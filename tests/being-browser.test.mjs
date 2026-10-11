@@ -468,10 +468,10 @@ describe('browser start goes through /chrome\'s own launch path', () => {
   it('ONE launch path: /chrome and startBrowser both go through ensureChrome, and launchChrome is called in one place', () => {
     const src = readFileSync(join(REPO, 'src', 'spine', 'commands.mjs'), 'utf8');
     expect(src.match(/await launchChrome\(/g)).toHaveLength(1);
-    const report = src.slice(src.indexOf('async function chromeReport()'), src.indexOf('function waitForChromeUp'));
-    const start = src.slice(src.indexOf('async function startBrowser()'), src.indexOf('async function chromeReport()'));
-    expect(report).toMatch(/await ensureChrome\(\)/);
-    expect(start).toMatch(/await ensureChrome\(\)/);
+    const report = src.slice(src.indexOf('async function chromeReport('), src.indexOf('function waitForChromeUp'));
+    const start = src.slice(src.indexOf('async function startBrowser('), src.indexOf('async function chromeReport('));
+    expect(report).toMatch(/await ensureChrome\(conversation\)/);
+    expect(start).toMatch(/await ensureChrome\(conversation\)/);
   });
 });
 

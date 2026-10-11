@@ -1795,6 +1795,14 @@ describe('createHeartbeatLoader — browser: true (the spine starts the browser,
     expect(h.writes.at(-1).c).toMatch(/name: room\/scout:scout[\s\S]*browser: true/);   // the readonly view says so
   });
 
+  it('the browser start is asked for the beat\'s OWN conversation (its ns), so boot starts that chat\'s group Chrome', async () => {
+    const asked = [];
+    const h = build(SCOUT, { startBrowser: async (ns) => { asked.push(ns); return { ok: true }; } });
+    await h.start();
+    h.beat()(); await flush();
+    expect(asked).toEqual([ENT.ns]);
+  });
+
   it('the browser cannot be started → the turn STILL runs, its prompt prefaced with ONE line saying why, and the log says it', async () => {
     const detail = 'the launch task did not bring a browser up on 127.0.0.1 — it may not be registered on this node';
     const h = build(SCOUT, { startBrowser: async () => ({ ok: false, reason: 'launch-failed', detail }) });

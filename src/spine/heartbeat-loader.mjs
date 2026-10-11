@@ -611,7 +611,7 @@ function _normalizeEntry({ name, source, cwd, raw, isAlive, aliveFallbackMs, ali
  * @param {(p:{ns:string, name:string, text:string, silent?:boolean}) => Promise<any>} [deps.dispatchPost]   a `post:` beat's message — AND every beat's firing announcement — into its entity's chat, injected by boot. `silent` → boot posts to eGPT Admin, not the entity's chat. Throws → the run logs FAILED (an announce failure only logs).
  * @param {(p:{ns:string, name:string}) => Promise<any>} [deps.placeChat]   boot's seeding of which connection holds an entity's chat, asked once per entity when a beat that SENDS into it (post:, agent:) is registered — so a scheduled send finds the holder a message arrival would have recorded
  * @param {(p:{ns:string, name:string, cwd:string, command:string, scriptPath?:string}) => Promise<any>} [deps.spawnBoxed]   a BEING-WRITTEN command beat's runner, injected by boot (createHeartbeatBoxRunner): refuses (rejects) unless the conversation runs boxed, else resolves the child of setup/sandbox-logon-launcher.ps1 running the command as the conversation's pool account. `scriptPath` marks a script_path: beat, refused when there is no sandbox credential for its textecute (every boxed beat is handed it when there is). The loader never spawns a being's command itself.
- * @param {() => Promise<{ok:boolean, detail?:string}>} [deps.startBrowser]   a `browser: true` beat's browser start, injected by boot: commands.startBrowser, /chrome's own launch path (idempotent)
+ * @param {(ns:string) => Promise<{ok:boolean, detail?:string}>} [deps.startBrowser]   a `browser: true` beat's browser start for its conversation's group Chrome, injected by boot: commands.startBrowser, /chrome's own launch path (idempotent)
  * @param {string} [deps.platform]                      process.platform seam — win32 runs command beats under POSIX bash
  * @param {() => string|null} [deps.resolvePosixBash]   the POSIX bash resolver seam (sandbox-cli-session.mjs resolveSandboxGitBash)
  * @param {object} [deps.env]                           base env commands inherit (boot: process.env)
@@ -820,7 +820,7 @@ export function createHeartbeatLoader({
         const path = resolvePath(cwd, script);
         prompt = framePrompt(basename(path), await readFile(path, 'utf8'));
       }
-      if (browser) prompt = `${await _browserPreface(entry.name)}${prompt}`;
+      if (browser) prompt = `${await _browserPreface(entry.name, ns)}${prompt}`;
       const res = await dispatchTurn({ being, ns, name: entry.name, prompt, beingWritten, silent });
       const reply = _replyPrefix(res?.text);
       onLog(`${entry.name}: ok in ${_elapsed(now() - startedMs)}${reply ? ` — ${reply}` : ''}`);
@@ -835,9 +835,9 @@ export function createHeartbeatLoader({
   // when CDP already answers — before the turn runs. A browser that will not come up does NOT cancel
   // the turn (operator 2026-09-28: "agent can manage it"): the prompt opens with ONE line saying why,
   // so the being can report it, and the log says the same. Never throws.
-  async function _browserPreface(name) {
+  async function _browserPreface(name, ns) {
     let r;
-    try { r = typeof startBrowser === 'function' ? await startBrowser() : { ok: false, detail: 'no browser start wired — boot injects startBrowser' }; }
+    try { r = typeof startBrowser === 'function' ? await startBrowser(ns) :{ ok: false, detail: 'no browser start wired — boot injects startBrowser' }; }
     catch (e) { r = { ok: false, detail: e?.message ?? String(e) }; }
     if (r?.ok) return '';
     const why = String(r?.detail ?? r?.reason ?? 'no reason given').replace(/\s+/g, ' ').trim();

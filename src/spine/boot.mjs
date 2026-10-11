@@ -72,7 +72,7 @@ import { createIngest, lifecycleExit, isShellConnectMarker } from './ingest.mjs'
 // Absent EGPT_SESSION1 this is one `false` and nothing else runs — every Session 0 spine, every
 // test and every other node take the identical path they took before it existed.
 import { isSession1Successor, announceStanddown, SESSION1_ENV } from './successor-announce.mjs';
-import { createCommands, launchChromeDirect, chromeProfileOf } from './commands.mjs';
+import { createCommands, launchChromeDirect, loginProfilePathOf } from './commands.mjs';
 import { createLoginLimb } from './login.mjs';
 import { readChromeCredential } from '../tools/chrome-creds.mjs';
 import { createBeingLink } from './being-link.mjs';
@@ -2967,13 +2967,13 @@ export async function boot({
   // (cdp.evaluate), its trusted Input click (cdp.dispatchClick) and its Page.captureScreenshot into
   // the operations login.mjs needs; the username, password and OTP enter through `fill` ALONE and
   // nowhere else, with the expression (which holds them) kept out of any error message. The
-  // credential is Chrome's OWN saved login, read for the brain profile via chrome-creds.mjs (the
+  // credential is Chrome's OWN saved login, read for the chat's group profile via chrome-creds.mjs (the
   // DPAPI master key + AES-256-GCM) — a LOCAL that login.mjs types and nulls, never returned,
-  // logged, or posted (chrome-creds logs nothing). The profile is the ONE the brain Chrome uses:
-  // login.chrome_profile_path if set, else chrome.profile_dir, else the discovered brain profile —
-  // chromeProfileOf, the SAME source commands.mjs /chrome launches into (no second source of truth).
+  // logged, or posted (chrome-creds logs nothing). The profile is the one that group's Chrome uses
+  // (loginProfilePathOf → chromeProfileOf, the SAME source commands.mjs launches into).
   // The admin post goes through boot's EXISTING noticeToChannel — never a second posting path.
-  const loginCdp = {
+  // `cdp` here is the chat's group client (commands.chatChromeOf); the module's own for brain.
+  const loginCdpOf = (cdp) => ({
     openOrFocus: async (url) => {
       let origin = null; try { origin = new URL(url).origin; } catch {}
       let targetId = null;
@@ -2991,13 +2991,12 @@ export async function boot({
       try { return await cdp.evaluate(targetId, expr); } catch { throw new Error('fill failed'); }
     },
     screenshot: (targetId) => cdp.captureScreenshot(targetId),
-  };
-  // The brain profile the credential is read from: login override, else the chrome.profile_dir the
-  // launcher uses, else the discovered brain profile — one source of truth (chromeProfileOf).
-  const loginProfilePath = () => getConfig()?.login?.chrome_profile_path || chromeProfileOf(getConfig());
-  const readCredential = (domain) => readChromeCredential({ profilePath: loginProfilePath(), domain });
-  const loginLimb = createLoginLimb({ cdp: loginCdp, bridge: { noticeToChannel }, readCredential, getConfig, log: (m) => log.line?.(m) });
-  const requestLogin = (domain) => loginLimb.requestLogin(domain);
+  });
+  // The credential is read from the conversation's GROUP profile (loginProfilePathOf).
+  const requestLogin = (domain, { conversation = null, client = cdp } = {}) => createLoginLimb({
+    cdp: loginCdpOf(client), bridge: { noticeToChannel }, getConfig, log: (m) => log.line?.(m),
+    readCredential: (d) => readChromeCredential({ profilePath: loginProfilePathOf(getConfig(), conversation), domain: d }),
+  }).requestLogin(domain);
 
   // ONE turn machinery for the whole node (see the import note). Built here because it needs
   // `brain` (its scopeOf/allowNewInput/steer seams) and the bridge pair the steer-ack rides —
@@ -3159,6 +3158,8 @@ export async function boot({
     },
     logToGroup,                                          // per-command audit → config.log_to_group (fail-closed, see above); the dispatch chokepoint emits ONE metadata-only line per command
     requestLogin,                                        // /login <site> → the auto-login limb (src/spine/login.mjs); returns an outcome token, never a credential
+    cdp,                                                 // the brain port client — the full driver, so /login and the relay drive it too
+    onChromeLog: (m) => log.line?.(`[chrome] ${m}`),    // group Chrome launches / refusals ("no browser for …")
     onLog: (m) => log.line?.(`[command] ${m}`),
   });
   commands.run = commandTranscript.wrapRun(commands.run);
@@ -3354,7 +3355,7 @@ export async function boot({
     spawnBoxed: spawnHeartbeatBoxed,
     // `browser: true` beats start the browser through /chrome's own launch path first — the one the
     // being link's `browser start` takes (commands.startBrowser).
-    startBrowser: () => commands.startBrowser(),
+    startBrowser: async (ns) => { const t = chatIdForEntity(await _loadState(), ns); return t ? commands.startBrowser(await commands.browserConversationOf(t.surface, t.chatId)) : { ok: false, detail: `no conversation for ${ns}` }; },
     // Command beats inherit process.env + EGPT_HOME + the queue-stats vars (the
     // loader adds those). The spine pid is no longer an env var — identity lives in
     // state/spine.pid now, and liveness is the alive.txt mtime, so a custom beat
@@ -3431,8 +3432,9 @@ export async function boot({
       if (!_adapterMods.has(name)) _adapterMods.set(name, await loadAdapterModule(name));
       return _adapterMods.get(name);
     },
-    streamFromTab: cdp.streamFromTab,
-    activateTarget: cdp.activateTarget,
+    // A member's tab lives in its ROOM's browser-group Chrome (the one resolver); refused → no browser.
+    streamFromTab: async (o, ev) => { const { client } = await commands.chatChromeOf(ev?.surface, ev?.chatId); if (!client) throw new Error('no browser for this room'); return client.streamFromTab(o); },
+    activateTarget: async (id, ev) => (await commands.chatChromeOf(ev?.surface, ev?.chatId)).client?.activateTarget(id),
     openStream: (memberId, chatId, opts = {}) => memberSender.open(chatId, { being: memberId, replyTo: opts.replyTo ?? null }),
     // NO logRoomTranscript SEAM ANY MORE (operator 2026-08-31, a net deletion): a wa-group message
     // is RE-ENTERED into the room it tunnels into now, so the room's own ingestion writes its ONE

@@ -10,7 +10,7 @@
 // with a short note.
 import { lifecycleExit } from './ingest.mjs';
 import { isAutoMode, AUTO_MODES, DEFAULT_AUTO_MODE, isDeliberateSilence, superModeOf } from '../auto-mode.mjs';
-import { patchBeing, patchContact, deleteBeing, getContact, getBeing, ensureContact, recordThread, findThreadJsonl, aliasContact, dropContact, aliasTargetOf, superChannelFor, residentsOf, slugDir, statsPath, conversationPathOf, seedIdentityLayers, skeletonIdentityFiles, slugSuffix, rollTranscript, DETERMINISTIC_MODEL, DETERMINISTIC_EFFORT, DEFAULT_ALLOWED_TOOLS, LOBBY_SLUG } from '../conversations-state.mjs';
+import { patchBeing, patchContact, deleteBeing, getContact, getBeing, ensureContact, recordThread, findThreadJsonl, aliasContact, dropContact, aliasTargetOf, superChannelFor, residentsOf, slugDir, statsPath, conversationPathOf, seedIdentityLayers, skeletonIdentityFiles, slugSuffix, rollTranscript, fixedSlugFor, DETERMINISTIC_MODEL, DETERMINISTIC_EFFORT, DEFAULT_ALLOWED_TOOLS, LOBBY_SLUG } from '../conversations-state.mjs';
 import { stripFrontMatter } from '../transcript-meta.mjs';
 // WHERE A SANDBOXED BEING'S CLI STORE LIVES — the ONE formula, taken from the module that
 // CREATES it (src/sandbox-cli-session.mjs) rather than rebuilt here, so the two verbs that retire
@@ -52,13 +52,13 @@ import { CONFIG_YAML_PATH, writeConfigKey } from '../tools/config-io.mjs';
 import { resolveConfigKey } from '../../config/config-schema.mjs';
 import { isRunning as cdpIsRunning, listTabs as cdpListTabs, cdpHost as cdpHostOf, openTab as cdpOpenTab, activateTarget as cdpActivateTarget, closeTab as cdpCloseTab, createCdpClient, createPipeTransport } from '../tools/cdp.mjs';
 import { findChromeExecutable, chromeArgs, chromeCommandLine, resolveBrainProfile, spawnChrome, spawnChromePipe as defaultSpawnChromePipe } from '../tools/chrome-launcher.mjs';
-import { admitLaunch, estimateChromeBytes, BRAIN_GROUP, isSafeGroupName } from './chrome-pool.mjs';
+import { admitLaunch, estimateChromeBytes, BRAIN_GROUP, isSafeGroupName, chromeConversationOf } from './chrome-pool.mjs';
 import { freemem } from 'node:os';
 import { helpText } from '../interpreter.mjs';
 import { uploadNote, radioNoteFilename, pickSpeaker } from '../radio-relay.mjs';
 import { stripNodeSignature, stripRenderedNodeSignature } from '../node-signature.mjs';
 import { bodyForMessageId } from '../transcript-log.mjs';
-import { readRoomConfig } from '../rooms-file.mjs';
+import { readRoomConfig, readBrowserGroups } from '../rooms-file.mjs';
 import { hhmm, dayBoundary } from '../dispatch-line.mjs';
 
 // Where a manually-launched Chrome should keep its profile. v1's shell hardcoded
@@ -138,6 +138,10 @@ export const chromeProfileOf = (c, conversation) => {
   if (!conversation || conversation.group === BRAIN_GROUP) return legacy;
   return isSafeGroupName(conversation.group) ? join(dirname(CHROME_BRAIN_PROFILE), conversation.group) : null;
 };
+// The profile /login reads a saved password from: the conversation's group profile. The
+// login.chrome_profile_path override is the BRAIN's only; no group → null, nothing read.
+export const loginProfilePathOf = (c, conversation) =>
+  ((!conversation || conversation.group === BRAIN_GROUP) && c?.login?.chrome_profile_path) || chromeProfileOf(c, conversation);
 // The executable: config `chrome.bin`, else null — which lets chrome-launcher run its own
 // per-platform CHROME_PATHS search. Never a second locator here.
 const chromeBinOf = (c) => c?.chrome?.bin || null;
@@ -712,11 +716,12 @@ export function createCommands({
   // Dedicated-Chrome pool seams (chunk 3b) — a FAKE child + injected memory in tests, never a real
   // spawn or a real OS probe. spawnChromePipe direct-spawns a pipe Chrome (DIRECT-SPAWN only, the
   // spine holds the fds); freeMem/rssOf feed the pure admission (chrome-pool.mjs); onChromeLog
-  // reports launches / evictions / deaths. Boot injects none of these → the dedicated path is INERT.
+  // reports launches / evictions / deaths / refusals. Boot injects onChromeLog only (real spawn + probes).
   spawnChromePipe = defaultSpawnChromePipe,
   freeMem = () => freemem(),
   rssOf = defaultRssOf,
   onChromeLog = () => {},
+  browserGroups = readBrowserGroups,     // config/browsers.yaml's groups, read fresh (rooms-file.readBrowserGroups)
   // git probe for /status (short sha + subject). Mirrors boot's gitOut so it's
   // fakeable in tests without threading spawnSync through createCommands.
   gitOut = (args) => { try { return spawnSync('git', args, { cwd: process.cwd() }).stdout?.toString().trim() || ''; } catch { return ''; } },
@@ -1192,21 +1197,22 @@ export function createCommands({
     // leak to E. /tab and /close address a tab by the 1-based number /tabs prints —
     // resolved fresh against listTabs() on every call, never a stale index carried over
     // from an earlier /tabs (Chrome's own tab order can shift between commands).
+    const tabChrome = async () => (await chatChromeOf(surfaceOf(ev), ev.chatId)).client;
     const tabsMatch = /^\/tabs\s*$/i.exec(line);
-    if (tabsMatch) { await send?.(ev.chatId, await tabsReport()); return; }
+    if (tabsMatch) { await send?.(ev.chatId, await tabsReport(await tabChrome())); return; }
     const openMatch = /^\/open\s+(\S+)\s*$/i.exec(line);
-    if (openMatch) { await send?.(ev.chatId, await openTabCmd(openMatch[1])); return; }
+    if (openMatch) { await send?.(ev.chatId, await openTabCmd(await tabChrome(), openMatch[1])); return; }
     const tabMatch = /^\/tab\s+(\d+)\s*$/i.exec(line);
-    if (tabMatch) { await send?.(ev.chatId, await activateTabCmd(Number(tabMatch[1]))); return; }
+    if (tabMatch) { await send?.(ev.chatId, await activateTabCmd(await tabChrome(), Number(tabMatch[1]))); return; }
     const closeMatch = /^\/close\s+(\d+)\s*$/i.exec(line);
-    if (closeMatch) { await send?.(ev.chatId, await closeTabCmd(Number(closeMatch[1]))); return; }
+    if (closeMatch) { await send?.(ev.chatId, await closeTabCmd(await tabChrome(), Number(closeMatch[1]))); return; }
 
-    // /login <site> — drive Chrome's OWN saved password into <site>'s login form on the brain
-    // profile (src/spine/login.mjs). Same slot as /chrome: matched BEFORE the catch-all so it
+    // /login <site> — drive Chrome's OWN saved password into <site>'s login form on THIS chat's
+    // browser-group profile (src/spine/login.mjs). Same slot as /chrome: matched BEFORE the catch-all so it
     // never leaks to E. isCommand already gated it operator-only. The reply is the OUTCOME token —
     // never a credential (the limb never reads one).
     const loginMatch = /^\/login\s+(\S+)\s*$/i.exec(line);
-    if (loginMatch) { await send?.(ev.chatId, await loginCmd(loginMatch[1])); return; }
+    if (loginMatch) { await send?.(ev.chatId, await loginCmd(ev, loginMatch[1])); return; }
 
     // /rooms — bare: list the saved rooms. Otherwise `/rooms <verb> [<room>]`, routed to the
     // same room() the singular /rooms used to reach. /rooms itself is retired (operator
@@ -1357,7 +1363,7 @@ export function createCommands({
     const own = ownNodeNamesOf(cfg());
     if (!arg) { await send?.(ev.chatId, `/chrome <node> — Chrome status from a node. This node answers to: ${[...own].join(', ') || '(no node_name set)'}`); return; }
     if (!own.has(arg.toLowerCase())) return;   // not addressed → silent, on purpose (BEFORE any launch)
-    await send?.(ev.chatId, await chromeReport());
+    await send?.(ev.chatId, await chromeReport(await browserConversationOf(surfaceOf(ev), ev.chatId)));
   }
 
   // THE ONE LAUNCH PATH — /chrome's, and since 2026-09-26 a boxed being's `browser start` too
@@ -1447,10 +1453,28 @@ export function createCommands({
     return p;
   }
 
+  // THE BROWSER-GROUP RESOLVER (every spine-side browser caller): chat → registry row (none → fixed slug; a room's
+  // id IS its slug) → chromeConversationOf over browsers.yaml, fresh. No registry → null (brain); failed read → group null.
+  async function browserConversationOf(surface, chatId) {
+    if (!loadState) return null;
+    try {
+      const entry = getContact(await loadState(), surface, chatId)?.entry ?? { slug: fixedSlugFor(surface, chatId) };
+      return chromeConversationOf(entry, await browserGroups());
+    } catch (e) { return { key: '', name: '', group: null, why: `browser group lookup failed — ${e?.message ?? e}` }; }
+  }
+
+  // A chat's group + the client that drives it (attach-only on brain) — /tabs…, /login, the room relay.
+  async function chatChromeOf(surface, chatId) {
+    const conversation = await browserConversationOf(surface, chatId);
+    return { conversation, client: (await chromeClientFor(conversation, { attach: true })).client };
+  }
+
   // 3c LOOKUP: conversation → its CDP client. A non-brain group yields its group's pipe cdpClient (null
   // when refused); the brain group and conversation-less callers keep the default port client — beings
   // stay on the port client until 3c rewires the being cdp seam. Ensures on demand; single-flight.
-  async function chromeClientFor(conversation) {
+  // `attach`: never launch the brain port Chrome (a group's pipe Chrome has no other launcher).
+  async function chromeClientFor(conversation, { attach = false } = {}) {
+    if (attach && (!conversation || conversation.group === BRAIN_GROUP)) return { dedicated: false, host: null, client: cdp };
     const r = await ensureChrome(conversation);
     if (r?.dedicated) return { dedicated: true, profileDir: r.profileDir, client: r.client ?? null, pid: r.pid ?? null, declined: !!r.declined, why: r.why ?? '' };
     return { dedicated: false, host: r?.host ?? null, client: cdp };
@@ -1499,8 +1523,10 @@ export function createCommands({
   // A BOXED BEING'S `browser start` (src/spine/being-link.mjs): the launch path above and nothing
   // else — no arguments reach it from the being, and it lists no tabs (that is the operator's
   // report). Idempotent: when CDP already answers it launches nothing and says so.
-  async function startBrowser() {
-    const r = await ensureChrome();
+  // `conversation` (browserConversationOf) picks its group's Chrome; none → the brain, as before.
+  async function startBrowser(conversation) {
+    const r = await ensureChrome(conversation);
+    if (r.dedicated) return r.client ? { ok: true, ...(r.launched ? { launched: true } : { alreadyRunning: true }), detail: `the "${conversation.group}" browser is ${r.launched ? 'up' : 'already running'}${r.pid ? ` (pid ${r.pid})` : ''}` } : { ok: false, reason: r.declined ? 'declined' : 'no-browser', detail: r.why };
     if (r.running && !r.launched) return { ok: true, alreadyRunning: true, detail: `the browser is already answering on ${r.host} — nothing was launched` };
     if (r.running) return { ok: true, launched: true, detail: `the browser is up on ${r.host}${r.pid ? ` (pid ${r.pid})` : ''}` };
     return {
@@ -1513,9 +1539,10 @@ export function createCommands({
   // The report body. When none is listening the launch path above fires the seam and waits; a
   // task that isn't registered, a direct launch that failed, or a Chrome that never binds its port
   // all degrade to the launch hint. Never throws.
-  async function chromeReport() {
-    const r = await ensureChrome();
-    const host = r.host;
+  async function chromeReport(conversation) {
+    const r = await ensureChrome(conversation);
+    if (r.dedicated && !r.client) return `no browser for this chat — ${r.why}`;
+    const host = r.dedicated ? `the "${conversation.group}" browser (pipe)` : r.host;
     const launchedPid = r.launched ? r.pid : null;
     if (!r.running) {
       return chromeLaunchHint(host, {
@@ -1530,8 +1557,8 @@ export function createCommands({
     // Reachable (already, or after a successful launch) → attach + report tabs. A tab-list
     // hiccup on a live Chrome degrades to the hint WITHOUT the launch note (Chrome is up).
     let tabs = null;
-    try { tabs = await cdp.listTabs(); } catch { tabs = null; }
-    if (!tabs) return chromeLaunchHint(host);
+    try { tabs = await (r.client ?? cdp).listTabs(); } catch { tabs = null; }
+    if (!tabs) return r.dedicated ? `${host}: its tab list failed` : chromeLaunchHint(host);
 
     const lines = [`attached: ${host}`];
     // The pid is the one fact `schtasks /run` could never hand back, so when this spine launched
@@ -1589,9 +1616,9 @@ export function createCommands({
   // /tabs — same fenced-yaml shape as /chrome's tab list, but WITH the 1-based index
   // /tab and /close address. A listTabs() failure (no Chrome reachable) degrades to a
   // one-line note, same "never throw" ethos as chromeReport.
-  async function tabsReport() {
+  async function tabsReport(c) {
     let tabs;
-    try { tabs = await cdp.listTabs(); } catch { return 'no Chrome to list tabs from — try /chrome first'; }
+    try { tabs = await c.listTabs(); } catch { return 'no Chrome to list tabs from — try /chrome first'; }
     const lines = [`tabs: ${tabs.length}`];
     tabs.forEach((t, i) => {
       lines.push(`  ${i + 1} · ${trunc(t?.title ?? '(untitled)', 48)}`);
@@ -1602,44 +1629,47 @@ export function createCommands({
 
   // /open <url> — open a new tab at url. The tab hasn't loaded yet the instant it opens
   // (nothing to title it by), so the reply names it by the url just opened.
-  async function openTabCmd(url) {
-    try { await cdp.openTab(url); return `opened: ${url}`; }
+  async function openTabCmd(c, url) {
+    if (!c) return '/open: no browser for this chat';
+    try { await c.openTab(url); return `opened: ${url}`; }
     catch (e) { return `/open: failed — ${e?.message ?? e}`; }
   }
 
   // Resolve the operator's 1-based /tab or /close index against a FRESH listTabs() call
   // (see the dispatch comment above for why: never a stale index). Returns { tab } or
   // { error } — callers never throw on a bad index.
-  async function nthTab(n) {
+  async function nthTab(c, n) {
     let tabs;
-    try { tabs = await cdp.listTabs(); } catch { return { error: 'no Chrome to list tabs from — try /chrome first' }; }
+    try { tabs = await c.listTabs(); } catch { return { error: 'no Chrome to list tabs from — try /chrome first' }; }
     const tab = tabs[n - 1];
     if (!tab) return { error: `no tab ${n} — ${tabs.length} open` };
     return { tab };
   }
 
   // /tab <n> — activate (focus) the nth listed tab.
-  async function activateTabCmd(n) {
-    const { tab, error } = await nthTab(n);
+  async function activateTabCmd(c, n) {
+    const { tab, error } = await nthTab(c, n);
     if (error) return `/tab: ${error}`;
-    try { await cdp.activateTarget(tab.id); return `activated ${n} · ${trunc(tab?.title ?? '(untitled)', 48)}`; }
+    try { await c.activateTarget(tab.id); return `activated ${n} · ${trunc(tab?.title ?? '(untitled)', 48)}`; }
     catch (e) { return `/tab: failed — ${e?.message ?? e}`; }
   }
 
   // /close <n> — close the nth listed tab.
-  async function closeTabCmd(n) {
-    const { tab, error } = await nthTab(n);
+  async function closeTabCmd(c, n) {
+    const { tab, error } = await nthTab(c, n);
     if (error) return `/close: ${error}`;
-    try { await cdp.closeTab(tab.id); return `closed ${n} · ${trunc(tab?.title ?? '(untitled)', 48)}`; }
+    try { await c.closeTab(tab.id); return `closed ${n} · ${trunc(tab?.title ?? '(untitled)', 48)}`; }
     catch (e) { return `/close: failed — ${e?.message ?? e}`; }
   }
 
   // /login <site> — ask the auto-login limb to sign in using Chrome's own saved password. The
   // whole reply is the limb's outcome token; the limb owns the flow (detect → autofill → trusted
   // click → classify, with the 2FA / CAPTCHA branches) and the secret boundary. Absent seam → say so.
-  async function loginCmd(site) {
+  async function loginCmd(ev, site) {
     if (typeof requestLogin !== 'function') return `/login: the auto-login limb isn't wired on this node`;
-    try { return `/login ${site} → ${await requestLogin(site)}`; }
+    const { conversation, client } = await chatChromeOf(surfaceOf(ev), ev.chatId);
+    if (!client) return `/login: no browser for this chat${conversation?.why ? ` — ${conversation.why}` : ''}`;
+    try { return `/login ${site} → ${await requestLogin(site, { conversation, client })}`; }
     catch (e) { return `/login: failed — ${e?.message ?? e}`; }
   }
 
@@ -4403,5 +4433,5 @@ export function createCommands({
   // above). `/e`/`/egpt` now carry no special meaning at all and fall through to the generic
   // catch-all like any other unrecognized token.
 
-  return { isCommand, phraseCommand, runPhrase, run, runCaptured, remoteNode, nodeCommandForMe, makeNodeExplicit, currentRoomOf, startBrowser, chromeClientFor };
+  return { isCommand, phraseCommand, runPhrase, run, runCaptured, remoteNode, nodeCommandForMe, makeNodeExplicit, currentRoomOf, startBrowser, chromeClientFor, browserConversationOf, chatChromeOf };
 }
