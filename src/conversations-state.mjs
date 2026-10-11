@@ -965,10 +965,14 @@ export function getBeing(state, surface, jid, being) {
   if (!c) return null;
   const e = c.entry ?? {};
   const b = _beingBlock(e, being);
+  // MODE IS THE ROOM'S (operator 2026-10-11): an alias room's own block wins; a /join room
+  // inherits the origin's, a super channel never does (config.super.mode, at the gate).
+  const own = _obj(state.contacts?.[surface]?.[jid]);
+  const alias = own?.aliasOf ? own : null;
   return {
     jid: c.jid, slug: c.slug, surface, being,
     present:            !!b,
-    mode:               b?.mode               ?? null,
+    mode:               _beingBlock(alias ?? {}, being)?.mode ?? (alias?.super === true ? null : b?.mode) ?? null,
     send_to_egpt:       b?.send_to_egpt       ?? null,  // per-conv 'always'|'mode' override
     threadId:           b?.threadId           ?? null,
     // PER-CONVERSATION allowed_paths OVERRIDE (operator 2026-10-01, /fork's read-only grant). Same

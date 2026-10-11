@@ -10,7 +10,7 @@
 // with a short note.
 import { lifecycleExit } from './ingest.mjs';
 import { isAutoMode, AUTO_MODES, DEFAULT_AUTO_MODE, isDeliberateSilence, superModeOf } from '../auto-mode.mjs';
-import { patchBeing, patchContact, deleteBeing, getContact, getBeing, ensureContact, recordThread, findThreadJsonl, aliasContact, dropContact, aliasTargetOf, superChannelFor, residentsOf, slugDir, statsPath, conversationPathOf, seedIdentityLayers, skeletonIdentityFiles, slugSuffix, rollTranscript, fixedSlugFor, DETERMINISTIC_MODEL, DETERMINISTIC_EFFORT, DEFAULT_ALLOWED_TOOLS, LOBBY_SLUG } from '../conversations-state.mjs';
+import { patchBeing, patchContact, deleteBeing, getContact, getBeing, ensureContact, recordThread, findThreadJsonl, aliasContact, dropContact, aliasTargetOf, superChannelFor, isSuperChannel, residentsOf, slugDir, statsPath, conversationPathOf, seedIdentityLayers, skeletonIdentityFiles, slugSuffix, rollTranscript, fixedSlugFor, DETERMINISTIC_MODEL, DETERMINISTIC_EFFORT, DEFAULT_ALLOWED_TOOLS, LOBBY_SLUG } from '../conversations-state.mjs';
 import { stripFrontMatter } from '../transcript-meta.mjs';
 // WHERE A SANDBOXED BEING'S CLI STORE LIVES — the ONE formula, taken from the module that
 // CREATES it (src/sandbox-cli-session.mjs) rather than rebuilt here, so the two verbs that retire
@@ -2106,7 +2106,14 @@ export function createCommands({
   async function agentsMode(ev, surface, jid, where, handles, mode, state, named = handles.join(', ')) {
     try {
       let next = state;
-      for (const h of handles) next = patchBeing(next, surface, jid, h, { mode });
+      // An ALIAS room (/join, super) keeps its mode on its OWN entry: patchBeing resolves through
+      // aliasOf and would write the origin (operator 2026-10-11). getBeing reads it back.
+      for (const h of handles) {
+        const { aliasOf, ...room } = next.contacts?.[surface]?.[jid] ?? {};
+        next = aliasOf
+          ? aliasContact(next, surface, jid, aliasOf, { ...room, agents: { ...room.agents, [h]: { ...room.agents?.[h], mode } } })
+          : patchBeing(next, surface, jid, h, { mode });
+      }
       await writeState(next);
       await send?.(ev.chatId, `✅ ${named} mode ${where} → ${mode}`);
     } catch (e) { onLog(`/agents mode ${ev.chatId}: ${e?.message ?? e}`); await send?.(ev.chatId, `/agents: mode failed — ${e?.message ?? e}`); }
@@ -2275,7 +2282,7 @@ export function createCommands({
         `slug: ${slug}`,
         // MODE IS THE TYPED CHAT'S — see the docblock. getBeing is pure over state already in
         // hand, so this second view costs no second read (resolveConv's own `b0` reasoning).
-        `mode: ${getBeing(state, surface, jid, handle)?.mode ?? 'default'}`,
+        `mode: ${getBeing(state, surface, jid, handle)?.mode ?? (isSuperChannel(state, surface, jid) ? `${superMode()} (super)` : 'default')}`,
         `access_level: ${b?.accessLevel ?? 'unset'}`,
         `configuration: ${confVal}`,
         `engine: ${previewDef?.type ?? CCODE}`,
@@ -3273,9 +3280,7 @@ export function createCommands({
   // config.super.mode — the auto-mode the super channel runs under. The coercion (quoted string vs
   // YAML boolean, invalid → default+log) is the SHARED auto-mode.superModeOf (operator 2026-10-08,
   // CHUNK 2): ONE definition, reused by the per-surface gate in gating.mjs so the gate and the
-  // channel agree. CHUNK 2 moved the LIVE read to the gate — summoning stores NO mode any more — so
-  // this wrapper has no in-module caller now; retained per the operator's instruction (the mode
-  // resolution survives, the gate is its reader).
+  // channel agree. Summoning stores NO mode; /agents reads this to report a super channel's mode.
   const superMode = () => superModeOf(cfg().super?.mode, { onInvalid: (raw) => onLog(`super: invalid mode ${JSON.stringify(raw)} — using '${SUPER_MODE_DEFAULT}'`), fallback: SUPER_MODE_DEFAULT });
   // config.super.opener ({chat}/{group} both = the parent chat's title) — the bridge-voice intro
   // posted FROM RODZ once on creation (same postOpener path /join uses), with the built-in fallback.
@@ -3469,20 +3474,27 @@ export function createCommands({
     // ── mutations begin ──
     // CREATE + ALIAS (the SAME core /join uses), carrying `{ super: true }` so the gate + reply
     // routing can find this channel from the reply path. NO mode is stored — the channel's mode is
-    // intrinsic (read live at the gate, see the header). operator + Rodz + the summoner (a plain
+    // intrinsic (read live at the gate, see the header). operator + Rodz + the invitees below (a plain
     // create-time invite — chunk 3 owns respect-exit / re-invite). null → createGroup gave no chatId.
     // In a 1:1 the OTHER party is the invitee (whoever summoned), so they can read the reply here;
-    // a group has no single other party → fall to the summoner. Optional (harness/bridge may lack it).
+    // in a GROUP its members are — the primary's roster minus every config.beeper account (members
+    // can only be set at create, operator 2026-10-11). Neither → the summoner. Optional (harness/bridge may lack it).
     const other = (await forkBridge.chatOtherPartyId?.(ev.chatId)) ?? null;
+    const raw = other ? null : await forkBridge.chatRaw?.(ev.chatId);
+    const ours = new Set(Object.values(cfg().beeper ?? {}).map((a) => phoneDigitsOf(a?.phone)).filter(Boolean));
+    const members = (raw && (raw.type ?? 'single') !== 'single' && Array.isArray(raw.participants?.items))
+      ? raw.participants.items.filter((p) => !p?.isSelf && !ours.has(phoneDigitsOf(p?.phoneNumber))).map((p) => p?.id)
+      : null;
     const toInvite = other ?? participantToInvite;
     // invitable id only: a bridged @…:beeper.local id is surface-valid; a @…:beeper.com (owner / cross-account matrix id) is NOT — DROP it so createGroup never 400s and the channel still creates.
     const invitee = String(toInvite ?? '').endsWith(':beeper.local') ? toInvite : null;
-    if (toInvite && !invitee) onLog(`super: ${toInvite} is not an invitable ${surface} participant id — creating the channel without inviting them`);
-    const participantIDs = [rodz.rodzUserId, ...(invitee ? [invitee] : [])];
+    if (!members && toInvite && !invitee) onLog(`super: ${toInvite} is not an invitable ${surface} participant id — creating the channel without inviting them`);
+    const invited = [...new Set((members ?? [invitee]).filter((id) => String(id ?? '').endsWith(':beeper.local') && id !== rodz.rodzUserId))];
+    const participantIDs = [rodz.rodzUserId, ...invited];
     const aliased = await createAliasedSideGroup(ev, surface, title, rodz.accountID, participantIDs, 'super', { super: true });
     if (!aliased) return;
     const { chatId: superChatId } = aliased;
-    onLog(`super: ${cTitle} -> channel ${superChatId} aliased to ${primaryJid}, invited ${invitee ?? '(none)'}`);
+    onLog(`super: ${cTitle} -> channel ${superChatId} aliased to ${primaryJid}, invited ${invited.join(', ') || '(none)'}`);
     // POST THE OPENER (bridge voice, FROM RODZ) so the new group surfaces in Beeper — same postOpener
     // path /join uses; a failure here never undoes the alias above.
     await postOpener({ verb: 'super', newChatId: superChatId, title, openerText: superOpenerText(cTitle), accountID: rodz.accountID });

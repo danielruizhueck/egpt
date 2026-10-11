@@ -8,7 +8,7 @@
 //   surfaces(decision, replyText)-> boolean    POST-brain: mayReply + the 'on'-'...' silence cosmetic
 //
 // `mode` resolves down ONE chain, most specific first (operator 2026-07-25):
-//   conversations.yaml  <conv>.agents.<name>.mode   per-conversation override (the `agents:` block)
+//   conversations.yaml  <conv>.agents.<name>.mode   per-conversation override (an alias room's own first)
 //   conversations.yaml  <conv>.<name>.mode          per-conversation block    (getBeing reads both)
 //   config.yaml         agents.<name>.mode          the AGENT's own default
 //   config.yaml         dispatch.auto_default_mode  node-wide (persona; legacy whatsapp.auto_e_default)
@@ -77,12 +77,12 @@ export function createGating({ getConfig = () => ({}), loadState = null, default
     if (loadState) { try { state = await loadState(); } catch { state = null; } }
     let bv = null;
     if (state) { try { bv = getBeing(state, ev.surface, ev.chatId, being); } catch { bv = null; } }
-    let { mode } = resolveMode(bv, being, c);
+    let { mode, source } = resolveMode(bv, being, c);
     // PER-SURFACE SUPER GATE (operator 2026-10-08, CHUNK 2): a message that ARRIVED in a super
-    // channel is gated by config.super.mode, NOT the shared stored mode — group-independent and
-    // READ-ONLY (nothing stored, nothing mutated; /end reverts it for free). The main chat keeps
-    // its own stored mode, so the two surfaces never conflict.
-    if (state && isSuperChannel(state, ev.surface, ev.chatId)) mode = superModeOf(c.super?.mode);
+    // channel is gated by config.super.mode, NOT the origin's stored mode — unless `/agents mode`
+    // was set IN that channel (stored on its alias entry, getBeing's room mode; operator
+    // 2026-10-11). /end drops the alias, so it reverts for free.
+    if (source !== 'conversation' && state && isSuperChannel(state, ev.surface, ev.chatId)) mode = superModeOf(c.super?.mode);
     const paused = !!(c.dispatch?.auto_paused ?? c.whatsapp?.auto_e_paused);
     const allowed = replyAllowed(mode, mention ?? {});
     const mayReply = mayEmitChat({ paused, mode, replyAllowed: allowed, isReaction: ev.kind === 'reaction' });

@@ -27,7 +27,8 @@ vi.hoisted(() => {
   process.env.EGPT_HOME = `${tmp}/egpt-super-channel-home`;
 });
 import { createCommands, SUPER_SUFFIX_DEFAULT, SUPER_OPENER_DEFAULT } from '../src/spine/commands.mjs';
-import { ensureContact, recordThread, getContact, getBeing, aliasTargetOf, aliasContact, superChannelFor } from '../src/conversations-state.mjs';
+import { createGating } from '../src/spine/gating.mjs';
+import { ensureContact, recordThread, getContact, getBeing, aliasTargetOf, aliasContact, superChannelFor, patchBeing } from '../src/conversations-state.mjs';
 import { sanitizeSlug } from '../src/sanitize.mjs';
 import { shortChatId } from '../src/bridges/chat-id.mjs';
 
@@ -70,7 +71,7 @@ const LIVE_ROSTER = { participants: { items: [
   { id: SUMMONER, phoneNumber: '+34667928959', isSelf: false },
 ] } };
 
-function harness({ config, state, resolveSecondaryChatIdByTitle = () => SEC_SUPER_ROOM, rodzUserId = RODZ_USER_ID, chatOtherPartyId = async () => null, chatRaw = async () => LIVE_ROSTER, resolvePrimaryChatIdByTitle = null, createdChatIds = null, now = null } = {}) {
+function harness({ config, state, resolveSecondaryChatIdByTitle = () => SEC_SUPER_ROOM, rodzUserId = RODZ_USER_ID, chatOtherPartyId = async () => null, chatRaw = async () => LIVE_ROSTER, resolvePrimaryChatIdByTitle = null, createdChatIds = null, now = null, defaultKey = 'e' } = {}) {
   let st = state ?? seedState();
   const sent = [];
   const logs = [];
@@ -93,7 +94,7 @@ function harness({ config, state, resolveSecondaryChatIdByTitle = () => SEC_SUPE
     send: async (chatId, text) => sent.push({ chatId, text }),
     loadState: async () => st,
     writeState: async (s) => { st = s; },
-    defaultKey: 'e',
+    defaultKey,
     forkBridge,
     sleep: async () => {},   // instant opener poll
     ...(now ? { now } : {}),
@@ -269,11 +270,42 @@ describe('ensureSuperChannel in a 1:1 — the COUNTERPARTY is invited regardless
     expect(calls.create[0].participantIDs).toEqual([RODZ_USER_ID, COUNTERPARTY]);
   });
 
-  it('a GROUP (chatOtherPartyId → null) keeps inviting the summoner, unchanged', async () => {
+  it('no 1:1 counterparty and no group roster → the summoner is invited, unchanged', async () => {
     const SUMMONER_LOCAL = '@whatsapp_lid-summoner42:beeper.local';
     const { cmds, calls } = harness({ config: cfg(), chatOtherPartyId: async () => null });
     await cmds.runPhrase(inbound('…', { senderId: SUMMONER_LOCAL }), 'super');
     expect(calls.create[0].participantIDs).toEqual([RODZ_USER_ID, SUMMONER_LOCAL]);
+  });
+});
+
+// ── GROUP: invite the origin group's members (reve 2026-10-11 14:26:51, SPOILER ALERT) ────────────────
+// Live: "super: SPOILER ALERT: chat de EyAy -> channel j7084… aliased to UuY6…, invited (none)" — the
+// summoner was the operator (a @…:beeper.com id, dropped) and a group has no single other party. Members
+// can only be set at createGroup, so the group's own roster (the primary's view) is the invite list,
+// minus every config.beeper account (the operator creates it; Rodz is added as the mouth).
+describe('ensureSuperChannel from a GROUP — the origin group\'s members are invited at creation', () => {
+  const H1 = '@whatsapp_lid-111:beeper.local';
+  const H2 = '@whatsapp_lid-222:beeper.local';
+  const GROUP_ROSTER = { type: 'group', participants: { items: [
+    { id: '@anrodriguez:beeper.com', isSelf: true },
+    { id: RODZ_USER_ID, phoneNumber: RODZ, isSelf: false },
+    { id: H1, phoneNumber: '+34667928959', isSelf: false },
+    { id: H2, isSelf: false },                                                    // no phone (LID-only member)
+    { id: '@whatsapp_lid-999:beeper.local', phoneNumber: AN, isSelf: false },    // the operator's own puppet
+  ] } };
+  const chatRaw = async (id) => (id === C_CHAT ? GROUP_ROSTER : LIVE_ROSTER);
+
+  it('the operator summons in a group → createGroup carries Rodz + every human member, and the log names them', async () => {
+    const { cmds, calls, logs } = harness({ config: cfg(), chatRaw });
+    await cmds.runPhrase(inbound('…', { senderId: '@anrodriguez:beeper.com' }), 'super');
+    expect(calls.create[0].participantIDs).toEqual([RODZ_USER_ID, H1, H2]);
+    expect(logs.find((l) => /aliased to/.test(l))).toMatch(new RegExp(`invited ${H1}, ${H2}$`));
+  });
+
+  it('a member summons → still the whole roster, the summoner not duplicated', async () => {
+    const { cmds, calls } = harness({ config: cfg(), chatRaw });
+    await cmds.runPhrase(inbound('…', { senderId: H1 }), 'super');
+    expect(calls.create[0].participantIDs).toEqual([RODZ_USER_ID, H1, H2]);
   });
 });
 
@@ -306,7 +338,7 @@ describe('ensureSuperChannel — reuse only a LIVE channel', () => {
     it(`${why} → the stale alias is dropped and a NEW channel is created + aliased`, async () => {
       const { cmds, calls, getState } = harness({ config: cfg(), state: stateWithStaleSuper(), chatRaw, createdChatIds: [NEW_FULL] });
       await cmds.runPhrase(inbound('…'), 'super');
-      expect(calls.chatRaw).toEqual([STALE]);
+      expect(calls.chatRaw).toEqual([STALE, C_CHAT]);   // liveness of the stale channel, then the origin's roster (invitees)
       expect(calls.create).toHaveLength(1);
       const st = getState();
       expect(st.contacts.whatsapp[STALE]).toBeUndefined();
@@ -413,5 +445,75 @@ describe('ensureSuperChannel — the create gates (like a nameless /join)', () =
     const { cmds, calls } = harness({ config: cfg(), rodzUserId: null });
     await cmds.runPhrase(inbound('…'), 'super');
     expect(calls.create).toHaveLength(0);
+  });
+});
+
+// ── /agents mode IN an alias room sets THAT room's mode (reve 2026-10-11 14:28/14:30, SPOILER ALERT) ──
+// Live: `/agents mode accum all` and `/agents mode accum e` typed IN the super channel j7084… answered
+// "✅ … mode here → accum", wrote `mode: accum` onto the ORIGIN UuY6…'s agents, and E kept gating `on`
+// in the super channel. "mode here" is the room it was typed in: the alias entry's own per-being mode,
+// else (super) config.super.mode, else (/join) the origin's.
+describe('/agents mode in an alias room — stored on the alias, read by the gate and by /agents', () => {
+  const ORIGIN = 'UuY6K6ly3BV3Ye7QqIne';
+  const SUPER_LIVE = 'j7084JKL7ZP7yjpcwCSJ';
+  const JOIN_LIVE = 'joinRoom0000000000000';
+  const TITLE = 'SPOILER ALERT: chat de EyAy';
+  const SUPER_ALIAS = { aliasOf: ORIGIN, transcript: 'SPOILER ALERT chat de EyAy-super', super: true };
+  const liveCfg = {
+    ...cfg({ superBlock: { enabled: true, mode: 'on' } }),
+    agents: { egpt: { default: true, handles: ['e', 'egpt'] }, codex: { handles: ['c', 'codex'] }, ken: { handles: ['k', 'ken'] } },
+  };
+  const seed = () => {
+    let st = ensureContact({ contacts: {} }, 'whatsapp', ORIGIN, { pushedName: TITLE }).state;
+    for (const b of ['egpt', 'codex', 'ken']) st = recordThread(st, 'whatsapp', ORIGIN, `thr-${b}`, '2026-10-11T12:00:00Z', b);
+    st = aliasContact(st, 'whatsapp', SUPER_LIVE, ORIGIN, { transcript: SUPER_ALIAS.transcript, super: true });
+    return aliasContact(st, 'whatsapp', JOIN_LIVE, ORIGIN, { transcript: 'SPOILER-join' });
+  };
+  const at = (chatId, body) => ({ chatId, surface: 'whatsapp', chatName: TITLE, body });
+  const live = (state = seed()) => harness({ config: liveCfg, state, defaultKey: 'egpt' });
+  const gateMode = async (st, chatId) => (await createGating({ getConfig: () => liveCfg, loadState: async () => st, defaultKey: 'egpt' })
+    .decide('egpt', { surface: 'whatsapp', chatId, kind: 'message' })).mode;
+
+  it('`/agents mode accum e` in the super channel writes the ALIAS entry and never the origin', async () => {
+    const { cmds, sent, getState } = live();
+    await cmds.run(at(SUPER_LIVE, '/agents mode accum e'));
+    const st = getState();
+    expect(sent.at(-1).text).toBe('✅ e (egpt) mode here → accum');
+    expect(st.contacts.whatsapp[ORIGIN].agents.egpt.mode).toBeUndefined();
+    expect(st.contacts.whatsapp[SUPER_LIVE]).toEqual({ ...SUPER_ALIAS, agents: { egpt: { mode: 'accum' } } });
+  });
+
+  it('`/agents mode accum all` in the super channel: every resident on the alias, the origin untouched', async () => {
+    const { cmds, getState } = live();
+    await cmds.run(at(SUPER_LIVE, '/agents mode accum all'));
+    const st = getState();
+    for (const b of ['egpt', 'codex', 'ken']) expect(st.contacts.whatsapp[ORIGIN].agents[b].mode).toBeUndefined();
+    expect(st.contacts.whatsapp[SUPER_LIVE].agents).toEqual({ egpt: { mode: 'accum' }, codex: { mode: 'accum' }, ken: { mode: 'accum' } });
+  });
+
+  it('the GATE: the super channel runs super.mode until a mode is set there, then that mode; the origin keeps its own', async () => {
+    const { cmds, getState } = live();
+    expect(await gateMode(getState(), SUPER_LIVE)).toBe('on');
+    await cmds.run(at(SUPER_LIVE, '/agents mode accum e'));
+    expect(await gateMode(getState(), SUPER_LIVE)).toBe('accum');
+    expect(await gateMode(getState(), ORIGIN)).toBe('mention');
+  });
+
+  it('`/agents e` in the super channel reports that room\'s effective mode', async () => {
+    const { cmds, sent } = live();
+    await cmds.run(at(SUPER_LIVE, '/agents e'));
+    expect(sent.at(-1).text).toMatch(/^mode: on \(super\)$/m);
+    await cmds.run(at(SUPER_LIVE, '/agents mode accum e'));
+    await cmds.run(at(SUPER_LIVE, '/agents e'));
+    expect(sent.at(-1).text).toMatch(/^mode: accum$/m);
+  });
+
+  it('a /join side-room inherits the origin\'s mode until one is set there; the set stays on the side-room', async () => {
+    const { cmds, getState } = live(patchBeing(seed(), 'whatsapp', ORIGIN, 'egpt', { mode: 'mention-direct' }));
+    expect(await gateMode(getState(), JOIN_LIVE)).toBe('mention-direct');
+    await cmds.run(at(JOIN_LIVE, '/agents mode on e'));
+    expect(await gateMode(getState(), JOIN_LIVE)).toBe('on');
+    expect(await gateMode(getState(), ORIGIN)).toBe('mention-direct');
+    expect(getState().contacts.whatsapp[ORIGIN].agents.egpt.mode).toBe('mention-direct');
   });
 });
