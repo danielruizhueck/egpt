@@ -25,6 +25,8 @@ import { startBeeperBridge, newerMsgId, transcriptionForNoteId, crossAccountMsgK
 import { EGPT_HOME } from '../src/egpt-home.mjs';
 import { encodeMesh } from '../src/mesh/relay.mjs';
 import { surfaceOf, createIdentity } from '../src/spine/identity.mjs';
+import { createSpine } from '../src/spine/spine.mjs';
+import { fromOtherNode } from '../src/spine/node-names.mjs';
 import { encodeNodeSignature, stripNodeSignature } from '../src/node-signature.mjs';
 import { hhmm } from '../src/dispatch-line.mjs';
 import { replyAllowed } from '../src/auto-mode.mjs';
@@ -2134,6 +2136,96 @@ describe('beeper bridge — a picker @-mention addresses only when it names the 
     expect(who(m)).toEqual(['rodz']);
     expect(m.from.atEStart).toBe(true);
     expect(m.text).toBe('@rodz ?');
+  });
+});
+
+// ── A REACTION FROM AN ACCOUNT WE SPEAK THROUGH IS OUR OWN OUTPUT (live, kg, 2026-10-10) ──
+// "eGPT Rodz Lulu An", mode on: E steered the operator's #26445 into its live turn and acked it 📩 then
+// 👀 through the mouth. Both came back on the PRIMARY as reactions by Rodz's lid, read as a human, and
+// each queued a turn ("⏳ Queued (1 ahead)…", "(2 ahead)…"). Payloads below are the live ones.
+describe('beeper bridge — a reaction placed by an account this node speaks through wakes nobody', () => {
+  const RODZ_LID = '@whatsapp_lid-69433129173200:beeper.local';
+  const MOUTH = ['+13472576794', '@dolly-egpt:beeper.com', 'dolly.egpt@gmail.com'];
+  const EAR = ['+16468217865', '@anrodriguez:beeper.com', 'anrodz42@gmail.com'];
+  const GROUP = CHAT('89xiqJ8w1iDuKtD4a5BY');
+  const fromThisNode = (ev) => ev?.fromNode != null && !fromOtherNode({ node_name: 'kg' }, ev);
+  const opMsg = (over = {}) => ({ id: '26445', chatID: GROUP, accountID: 'whatsapp', type: 'TEXT', senderID: '@anrodriguez:beeper.com',
+    isSender: true, text: 'cuigmar, also yes', timestamp: Date.now(), ...over });
+  const reacted = (msg, participantID, reactionKey) => ({ ...msg, reactions: [{ id: participantID, participantID, reactionKey }] });
+
+  // The REAL spine in mode on (stubs as guard-provenance.test.mjs buildReplySpine); E's first turn
+  // stays live until release(), so a second dispatch on the chat queues behind it.
+  function onSpine() {
+    let release;
+    const live = new Promise((r) => { release = r; });
+    const brain = { calls: [], async turn(b, ev) { this.calls.push(ev); await live; return { text: 'x' }; } };
+    const opens = [], notes = [], pending = [];
+    const spine = createSpine({
+      bridge: { onMessage() {}, send() {}, stop() {}, wasSentByUs: () => false },
+      brain, identity: createIdentity({ now: () => 1000 }), router: { resolve: () => 'e' },
+      gating: { async decide() { return { mode: 'on', receives: true, mayReply: true, sendToEgpt: 'mode' }; }, surfaces: () => true },
+      sender: { open(chatId, o) { opens.push(o); return { activate() {}, update() {}, async finish() {}, fail() {} }; } },
+      transcript: { async log() {} }, heartbeats: { runDue() {} },
+      mesh: { isEnvelope: () => false, async handle() {} },
+      fromThisNode, isSelfChat: () => false, clock: { now: () => 1000 }, defaultBeing: 'e', log: { line: (s) => notes.push(s) },
+    });
+    const feed = (body, from) => { pending.push(spine.handleInbound({ body, from })); };
+    return { brain, opens, notes, feed, release, settled: () => Promise.all(pending) };
+  }
+  const roster = (items) => fake.chats.set(GROUP, { title: 'eGPT Rodz Lulu An', type: 'group', isMuted: false, accountID: 'whatsapp', participants: { items } });
+
+  it('REPRODUCE: the mouth\'s 📩 steer-ack on the operator\'s message, mid-turn on the PRIMARY, queues no second turn', async () => {
+    roster([{ id: '@anrodriguez:beeper.com', isSelf: true }, { id: RODZ_LID, phoneNumber: '+13472576794', fullName: 'Rodz' }]);
+    const s = onSpine();
+    await startBridge({ nodeName: 'kg', speakingIdentities: async () => MOUTH, earIdentities: async () => EAR, onIncoming: s.feed });
+    fake.emit({ type: 'message.upserted', entries: [opMsg()] });
+    await waitFor(() => s.brain.calls.length === 1);   // E's turn on #26445 is live
+    fake.emit({ type: 'message.upserted', entries: [reacted(opMsg(), RODZ_LID, '📩')] });
+    await waitFor(() => s.opens.length > 1 || s.notes.some((n) => n.startsWith('echo:')));
+    expect(s.opens.map((o) => o.queued)).toEqual([false]);   // no "⏳ Queued (1 ahead)…"
+    s.release();
+    await s.settled();
+    expect(s.brain.calls.map((ev) => ev.kind)).toEqual(['text']);
+  });
+
+  it('the mouth seeing its OWN reaction (its Beeper id, no roster) is ours too — wherever it is the receiving account', async () => {
+    roster([{ id: '@dolly-egpt:beeper.com', isSelf: true }, { id: '@whatsapp_lid-1:beeper.local', phoneNumber: '+16468217865' }]);
+    const s = onSpine();
+    await startBridge({ nodeName: 'kg', speakingIdentities: async () => MOUTH, earIdentities: async () => EAR, onIncoming: s.feed });
+    const msg = opMsg({ id: '10006', senderID: '@whatsapp_lid-1:beeper.local', isSender: false });
+    fake.emit({ type: 'message.upserted', entries: [msg] });
+    await waitFor(() => s.brain.calls.length === 1);
+    fake.emit({ type: 'message.upserted', entries: [reacted(msg, '@dolly-egpt:beeper.com', '👀')] });
+    await waitFor(() => s.opens.length > 1 || s.notes.some((n) => n.startsWith('echo:')));
+    expect(s.opens).toHaveLength(1);
+  });
+
+  it('LOCK: the operator\'s own reaction on the ear still wakes E in mode on', async () => {
+    roster([{ id: '@anrodriguez:beeper.com', isSelf: true }, { id: RODZ_LID, phoneNumber: '+13472576794', fullName: 'Rodz' }]);
+    const s = onSpine();
+    s.release();
+    await startBridge({ nodeName: 'kg', speakingIdentities: async () => MOUTH, earIdentities: async () => EAR, onIncoming: s.feed });
+    const msg = opMsg({ id: '26444', senderID: '@whatsapp_lid-2:beeper.local', senderName: 'Lulu', isSender: false, text: 'ya llegué' });
+    fake.emit({ type: 'message.upserted', entries: [msg] });
+    await waitFor(() => s.brain.calls.length === 1);
+    fake.emit({ type: 'message.upserted', entries: [reacted(msg, '@anrodriguez:beeper.com', '❤️')] });
+    await waitFor(() => s.brain.calls.length === 2);
+    expect(s.brain.calls[1].kind).toBe('reaction');
+  });
+
+  it('LOCK: a one-connection node (the ear IS the mouth) — the operator\'s reaction still wakes E', async () => {
+    roster([{ id: '@anrodriguez:beeper.com', isSelf: true }, { id: RODZ_LID, phoneNumber: '+13472576794', fullName: 'Rodz' }]);
+    fake.accounts.push({ accountID: 'matrix', user: { id: '@anrodriguez:beeper.com', email: 'anrodz42@gmail.com', isSelf: true } },
+      { accountID: 'whatsapp', user: { id: '16468217865', phoneNumber: '+16468217865', isSelf: true } });
+    const s = onSpine();
+    s.release();
+    await startBridge({ nodeName: 'kg', speakingIdentities: async () => EAR, onIncoming: s.feed });   // no earIdentities: this bridge is its own ear
+    const msg = opMsg({ id: '26444', senderID: '@whatsapp_lid-2:beeper.local', senderName: 'Lulu', isSender: false, text: 'ya llegué' });
+    fake.emit({ type: 'message.upserted', entries: [msg] });
+    await waitFor(() => s.brain.calls.length === 1);
+    fake.emit({ type: 'message.upserted', entries: [reacted(msg, '@anrodriguez:beeper.com', '❤️')] });
+    await waitFor(() => s.brain.calls.length === 2);
+    expect(s.brain.calls[1].kind).toBe('reaction');
   });
 });
 

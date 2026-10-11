@@ -763,6 +763,13 @@ describe('every bridge is told which accounts this node speaks through', () => {
     expect(await byConnection.primary.opts.speakingIdentities()).toEqual(SELF_IDENTITY[PRIMARY]);
     app.stop();
   });
+
+  it('every connection, the mouth included, is handed the EAR\'s identities — the account whose reactions stay human', async () => {
+    const { app, byConnection } = await bootWith(KG());
+    expect(await byConnection.primary.opts.earIdentities()).toEqual(SELF_IDENTITY[PRIMARY]);
+    expect(await byConnection.secondary.opts.earIdentities()).toEqual(SELF_IDENTITY[PRIMARY]);
+    app.stop();
+  });
 });
 
 // ── THE RESOLVER'S HALF OF IT ──────────────────────────────────────────────────────────────────

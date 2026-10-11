@@ -595,10 +595,15 @@ export async function startBeeperBridge(opts = {}) {
     addressWithoutAt = true,
     // WHO THIS NODE SPEAKS AS (operator 2026-09-16): every identity the accounts this node's beings
     // post through report for themselves (/v1/accounts — selfIdentities, one per mouth connection),
-    // resolved by boot because only boot holds the other connections. Read ONLY to decide whether a
-    // picker @-mention names the mouth (mouthMentionsAsAddresses, below). async () => string[].
+    // resolved by boot because only boot holds the other connections. Read to decide whether a
+    // picker @-mention names the mouth (mouthMentionsAsAddresses, below) and whether a reaction is
+    // our own output (_maybeEmitReactions). async () => string[].
     // Default [] → no anchor is ever rewritten, byte-identical to before.
     speakingIdentities = async () => [],
+    // THE EAR's identities — the operator's own account, whose reactions stay a person's even when a
+    // being also speaks through it (operator 2026-10-11). Boot hands the ear connections'; default =
+    // this connection's own (a bridge built alone is its own ear).
+    earIdentities = async () => { await _startupReady; return _selfIdentities; },
     // 👂 ECHO PLAN (operator 2026-07-11, Phase 3b HRW ordered failover; plans/2607101713-HRW-ECHO-PLAN.md):
     // (noteId) => { rank, winner } — this node's 1-indexed failover RANK for the note. rank 1 = the
     // rendezvous-hash winner, posts now; rank>1 = a lower rank that HOLDS its 👂 and posts only if the
@@ -986,17 +991,16 @@ export async function startBeeperBridge(opts = {}) {
     catch (e) { onLog(`beeper: could not read which accounts this node speaks through — picker mentions left as anchors: ${e?.message ?? e}`); }
     const mouth = new Set(ids.map(idKey).filter(Boolean));
     if (!mouth.size) return text;
-    let roster = null;
     const ours = new Set();
-    for (const key of new Set(anchors.map((m) => idKey(m[2])))) {
-      if (!mouth.has(key)) {
-        roster ??= participantItems(await chatRaw(msg.chatID)) ?? [];
-        const p = roster.find((q) => idKey(q?.id) === key);
-        if (!p || !mouth.has(idKey(p.phoneNumber))) continue;
-      }
-      ours.add(key);
-    }
+    for (const key of new Set(anchors.map((m) => idKey(m[2])))) if (await isOneOf(msg.chatID, key, mouth)) ours.add(key);
     return text.replace(MENTION_ANCHOR_G, (whole, name, id) => (ours.has(idKey(id)) ? `@${name.replace(/^@+/, '')}` : whole));
+  }
+  // The mouth proof above, shared with _maybeEmitReactions: participant `key` IS one of `ids` (idKeys)
+  // directly, or THIS account's roster entry for it carries one as its phone.
+  async function isOneOf(chatID, key, ids) {
+    if (ids.has(key)) return true;
+    const p = (participantItems(await chatRaw(chatID)) ?? []).find((q) => idKey(q?.id) === key);
+    return !!p && ids.has(idKey(p.phoneNumber));
   }
 
   // ── `@Nombre` ON THE WAY OUT IS A REAL MENTION (operator 2026-09-21) ────────────────────────
@@ -1932,11 +1936,18 @@ export async function startBeeperBridge(opts = {}) {
     const info = await chatInfo(msg.chatID);
     const network = msg.accountID || info.accountID || 'whatsapp';   // origin network (Beeper accountID); default 'whatsapp'
     const snippet = htmlToMarkdown(msg.text) || '';
+    // OURS = an account a being speaks through, the ear's excepted (operator 2026-10-11): such a
+    // reaction (the 📩/👀 steer-ack, the 🎧 mark, /react) carries this node's frame as fromNode, so
+    // the spine's own-echo path records it and prompts nobody.
+    const ear = new Set((await earIdentities()).map(idKey));
+    const ours = new Set(((await speakingIdentities()) ?? []).map(idKey).filter((k) => k && !ear.has(k)));
     for (const { reactor, emoji } of fresh) {
       const name = _reactorName(reactor, network);
       const body = reactionAction({ emoji, targetId: msg.id, snippet });
       onLog(`beeper: reaction ${emoji} by ${name} → #${msg.id} [${info.title}]`);
+      const mine = ours.size > 0 && await isOneOf(msg.chatID, idKey(reactor), ours);
       const from = {
+        ...(mine ? { fromNode: nodeName } : {}),
         chatId: msg.chatID, chatName: info.title,
         chatType: info.type === 'group' ? 'group' : 'private',
         network,   // per-surface authorization namespace

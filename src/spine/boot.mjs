@@ -2183,13 +2183,14 @@ export async function boot({
   // mistake is one message this node stays quiet in — recoverable, and visible in the log below.
   // An ear that cannot say who it is (no identities, or a read that threw) is the same UNKNOWN.
   const earPorts = () => inboundConnections.map((n) => bridgeByEndpoint.get(endpointKey(endpointFor(n)))).filter(Boolean);
+  const earIdentities = async () => { const ids = []; for (const ear of earPorts()) ids.push(...((await ear.selfIdentities?.()) ?? [])); return ids; };
   const gateTold = new Set();
   const gateSays = (line, once) => { if (gateTold.has(once)) return; if (gateTold.size >= ARRIVAL_MAX) gateTold.clear(); gateTold.add(once); log.line?.(line); };
   const theEarIsAbsentFrom = async (chatId, on, name) => {
     const chat = String(chatId ?? '');
     if (!chat) return false;
     let earIds = [];
-    try { for (const ear of earPorts()) earIds.push(...((await ear.selfIdentities?.()) ?? [])); }
+    try { earIds = await earIdentities(); }
     catch (e) { gateSays(`[bridge] '${name}' could not ask which account this node's ear is, so it cannot know whether the ear is in ${shortChatId(chat)} — it stays silent there: ${e?.message ?? e}`, `who:${name}`); return false; }
     if (!earIds.length) {
       gateSays(`[bridge] this node's ear (${inboundConnections.map((n) => `'${n}'`).join(', ')}) reports no identity of its own — not a phone, not a Beeper id, not an email — so it cannot be looked for in a chat, and '${name}' can never know it is alone in one. '${name}' hears nothing until the ear can say who it is.`, `who:${name}`);
@@ -2267,7 +2268,8 @@ export async function boot({
         // chat-qualified _sentIds misses it; this lets the EAR find the MOUTH's sent-audio key by
         // BYTES alone (beeper.mjs ownVoiceEcho). A one-connection node fans over the single bridge —
         // its own store — so it is byte-identical to the baseline.
-        isOwnAudioEcho: (sha) => [...bridgeByEndpoint.values()].some((b) => !!b?.wasAudioSentByUs?.(sha)) };
+        isOwnAudioEcho: (sha) => [...bridgeByEndpoint.values()].some((b) => !!b?.wasAudioSentByUs?.(sha)),
+        earIdentities };   // the operator's account: excepted from "a reaction by a mouth is ours" (beeper.mjs _maybeEmitReactions)
       const port = lasso.wrap(await createBeeperBridgePort(opts, startBridge ? { start: startBridge } : {}));
       const owned = ear && wakesOn(ep);
       // A PER-CHAT ear: not one of the node's ears, but a connection allowed to be the ear of the
