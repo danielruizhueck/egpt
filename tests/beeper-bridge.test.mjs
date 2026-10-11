@@ -207,7 +207,7 @@ async function startFakeBeeper() {
         const id = decodeURIComponent(get[1]);
         chatGets.push(id);   // the ONE chat-info round trip — counted so the membership cache/TTL is provable
         const c = chats.get(id);
-        if (typeof c === 'function') { try { res.end(JSON.stringify(c())); } catch (e) { res.statusCode = 500; res.end(JSON.stringify({ error: String(e?.message ?? e) })); } return; }
+        if (typeof c === 'function') { try { res.end(JSON.stringify(c())); } catch (e) { res.statusCode = e?.status ?? 500; res.end(JSON.stringify({ error: String(e?.message ?? e) })); } return; }
         res.end(JSON.stringify(c ?? { id, title: `Chat ${id}`, type: 'single', isMuted: false, accountID: 'whatsapp' }));
         return;
       }
@@ -3820,6 +3820,14 @@ describe('beeper bridge — raw chat payloads (crossAccountChatKey needs the ros
   it('a FAILING GET answers null (UNKNOWN) — never an empty payload a caller could key on', async () => {
     fake.chats.set(CHAT('boom'), () => { throw new Error('beeper down'); });
     const { bridge } = await startBridge();
+    expect(await bridge.chatRaw('boom')).toBeNull();
+  });
+
+  it('a 404 answers false (DEFINITELY no such chat on this account) — distinct from a failure\'s null', async () => {
+    fake.chats.set(CHAT('gone'), () => { throw Object.assign(new Error('Chat not found'), { status: 404 }); });
+    fake.chats.set(CHAT('boom'), () => { throw new Error('beeper down'); });
+    const { bridge } = await startBridge();
+    expect(await bridge.chatRaw('gone')).toBe(false);
     expect(await bridge.chatRaw('boom')).toBeNull();
   });
 

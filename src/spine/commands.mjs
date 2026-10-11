@@ -24,6 +24,7 @@ import { loadPermissionLevel, ACCESS_LEVELS, isAccessLevel } from './permission-
 // findAgentByToken, src/spine/heartbeat-loader.mjs's `agent:`); `addressableTokens` LISTS the
 // valid handles in the refusal. See agentsCmd's HANDLE → KEY block.
 import { addressed, addressableTokens } from './router.mjs';
+import { superChannelAlive } from './gating.mjs';
 import { stat as fsStat, readFile as fsReadFile, writeFile as fsWriteFile, mkdir as fsMkdir, readdir as fsReaddir, rm as fsRm, rename as fsRename } from 'node:fs/promises';
 import { readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -3656,13 +3657,12 @@ export function createCommands({
     if (!contact) { onLog(`super: ${ev.chatId} is not a known conversation — nothing to alias, refusing.`); return; }
     const primaryJid = contact.jid;
     const cTitle = ev.chatName || (await forkBridge.chatTitle(ev.chatId)) || ev.chatId;
-    // EXISTING? reuse only while the primary still sees it with a human in it (not self, not a
-    // config.beeper account); else drop the stale alias (as /end does) and create a new one.
+    // EXISTING? reuse unless it is DEFINITELY dead (superChannelAlive, shared with the reply routing);
+    // then drop the stale alias (as /end does) and create a new one.
     const existing = existingSuperChannel(state0, surface, ev.chatId);
     if (existing) {
-      const ours = new Set([cfg().beeper?.primary?.phone, cfg().beeper?.secondary?.phone].map(phoneDigitsOf).filter(Boolean));
-      const members = (await forkBridge.chatRaw(existing))?.participants?.items ?? [];
-      if (members.some((p) => !p?.isSelf && !ours.has(phoneDigitsOf(p?.phoneNumber)))) { onLog(`super: channel ${existing} already exists for ${ev.chatId} — reusing (no re-create, no opener)`); return; }
+      const alive = await superChannelAlive(existing, { chatRaw: forkBridge.chatRaw, config: cfg() });
+      if (alive !== false) { onLog(`super: channel ${existing} already exists for ${ev.chatId} — reusing (no re-create, no opener)${alive ? '' : '; liveness unknown (chat read failed)'}`); return; }
       await writeState(dropContact(await loadState(), surface, existing));
       onLog(`super: channel ${existing} is gone or has no human member — alias dropped, creating a new one`);
     }

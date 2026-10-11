@@ -764,7 +764,7 @@ export async function startBeeperBridge(opts = {}) {
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: body ? JSON.stringify(body) : undefined,
     });
-    if (!res.ok) throw new Error(`${method} ${path} → ${res.status} ${(await res.text()).slice(0, 200)}`);
+    if (!res.ok) throw Object.assign(new Error(`${method} ${path} → ${res.status} ${(await res.text()).slice(0, 200)}`), { status: res.status });
     const t = await res.text();
     return t ? JSON.parse(t) : null;
   }
@@ -879,7 +879,7 @@ export async function startBeeperBridge(opts = {}) {
     // membership answer must never read a failed fetch as "nobody is in this chat".
     let info = { title: chatID, type: 'single', isMuted: false, accountID: null, participants: null, raw: null, at: Date.now() };
     try { const c = await api('GET', `/v1/chats/${encodeURIComponent(fullChatId(chatID))}`); info = { title: c.title || chatID, type: c.type || 'single', isMuted: !!c.isMuted, accountID: c.accountID || null, participants: participantKeys(c), raw: c, at: Date.now() }; }
-    catch (e) { onLog(`beeper: chatInfo(${chatID}) failed — ${e?.message ?? e}`); }
+    catch (e) { info.gone = e?.status === 404; onLog(`beeper: chatInfo(${chatID}) failed — ${e?.message ?? e}`); }
     _chatCache.set(chatID, info);
     _knownChatIds.add(chatID);
     return info;
@@ -940,13 +940,13 @@ export async function startBeeperBridge(opts = {}) {
   //
   // null = UNKNOWN (never fetched, or the GET failed). The caller must read that as "this chat
   // cannot be keyed", never as "this chat has nobody in it" — the same reading chatHasParticipant
-  // takes, for the same reason.
+  // takes, for the same reason. false = the GET answered 404: DEFINITELY no such chat on this account.
   async function chatRaw(chatID) {
     const id = shortChatId(chatID);
     let info = _chatCache.get(id);
     const fresh = info?.raw && (info.type === 'single' || Date.now() - (info.at ?? 0) < PARTICIPANTS_TTL_MS);
     if (!fresh) info = await chatInfo(id, { refresh: true });
-    return info?.raw ?? null;
+    return info?.raw ?? (info?.gone ? false : null);
   }
 
   // THE 1:1 COUNTERPARTY (operator 2026-10-10, the super-channel invite) — the OTHER party's

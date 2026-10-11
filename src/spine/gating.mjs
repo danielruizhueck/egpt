@@ -49,7 +49,21 @@ export function resolveMode(bv, being, c = {}) {
   return isAutoMode(def) ? { mode: def, source: 'node' } : { mode: DEFAULT_AUTO_MODE, source: 'default' };
 }
 
-export function createGating({ getConfig = () => ({}), loadState = null, defaultKey = 'e' } = {}) {
+// Is super channel `chatId` still read by a human? true | false (DEFINITE: the GET 404'd, or the roster
+// holds only our mouth accounts) | null (unknown — keep using it). The operator counts as a human; a
+// mouth is any config.beeper phone other than the primary's. Shared by ensureSuperChannel and decide.
+export async function superChannelAlive(chatId, { chatRaw, config = {} }) {
+  const raw = await chatRaw(chatId);
+  if (raw === false) return false;
+  const items = raw?.participants?.items;
+  if (!Array.isArray(items)) return null;
+  const digits = (v) => String(v ?? '').replace(/\D/g, '');
+  const operator = digits(config.beeper?.primary?.phone);
+  const mouths = new Set(Object.values(config.beeper ?? {}).map((a) => digits(a?.phone)).filter((d) => d && d !== operator));
+  return items.some((p) => !mouths.has(digits(p?.phoneNumber)));
+}
+
+export function createGating({ getConfig = () => ({}), loadState = null, defaultKey = 'e', chatRaw = async () => null } = {}) {
   const cfg = () => getConfig() ?? {};
 
   // The single per-message decision. ONE conversations.yaml read resolves the conversation's
@@ -81,8 +95,10 @@ export function createGating({ getConfig = () => ({}), loadState = null, default
     // REPLY ROUTING (operator 2026-10-08, CHUNK 2): when this conversation HAS a super channel
     // right now, the reply is posted THERE instead of the main chat (the Mouth "pinned" to the
     // super channel). LIVE lookup off the same state read — /end drops the alias, so this reverts
-    // to the arrival chat automatically with no un-pin to undo. No super channel → ev.chatId.
-    const replyChatId = (state && superChannelFor(state, ev.surface, ev.chatId)) || ev.chatId;
+    // to the arrival chat automatically with no un-pin to undo. No super channel, or a DEFINITELY dead
+    // one (superChannelAlive → false) → ev.chatId.
+    const superId = state && superChannelFor(state, ev.surface, ev.chatId);
+    const replyChatId = (superId && (await superChannelAlive(superId, { chatRaw, config: c })) !== false) ? superId : ev.chatId;
     return { mode, receives: receives(mode), mayReply, sendToEgpt, replyChatId };
   }
 

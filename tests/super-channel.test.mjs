@@ -289,9 +289,9 @@ describe('ensureSuperChannel — an existing channel is REUSED', () => {
 });
 
 // ── liveness: a stale super alias is dropped and replaced (reve 2026-10-10, Reencuentro pjcOWW…) ──────
-// The operator LEFT the -super room: the primary's GET 404s (chatRaw → null) and Rodz's view has only
+// The operator LEFT the -super room: the primary's GET 404s (chatRaw → false) and Rodz's view has only
 // Rodz. The alias stayed `super: true`, so every summon logged "already exists … reusing" and replies
-// kept routing into the dead room.
+// kept routing into the dead room. Only a DEFINITE answer kills it; a failed read keeps it.
 describe('ensureSuperChannel — reuse only a LIVE channel', () => {
   const STALE = 'pjcOWWstale';
   const NEW_FULL = '!chatSuperNew:beeper.local';
@@ -300,8 +300,9 @@ describe('ensureSuperChannel — reuse only a LIVE channel', () => {
     return aliasContact(st, 'whatsapp', STALE, getContact(st, 'whatsapp', C_CHAT).jid, { transcript: sanitizeSlug(SUPER_TITLE), super: true });
   };
   const SELF_AND_RODZ_ONLY = { participants: { items: LIVE_ROSTER.participants.items.slice(0, 2) } };
+  const RODZ_ONLY = { participants: { items: LIVE_ROSTER.participants.items.slice(1, 2) } };
 
-  for (const [why, chatRaw] of [['the primary 404s (chatRaw → null)', async () => null], ['only self + Rodz are left', async () => SELF_AND_RODZ_ONLY]]) {
+  for (const [why, chatRaw] of [['the primary 404s (chatRaw → false)', async () => false], ['the roster holds only our mouth account', async () => RODZ_ONLY]]) {
     it(`${why} → the stale alias is dropped and a NEW channel is created + aliased`, async () => {
       const { cmds, calls, getState } = harness({ config: cfg(), state: stateWithStaleSuper(), chatRaw, createdChatIds: [NEW_FULL] });
       await cmds.runPhrase(inbound('…'), 'super');
@@ -314,11 +315,23 @@ describe('ensureSuperChannel — reuse only a LIVE channel', () => {
     });
   }
 
-  it('a channel with a human still in it is reused (no create, alias kept)', async () => {
-    const { cmds, calls, getState } = harness({ config: cfg(), state: stateWithStaleSuper() });
+  for (const [why, chatRaw] of [
+    ['a channel with a human still in it', async () => LIVE_ROSTER],
+    ['an operator-only room (self + Rodz — the operator is a human)', async () => SELF_AND_RODZ_ONLY],
+    ['a failed read (chatRaw → null, UNKNOWN)', async () => null],
+  ]) {
+    it(`${why} is reused (no create, alias kept)`, async () => {
+      const { cmds, calls, getState } = harness({ config: cfg(), state: stateWithStaleSuper(), chatRaw });
+      await cmds.runPhrase(inbound('…'), 'super');
+      expect(calls.create).toHaveLength(0);
+      expect(superChannelFor(getState(), 'whatsapp', C_CHAT)).toBe(STALE);
+    });
+  }
+
+  it('a failed read logs ONE line saying liveness is unknown', async () => {
+    const { cmds, logs } = harness({ config: cfg(), state: stateWithStaleSuper(), chatRaw: async () => null });
     await cmds.runPhrase(inbound('…'), 'super');
-    expect(calls.create).toHaveLength(0);
-    expect(superChannelFor(getState(), 'whatsapp', C_CHAT)).toBe(STALE);
+    expect(logs.filter((l) => /unknown/i.test(l))).toHaveLength(1);
   });
 });
 

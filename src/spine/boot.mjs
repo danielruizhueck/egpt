@@ -2764,7 +2764,8 @@ export async function boot({
   // --- services (each DI-wired; none closes over another) ---
   const services = {
     identity: createIdentity({ now, timeZone: transcriptTimeZone }),
-    gating: createGating({ getConfig, loadState: _loadState, defaultKey }),
+    // chatRaw: the super-channel liveness read off the ear (earBridge, declared below — decide only runs once the spine exists).
+    gating: createGating({ getConfig, loadState: _loadState, defaultKey, chatRaw: (id) => earBridge.chatRaw?.(id) }),
     // Router resolves an @token against the unified `agents:` block (operator 2026-07-02) —
     // the ONE registry, and since 2026-07-25 the ONLY source of off-node reach (a relay agent's
     // relay_channel). defaultBeing = defaultKey: the persona-route + the un-@mentioned

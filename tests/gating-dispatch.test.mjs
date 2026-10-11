@@ -188,4 +188,26 @@ describe('gating — the super channel (CHUNK 2): per-surface mode + reply routi
     expect(after.replyChatId).toBe(MAIN);                 // routing reverts automatically
     expect(after.mode).toBe('mention');                   // and the stored mode was never touched, so nothing to restore
   });
+
+  // LIVENESS (reve 2026-10-10, Reencuentro pjcOWW…): the operator left the -super room, the primary's
+  // GET 404s, yet every E reply kept routing there. Routing honours a DEFINITE death only.
+  describe('ROUTING follows the channel only while it is alive (superChannelAlive)', () => {
+    const config = { beeper: { primary: { phone: '16468217865' }, secondary: { phone: '13472576794' } }, super: { enabled: true, mode: 'on' } };
+    const SELF = { id: '@anrodriguez:beeper.com', isSelf: true };
+    const RODZ = { id: '@whatsapp_lid-1:beeper.local', phoneNumber: '+13472576794' };
+    const decideWith = (chatRaw) => createGating({ getConfig: () => config, loadState: async () => withSuper(), defaultKey: 'e', chatRaw }).decide('e', evIn(MAIN));
+
+    it('the channel 404s (chatRaw → false) → the reply falls back to the origin chat', async () => {
+      expect((await decideWith(async () => false)).replyChatId).toBe(MAIN);
+    });
+    it('a roster read with only our mouth accounts → falls back to the origin chat', async () => {
+      expect((await decideWith(async () => ({ participants: { items: [RODZ] } }))).replyChatId).toBe(MAIN);
+    });
+    it('the read failed (chatRaw → null, UNKNOWN) → keeps routing to the channel', async () => {
+      expect((await decideWith(async () => null)).replyChatId).toBe(SUPER);
+    });
+    it('operator + Rodz only → alive (the operator is a human)', async () => {
+      expect((await decideWith(async () => ({ participants: { items: [SELF, RODZ] } }))).replyChatId).toBe(SUPER);
+    });
+  });
 });
