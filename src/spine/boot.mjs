@@ -3136,6 +3136,7 @@ export async function boot({
         postBridgeFor(via).send(chatId, text, { replyTo: replyToMessageID, skipSignature: unsigned }),
       archiveChat:   (chatId)                         => earBridge.archiveChat(chatId),
       chatAccountId: async (chatId) => { try { return (await earBridge.chatRaw(chatId))?.accountID ?? null; } catch { return null; } },
+      chatRaw:       (chatId)                         => earBridge.chatRaw(chatId),   // the super-channel liveness check
       chatOtherPartyId: (chatId) => earBridge.chatOtherPartyId(chatId),   // 1:1 counterparty → the super-channel invite
       chatTitle:     (chatId)                         => earBridge.getChatName(chatId),
       // RODZ'S BEEPER USER ID (operator 2026-10-03) — the create needs `@whatsapp_lid-…`, not a

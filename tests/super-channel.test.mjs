@@ -27,7 +27,7 @@ vi.hoisted(() => {
   process.env.EGPT_HOME = `${tmp}/egpt-super-channel-home`;
 });
 import { createCommands, SUPER_SUFFIX_DEFAULT, SUPER_OPENER_DEFAULT } from '../src/spine/commands.mjs';
-import { ensureContact, recordThread, getContact, getBeing, aliasTargetOf } from '../src/conversations-state.mjs';
+import { ensureContact, recordThread, getContact, getBeing, aliasTargetOf, aliasContact, superChannelFor } from '../src/conversations-state.mjs';
 import { sanitizeSlug } from '../src/sanitize.mjs';
 import { shortChatId } from '../src/bridges/chat-id.mjs';
 
@@ -62,21 +62,31 @@ function seedState() {
   return st;
 }
 
-function harness({ config, state, resolveSecondaryChatIdByTitle = () => SEC_SUPER_ROOM, rodzUserId = RODZ_USER_ID, chatOtherPartyId = async () => null } = {}) {
+// The PRIMARY's GET /v1/chats/{id} payload for a live super channel (shape measured on reve 2026-10-11):
+// self (the primary, no phone), Rodz (secondary.phone) and one human.
+const LIVE_ROSTER = { participants: { items: [
+  { id: '@anrodriguez:beeper.com', isSelf: true },
+  { id: RODZ_USER_ID, phoneNumber: RODZ, isSelf: false },
+  { id: SUMMONER, phoneNumber: '+34667928959', isSelf: false },
+] } };
+
+function harness({ config, state, resolveSecondaryChatIdByTitle = () => SEC_SUPER_ROOM, rodzUserId = RODZ_USER_ID, chatOtherPartyId = async () => null, chatRaw = async () => LIVE_ROSTER, resolvePrimaryChatIdByTitle = null, createdChatIds = null, now = null } = {}) {
   let st = state ?? seedState();
   const sent = [];
   const logs = [];
-  const calls = { create: [], post: [], resolve: [], resolveTitle: [] };
+  const calls = { create: [], post: [], resolve: [], resolveTitle: [], archive: [], chatRaw: [] };
   const forkBridge = {
     editMessage: async () => true,
-    createGroup: async (opts) => { calls.create.push(opts); return { success: true, chatID: SUPER_CHAT_FULL }; },
+    createGroup: async (opts) => { calls.create.push(opts); return { success: true, chatID: createdChatIds?.[calls.create.length - 1] ?? SUPER_CHAT_FULL }; },
     postReply: async (chatId, text, replyToMessageID, opts = {}) => { calls.post.push({ chatId, text, replyToMessageID, via: opts.via ?? null }); return { ok: true }; },
-    archiveChat: async () => true,
+    archiveChat: async (chatId) => { calls.archive.push(chatId); return true; },
     chatAccountId: async () => 'whatsapp',
+    chatRaw: async (chatId) => { calls.chatRaw.push(chatId); return chatRaw(chatId); },
     chatTitle: async () => null,
     chatOtherPartyId,
     resolveUserIdByPhone: async (digits, opts) => { calls.resolve.push({ digits, opts }); return digits === RODZ_DIGITS ? rodzUserId : null; },
     resolveSecondaryChatIdByTitle: async (title, opts) => { calls.resolveTitle.push({ title, opts }); return resolveSecondaryChatIdByTitle(title, opts); },
+    ...(resolvePrimaryChatIdByTitle ? { resolvePrimaryChatIdByTitle: async (title, opts) => resolvePrimaryChatIdByTitle(title, opts) } : {}),
   };
   const cmds = createCommands({
     getConfig: () => config,
@@ -86,6 +96,7 @@ function harness({ config, state, resolveSecondaryChatIdByTitle = () => SEC_SUPE
     defaultKey: 'e',
     forkBridge,
     sleep: async () => {},   // instant opener poll
+    ...(now ? { now } : {}),
     onLog: (m) => logs.push(m),
   });
   return { cmds, sent, logs, calls, getState: () => st };
@@ -274,6 +285,77 @@ describe('ensureSuperChannel — an existing channel is REUSED', () => {
     await cmds.runPhrase(inbound('…'), 'super');
     expect(calls.create).toHaveLength(1);   // reused, not re-created
     expect(calls.post).toHaveLength(1);     // no duplicate opener
+  });
+});
+
+// ── liveness: a stale super alias is dropped and replaced (reve 2026-10-10, Reencuentro pjcOWW…) ──────
+// The operator LEFT the -super room: the primary's GET 404s (chatRaw → null) and Rodz's view has only
+// Rodz. The alias stayed `super: true`, so every summon logged "already exists … reusing" and replies
+// kept routing into the dead room.
+describe('ensureSuperChannel — reuse only a LIVE channel', () => {
+  const STALE = 'pjcOWWstale';
+  const NEW_FULL = '!chatSuperNew:beeper.local';
+  const stateWithStaleSuper = () => {
+    const st = seedState();
+    return aliasContact(st, 'whatsapp', STALE, getContact(st, 'whatsapp', C_CHAT).jid, { transcript: sanitizeSlug(SUPER_TITLE), super: true });
+  };
+  const SELF_AND_RODZ_ONLY = { participants: { items: LIVE_ROSTER.participants.items.slice(0, 2) } };
+
+  for (const [why, chatRaw] of [['the primary 404s (chatRaw → null)', async () => null], ['only self + Rodz are left', async () => SELF_AND_RODZ_ONLY]]) {
+    it(`${why} → the stale alias is dropped and a NEW channel is created + aliased`, async () => {
+      const { cmds, calls, getState } = harness({ config: cfg(), state: stateWithStaleSuper(), chatRaw, createdChatIds: [NEW_FULL] });
+      await cmds.runPhrase(inbound('…'), 'super');
+      expect(calls.chatRaw).toEqual([STALE]);
+      expect(calls.create).toHaveLength(1);
+      const st = getState();
+      expect(st.contacts.whatsapp[STALE]).toBeUndefined();
+      expect(superChannelFor(st, 'whatsapp', C_CHAT)).toBe(shortChatId(NEW_FULL));
+      expect(calls.post).toHaveLength(1);   // the new channel's opener
+    });
+  }
+
+  it('a channel with a human still in it is reused (no create, alias kept)', async () => {
+    const { cmds, calls, getState } = harness({ config: cfg(), state: stateWithStaleSuper() });
+    await cmds.runPhrase(inbound('…'), 'super');
+    expect(calls.create).toHaveLength(0);
+    expect(superChannelFor(getState(), 'whatsapp', C_CHAT)).toBe(STALE);
+  });
+});
+
+// ── unique title: a re-summon after /end must not reuse the old group's title (reve 2026-10-10 09:10) ──
+// 08:42 channel TstFyzz created, 08:55 /end dropped it (archived, still on the primary), 09:10 a new
+// summon created pjcOWW under the SAME title and the opener's by-title lookup on Rodz's side landed in
+// the OLD group (no1QNPs) — the new channel stayed empty.
+describe('ensureSuperChannel — the title is made unique (the /join uniqueTitle)', () => {
+  it('summon → /end → summon: distinct titles, and the second opener lands in the NEW group', async () => {
+    const FIXED = () => new Date(2026, 9, 10, 9, 10, 0).getTime();   // → " 0910-10102026"
+    const SECOND_FULL = '!chatSuper2:beeper.local';
+    const onPrimary = new Set();
+    const OLD_SEC = '!no1QNPs', NEW_SEC = '!secSuper2';
+    const { cmds, calls } = harness({
+      config: cfg(), now: FIXED, createdChatIds: [SUPER_CHAT_FULL, SECOND_FULL],
+      resolvePrimaryChatIdByTitle: (title) => (onPrimary.has(title) ? '!onPrimary' : null),
+      resolveSecondaryChatIdByTitle: (title) => (title === SUPER_TITLE ? OLD_SEC : NEW_SEC),
+    });
+    await cmds.runPhrase(inbound('…'), 'super');
+    onPrimary.add(calls.create[0].title);                                  // the ended group stays on the primary
+    await cmds.run({ chatId: SUPER_CHAT, surface: 'whatsapp', msgId: 'end1', body: '/end' });
+    await cmds.runPhrase(inbound('…'), 'super');
+    expect(calls.create.map((c) => c.title)).toEqual([SUPER_TITLE, `${SUPER_TITLE} 0910-10102026`]);
+    expect(calls.post.map((p) => p.chatId)).toEqual([OLD_SEC, NEW_SEC]);
+  });
+});
+
+// ── /end closes a super channel through the /join alias path ─────────────────────────────────────────
+describe('/end in a super channel', () => {
+  it('archives it and drops the alias — replies revert to the main chat', async () => {
+    const { cmds, calls, getState } = harness({ config: cfg() });
+    await cmds.runPhrase(inbound('…'), 'super');
+    expect(superChannelFor(getState(), 'whatsapp', C_CHAT)).toBe(SUPER_CHAT);
+    await cmds.run({ chatId: SUPER_CHAT, surface: 'whatsapp', msgId: 'end1', body: '/end' });
+    expect(calls.archive).toEqual([SUPER_CHAT]);
+    expect(getState().contacts.whatsapp[SUPER_CHAT]).toBeUndefined();
+    expect(superChannelFor(getState(), 'whatsapp', C_CHAT)).toBe(null);
   });
 });
 

@@ -793,6 +793,7 @@ export function createCommands({
     archiveChat:   async () => false,   // (chatId) -> bool
     chatAccountId: async () => null,    // (chatId) -> the accountID the chat lives on
     chatTitle:     async () => null,    // (chatId) -> the chat's display title
+    chatRaw:       async () => null,    // (chatId) -> the GET /v1/chats/{id} payload (roster) | null when gone
     resolveUserIdByPhone: async () => null,   // (phoneDigits, { accountID }) -> "@whatsapp_lid-…:beeper.local" | null
     resolveSecondaryChatIdByTitle: async () => null,   // (title, { accountID }) -> the SECONDARY account's own room id for the group titled `title` | null
   },
@@ -3507,7 +3508,7 @@ export function createCommands({
   // group by this EXACT title already exists on the PRIMARY account, append " HHMM-MMDDYYYY" (local,
   // minute-granular — effectively unique, no loop). Covers the defaulted AND the explicitly-named case.
   // A probe that is unavailable (standalone/tests) returns the title untouched; a probe that THROWS is
-  // treated as "does not exist" and logged — creation is NEVER blocked on a probe. Shared by /join + /split.
+  // treated as "does not exist" and logged — creation is NEVER blocked on a probe. Shared by /join, /split + super.
   const uniqueTitle = async (verb, title, accountID) => {
     if (typeof forkBridge.resolvePrimaryChatIdByTitle !== 'function') return title;
     let exists = false;
@@ -3637,7 +3638,7 @@ export function createCommands({
   // (phraseCommand), not here.
   //   not existing → create it (operator + Rodz + the summoner), alias it (carrying the `super: true`
   //                  routing/gate marker), post config.super.opener once. It sets NO stored mode.
-  //   existing     → reuse it (no re-create, no duplicate opener).
+  //   existing     → reuse it while live (no re-create, no duplicate opener); dead → replaced.
   // NODE GATE: like a nameless /join, only the primary-role node acts — on a shared account both
   // co-account nodes hear the "…" and only one must create the channel. THE MODE IS INTRINSIC, NOT
   // STORED (operator 2026-10-08, CHUNK 2): a super channel is an ALIAS, so a stored per-being mode
@@ -3655,12 +3656,19 @@ export function createCommands({
     if (!contact) { onLog(`super: ${ev.chatId} is not a known conversation — nothing to alias, refusing.`); return; }
     const primaryJid = contact.jid;
     const cTitle = ev.chatName || (await forkBridge.chatTitle(ev.chatId)) || ev.chatId;
-    const title = `${cTitle}${superSuffix()}`;
-    // EXISTING? reuse — no re-create, no duplicate opener (the SHARED marker-based resolver, above).
+    // EXISTING? reuse only while the primary still sees it with a human in it (not self, not a
+    // config.beeper account); else drop the stale alias (as /end does) and create a new one.
     const existing = existingSuperChannel(state0, surface, ev.chatId);
-    if (existing) { onLog(`super: channel ${existing} already exists for ${ev.chatId} — reusing (no re-create, no opener)`); return; }
+    if (existing) {
+      const ours = new Set([cfg().beeper?.primary?.phone, cfg().beeper?.secondary?.phone].map(phoneDigitsOf).filter(Boolean));
+      const members = (await forkBridge.chatRaw(existing))?.participants?.items ?? [];
+      if (members.some((p) => !p?.isSelf && !ours.has(phoneDigitsOf(p?.phoneNumber)))) { onLog(`super: channel ${existing} already exists for ${ev.chatId} — reusing (no re-create, no opener)`); return; }
+      await writeState(dropContact(await loadState(), surface, existing));
+      onLog(`super: channel ${existing} is gone or has no human member — alias dropped, creating a new one`);
+    }
     const rodz = await resolveRodz(ev.chatId, 'super');
     if (!rodz) return;
+    const title = await uniqueTitle('super', `${cTitle}${superSuffix()}`, rodz.accountID);
     // ── mutations begin ──
     // CREATE + ALIAS (the SAME core /join uses), carrying `{ super: true }` so the gate + reply
     // routing can find this channel from the reply path. NO mode is stored — the channel's mode is
