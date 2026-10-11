@@ -52,7 +52,7 @@ import { CONFIG_YAML_PATH, writeConfigKey } from '../tools/config-io.mjs';
 import { resolveConfigKey } from '../../config/config-schema.mjs';
 import { isRunning as cdpIsRunning, listTabs as cdpListTabs, cdpHost as cdpHostOf, openTab as cdpOpenTab, activateTarget as cdpActivateTarget, closeTab as cdpCloseTab, createCdpClient, createPipeTransport } from '../tools/cdp.mjs';
 import { findChromeExecutable, chromeArgs, chromeCommandLine, resolveBrainProfile, spawnChrome, spawnChromePipe as defaultSpawnChromePipe } from '../tools/chrome-launcher.mjs';
-import { admitLaunch, estimateChromeBytes } from './chrome-pool.mjs';
+import { admitLaunch, estimateChromeBytes, BRAIN_GROUP, isSafeGroupName } from './chrome-pool.mjs';
 import { freemem } from 'node:os';
 import { helpText } from '../interpreter.mjs';
 import { uploadNote, radioNoteFilename, pickSpeaker } from '../radio-relay.mjs';
@@ -128,28 +128,15 @@ const chromePortOf = (host) => String(host).split(':')[1] ?? '9221';
 // precisely because it is a HEURISTIC: it scans for a profile that has been used on an AI site.
 // No conversation ⇒ CHROME_BRAIN_PROFILE ⇒ byte-identical to before.
 //
-// PER-CONVERSATION (plans/2610091931 chunk 1 — ADDITIVE and INERT: no caller passes `conversation`
-// yet; the rewire + per-conversation ports are chunk 2). `conversation` is a small PURE descriptor,
-// whatever chunk 2's caller carries from the conversation state entry:
-//   { slug, name }
-//     • slug — the conversation's dir name (basename of its `conversation_path`, e.g.
-//       "Reinie Alvino-2607150057"); becomes the profile dir name. Re-run through sanitizeSlug (a
-//       real slug is already idempotent under it) so a raw name can never escape the profiles root.
-//     • name — the conversation's display name (its `pushedName`), matched against `admin_channel`.
-// The ADMIN conversation — the one whose name equals the EXISTING `admin_channel` config (e.g.
-// "eGPT Admin"); no new key — KEEPS the legacy/`brain` profile, because brain is where the admin
-// creds (Gmail / ClassDojo / AWS) are signed in. Every OTHER conversation gets its own
-// <profiles-root>/<slug>, profiles-root being the parent of CHROME_BRAIN_PROFILE
-// (.egpt/chrome/profiles/), so whatever is signed into one conversation's Chrome is invisible to
-// the rest. A blank/unslugged conversation falls back to legacy rather than mint a junk dir.
+// BROWSER GROUPS (plans/2610091931 rev 2026-10-11). `conversation` is chrome-pool.chromeConversationOf's
+// { key, name, group }; group name = profile dir name. Group `brain` → the legacy value above (where
+// Gmail / ClassDojo / AWS are signed in). Any other group → <profiles-root>/<group>, profiles-root
+// being the parent of CHROME_BRAIN_PROFILE (.egpt/chrome/profiles/). No group, or one that is not a
+// safe path segment → null: no browser, never a fallback to brain.
 export const chromeProfileOf = (c, conversation) => {
   const legacy = c?.chrome?.profile_dir || CHROME_BRAIN_PROFILE;
-  if (!conversation) return legacy;                             // no conversation → byte-for-byte legacy
-  const admin = String(c?.admin_channel ?? '').trim();          // the existing config key, read like boot's declaredChannel
-  const name = String(conversation.name ?? '').trim();
-  if (admin && name === admin) return legacy;                   // the admin conversation keeps brain
-  const slug = sanitizeSlug(conversation.slug);
-  return slug ? join(dirname(CHROME_BRAIN_PROFILE), slug) : legacy;
+  if (!conversation || conversation.group === BRAIN_GROUP) return legacy;
+  return isSafeGroupName(conversation.group) ? join(dirname(CHROME_BRAIN_PROFILE), conversation.group) : null;
 };
 // The executable: config `chrome.bin`, else null — which lets chrome-launcher run its own
 // per-platform CHROME_PATHS search. Never a second locator here.
@@ -1384,8 +1371,8 @@ export function createCommands({
   // not fire two launches at one profile, so a call that arrives while a launch is in flight JOINS
   // it and gets the same answer. Nothing is queued: the next call after it settles probes afresh,
   // and finds the browser up.
-  // ── DEDICATED-CHROME POOL (chunk 3b) ─────────────────────────────────────────────────────────
-  // One pipe-driven chrome.exe per DEDICATED profile dir; the shared brain path below is untouched.
+  // ── GROUP CHROME POOL (chunk 3b, rev 2026-10-11) ─────────────────────────────────────────────
+  // One pipe-driven chrome.exe per non-brain GROUP profile dir; the brain path below is untouched.
   const _dedicated = new Map();          // profileDir → { child, client, writable, readable, pid, lastUsedAt, busy }
   const _dedicatedEnsuring = new Map();  // profileDir → in-flight launch (per-profile single-flight)
   const chromeAlive = (e) => !!e?.child && e.child.exitCode == null && !e.child.killed;
@@ -1393,7 +1380,7 @@ export function createCommands({
   const memoryMarginBytes = () => (Number(cfg()?.chrome?.memory_margin_mb) || CHROME_MEMORY_MARGIN_MB) * MB;
 
   // Evict the idlest NON-busy dedicated Chrome (lowest lastUsedAt); profile dir persists → relaunch
-  // comes up still-logged-in. The shared brain is not in this map, so it is never evicted.
+  // comes up still-logged-in. The brain Chrome is not in this map, so it is never evicted.
   function evictIdlestDedicated() {
     let victim = null;
     for (const [dir, e] of _dedicated) {
@@ -1407,12 +1394,16 @@ export function createCommands({
     return true;
   }
 
-  // A dedicated conversation's OWN Chrome: memory-admitted, pipe-spawned, driven by a pipe cdpClient.
+  // A non-brain group's Chrome: memory-admitted, pipe-spawned, driven by a pipe cdpClient.
   // Registry keyed by profile dir; a live profile is NEVER relaunched; single-flight per profile.
+  // FAIL CLOSED: no profile (the lookup refused the chat) or the brain's own dir → no browser + one log line.
   function ensureDedicatedChrome(conversation) {
     const profileDir = chromeProfileOf(cfg(), conversation);
-    // A conversation that resolves to the shared brain (admin / unslugged) is NOT dedicated.
-    if (profileDir === chromeProfileOf(cfg())) return ensureChrome();
+    if (!profileDir || profileDir === chromeProfileOf(cfg())) {
+      const why = conversation.why || `browser group "${conversation.group}" ${profileDir ? 'is the brain profile dir' : 'is unusable'}`;
+      onChromeLog(`no browser for "${conversation.name ?? ''}": ${why}`);
+      return Promise.resolve({ dedicated: true, profileDir: null, client: null, launched: false, running: false, why });
+    }
     const live = _dedicated.get(profileDir);
     if (chromeAlive(live)) { live.lastUsedAt = now(); return Promise.resolve({ dedicated: true, profileDir, client: live.client, pid: live.pid, launched: false, running: true }); }
     if (_dedicatedEnsuring.has(profileDir)) return _dedicatedEnsuring.get(profileDir);
@@ -1456,8 +1447,8 @@ export function createCommands({
     return p;
   }
 
-  // 3c LOOKUP: conversation → its CDP client. A dedicated conversation ensures its own pipe Chrome and
-  // yields that pipe cdpClient; everyone else is shared/brain and keeps the default port client — beings
+  // 3c LOOKUP: conversation → its CDP client. A non-brain group yields its group's pipe cdpClient (null
+  // when refused); the brain group and conversation-less callers keep the default port client — beings
   // stay on the port client until 3c rewires the being cdp seam. Ensures on demand; single-flight.
   async function chromeClientFor(conversation) {
     const r = await ensureChrome(conversation);
@@ -1466,10 +1457,10 @@ export function createCommands({
   }
 
   let _ensuring = null;
-  // A DEDICATED conversation gets its OWN pipe Chrome (above); everyone else — conversation-less, or a
-  // non-dedicated conversation — takes the byte-identical shared/brain port path below.
+  // A conversation in any group but brain gets its GROUP's pipe Chrome (above); conversation-less
+  // callers and the brain group take the byte-identical brain port path below.
   function ensureChrome(conversation) {
-    if (conversation && conversation.dedicated) return ensureDedicatedChrome(conversation);
+    if (conversation && conversation.group !== BRAIN_GROUP) return ensureDedicatedChrome(conversation);
     if (_ensuring) return _ensuring;
     _ensuring = (async () => {
       let host = '?';

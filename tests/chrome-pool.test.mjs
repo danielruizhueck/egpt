@@ -1,10 +1,10 @@
-// tests/chrome-pool.test.mjs — the PURE launch-admission decision + the two config readers for the
-// per-profile Chrome pool (plans/2610091931 chunk 2). No Chrome, no OS, no fs, no clock: every
+// tests/chrome-pool.test.mjs — the PURE launch-admission decision + the browser-group lookup for the
+// per-profile Chrome pool (plans/2610091931 chunk 2, rev 2026-10-11). No Chrome, no OS, no fs, no clock: every
 // measurement is a plain number fed in, so the same inputs always give the same answer — the
 // operator's "deterministic estimate as if to launch a new one".
 import { describe, it, expect } from 'vitest';
 import { join, basename } from 'node:path';
-import { estimateChromeBytes, admitLaunch, parseDedicatedFlag, chromeConversationOf, MB } from '../src/spine/chrome-pool.mjs';
+import { estimateChromeBytes, admitLaunch, chromeConversationOf, MB } from '../src/spine/chrome-pool.mjs';
 
 describe('admitLaunch() — the pure memory-admission table', () => {
   // A fixed frame: a 500 MB estimate, a 1024 MB margin. available is what varies.
@@ -73,39 +73,50 @@ describe('estimateChromeBytes() — deterministic per-Chrome cost', () => {
   });
 });
 
-describe('parseDedicatedFlag() — the per-conversation opt-in (mirrors parseWarmBlock)', () => {
-  it('true ONLY for chrome.dedicated === true', () => {
-    expect(parseDedicatedFlag({ chrome: { dedicated: true } })).toBe(true);
-  });
-  it('false for absent / false / non-boolean / garbage docs (shared is the default)', () => {
-    expect(parseDedicatedFlag({})).toBe(false);
-    expect(parseDedicatedFlag({ chrome: {} })).toBe(false);
-    expect(parseDedicatedFlag({ chrome: { dedicated: false } })).toBe(false);
-    expect(parseDedicatedFlag({ chrome: { dedicated: 'true' } })).toBe(false);   // not the boolean
-    expect(parseDedicatedFlag({ chrome: 'nope' })).toBe(false);
-    expect(parseDedicatedFlag(null)).toBe(false);
-    expect(parseDedicatedFlag(undefined)).toBe(false);
-  });
-});
+// config/browsers.yaml's `groups:` map, as rooms-file.readBrowserGroups returns it.
+const GROUPS = { brain: ['eGPT Admin', 'eGPT Rodz Lulu An'] };
 
-describe('chromeConversationOf() — entry + resolved doc → launch descriptor', () => {
-  it('slug = basename(conversation_path), name = pushedName, dedicated from the doc', () => {
+describe('chromeConversationOf() — entry + browsers.yaml groups → { key, name, group }', () => {
+  it('a chat listed under brain → brain (both operator-named chats)', () => {
+    const admin = { conversation_path: '.egpt/conversations/whatsapp/eGPT Admin-2601010000', pushedName: 'eGPT Admin' };
+    expect(chromeConversationOf(admin, GROUPS)).toEqual({ key: 'eGPT Admin-2601010000', name: 'eGPT Admin', group: 'brain' });
+    expect(chromeConversationOf({ slug: 'rla-1', pushedName: 'eGPT Rodz Lulu An' }, GROUPS).group).toBe('brain');
+  });
+
+  it('an unlisted chat → shared', () => {
     const entry = { conversation_path: '.egpt/conversations/whatsapp/Reinie Alvino-2607150057', pushedName: 'Reinie Alvino', slug: 'reinie-x' };
-    const d = chromeConversationOf(entry, { chrome: { dedicated: true } });
-    expect(d).toEqual({ slug: 'Reinie Alvino-2607150057', name: 'Reinie Alvino', dedicated: true });
+    expect(chromeConversationOf(entry, GROUPS)).toEqual({ key: 'Reinie Alvino-2607150057', name: 'Reinie Alvino', group: 'shared' });
   });
 
-  it('falls back to entry.slug when there is no conversation_path', () => {
-    const d = chromeConversationOf({ slug: 'diego-2605201243', pushedName: 'Diego' }, {});
-    expect(d).toEqual({ slug: 'diego-2605201243', name: 'Diego', dedicated: false });
+  it('no browsers.yaml (empty map) → every chat is shared, eGPT Admin included', () => {
+    expect(chromeConversationOf({ pushedName: 'eGPT Admin' }, {}).group).toBe('shared');
   });
 
-  it('handles a backslash conversation_path (basename still yields the dir name)', () => {
+  it('a chat in TWO groups → no group (no browser), with the reason; never a silent pick', () => {
+    const d = chromeConversationOf({ pushedName: 'eGPT Admin' }, { brain: ['eGPT Admin'], work: ['eGPT Admin'] });
+    expect(d.group).toBe(null);
+    expect(d.why).toMatch(/brain, work/);
+  });
+
+  it('a group name that is not a safe single path segment → no group', () => {
+    for (const bad of ['../brain', 'a/b', 'a\\b', '..', 'CON', ' brain', 'x:y']) {
+      const d = chromeConversationOf({ pushedName: 'Diego' }, { [bad]: ['Diego'] });
+      expect(d.group, bad).toBe(null);
+      expect(d.why, bad).toMatch(/not a safe/);
+    }
+  });
+
+  it('a nameless chat matches no listed member (an empty "" entry included) → shared', () => {
+    expect(chromeConversationOf({ slug: 'x-1' }, { brain: [''] }).group).toBe('shared');
+  });
+
+  it('key falls back to entry.slug; a backslash conversation_path still yields the dir name', () => {
+    expect(chromeConversationOf({ slug: 'diego-2605201243', pushedName: 'Diego' }, {}).key).toBe('diego-2605201243');
     const entry = { conversation_path: 'C:\\Users\\an\\.egpt\\conversations\\whatsapp\\Grp-2601010000', pushedName: 'Grp' };
-    expect(chromeConversationOf(entry, {}).slug).toBe('Grp-2601010000');
+    expect(chromeConversationOf(entry, {}).key).toBe('Grp-2601010000');
   });
 
-  it('empty entry → empty slug/name, shared (no throw)', () => {
-    expect(chromeConversationOf()).toEqual({ slug: '', name: '', dedicated: false });
+  it('empty entry → shared (no throw)', () => {
+    expect(chromeConversationOf()).toEqual({ key: '', name: '', group: 'shared' });
   });
 });

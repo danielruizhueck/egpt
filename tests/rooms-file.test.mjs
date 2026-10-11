@@ -1,8 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import * as YAML from 'yaml';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import {
   readRoomsFile, readRoomConfig, setRoomConfigBlock, setRoomConfigKey, removeRoomRow,
-  roomsFilePath, agentsFilePath,
+  roomsFilePath, agentsFilePath, readBrowserGroups,
   mergeRoomBeings, persistRoomBeings, mergeAgentBeings, persistAgentBeings,
 } from '../src/rooms-file.mjs';
 
@@ -188,5 +191,29 @@ describe('the per-being halves, one per registry', () => {
     expect(await readRoomConfig('room/dj-son', vfs.io)).toEqual({ agents: { egpt: { threadId: 'r-1' } } });
     const back = await mergeRoomBeings({ contacts: { room: { 'dj-son': { slug: 'dj-son' } } } }, vfs.io);
     expect(back.contacts.room['dj-son'].agents).toEqual({ egpt: { threadId: 'r-1' } });
+  });
+});
+
+describe('config/browsers.yaml — the browser-group map, same reader as rooms.yaml', () => {
+  it('reads <EGPT_HOME>/config/browsers.yaml fresh on every call — an edit needs no restart', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'egpt-browsers-'));
+    const saved = process.env.EGPT_HOME;
+    try {
+      process.env.EGPT_HOME = home;
+      expect(await readBrowserGroups()).toEqual({});                       // no file → no groups
+      mkdirSync(join(home, 'config'));
+      const file = join(home, 'config', 'browsers.yaml');
+      writeFileSync(file, 'groups:\n  brain: [ "eGPT Admin", "eGPT Rodz Lulu An" ]\n');
+      expect(await readBrowserGroups()).toEqual({ brain: ['eGPT Admin', 'eGPT Rodz Lulu An'] });
+      writeFileSync(file, 'groups:\n  brain: [ "eGPT Admin" ]\n  work: [ "Diego" ]\n');
+      expect(await readBrowserGroups()).toEqual({ brain: ['eGPT Admin'], work: ['Diego'] });
+    } finally {
+      process.env.EGPT_HOME = saved;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('an unparseable file reads as no groups, like the other registries', async () => {
+    expect(await readBrowserGroups(mkIO('groups: [ unclosed'))).toEqual({});
   });
 });

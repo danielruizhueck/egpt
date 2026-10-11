@@ -2447,12 +2447,11 @@ describe('/chrome: the Session 0 hop and the Session 1 direct spawn', () => {
   });
 });
 
-// ── chromeProfileOf: the per-conversation profile resolver (plan 2610091931 chunk 1) ──────────
-// ADDITIVE + INERT: the no-conversation path is byte-for-byte the legacy value (every caller in
-// chunk 1 keeps calling it with no conversation), the admin conversation keeps `brain`, and every
-// other conversation gets its own <profiles-root>/<slug>. No launch happens here — this is the
-// pure decision function, tested in isolation.
-describe('chromeProfileOf(c, conversation) — per-conversation profiles', () => {
+// ── chromeProfileOf: the browser-GROUP profile resolver (plan 2610091931 rev 2026-10-11) ──────
+// The conversation descriptor is chrome-pool.chromeConversationOf's { key, name, group }. Group name
+// = profile dir name: `brain` → chrome.profile_dir (else the discovered brain), any other group →
+// <profiles-root>/<group>, no group → null (no browser). No conversation → byte-for-byte legacy.
+describe('chromeProfileOf(c, conversation) — browser-group profiles', () => {
   const profilesRoot = dirname(CHROME_BRAIN_PROFILE);
 
   it('no conversation → exactly the legacy value (discovered brain when no chrome.profile_dir)', () => {
@@ -2464,33 +2463,26 @@ describe('chromeProfileOf(c, conversation) — per-conversation profiles', () =>
     expect(chromeProfileOf({ chrome: { profile_dir: 'C:/x/brain' } })).toBe('C:/x/brain');
   });
 
-  it('the admin conversation (name === admin_channel) keeps the legacy/brain value', () => {
-    const c = { admin_channel: 'eGPT Admin' };
-    // Even though it carries its own slug, the admin conversation resolves to brain, not a sibling.
-    expect(chromeProfileOf(c, { name: 'eGPT Admin', slug: 'eGPT Admin-2601010000' })).toBe(CHROME_BRAIN_PROFILE);
-    // ...and to the configured profile_dir when the operator named one (brain == profile_dir then).
-    expect(chromeProfileOf({ ...c, chrome: { profile_dir: 'C:/x/brain' } }, { name: 'eGPT Admin', slug: 'eGPT Admin-2601010000' })).toBe('C:/x/brain');
+  it('group brain → the brain profile (chrome.profile_dir when set), whatever the chat is called', () => {
+    expect(chromeProfileOf({}, { key: 'eGPT Admin-2601010000', name: 'eGPT Admin', group: 'brain' })).toBe(CHROME_BRAIN_PROFILE);
+    expect(chromeProfileOf({ chrome: { profile_dir: 'C:/x/brain' } }, { name: 'eGPT Rodz Lulu An', group: 'brain' })).toBe('C:/x/brain');
   });
 
-  it('a non-admin conversation → <profiles-root>/<slug>', () => {
-    const c = { admin_channel: 'eGPT Admin' };
-    expect(chromeProfileOf(c, { name: 'Reinie Alvino', slug: 'Reinie Alvino-2607150057' }))
-      .toBe(join(profilesRoot, 'Reinie Alvino-2607150057'));
+  it('admin_channel no longer decides the profile — an eGPT Admin chat outside brain is not brain', () => {
+    expect(chromeProfileOf({ admin_channel: 'eGPT Admin' }, { name: 'eGPT Admin', group: 'shared' }))
+      .toBe(join(profilesRoot, 'shared'));
   });
 
-  it('the slug is sanitized for filesystem safety (Windows-illegal chars collapse to a space)', () => {
-    // sanitizeSlug: < > : " / \ | ? * and control chars → space, whitespace collapsed.
-    expect(chromeProfileOf({}, { slug: 'a/b:c' })).toBe(join(profilesRoot, 'a b c'));
+  it('any other group → <profiles-root>/<group> (shared, or an operator-named one)', () => {
+    expect(chromeProfileOf({}, { key: 'Reinie Alvino-2607150057', name: 'Reinie Alvino', group: 'shared' })).toBe(join(profilesRoot, 'shared'));
+    expect(chromeProfileOf({ chrome: { profile_dir: 'C:/x/brain' } }, { name: 'Diego', group: 'work' })).toBe(join(profilesRoot, 'work'));
   });
 
-  it('a non-admin conversation with no usable slug falls back to legacy rather than mint a junk dir', () => {
-    expect(chromeProfileOf({ admin_channel: 'eGPT Admin' }, { name: 'Nameless' })).toBe(CHROME_BRAIN_PROFILE);
-    expect(chromeProfileOf({ chrome: { profile_dir: 'C:/x/brain' } }, { slug: '   ' })).toBe('C:/x/brain');
-  });
-
-  it('admin_channel unset → no conversation is admin; a named conversation still gets its own profile', () => {
-    expect(chromeProfileOf({}, { name: 'eGPT Admin', slug: 'eGPT Admin-2601010000' }))
-      .toBe(join(profilesRoot, 'eGPT Admin-2601010000'));
+  it('no group (refused by the lookup) or an unsafe group name → null, never the brain', () => {
+    expect(chromeProfileOf({}, { name: 'x', group: null })).toBe(null);
+    expect(chromeProfileOf({}, { name: 'x' })).toBe(null);
+    expect(chromeProfileOf({}, { name: 'x', group: '../brain' })).toBe(null);
+    expect(chromeProfileOf({}, { name: 'x', group: 'a/b' })).toBe(null);
   });
 });
 

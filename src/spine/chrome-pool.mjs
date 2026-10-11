@@ -1,6 +1,6 @@
 // chrome-pool.mjs — deterministic, memory-bounded LAUNCH ADMISSION for the per-profile Chrome
-// pool (plans/2610091931 chunk 2), plus the two pure readers a caller uses to turn a conversation
-// into a launch descriptor.
+// pool (plans/2610091931 chunk 2), plus the pure browser-group lookup a caller uses to turn a
+// conversation into a launch descriptor.
 //
 // PURE BY CONSTRUCTION, and that is the whole point (operator's key requirement: "a deterministic
 // estimate as if to launch a new one"): nothing here touches fs, net, a clock, or the OS. Every
@@ -13,6 +13,7 @@
 // functions the launch orchestrator keys its registry decisions off, not a second launch path.
 
 import { basename } from 'node:path';
+import { sanitizeSlug } from '../sanitize.mjs';
 
 export const MB = 1024 * 1024;
 
@@ -34,8 +35,8 @@ export function estimateChromeBytes({ runningRssBytes = [], floorBytes = 0 } = {
 //                                                          idlest and calls again with the freed RAM)
 //   below margin, nothing idle to evict                 → { action: 'decline' }
 // `canEvict` is what distinguishes evict from decline; the caller sets it from whether any managed
-// Chrome is idle (never busy). The shared/brain Chrome is NOT in the caller's managed set, so this
-// never gates or evicts it — admission bounds only the EXTRA, dedicated Chromes.
+// Chrome is idle (never busy). The brain Chrome is NOT in the caller's managed set, so this
+// never gates or evicts it — admission bounds only the other groups' Chromes.
 export function admitLaunch({ availableBytes, estimateBytes, marginBytes, canEvict = false } = {}) {
   const projectedFree = Number(availableBytes) - Number(estimateBytes);
   const margin = Number(marginBytes);
@@ -49,28 +50,29 @@ export function admitLaunch({ availableBytes, estimateBytes, marginBytes, canEvi
   return { ok: false, action: 'decline', reason: `only ~${toMb(projectedFree)} MB would remain (< ${toMb(margin)} MB margin) and no idle managed Chrome to evict` };
 }
 
-// THE PER-CONVERSATION DEDICATED FLAG, read from the conversation's RESOLVED config doc — the one
-// the config resolver merges out of config/config.yaml < config/conversations.yaml <
-// <conv>/config.yaml (src/spine/config-resolver.mjs), exactly as brainpool.parseWarmBlock reads
-// `warm:`. `chrome.dedicated: true` opts THIS conversation out of the shared brain Chrome and onto
-// its own profile + process; absent / false / anything-but-true (the default) = shared. Pure.
-export function parseDedicatedFlag(doc) {
-  const c = (doc && typeof doc === 'object' && doc.chrome && typeof doc.chrome === 'object' && !Array.isArray(doc.chrome)) ? doc.chrome : {};
-  return c.dedicated === true;
-}
+// BROWSER GROUPS (plans/2610091931 rev 2026-10-11). Group name = profile dir name; `brain` is the
+// existing brain profile, every unlisted chat is `shared`.
+export const BRAIN_GROUP = 'brain';
+export const SHARED_GROUP = 'shared';
 
-// Build the Chrome launch DESCRIPTOR a caller hands ensureChrome, from the conversation's registry
-// ENTRY (getContact(state, surface, jid).entry — the existing helper that already holds it) and its
-// RESOLVED config doc. The descriptor is `{ slug, name, dedicated }`:
-//   • slug — basename of `conversation_path` (the dir name under the profiles root, e.g.
-//     "Reinie Alvino-2607150057"); falls back to `entry.slug`. chromeProfileOf sanitizes it.
-//   • name — `pushedName` (the chat title), which chromeProfileOf matches against admin_channel so
-//     the admin conversation keeps brain.
-//   • dedicated — the flag above.
-// Pure. The runtime wiring of a caller that passes this to ensureChrome is CHUNK 3/4 (routing the
-// being's CDP); here it is the documented contract those chunks build on.
-export function chromeConversationOf(entry = {}, doc = {}) {
+// A group name must be one safe path segment: something sanitizeSlug leaves exactly as it is.
+export const isSafeGroupName = (g) => typeof g === 'string' && g !== '' && sanitizeSlug(g) === g;
+
+// THE GROUP LOOKUP: a conversation's registry ENTRY + config/browsers.yaml's `groups:` map
+// (rooms-file.readBrowserGroups) → the descriptor ensureChrome takes, `{ key, name, group }`.
+//   • key   — basename of `conversation_path`, else `entry.slug`.
+//   • name  — `pushedName`, matched against the group lists by exact chat name.
+//   • group — the one group listing the name; unlisted → `shared`. Listed in two groups, or in a
+//     group whose name is not a safe path segment → null (no browser) plus `why`. Never a silent pick.
+export function chromeConversationOf(entry = {}, groups = {}) {
   const path = String(entry?.conversation_path ?? '').replace(/\\/g, '/');
-  const slug = (path ? basename(path) : '') || entry?.slug || '';
-  return { slug, name: entry?.pushedName ?? '', dedicated: parseDedicatedFlag(doc) };
+  const key = (path ? basename(path) : '') || entry?.slug || '';
+  const name = String(entry?.pushedName ?? '').trim();
+  const hits = Object.entries(groups ?? {})
+    .filter(([, members]) => name && [].concat(members ?? []).some((m) => String(m).trim() === name))
+    .map(([g]) => g);
+  if (hits.length > 1) return { key, name, group: null, why: `"${name}" is listed in browser groups ${hits.join(', ')}` };
+  const group = hits[0] ?? SHARED_GROUP;
+  if (!isSafeGroupName(group)) return { key, name, group: null, why: `browser group "${group}" is not a safe profile dir name` };
+  return { key, name, group };
 }

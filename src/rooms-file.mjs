@@ -67,6 +67,12 @@ export const agentsFilePath = () => registryPath(AGENT);
 export const ROOMS_FILE = roomsFilePath();
 const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 
+// config/browsers.yaml — operator-only map of browser groups: `groups: { <group>: [<chat name>, …] }`
+// (plans/2610091931 rev 2026-10-11). Not a `<surface>/<slug>` registry; it only borrows the reader,
+// so it is read fresh on every call and an edit needs no restart. Consumer: chrome-pool.chromeConversationOf.
+const BROWSERS = { file: 'browsers.yaml', root: 'groups' };
+export const readBrowserGroups = (deps = {}) => readRoomsFile({ reg: BROWSERS, ...deps });
+
 /** The whole file as a plain object: { "<surface>/<slug>": {...} }. Never throws. */
 export async function readRoomsFile({ reg = ROOM, path = registryPath(reg), read = readFile } = {}) {
   let doc;
