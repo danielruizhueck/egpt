@@ -44,6 +44,10 @@ export async function cdpHost() {
   return _hostGetter ? await _hostGetter() : 'localhost:9221';
 }
 
+/** The fetch + WebSocket every CDP call here dials with. In a being's session ($EGPT_CDP,
+ *  src/tools/being-cdp.mjs) they reach the chat's group Chrome through the spine. */
+export const cdpWire = async () => (_isNode && process.env.EGPT_CDP ? import(process.env.EGPT_CDP) : globalThis);
+
 // Deadline for a CDP HTTP probe. These are loopback calls to Chrome's own
 // debugging port — a live Chrome answers /json in single-digit ms, so 3s is
 // generous slack for scheduler jitter while still short enough that a hung
@@ -55,6 +59,7 @@ const FETCH_TIMEOUT_MS = 3000;
 
 async function fetchJson(path) {
   const host = await cdpHost();
+  const { fetch } = await cdpWire();
   // A manual AbortController (rather than AbortSignal.timeout) so the deadline
   // is driven by setTimeout — fake-timer friendly for tests, and the aborted
   // flag tells us plainly whether OUR deadline fired vs. some other fetch failure.
@@ -107,7 +112,8 @@ function withDeadline(promise, ms, message = 'CDP timeout') {
 /** Open a WebSocket, wire id-correlation + events, resolve a session handle
  *  once the socket is open. Mirrors the per-socket machinery the ops used
  *  inline before — byte-for-byte the same behavior on the port path. */
-function openWsSession(url) {
+async function openWsSession(url) {
+  const { WebSocket } = await cdpWire();
   const ws = new WebSocket(url);
   let msgId = 0;
   const pending = new Map();
@@ -213,6 +219,7 @@ export function createPortTransport() {
     // The browser endpoint as ONE channel, reused while it stays open (the being mux rides it).
     channel: () => (browserChannel ??= (async () => {
       const { webSocketDebuggerUrl } = await fetchJson('/json/version');
+      const { WebSocket } = await cdpWire();
       const ws = new WebSocket(webSocketDebuggerUrl);
       await new Promise((res, rej) => { ws.addEventListener('open', res); ws.addEventListener('error', () => rej(new Error('CDP WebSocket error'))); });
       const ch = createWsChannel(ws);

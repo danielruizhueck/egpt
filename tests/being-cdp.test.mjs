@@ -5,7 +5,12 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { join } from 'node:path';
-import { createPipeChannel, createCdpMux } from '../src/tools/cdp.mjs';
+import { spawn } from 'node:child_process';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { pathToFileURL } from 'node:url';
+import { createPipeChannel, createCdpMux, cdpWire } from '../src/tools/cdp.mjs';
+import { withInsert } from '../migrations/0038-being-scripts-reach-chrome-through-the-spine.mjs';
 import { createBeingLink } from '../src/spine/being-link.mjs';
 import { createShellPort } from '../src/bridges/shell-port.mjs';
 import { responseFrame, authMac, macMatches } from '../src/shell/auth.mjs';
@@ -498,6 +503,62 @@ describe('being-cdp — /json and ws://…/devtools over the link, everything el
       expect(w).toBeInstanceOf(Stub);
       expect(w.u).toBe('ws://example.com/devtools/page/x');
     } finally { globalThis.fetch = realFetch; globalThis.WebSocket = RealWS; }
+  });
+
+  const SHIM = pathToFileURL(join(import.meta.dirname, '..', 'src', 'tools', 'being-cdp.mjs')).href;
+
+  it('cdp.mjs dials with the globals outside a being session, and with the shim inside one', async () => {
+    saved[CDP_MODULE_ENV] = process.env[CDP_MODULE_ENV];
+    delete process.env[CDP_MODULE_ENV];
+    expect(await cdpWire()).toBe(globalThis);
+    process.env[CDP_MODULE_ENV] = SHIM;
+    const shim = await import('../src/tools/being-cdp.mjs');
+    const wire = await cdpWire();
+    expect([wire.fetch, wire.WebSocket]).toEqual([shim.fetch, shim.WebSocket]);
+  });
+
+  it('browser-tools from ~/src, with EGPT_CDP set, opens and reads tabs in the group\'s Chrome', async () => {
+    const { shared, port } = await realSpine();
+    process.env[CDP_MODULE_ENV] = SHIM;
+    const browser = await import('../src/tools/browser-tools.mjs');
+    // A call that slipped past the shim would reach this box's real :9221 — make it fail instead.
+    const realFetch = globalThis.fetch, RealWS = globalThis.WebSocket;
+    globalThis.fetch = () => { throw new Error('dialled the real fetch'); };
+    globalThis.WebSocket = class { constructor() { throw new Error('dialled the real WebSocket'); } };
+    try {
+      await browser.openTab('https://example.com/');
+      expect(shared.of('Target.createTarget')[0].params).toEqual({ url: 'https://example.com/' });
+      expect(await browser.getUrl('T-page')).toBe('location.href');
+      expect(shared.of('Runtime.evaluate').at(-1)).toMatchObject({ sessionId: expect.stringMatching(/^shared-P/), params: { expression: 'location.href' } });
+    } finally { globalThis.fetch = realFetch; globalThis.WebSocket = RealWS; port.stop(); }
+  });
+
+  it('a script 0038 migrated runs as a being runs it — its own node, the minted env — and exits by itself', async () => {
+    const { shared, port } = await realSpine();
+    const script = join(mkdtempSync(join(tmpdir(), 'egpt-0038-run-')), 'tab-peek.mjs');
+    writeFileSync(script, withInsert([
+      "const list = await (await fetch('http://localhost:9221/json')).json();",
+      "const tab = list.find((t) => t.type === 'page' && t.url.startsWith(process.argv[2]));",
+      'const ws = new WebSocket(tab.webSocketDebuggerUrl);',
+      'const pend = new Map();',
+      'ws.onmessage = (e) => { const m = JSON.parse(e.data); pend.get(m.id)?.(m); };',
+      "await new Promise((r) => { ws.onopen = r; });",
+      "const r = await new Promise((res) => { pend.set(1, res); ws.send(JSON.stringify({ id: 1, method: 'Runtime.evaluate', params: { expression: 'location.href', returnByValue: true } })); });",
+      'console.log(r.result.result.value);',
+      'ws.close();',
+      '',
+    ].join('\n')));
+    const run = await new Promise((resolve) => {
+      const child = spawn(process.execPath, [script, 'https://mail.google.com'], { env: { ...process.env, [CDP_MODULE_ENV]: SHIM } });
+      let out = '', err = '';
+      child.stdout.on('data', (d) => { out += d; });
+      child.stderr.on('data', (d) => { err += d; });
+      const kill = setTimeout(() => child.kill(), 10000);
+      child.on('close', (code) => { clearTimeout(kill); resolve({ code, out, err }); });
+    });
+    expect(run).toEqual({ code: 0, out: 'location.href\n', err: '' });
+    expect(shared.of('Target.attachToTarget').at(-1).params).toEqual({ targetId: 'T-page', flatten: true });
+    port.stop();
   });
 });
 

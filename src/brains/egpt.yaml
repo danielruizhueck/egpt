@@ -48,7 +48,7 @@ allowed_tools:        # list tools explicitly. A LIST = CONFINED (file tools pat
   # SendMessage, RemoteTrigger, ScheduleWakeup, CronCreate, CronList, CronDelete, ReportFindings,
   # ShareOnboardingGuide, TaskOutput.
   # NOT IN THE VOCABULARY: there is no CDP / drive-a-real-browser tool and no "execution power"
-  # beyond the two shells above — driving Chrome on :9221 needs a WebSocket and no tool speaks one.
+  # beyond the two shells above — no tool speaks CDP; a node script uses the fetch/WebSocket $EGPT_CDP exports.
   # An MCP server's tools are grantable as mcp__<server>__<tool>, but this engine runs with
   # --setting-sources '' so no MCP server is inherited from ~/.claude; there are none to grant.
 allowed_paths:

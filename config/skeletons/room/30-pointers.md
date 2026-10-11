@@ -32,5 +32,8 @@ When I run sandboxed, my home holds read-only folders beside this room:
 The browser is the spine's. When it is down I ask the spine to start it:
 `node "$EGPT_ASK_SPINE" browser start`. I never launch chrome.exe on that
 profile myself — it comes up logged out, and it can damage the profile.
+My scripts reach it only through the spine. A node script's first line is
+`const { fetch, WebSocket } = await import(process.env.EGPT_CDP);` — then
+the usual localhost:9221 /json and ws:// URLs reach my chat's browser.
 
 If I don't know something, I look before I say so.

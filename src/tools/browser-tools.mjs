@@ -1,8 +1,9 @@
 // tools/browser-tools.mjs — CDP control library for operator brains
 //
 // Import this from an operator script to drive the live Chrome session
-// that egpt manages. Chrome must be running with --remote-debugging-port=9221
-// (cdp.mjs's real default — or $EGPT_CDP_HOST must be set).
+// that egpt manages. In a being's session ($EGPT_CDP set) it reaches the chat's
+// group Chrome through the spine (cdp.mjs cdpWire); elsewhere Chrome must be running
+// with --remote-debugging-port=9221 (cdp.mjs's default — or $EGPT_CDP_HOST must be set).
 //
 // Pause / resume mechanism:
 //   await browser.waitForHuman('message')
@@ -19,7 +20,7 @@
 
 import { join } from 'node:path';
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
-import { findTab, openTab, closeTab, cdpHost } from './cdp.mjs';
+import { findTab, openTab, closeTab, cdpHost, cdpWire } from './cdp.mjs';
 import { EGPT_HOME } from '../egpt-home.mjs';   // profile-aware: EGPT_HOME selects the node
 
 export { openTab, closeTab, cdpHost, EGPT_HOME };
@@ -28,6 +29,7 @@ export { openTab, closeTab, cdpHost, EGPT_HOME };
 async function cdpCall(targetId, method, params = {}) {
   const tab = await findTab(targetId);
   if (!tab) throw new Error(`Tab ${(targetId ?? '?').slice(0, 8)}… not found`);
+  const { WebSocket } = await cdpWire();
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(tab.webSocketDebuggerUrl);
     const tmo = setTimeout(() => {
