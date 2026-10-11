@@ -38,7 +38,23 @@ export function createChromeHost({ profilesRoot, spawn = nodeSpawn, processes = 
     tell({ t: 'msg', group, msg: m });
   }
 
+  // The daemon is the ONLY Chrome spawner: it runs nothing but a pipe Chrome on the profile it was
+  // sent, under our profiles root. Switches as Chrome reads them: --, - or /, any case.
+  function refusal(profileDir, argv) {
+    const port = argv.find((a) => /^(--|-|\/)remote-debugging-(port|address)/i.test(a));
+    if (port) return `${port} opens a debugging port`;
+    const cmd = argv.map((a) => (/\s/.test(a) ? `"${a}"` : a)).join(' ');
+    if (!isPipe(cmd)) return 'not a pipe Chrome (no --remote-debugging-pipe)';
+    if (argv.filter((a) => /^(--|-|\/)user-data-dir=/i.test(a)).length > 1) return 'it names more than one --user-data-dir';
+    const dir = userDataDirOf(cmd);
+    if (!dir || !under(dir, profilesRoot)) return `its --user-data-dir must be under ${profilesRoot}`;
+    if (dir !== profileDir) return `its --user-data-dir ${dir} is not ${profileDir}`;
+    return null;
+  }
+
   function launch({ id, group, profileDir, bin, argv }) {
+    const why = refusal(profileDir, argv);
+    if (why) { log(`chrome-host: refused "${group}" launch — ${why}`); return tell({ t: 'reply', id, error: why }); }
     if (chromes.has(group)) return tell({ t: 'reply', id, error: `the "${group}" Chrome is already up (pid ${chromes.get(group).child.pid})` });
     const exe = bin || findChromeExecutable();
     if (!exe) return tell({ t: 'reply', id, error: 'Chrome executable not found in standard locations' });
@@ -97,8 +113,8 @@ export function createChromeHost({ profilesRoot, spawn = nodeSpawn, processes = 
     sweepOrphans() {
       try {
         for (const { pid, cmd } of processes()) {
-          const dir = /(?:^|\s)("?)--user-data-dir=(.+?)\1(?=\s|$)/.exec(cmd)?.[2];
-          if (!/(?:^|\s)"?--remote-debugging-pipe"?(?=\s|$)/.test(cmd) || !dir || !under(dir, profilesRoot)) continue;
+          const dir = userDataDirOf(cmd);
+          if (!isPipe(cmd) || !dir || !under(dir, profilesRoot)) continue;
           log(`chrome-host: killing orphan pipe Chrome pid ${pid} on ${dir}`);
           killTree(pid);
         }
@@ -107,6 +123,9 @@ export function createChromeHost({ profilesRoot, spawn = nodeSpawn, processes = 
   };
 }
 
+// One reading of a Chrome command line, for the orphan sweep and for the argv launch is about to run.
+const isPipe = (cmd) => /(?:^|\s)"?--remote-debugging-pipe"?(?=\s|$)/.test(cmd);
+const userDataDirOf = (cmd) => /(?:^|\s)("?)--user-data-dir=(.+?)\1(?=\s|$)/.exec(cmd)?.[2];
 const under = (p, root) => { const rel = relative(root, p); return !!rel && !rel.startsWith('..') && !isAbsolute(rel); };
 
 /**

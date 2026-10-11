@@ -9,11 +9,15 @@ import { join, dirname, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createChromeHost, connectChromeHost, CHROME_HOST_ENV } from '../src/chrome-host.mjs';
 import { createChannelTransport } from '../src/tools/cdp.mjs';
+import { chromePipeArgs } from '../src/tools/chrome-launcher.mjs';
 import { createCommands, CHROME_BRAIN_PROFILE } from '../src/spine/commands.mjs';
 import { fakeChromeChild } from './fake-pipe-chrome.mjs';
 
 const MB = 1024 * 1024;
 const SHARED = { key: 'Reinie-2607150057', name: 'Reinie', group: 'shared' };
+const ROOT = dirname(CHROME_BRAIN_PROFILE);
+// What the spine sends for group `g` (commands.mjs ensureGroupChrome).
+const launchOf = (group, bin = 'chrome') => ({ group, profileDir: join(ROOT, group), bin, argv: chromePipeArgs({ userDataDir: join(ROOT, group) }) });
 const TABS = [{ id: 'T1', title: 'kept', url: 'https://x/' }];
 const until = async (ok) => { for (let i = 0; i < 200 && !ok(); i++) await new Promise((r) => setImmediate(r)); expect(ok()).toBe(true); };
 
@@ -30,8 +34,10 @@ function ipcPair() {
 
 function world(browser = { listTabs: async () => TABS }) {
   const spawns = [];
+  const logs = [];
   const host = createChromeHost({
-    profilesRoot: dirname(CHROME_BRAIN_PROFILE),
+    profilesRoot: ROOT,
+    log: (m) => logs.push(m),
     spawn: (bin, argv) => { const child = fakeChromeChild(browser, 4000 + spawns.length); spawns.push({ bin, argv, child }); return child; },
   });
   // One spine: a fresh IPC pair to the SAME host, and the spine's end of it.
@@ -51,7 +57,7 @@ function world(browser = { listTabs: async () => TABS }) {
     });
     return { pair, cmds, logs };
   };
-  return { host, spawns, connect, spine };
+  return { host, spawns, logs, connect, spine };
 }
 
 afterEach(() => { vi.restoreAllMocks(); });
@@ -90,12 +96,12 @@ describe('a spine restart never restarts a Chrome', () => {
   // REAL spawn, SAFE BY CONSTRUCTION: the configured binary does not exist, so the OS starts nothing.
   // Without an 'error' listener that ENOENT would be an uncaught exception in the DAEMON.
   it('runs the configured binary; a spawn that fails is the launch\'s error, and nothing is held', async () => {
-    const host = createChromeHost({ profilesRoot: dirname(CHROME_BRAIN_PROFILE) });
+    const host = createChromeHost({ profilesRoot: ROOT });
     const pair = ipcPair();
     host.attach(pair.daemonSide);
     const chromeHost = connectChromeHost(pair.spineSide, { [CHROME_HOST_ENV]: '1' });
     const missing = join(tmpdir(), 'egpt-no-such-dir', 'no-such-chrome.exe');
-    await expect(chromeHost.launch({ group: 'g', profileDir: join(tmpdir(), 'egpt-no-such-dir', 'g'), bin: missing, argv: [] })).rejects.toThrow(/ENOENT/);
+    await expect(chromeHost.launch(launchOf('g', missing))).rejects.toThrow(/ENOENT/);
     expect(await chromeHost.list()).toEqual([]);
   });
 
@@ -104,7 +110,7 @@ describe('a spine restart never restarts a Chrome', () => {
     const { chromeHost } = w.connect();
     const exits = [];
     chromeHost.onExit((e) => exits.push(e));
-    const { channel } = await chromeHost.launch({ group: 'g', profileDir: join(dirname(CHROME_BRAIN_PROFILE), 'g'), bin: 'chrome', argv: [] });
+    const { channel } = await chromeHost.launch(launchOf('g'));
     chromeHost.kill('g');
     await until(() => exits.length === 1);
     expect(exits[0]).toMatchObject({ group: 'g', pid: 4000 });
@@ -175,7 +181,7 @@ describe('what a dropped spine leaves on a held Chrome', () => {
     const t0 = Date.now();
     const clock = vi.spyOn(Date, 'now').mockReturnValue(t0);
     const a = w.connect();
-    const { channel } = await a.chromeHost.launch({ group: 'g', profileDir: 'P', bin: 'chrome', argv: [] });
+    const { channel } = await a.chromeHost.launch(launchOf('g'));
     const s1 = await createChannelTransport(channel).openBrowserSession();
     s1.send('Slow.call', { who: 'spine1' }).catch(() => {});
     await until(() => held.length === 1);
@@ -204,7 +210,7 @@ describe('what a dropped spine leaves on a held Chrome', () => {
       },
     });
     const a = w.connect();
-    const { channel } = await a.chromeHost.launch({ group: 'g', profileDir: 'P', bin: 'chrome', argv: [] });
+    const { channel } = await a.chromeHost.launch(launchOf('g'));
     const t = createChannelTransport(channel);
     await t.openTargetSession('T1');                                    // a top-level page session
     const b = await t.openBrowserSession();
@@ -224,5 +230,53 @@ describe('what a dropped spine leaves on a held Chrome', () => {
     (await c.chromeHost.list())[0].channel.onMessage((m) => heard.push(m));
     await new Promise((r) => setTimeout(r, 20));
     expect(heard).toEqual([]);
+  });
+});
+
+// The daemon is the ONLY Chrome spawner, so it runs nothing but a pipe Chrome on the profile it was
+// sent, under our profiles root — whatever a spine (or anything else on its IPC) asks for.
+describe('the daemon refuses a launch that is not a pipe Chrome on our profile', () => {
+  const dir = join(ROOT, 'g');
+  const pipeArgs = chromePipeArgs({ userDataDir: dir });
+  const refused = async (argv, profileDir = dir, why) => {
+    const w = world();
+    const { chromeHost } = w.connect();
+    await expect(chromeHost.launch({ group: 'g', profileDir, bin: 'chrome', argv })).rejects.toThrow(why);
+    expect(w.spawns).toHaveLength(0);
+    expect(w.logs.filter((l) => /refused/.test(l))).toHaveLength(1);
+  };
+
+  it('a debugging PORT or ADDRESS, in any switch spelling Chrome reads', async () => {
+    await refused([...pipeArgs, '--remote-debugging-port=9222'], dir, /remote-debugging-port/);
+    await refused([...pipeArgs, '--remote-debugging-address=0.0.0.0'], dir, /remote-debugging-address/);
+    await refused(['/Remote-Debugging-Port=9222', ...pipeArgs], dir, /remote-debugging-port/i);
+    await refused(['-remote-debugging-port', ...pipeArgs], dir, /remote-debugging-port/);
+  });
+
+  it('no --remote-debugging-pipe', async () => {
+    await refused(pipeArgs.filter((a) => a !== '--remote-debugging-pipe'), dir, /not a pipe Chrome/);
+  });
+
+  it('no --user-data-dir, one outside the profiles root, or the root itself', async () => {
+    await refused(pipeArgs.filter((a) => !a.startsWith('--user-data-dir=')), dir, /under/);
+    const out = join(tmpdir(), 'egpt-elsewhere', 'g');
+    await refused(chromePipeArgs({ userDataDir: out }), out, /under/);
+    await refused(chromePipeArgs({ userDataDir: ROOT }), ROOT, /under/);
+  });
+
+  it('a --user-data-dir that is not the profileDir it was sent, or a second one', async () => {
+    await refused(chromePipeArgs({ userDataDir: join(ROOT, 'other') }), dir, /is not/);
+    await refused([...pipeArgs, `--user-data-dir=${join(tmpdir(), 'egpt-elsewhere')}`], dir, /one --user-data-dir/);
+    await refused([...pipeArgs, `-user-data-dir=${join(ROOT, 'other')}`], dir, /one --user-data-dir/);
+  });
+
+  it('the spine\'s own chromePipeArgs launch still runs — a profile path with a space too', async () => {
+    const w = world();
+    const { chromeHost } = w.connect();
+    const spaced = join(ROOT, 'with space');
+    await chromeHost.launch({ group: 'with space', profileDir: spaced, bin: 'chrome', argv: chromePipeArgs({ userDataDir: spaced }) });
+    await chromeHost.launch(launchOf('g'));
+    expect(w.spawns.map((s) => s.argv)).toEqual([chromePipeArgs({ userDataDir: spaced }), pipeArgs]);
+    expect(w.logs.filter((l) => /refused/.test(l))).toEqual([]);
   });
 });
