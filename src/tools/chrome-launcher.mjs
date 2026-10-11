@@ -135,11 +135,13 @@ export function resolveBrainProfile({ egptHome = EGPT_HOME, fs = defaultFs, read
 // Pipe-mode flags (chunk 3b): --remote-debugging-pipe instead of a port, and NO --remote-allow-origins
 // (that is port/WS-only). Keeps the non-default --user-data-dir (Chrome 136 requires it), --no-first-run,
 // the no-banner --silent-debugger-extension-api, and the renderer-alive flags. --load-extension still opts.
+// --restore-last-session: a relaunch (every spine restart, every eviction) reopens the group's tabs.
 export function chromePipeArgs({ userDataDir, extensionDir, url = 'about:blank' }) {
   const args = [
     '--remote-debugging-pipe',
     `--user-data-dir=${userDataDir}`,
     '--no-first-run',
+    '--restore-last-session',
     `--disable-features=ChromeWhatsNewUI${extensionDir ? ',DisableLoadExtensionCommandLineSwitch' : ''}`,
     '--silent-debugger-extension-api',
     '--disable-backgrounding-occluded-windows',

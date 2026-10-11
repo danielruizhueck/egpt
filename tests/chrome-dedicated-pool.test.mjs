@@ -102,6 +102,13 @@ describe('chromePipeArgs — pipe, non-default profile, no port/origins', () => 
     expect(args).toContain('--remote-debugging-pipe');
     expect(args.some((a) => a.startsWith('--remote-debugging-port'))).toBe(false);
   });
+  it('restores the group\'s last session, keeps the trailing url, and never names a port', () => {
+    expect(args).toContain('--restore-last-session');
+    expect(args.at(-1)).toBe('about:blank');
+    expect(chromePipeArgs({ userDataDir: 'C:/x/p', url: 'https://example.com/' }).at(-1)).toBe('https://example.com/');
+    expect(args.some((a) => a.includes('remote-debugging-port'))).toBe(false);
+  });
+
   it('drops --remote-allow-origins (that is port/WS-only)', () => {
     expect(args.some((a) => a.startsWith('--remote-allow-origins'))).toBe(false);
   });
