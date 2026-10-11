@@ -53,7 +53,7 @@
 //   /edit #<id> <text>         edit one of your OWN earlier messages
 //   /ask <question>            (mode: auto) consult the operator in the advice channel
 import { resolve as resolvePath, relative as relPath, isAbsolute } from 'node:path';
-import { existsSync } from 'node:fs';
+import { realpathSync } from 'node:fs';
 // WHICH CONNECTION AN OUTBOUND GOES OUT ON — the ONE resolver (sender.mjs makeOutbound), not a
 // fourth local copy of `bridgeOf(being) ?? bridge`.
 import { makeOutbound } from './sender.mjs';
@@ -438,10 +438,13 @@ export function createReplyActions({ bridge, bridgeOf = null, peerMouth = null, 
     const convDir = await resolveConvDir(ev);
     if (!convDir) { onLog(`media: no conversation dir for ${ev.surface}/${ev.chatId} — skipped`); return false; }
     const abs = resolvePath(convDir, a.path);
-    const rel = relPath(convDir, abs);
+    const escapes = (rel) => rel === '' || rel.startsWith('..') || isAbsolute(rel);
     // Belt-and-suspenders confinement: the resolved path must stay INSIDE convDir.
-    if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) { onLog(`media: "${a.path}" escapes the conversation dir — rejected (fail-closed)`); return false; }
-    if (!existsSync(abs)) { onLog(`media: file not found "${a.path}" in ${convDir} — skipped`); return false; }
+    if (escapes(relPath(convDir, abs))) { onLog(`media: "${a.path}" escapes the conversation dir — rejected (fail-closed)`); return false; }
+    let real;
+    try { real = realpathSync.native(abs); } catch { onLog(`media: file not found "${a.path}" in ${convDir} — skipped`); return false; }
+    // ...and so must its REAL path: a boxed being can plant a junction in its Room, and the spine reads as the operator.
+    if (escapes(relPath(realpathSync.native(convDir), real))) { onLog(`media: "${a.path}" leaves the conversation dir through a link — rejected (fail-closed)`); return false; }
     // No target, so nothing to key: whoever says this being's lines in this chat posts it (sender.mjs makeOutbound `say`).
     const ok = await outbound(being, ev.chatId).say((on, room) => on.sendMedia?.(room, abs, { caption: a.caption, bodyEmoji: bodyEmojiOf(being), label: labelOf(being), persona: being }), { what: 'media' });
     if (!ok) onLog(`media: send failed "${a.path}"`);

@@ -1,7 +1,7 @@
 // Conversation-E LIMBS (ROADMAP §3) — the emitted-action surface E drives from
 // inside its own reply: parse (pure) + execute (confined, fail-closed).
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseReplyActions, partialProse, createReplyActions } from '../src/spine/reply-actions.mjs';
@@ -451,6 +451,26 @@ describe('createReplyActions.execute — confined + fail-closed', () => {
     b.calls.media.length = 0;
     await a.execute(a.parse('/media nope.png', EV).run, [], EV, { being: 'e' });
     expect(b.calls.media).toEqual([]);
+  });
+
+  it('REPRODUCE (2026-10-11 audit): a media path that walks through a junction out of the conversation dir is NOT sent', async () => {
+    // A boxed being holds Modify on its Room and bare Bash, and a junction needs no privilege, so it
+    // can plant one onto a folder only the spine (running as the operator) can read.
+    const base = mkdtempSync(join(tmpdir(), 'egpt-limb-link-'));
+    const dir = join(base, 'room'), outside = join(base, 'operator');
+    mkdirSync(dir); mkdirSync(outside);
+    writeFileSync(join(outside, 'secret.yaml'), 'token: x');
+    symlinkSync(outside, join(dir, 'link'), 'junction');
+    const b = fakeBridge();
+    const logs = [];
+    const a = mk(b, { resolveConvDir: async () => dir, onLog: (m) => logs.push(m) });
+    try {
+      await a.execute(a.parse('/media link/secret.yaml', EV).run, [], EV, { being: 'e' });
+      expect(b.calls.media).toEqual([]);
+      expect(logs.some((l) => /through a link/.test(l))).toBe(true);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 
   it('ask: delegates to the injected askAdvice callback (never a bridge send to another chat)', async () => {
