@@ -3125,6 +3125,7 @@ export async function boot({
       chatRaw:       (chatId)                         => earBridge.chatRaw(chatId),   // the super-channel liveness check
       chatOtherPartyId: (chatId) => earBridge.chatOtherPartyId(chatId),   // 1:1 counterparty → the super-channel invite
       chatTitle:     (chatId)                         => earBridge.getChatName(chatId),
+      listMessagesRaw: (chatId, opts)                 => earBridge.listMessagesRaw(chatId, opts),   // /send reads the replied-to message's live text
       // RODZ'S BEEPER USER ID (operator 2026-10-03) — the create needs `@whatsapp_lid-…`, not a
       // +phone (the API rejects it). Resolved from config.beeper.secondary.phone by scanning this
       // account's rosters (phoneNumber+id ride together on every participant).

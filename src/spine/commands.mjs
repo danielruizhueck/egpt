@@ -59,6 +59,7 @@ import { helpText } from '../interpreter.mjs';
 import { uploadNote, radioNoteFilename, pickSpeaker } from '../radio-relay.mjs';
 import { stripNodeSignature, stripRenderedNodeSignature } from '../node-signature.mjs';
 import { bodyForMessageId } from '../transcript-log.mjs';
+import { htmlToMarkdown } from '../html-to-markdown.mjs';
 import { readRoomConfig, readBrowserGroups } from '../rooms-file.mjs';
 import { hhmm, dayBoundary } from '../dispatch-line.mjs';
 
@@ -3595,8 +3596,8 @@ export function createCommands({
 
   // /send (the operator REPLIES /send to a message M in a join/split group): relay M's text into the
   // ORIGINAL chat. Repeatable — no placeholder edit, no close. The original is the alias target (join)
-  // or the recorded parent_chat (split); silent when neither. Reads M's text out of the transcript the
-  // SAME way /radio say's quick-reply does, then strips the node/bridge/persona wrap. Posts via the
+  // or the recorded parent_chat (split); silent when neither. Reads M's text off the chat, else the
+  // transcript (as /radio say's quick-reply does), then strips the node/bridge/persona wrap. Posts via the
   // account named by config.send.post_back_from ('primary' = the operator's own account, the DEFAULT;
   // 'secondary' = the mouth) — boot routes { via } to that connection's bridge.
   async function sendToOriginal(ev) {
@@ -3616,7 +3617,10 @@ export function createCommands({
     const path = tt?.path ?? (await resolveConvRoom(surface, ev.chatId))?.transcriptPath ?? null;
     let text = null;
     if (path) { try { text = await readFile(path, 'utf8'); } catch { text = null; } }
-    const body = text ? bodyForMessageId(text, ev.replyToId) : null;
+    // The chat's own copy first: an edited message (every being reply) is on the record only as
+    // editAction's one flattened line, so its line breaks survive nowhere else.
+    const live = (await forkBridge.listMessagesRaw?.(ev.chatId))?.find((m) => m?.id != null && String(m.id) === String(ev.replyToId));
+    const body = htmlToMarkdown(live?.text) || (text ? bodyForMessageId(text, ev.replyToId) : null);
     const cleaned = body ? cleanQuotedBody(body) : null;
     if (!cleaned) { await send?.(ev.chatId, '/send: nothing to send — reply to a message that has text'); return; }
     const pbf = String(cfg().send?.post_back_from ?? '').trim().toLowerCase();

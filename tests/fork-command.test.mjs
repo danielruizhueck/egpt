@@ -32,6 +32,7 @@ import { createCommands, resolveSecondaryParticipantId, rewriteForkSessionJsonl,
 import { resolveBeingDef, sandboxSharePathsFor } from '../src/spine/brainpool.mjs';
 import { ensureContact, recordThread, getContact, getBeing, slugDir, aliasContact, aliasTargetOf, patchContact, readState as readConvState, writeState as writeConvState } from '../src/conversations-state.mjs';
 import { shortChatId } from '../src/bridges/chat-id.mjs';
+import { encodeNodeSignature } from '../src/node-signature.mjs';
 import { Room } from '../src/room-core.mjs';
 
 const C_CHAT = '!chatC';
@@ -131,11 +132,11 @@ function cfg({ node_name = 'kg', node_role = 'primary', texts = true, send, peer
   };
 }
 
-function harness({ config, state, rooms = new Map(), rodzUserId = RODZ_USER_ID, resolveSecondaryChatIdByTitle = defaultSecondaryResolver, resolvePrimaryChatIdByTitle = null, now = null, throwOnPost = false } = {}) {
+function harness({ config, state, rooms = new Map(), rodzUserId = RODZ_USER_ID, resolveSecondaryChatIdByTitle = defaultSecondaryResolver, resolvePrimaryChatIdByTitle = null, now = null, throwOnPost = false, messages = null } = {}) {
   let st = state ?? seedState();
   const sent = [];
   const logs = [];
-  const calls = { edit: [], create: [], post: [], archive: [], resolve: [], resolveTitle: [], resolvePrimaryTitle: [] };
+  const calls = { edit: [], create: [], post: [], archive: [], resolve: [], resolveTitle: [], resolvePrimaryTitle: [], list: [] };
   const forkBridge = {
     editMessage: async (chatId, msgId, text) => { calls.edit.push({ chatId, msgId, text }); return true; },
     createGroup: async (opts) => { calls.create.push(opts); return { success: true, chatID: opts.title?.includes('split') ? SPLIT_CHAT_FULL : JOIN_CHAT_FULL }; },
@@ -153,6 +154,8 @@ function harness({ config, state, rooms = new Map(), rodzUserId = RODZ_USER_ID, 
     // test supplies a resolver, so every existing test keeps a forkBridge WITHOUT it (uniqueTitle then
     // short-circuits → no suffix, byte-identical to before this fix).
     ...(resolvePrimaryChatIdByTitle ? { resolvePrimaryChatIdByTitle: async (title, opts) => { calls.resolvePrimaryTitle.push({ title, opts }); return resolvePrimaryChatIdByTitle(title, opts); } } : {}),
+    // the chat's recent raw messages (Beeper's own payload shape). Opt-in, like the resolver above.
+    ...(messages ? { listMessagesRaw: async (chatId) => { calls.list.push(chatId); return messages; } } : {}),
   };
   const cmds = createCommands({
     getConfig: () => config,
@@ -682,6 +685,50 @@ describe('/send — edited-placeholder + inline-stamp cleaning (the end-to-end f
     const b = harness({ state: stateWithJoin(), rooms: roomWith(JOIN_CHAT, standalone), config: sendCfg() });
     await b.cmds.run({ ...EV, replyToId: 'M4' });
     expect(b.calls.post[0].text).toBe('hola de nuevo');
+  });
+});
+
+// ── /send keeps the message's paragraphs (2026-10-11 live bug, -super room → SPOILER) ───────────────
+// E's reply lands by editing its "⏳ Thinking…" placeholder, so the transcript holds its text only as
+// editAction's flattened `+` line. The relay must come from the chat's own copy of the message.
+describe('/send — relays the live message, line breaks intact', () => {
+  const sendCfg = () => ({ ...cfg({ send: { post_back_from: 'primary' } }), agents: { egpt: { body_emoji: '🐶', name: 'E' } }, bridge_signature_close: '🏰' });
+  const EV = { chatId: JOIN_CHAT, surface: 'whatsapp', msgId: '26881', body: '/send' };
+  const CHAT = 'SPOILER ALERT: chat de EyAy-super 1457-10112026';
+  const FLAT = '🐶 E: ¡Qué lindo, Caro! Te dejo un texto listo para reenviar 👇 📚 *Este miércoles 14 de octubre, 18 h*, presento *Yo te cielo* junto a otras cuatro autoras de Metrópolis, en un encuentro íntimo para conversar, narrar y compartirnos. 📍 Casa PAM!, Aguirre 130, Villa Crespo (CABA) Me encantaría verles ahí. Traigan a quien quieran 💙 Si me dices el tono que buscas, más formal o más canchero, o si es para Instagram, lo adapto. 🏰<kg>';
+  const TRANSCRIPT = [
+    `Rodz@[${CHAT}].wa (15:09) #26875: 🐶 E: ⏳ Thinking… 🏰<kg>`, '',
+    `[ Rodz@[${CHAT}].wa (15:09): edited #26875`,
+    '    - 🐶 E: ⏳ Thinking… 🏰<kg>',
+    `    + ${FLAT} ]`, '',
+  ].join('\n');
+  // Beeper's payload for #26875, verbatim (GET /v1/chats/{c}/messages): HTML, close + invisible node frame.
+  const LIVE = {
+    id: '26875', senderName: 'Rodz', type: 'TEXT', isSender: false,
+    text: '🐶 E: ¡Qué lindo, Caro! Te dejo un texto listo para reenviar 👇<br><br>📚 <em>Este miércoles 14 de octubre, 18 h</em>, presento <em>Yo te cielo</em> junto a otras cuatro autoras de Metrópolis, en un encuentro íntimo para conversar, narrar y compartirnos.<br>📍 Casa PAM!, Aguirre 130, Villa Crespo (CABA)<br>Me encantaría verles ahí. Traigan a quien quieran 💙<br><br>Si me dices el tono que buscas, más formal o más canchero, o si es para Instagram, lo adapto. 🏰'
+      + encodeNodeSignature('kg', 'egpt'),
+  };
+
+  it('REPRODUCE-FIRST: paragraphs, single breaks, italics and emoji survive; stamp, close and node frame stripped', async () => {
+    const { cmds, calls } = harness({ state: stateWithJoin(), rooms: roomWith(JOIN_CHAT, TRANSCRIPT), config: sendCfg(), messages: [{ id: '26874', text: 'x' }, LIVE] });
+    await cmds.run({ ...EV, replyToId: '26875' });
+    expect(calls.post).toHaveLength(1);
+    expect(calls.post[0].text).toBe([
+      '¡Qué lindo, Caro! Te dejo un texto listo para reenviar 👇',
+      '',
+      '📚 *Este miércoles 14 de octubre, 18 h*, presento *Yo te cielo* junto a otras cuatro autoras de Metrópolis, en un encuentro íntimo para conversar, narrar y compartirnos.',
+      '📍 Casa PAM!, Aguirre 130, Villa Crespo (CABA)',
+      'Me encantaría verles ahí. Traigan a quien quieran 💙',
+      '',
+      'Si me dices el tono que buscas, más formal o más canchero, o si es para Instagram, lo adapto.',
+    ].join('\n'));
+    expect(calls.list).toEqual([JOIN_CHAT]);   // read on the side-room's own account, where #26875 is its id
+  });
+
+  it('a message no longer in the chat\'s recent list still relays from the transcript, cleaned as before', async () => {
+    const { cmds, calls } = harness({ state: stateWithJoin(), rooms: roomWith(JOIN_CHAT, TRANSCRIPT), config: sendCfg(), messages: [{ id: '26874', text: 'x' }] });
+    await cmds.run({ ...EV, replyToId: '26875' });
+    expect(calls.post[0].text).toBe(FLAT.replace('🐶 E: ', '').replace(' 🏰<kg>', ''));
   });
 });
 
