@@ -112,8 +112,8 @@ Describe 'Get-BeeperS0LegacyNameMap' {
     $map['egpt-secondary'] | Should Be 'egpt-beeper-secondary'
   }
   It 'maps the account-named hand installs too - do still carries BeeperRodz' {
-    # A GUESS from the account (An is the ear, Rodz the mouth). migrations\0001 takes the role
-    # from each service's own CDP port and refuses when that evidence disagrees with this.
+    # A GUESS from the account (An is the ear, Rodz the mouth). migrations\0001 does not trust it:
+    # an account-named service carries no role in its name, so it refuses it by name.
     $map['BeeperAn']   | Should Be 'egpt-beeper-primary'
     $map['BeeperRodz'] | Should Be 'egpt-beeper-secondary'
   }

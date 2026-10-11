@@ -5,8 +5,8 @@
 # WHY IT EXISTS (operator, 2026-09-15). `Get-Service egpt-*` on reve listed three services:
 #
 #   egpt-daemon      the real thing - nssm hosting `node egpt-daemon.mjs` -> egpt-spine.mjs
-#   egpt-primary     NOT a spine. Beeper Desktop, primary account, CDP 9223
-#   egpt-secondary   NOT a spine. Beeper Desktop, secondary account, CDP 9225
+#   egpt-primary     NOT a spine. Beeper Desktop, primary account
+#   egpt-secondary   NOT a spine. Beeper Desktop, secondary account
 #
 # Two of those three names read like eGPT spines and are not. The operator read the list and
 # reasonably concluded there were three spines. Stopping `egpt-primary` does not stop a spine -
@@ -36,8 +36,8 @@
 # BeeperAn / BeeperRodz are the pre-generalisation hand names, named after the ACCOUNT - do still
 # carries BeeperRodz on 2026-09-16. Their targets here are a GUESS from the account (An's number
 # is the ear on both nodes, Rodz's the mouth), and an account name is exactly what a service name
-# must never encode. So the migration takes the ROLE from no row of this map: it reads each
-# service's own --remote-debugging-port and refuses when that evidence and this column disagree.
+# must never encode. So the migration takes the ROLE from no row of this map: it reads it off the
+# old name's own suffix, and refuses an account-named install by name (a human decides).
 function Get-BeeperS0LegacyNameMap {
   return [ordered]@{
     'egpt-primary'   = 'egpt-beeper-primary'

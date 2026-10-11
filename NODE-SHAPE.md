@@ -106,7 +106,7 @@ account deaf, nothing announcing it.
 Session 0 is enough for all of them. **Session isolation isolates the desktop,
 not a loopback socket** — measured on 2026-09-06, a real Chrome and two
 `Beeper.exe` were serving CDP from session 0. A session 1 Beeper buys visibility
-to you, not reachability for the spine.
+to you, not reachability for the spine. (The Beepers serve no CDP since 2026-10-11.)
 
 
 ## One node, two sessions, one live

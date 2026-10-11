@@ -577,6 +577,17 @@ describe('the retired Beeper Desktop service names are gone from the tree', () =
   });
 });
 
+// Loopback CDP has no auth: a Beeper service serving it can be driven by every local account,
+// every boxed being included (closed live 2026-10-11).
+describe('no Session 0 Beeper service is installed with a debugger', () => {
+  it('install-beeper-s0-service.ps1 passes no --remote-debugging-port / --remote-allow-origins', () => {
+    const src = readFileSync(join(ROOT, 'setup/install-beeper-s0-service.ps1'), 'utf8');
+    const argLine = src.split('\n').find((l) => /^\$argLine\s*=/.test(l));
+    expect(argLine).toContain('--user-data-dir');
+    expect(argLine).not.toMatch(/--remote-debugging-(port|pipe)|--remote-allow-origins/);
+  });
+});
+
 // The session 1 logon task is `egpt-daemon` (NODE-SHAPE.md), no longer `egpt-session1-daemon`.
 //
 // That task drives the S0 -> S1 handover, and a rename that misses one consumer breaks the

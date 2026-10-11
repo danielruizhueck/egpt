@@ -23,13 +23,13 @@ says which is which:
 | service | what it is | stopping it |
 |---|---|---|
 | `egpt-daemon` | the spine supervisor — `node egpt-daemon.mjs` → `egpt-spine.mjs` | this node goes silent |
-| `egpt-beeper-primary` | Beeper Desktop, primary account (the ear), CDP 9223 | that account goes offline |
-| `egpt-beeper-secondary` | Beeper Desktop, secondary account (the mouth), CDP 9225 | the agents cannot reply |
+| `egpt-beeper-primary` | Beeper Desktop, primary account (the ear) | that account goes offline |
+| `egpt-beeper-secondary` | Beeper Desktop, secondary account (the mouth) | the agents cannot reply |
 
 A Beeper Desktop is **not** a spine — it is one nssm-wrapped Electron app per
-connection, with its own `--user-data-dir` and CDP port (reve 9223 + 9225, 9222 =
-Chrome profile; dolly 9223). reve's second spine comes from the
-`egpt-daemon` scheduled task, not a service.
+connection, with its own `--user-data-dir` and **no CDP port** (closed 2026-10-11:
+loopback CDP has no auth, so any boxed being could drive it). reve's second spine
+comes from the `egpt-daemon` scheduled task, not a service.
 
 **Renaming, once per node.** The two Beeper services were hand-created and still
 carry the old names `egpt-primary`/`egpt-secondary` on a node that has not been

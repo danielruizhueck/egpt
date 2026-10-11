@@ -186,6 +186,7 @@ export async function report({ cfg = readConfigSync(), extraPorts = [], deps = {
 // by Application path rather than by a service name that differs on every install.
 const API_SCAN = { from: 23373, to: 23385 };  // Beeper takes the NEXT FREE port from 23373 up
 const CDP_SCAN = { from: 9222, to: 9230 };    // the Chrome/Electron debugger — the number a driver is aimed at
+// eGPT's Beeper services serve none (closed 2026-10-11); a Beeper row here was started with one by hand.
 // Must equal shell-port's SHELL_WS_PORT. Moved off 23375 on 2026-09-11: it was inside API_SCAN
 // above, i.e. inside the range Beeper itself takes the next free port from.
 const DEFAULT_SHELL_PORT = 23475;

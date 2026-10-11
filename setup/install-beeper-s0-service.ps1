@@ -2,9 +2,11 @@
 #
 # Session 0 isolation removed the ability to SEE a service's windows. It never removed the
 # ability to RUN there: Session 0 has a window station, a desktop, a working window manager and
-# a virtual display, and CDP renders from the compositor, so a Beeper Desktop nobody can see
-# still syncs, still serves its local API, and can still be driven (src/tools/s0-driver). That is
-# what makes the agents answer in the operator's groups with nobody logged in.
+# a virtual display, so a Beeper Desktop nobody can see still syncs and still serves its local
+# API. That is what makes the agents answer in the operator's groups with nobody logged in.
+#
+# NO CDP (closed 2026-10-11): --remote-debugging-port on loopback has no auth, so every local
+# account - every boxed being - could drive this account. Nothing in eGPT uses it.
 #
 # This installs ONE such Desktop. A node can host SEVERAL: they are the same binaries with
 # DIFFERENT --user-data-dir values, which is what makes them separate INSTALLS - separate
@@ -20,7 +22,12 @@
 #
 # Run ELEVATED, from the repo root:
 #   .\setup\install-beeper-s0-service.ps1 -ServiceName egpt-beeper-secondary `
-#       -UserDataDir $env:USERPROFILE\.egpt\state\beeper-secondary\userdata -CdpPort 9225
+#       -UserDataDir $env:USERPROFILE\.egpt\state\beeper-secondary\userdata
+#
+# A FRESH install has no login and no window to log in through. Log the account in (and mint its
+# token, src/tools/beeper-mint-token.mjs) on a Session 1 Beeper started with its own
+# --user-data-dir, quit it, then hand that profile over:
+#   .\setup\adopt-beeper-profile.ps1 -ServiceName egpt-beeper-secondary -From <that dir>
 #
 # Remove:  nssm remove <ServiceName> confirm
 #
@@ -30,7 +37,6 @@
 param(
   [Parameter(Mandatory = $true)][string] $ServiceName,
   [Parameter(Mandatory = $true)][string] $UserDataDir,
-  [int]    $CdpPort  = 9223,
   [string] $BeeperExe = (Join-Path $env:LOCALAPPDATA 'Programs\BeeperTexts\Beeper.exe'),
   [string] $LogDir   = (Join-Path $env:USERPROFILE 'bin\beeper-s0-logs'),
   # AUTO for the Desktop that must be up BEFORE anyone logs in; MANUAL for one the logon
@@ -70,7 +76,7 @@ if (Get-Service $ServiceName -ErrorAction SilentlyContinue) { throw "service $Se
 #
 # It deliberately does not migrate, for two reasons. First, it is not idempotent by design (the
 # throw above): installing beside a live Desktop would leave two services fighting for the same
-# CDP port, the same user-data-dir and the same account. Second, THIS SCRIPT ONLY KNOWS THE
+# user-data-dir and the same account. Second, THIS SCRIPT ONLY KNOWS THE
 # PARAMETERS IT SETS - the services on this node were created by hand, so anything hand-set on
 # them would be silently dropped by a reinstall from these defaults. setup\rename-beeper-s0-
 # service.ps1 exists for exactly this, carries the old service's whole configuration across, and
@@ -85,12 +91,6 @@ Renaming is remove-and-reinstall (sc.exe has no rename verb) and the Desktop is 
   .\setup\rename-beeper-s0-service.ps1 -From $oldName -To $ServiceName -WhatIf
   .\setup\rename-beeper-s0-service.ps1 -From $oldName -To $ServiceName
 "@
-}
-
-# A CDP port already in use would silently give this Desktop NO debugger, which is the one way
-# back into a window nobody can see.
-if (Get-NetTCPConnection -State Listen -LocalPort $CdpPort -ErrorAction SilentlyContinue) {
-  throw "CDP port $CdpPort is already listening - pick another (egpt-beeper-primary uses 9223)"
 }
 
 New-Item -ItemType Directory -Force -Path $UserDataDir | Out-Null
@@ -114,9 +114,8 @@ foreach ($d in 'Downloads','Documents','Desktop','Pictures','Music','Videos') {
 #   --disable-background-timer-throttling   Chromium throttles what it thinks is background, and
 #   --disable-renderer-backgrounding        NOTHING in Session 0 is ever foregrounded. Without
 #   --disable-backgrounding-occluded-windows these three a live sync socket stalls.
-#   --remote-debugging-port                 the only way into a window nobody can display.
-#   --remote-allow-origins=*                /json/list sends no CORS headers; the driver is served.
-$argLine = "--user-data-dir=`"$UserDataDir`" --disable-gpu --disable-gpu-compositing --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --remote-debugging-port=$CdpPort --remote-allow-origins=*"
+# Never --remote-debugging-port / --remote-allow-origins (header: NO CDP).
+$argLine = "--user-data-dir=`"$UserDataDir`" --disable-gpu --disable-gpu-compositing --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows"
 
 Say "installing $ServiceName"
 & $nssm install $ServiceName $BeeperExe | Out-Null
@@ -132,30 +131,36 @@ $startConst = @{ auto = 'SERVICE_AUTO_START'; manual = 'SERVICE_DEMAND_START'; d
 & $nssm set $ServiceName Description (Get-BeeperS0Description $ServiceName) | Out-Null
 
 Say "installed ($StartMode start). user-data-dir: $UserDataDir"
-Say "               CDP port: $CdpPort"
 Say "                    log: $(Join-Path $LogDir "$ServiceName.log")"
 
 if ($Start) {
   Say "starting"
   Start-Service $ServiceName
-  # A fresh install has no login, so it will NOT serve /v1/accounts. What proves it came up is
-  # the CDP endpoint - and that is also how you log it in, through src/tools/s0-driver.
-  $deadline = (Get-Date).AddSeconds(90)
-  $up = $false
-  while (-not $up -and (Get-Date) -lt $deadline) {
-    Start-Sleep -Seconds 3
-    try { $null = Invoke-WebRequest "http://127.0.0.1:$CdpPort/json/version" -TimeoutSec 3 -UseBasicParsing; $up = $true } catch { }
+  # CAME UP = Running, and the same Beeper process is still there 30s later: nssm relaunches a
+  # dying app every AppRestartDelay, so a crash loop shows as a new pid. Only a LOGGED-IN install
+  # answers /v1/accounts, so that is beeper-whoami's job below, not this check's.
+  $exe = Split-Path $BeeperExe -Leaf
+  $appPid = {
+    $svc = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'"
+    if ($svc.State -eq 'Running' -and $svc.ProcessId) {
+      (Get-CimInstance Win32_Process -Filter "ParentProcessId=$($svc.ProcessId) AND Name='$exe'" | Select-Object -First 1).ProcessId
+    }
   }
-  if ($up) {
-    Say "CDP is answering on $CdpPort - drive it with src/tools/s0-driver to log this install in"
-    $api = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
-           Where-Object { $_.LocalPort -ge 23373 -and $_.LocalPort -le 23390 -and (Get-CimInstance Win32_Process -Filter "ProcessId=$($_.OwningProcess)").SessionId -eq 0 }
-    if ($api) { Say ("session 0 Beeper API ports now listening: " + (($api.LocalPort | Sort-Object -Unique) -join ', ')) }
+  Start-Sleep -Seconds 10
+  $first = & $appPid
+  Start-Sleep -Seconds 30
+  $now = & $appPid
+  if ($first -and $now -eq $first) {
+    Say "up: $ServiceName Running, $exe pid $first stayed up 30s"
+    $api = Get-NetTCPConnection -State Listen -OwningProcess $first -ErrorAction SilentlyContinue |
+           Where-Object { $_.LocalPort -ge 23373 -and $_.LocalPort -le 23390 }
+    if ($api) { Say ("its Beeper API port: " + (($api.LocalPort | Sort-Object -Unique) -join ', ')) }
+    else      { Say "no Beeper API port yet - a fresh install: log it in via adopt-beeper-profile.ps1 (header)" }
   } else {
-    Say "WARNING: no CDP on $CdpPort after 90s - check $(Join-Path $LogDir "$ServiceName.log")"
+    Say "WARNING: $ServiceName did not stay up (pid '$first' -> '$now') - check $(Join-Path $LogDir "$ServiceName.log")"
   }
 }
 
-Say "done. verify with:  node src/tools/beeper-whoami.mjs"
+Say "done. verify with:  node src/tools/beeper-whoami.mjs   (a logged-in install answers /v1/accounts)"
 
 if ($Pause) { Write-Host ''; Write-Host 'Press Enter to close...' -ForegroundColor Cyan; try { Read-Host | Out-Null } catch { } }

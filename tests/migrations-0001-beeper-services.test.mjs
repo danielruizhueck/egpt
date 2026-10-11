@@ -1,10 +1,12 @@
 // tests/migrations-0001-beeper-services.test.mjs — migrations/0001-beeper-services-carry-role.mjs.
 //
-// The fixtures are the probe output MEASURED on 2026-09-16 (read-only) on each node:
-//   kg: egpt-beeper-primary (CDP 9223, no --user-data-dir) + egpt-beeper-secondary (rodz-beeper, 9225)
+// The fixtures are the probe output MEASURED on 2026-09-16 (read-only) on each node, with the
+// --remote-debugging-port / --remote-allow-origins flags removed as they were live on 2026-10-11:
+//   kg: egpt-beeper-primary (no --user-data-dir) + egpt-beeper-secondary (rodz-beeper)
 //       - already the target, so 0001 must report "already satisfied": the idempotency proof.
-//   do: egpt-primary (an-beeper, 9223) + BeeperRodz (rodz-beeper, 9225) - both to rename, the
-//       role read from each service's own CDP port, not from its name.
+//   do: egpt-primary (an-beeper) + BeeperRodz (rodz-beeper) - BeeperRodz is named for an
+//       account, so with no CDP port left nothing on it says its role, and 0001 refuses it.
+// LEGACY is an unmigrated node whose names carry the role: both renamed, role read from the name.
 // Nothing here touches the SCM: the PowerShell seams are injected.
 import { describe, it, expect } from 'vitest';
 import { mkdtempSync, cpSync } from 'node:fs';
@@ -22,19 +24,28 @@ const MAP = [
   { old: 'BeeperRodz', new: 'egpt-beeper-secondary' },
 ];
 const svc = (name, appParameters, extra = {}) => ({ name, appParameters, application: BEEPER, startMode: 'Auto', state: 'Running', startName: 'LocalSystem', ...extra });
+const ANDIR = '--user-data-dir=C:/Users/an/.egpt/state/an-beeper/userdata';
+const RODZDIR = '--user-data-dir=C:/Users/an/.egpt/state/rodz-beeper/userdata';
 
 const KG = {
   map: MAP,
   services: [
-    svc('egpt-beeper-primary', `${FLAGS} --remote-debugging-port=9223 --remote-allow-origins=*`),
-    svc('egpt-beeper-secondary', `--user-data-dir=C:/Users/an/.egpt/state/rodz-beeper/userdata ${FLAGS} --remote-debugging-port=9225 --remote-allow-origins=*`),
+    svc('egpt-beeper-primary', FLAGS),
+    svc('egpt-beeper-secondary', `${RODZDIR} ${FLAGS}`),
   ],
 };
 const DO = {
   map: MAP,
   services: [
-    svc('egpt-primary', `--user-data-dir=C:/Users/an/.egpt/state/an-beeper/userdata ${FLAGS} --remote-debugging-port=9223 --remote-allow-origins=*`),
-    svc('BeeperRodz', `--user-data-dir=C:/Users/an/.egpt/state/rodz-beeper/userdata ${FLAGS} --remote-allow-origins=* --remote-debugging-port=9225`),
+    svc('egpt-primary', `${ANDIR} ${FLAGS}`),
+    svc('BeeperRodz', `${RODZDIR} ${FLAGS}`),
+  ],
+};
+const LEGACY = {
+  map: MAP,
+  services: [
+    svc('egpt-primary', `${ANDIR} ${FLAGS}`),
+    svc('egpt-secondary', `${RODZDIR} ${FLAGS}`),
   ],
 };
 
@@ -51,7 +62,7 @@ function ctxFor(state, over = {}) {
   return { ctx, calls };
 }
 
-describe('0001 on kg - already the target', () => {
+describe('0001 on kg - already the target, no CDP flag on either service', () => {
   it('reports already satisfied and renames nothing', async () => {
     const { ctx, calls } = ctxFor(KG);
     const p = await plan(ctx);
@@ -79,33 +90,33 @@ describe('0001 on kg - already the target', () => {
   });
 });
 
-describe('0001 on do - resolved from evidence', () => {
-  it('plans both renames, SECONDARY first, each with its evidence', async () => {
-    const { ctx } = ctxFor(DO);
+describe('0001 on an unmigrated node - the role is read from the name, no CDP port needed', () => {
+  it('plans both renames, SECONDARY first, with no --remote-debugging-port on either service', async () => {
+    const { ctx } = ctxFor(LEGACY);
     const p = await plan(ctx);
     expect(p.satisfied).toBe(false);
     const text = p.changes.join('\n');
-    expect(p.changes[0]).toBe('rename service BeeperRodz -> egpt-beeper-secondary   (Running, Auto, LocalSystem)');
-    expect(text).toContain("evidence: CDP 9225 = the secondary's port; --user-data-dir=C:/Users/an/.egpt/state/rodz-beeper/userdata");
+    expect(p.changes[0]).toBe('rename service egpt-secondary -> egpt-beeper-secondary   (Running, Auto, LocalSystem)');
+    expect(text).toContain('evidence: its name says secondary; --user-data-dir=C:/Users/an/.egpt/state/rodz-beeper/userdata');
     expect(text).toContain('rename service egpt-primary -> egpt-beeper-primary');
-    expect(text).toContain("evidence: CDP 9223 = the primary's port; --user-data-dir=C:/Users/an/.egpt/state/an-beeper/userdata");
-    expect(text.indexOf('BeeperRodz ->')).toBeLessThan(text.indexOf('egpt-primary ->'));
+    expect(text).toContain('evidence: its name says primary; --user-data-dir=C:/Users/an/.egpt/state/an-beeper/userdata');
+    expect(text.indexOf('egpt-secondary ->')).toBeLessThan(text.indexOf('egpt-primary ->'));
   });
 
   it('apply CALLS setup/rename-beeper-s0-service.ps1 - it does not reimplement the rename', async () => {
-    const { ctx, calls } = ctxFor(DO);
+    const { ctx, calls } = ctxFor(LEGACY);
     await (await plan(ctx)).apply();
     const script = join('C:\\Users\\an\\bin\\egpt', 'setup', 'rename-beeper-s0-service.ps1');
     expect(calls.psFile).toEqual([
-      [script, '-From', 'BeeperRodz', '-To', 'egpt-beeper-secondary'],
+      [script, '-From', 'egpt-secondary', '-To', 'egpt-beeper-secondary'],
       [script, '-From', 'egpt-primary', '-To', 'egpt-beeper-primary'],
     ]);
   });
 
   it('through the runner, elevated: renames, re-checks, records - and unelevated it is PENDING and untouched', async () => {
-    const state = { current: DO };
+    const state = { current: LEGACY };
     const { ctx, calls } = ctxFor(state, {
-      psFile: (file, args) => { calls.psFile.push(args); if (calls.psFile.length === 2) state.current = { map: MAP, services: [svc('egpt-beeper-primary', DO.services[0].appParameters), svc('egpt-beeper-secondary', DO.services[1].appParameters)] }; },
+      psFile: (file, args) => { calls.psFile.push(args); if (calls.psFile.length === 2) state.current = { map: MAP, services: [svc('egpt-beeper-primary', LEGACY.services[0].appParameters), svc('egpt-beeper-secondary', LEGACY.services[1].appParameters)] }; },
     });
     const home = mkdtempSync(join(tmpdir(), 'egpt-0001-'));
     const dir = mkdtempSync(join(tmpdir(), 'egpt-0001-dir-'));
@@ -124,51 +135,40 @@ describe('0001 on do - resolved from evidence', () => {
 });
 
 describe('0001 refuses by name when the evidence is ambiguous', () => {
-  const refusal = async (services) => {
-    const { ctx, calls } = ctxFor({ map: MAP, services });
+  const refusal = async (services, map = MAP) => {
+    const { ctx, calls } = ctxFor({ map, services });
     let err;
     try { await plan(ctx); } catch (e) { err = e; }
     expect(calls.psFile).toEqual([]);
     return err?.message;
   };
-  const ANDIR = '--user-data-dir=C:/Users/an/.egpt/state/an-beeper/userdata';
-  const RODZDIR = '--user-data-dir=C:/Users/an/.egpt/state/rodz-beeper/userdata';
 
-  it('the name says primary but the service serves the secondary port', async () => {
-    expect(await refusal([svc('egpt-primary', `${ANDIR} --remote-debugging-port=9225`)]))
-      .toBe("0001 refuses: egpt-primary: setup/beeper-s0-naming.ps1 maps it to egpt-beeper-primary, but it serves CDP 9225, the secondary's port - the name and the evidence disagree");
+  it('do as measured: BeeperRodz is named for an account, so nothing on it says its role - a human decides', async () => {
+    expect(await refusal(DO.services))
+      .toBe('0001 refuses: BeeperRodz: its name carries no role (primary/secondary) - rename it by hand with setup/rename-beeper-s0-service.ps1');
   });
 
-  it('BeeperRodz on the primary port - an account name is a guess, the port decides, and they disagree', async () => {
-    expect(await refusal([svc('BeeperRodz', `${RODZDIR} --remote-debugging-port=9223`)])).toMatch(/BeeperRodz: .* maps it to egpt-beeper-secondary, but it serves CDP 9223/);
-  });
-
-  it('no CDP port, or an unknown one', async () => {
-    expect(await refusal([svc('egpt-primary', `${ANDIR} ${FLAGS}`)])).toMatch(/egpt-primary: its AppParameters carry 0 --remote-debugging-port flags/);
-    expect(await refusal([svc('egpt-primary', `${ANDIR} --remote-debugging-port=9224`)])).toMatch(/egpt-primary: CDP port 9224 names no role/);
+  it('the name says primary but the map sends it to the secondary', async () => {
+    expect(await refusal([svc('egpt-primary', `${ANDIR} ${FLAGS}`)], [{ old: 'egpt-primary', new: 'egpt-beeper-secondary' }]))
+      .toBe('0001 refuses: egpt-primary: setup/beeper-s0-naming.ps1 maps it to egpt-beeper-secondary, but its name says primary - the name and the map disagree');
   });
 
   it('no --user-data-dir on a service that is to be renamed', async () => {
-    expect(await refusal([svc('egpt-primary', '--remote-debugging-port=9223')])).toMatch(/egpt-primary: its AppParameters carry 0 --user-data-dir flags/);
-  });
-
-  it('two services claim one role', async () => {
-    expect(await refusal([svc('egpt-primary', `${ANDIR} --remote-debugging-port=9223`), svc('BeeperAn', `${RODZDIR} --remote-debugging-port=9223`)]))
-      .toMatch(/egpt-primary and BeeperAn both serve the primary's CDP port/);
+    expect(await refusal([svc('egpt-primary', FLAGS)])).toMatch(/egpt-primary: its AppParameters carry 0 --user-data-dir flags/);
   });
 
   it('the target name already exists beside the legacy service', async () => {
-    expect(await refusal([svc('egpt-primary', `${ANDIR} --remote-debugging-port=9223`), svc('egpt-beeper-primary', '--remote-debugging-port=9223')]))
+    expect(await refusal([svc('egpt-primary', `${ANDIR} ${FLAGS}`), svc('egpt-beeper-primary', FLAGS)]))
       .toMatch(/egpt-primary would become egpt-beeper-primary, which already exists/);
   });
 
   it('two services share one install', async () => {
-    expect(await refusal([svc('egpt-primary', `${ANDIR} --remote-debugging-port=9223`), svc('BeeperRodz', `--user-data-dir="C:\\Users\\an\\.egpt\\state\\an-beeper\\userdata\\" --remote-debugging-port=9225`)]))
-      .toMatch(/egpt-primary and BeeperRodz share --user-data-dir/);
+    expect(await refusal([svc('egpt-primary', `${ANDIR} ${FLAGS}`), svc('egpt-secondary', `--user-data-dir="C:\\Users\\an\\.egpt\\state\\an-beeper\\userdata\\" ${FLAGS}`)]))
+      .toMatch(/egpt-primary and egpt-secondary share --user-data-dir/);
   });
 
   it('a service that does not run as LocalSystem - the rename script would stop to ask for a password', async () => {
-    expect(await refusal([svc('egpt-primary', `${ANDIR} --remote-debugging-port=9223`, { startName: '.\\an' })]))
+    expect(await refusal([svc('egpt-primary', `${ANDIR} ${FLAGS}`, { startName: '.\\an' })]))
       .toMatch(/egpt-primary runs as \.\\an, not LocalSystem/);
   });
 });

@@ -1322,6 +1322,7 @@ export function createCommands({
   // chrome.exe pid 2388 answering CDP on :9224 — SessionId 0 — beside two Chromium-based Beeper
   // Desktops on :9223 / :9225, all three in Session 0. setup/install-beeper-s0-service.ps1 has
   // said so in its own header all along, and those Session 0 Desktops are the feature built on it.
+  // (Their CDP ports were closed 2026-10-11; the Desktops still run there.)
   //
   // So the reason a Session 0 spine does not spawn its own browser is not CAPABILITY, it is
   // VISIBILITY AND INTERACTION. A child inherits its parent's session (verified live 2026-07-15:
