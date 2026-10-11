@@ -50,7 +50,7 @@ import { compactionRatio } from './compaction.mjs';
 import { NODE_FILE, REGISTRY_FILE, parseEntityConfig } from './config-resolver.mjs';
 import { CONFIG_YAML_PATH, writeConfigKey } from '../tools/config-io.mjs';
 import { resolveConfigKey } from '../../config/config-schema.mjs';
-import { isRunning as cdpIsRunning, listTabs as cdpListTabs, cdpHost as cdpHostOf, openTab as cdpOpenTab, activateTarget as cdpActivateTarget, closeTab as cdpCloseTab, createCdpClient, createPipeTransport } from '../tools/cdp.mjs';
+import { isRunning as cdpIsRunning, listTabs as cdpListTabs, cdpHost as cdpHostOf, openTab as cdpOpenTab, activateTarget as cdpActivateTarget, closeTab as cdpCloseTab, channel as cdpChannel, createCdpClient, createPipeTransport } from '../tools/cdp.mjs';
 import { findChromeExecutable, chromeArgs, chromeCommandLine, resolveBrainProfile, spawnChrome, spawnChromePipe as defaultSpawnChromePipe } from '../tools/chrome-launcher.mjs';
 import { admitLaunch, estimateChromeBytes, BRAIN_GROUP, isSafeGroupName, chromeConversationOf } from './chrome-pool.mjs';
 import { freemem } from 'node:os';
@@ -640,7 +640,7 @@ export function createCommands({
   io = {},                               // { stat, readFile, writeFile, mkdir, readdir, rm } — real fs by default; /status probes files + the custom branch authors through here
   // CDP seam for /chrome, /tabs, /open, /tab, /close — the real localhost probe by
   // default; tests inject fakes so the suite never needs a live Chrome or a real socket.
-  cdp = { isRunning: cdpIsRunning, listTabs: cdpListTabs, cdpHost: cdpHostOf, openTab: cdpOpenTab, activateTarget: cdpActivateTarget, closeTab: cdpCloseTab },
+  cdp = { isRunning: cdpIsRunning, listTabs: cdpListTabs, cdpHost: cdpHostOf, openTab: cdpOpenTab, activateTarget: cdpActivateTarget, closeTab: cdpCloseTab, channel: cdpChannel },
   // /login <site> → the auto-login limb (src/spine/login.mjs), injected by boot. Returns an
   // OUTCOME token (logged-in | needs-2fa | captcha-posted | failed | no-credential) — NEVER a
   // credential. Absent (standalone construction / a test that doesn't need it) → /login replies

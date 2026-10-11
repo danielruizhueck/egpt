@@ -39,7 +39,20 @@ export function askSpine({ argv = [], env = {}, WebSocket = WS, timeoutMs = ANSW
   // The one request, spelled exactly. Anything else is refused HERE rather than sent: the spine
   // would refuse it too, and a being should learn the vocabulary without a round trip.
   if (ask !== 'browser' || action !== 'start' || rest.length) return fail(`the spine serves exactly one request — ${USAGE}`);
+  return dialSpine({ env, ask, action, WebSocket, timeoutMs }).then(({ ws, result: r, line }) => {
+    ws?.close();
+    if (!r) return { code: 1, line: `ask-spine: ${line}` };
+    if (r.ok) return { code: 0, line: `ask-spine: browser start — ${r.launched ? 'started' : 'already running'}: ${r.detail}` };
+    if (r.reason === 'launch-failed') return { code: 1, line: `ask-spine: browser start FAILED — ${r.detail}` };
+    return { code: 1, line: `ask-spine: browser start REFUSED (${r.reason || 'no reason given'}) — ${r.detail}` };
+  });
+}
 
+// THE DIAL, shared with cdp.mjs's createLinkTransport: one request, resolved { ws, result } at an ok
+// answer — the socket left open, so a `browser cdp` answer is a tunnel from then on — else
+// { line, result? }. Never throws.
+export function dialSpine({ env, ask, action, WebSocket = WS, timeoutMs = ANSWER_TIMEOUT_MS }) {
+  const fail = (line) => Promise.resolve({ line });
   const secret = String(env[BEING_TOKEN_ENV] ?? '').trim();
   const port = Number(env[SPINE_PORT_ENV]);
   if (!secret || !Number.isInteger(port) || port <= 0 || port >= 65536) {
@@ -49,18 +62,19 @@ export function askSpine({ argv = [], env = {}, WebSocket = WS, timeoutMs = ANSW
   const where = `127.0.0.1:${port}`;
   return new Promise((resolve) => {
     let settled = false, opened = false, timer = null, ws = null;
-    const done = (code, line) => {
+    const done = (line, result) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      if (result?.ok) { ws.removeAllListeners('message'); resolve({ ws, result }); return; }
       try { ws?.close?.(); } catch { /* closing */ }
-      resolve({ code, line: `ask-spine: ${line}` });
+      resolve({ line, result });
     };
     try { ws = new WebSocket(`ws://${where}${BEING_PATH}`); }
-    catch (e) { done(1, `spine unreachable on ${where} — ${e?.message ?? e}`); return; }
-    timer = setTimeout(() => done(1, `the spine on ${where} gave no answer within ${Math.round(timeoutMs / 1000)}s`), timeoutMs);
+    catch (e) { done(`spine unreachable on ${where} — ${e?.message ?? e}`); return; }
+    timer = setTimeout(() => done(`the spine on ${where} gave no answer within ${Math.round(timeoutMs / 1000)}s`), timeoutMs);
     ws.on('open', () => { opened = true; });
-    ws.on('error', (e) => done(1, opened
+    ws.on('error', (e) => done(opened
       ? `the connection to the spine on ${where} failed — ${e?.message ?? e}`
       : `spine unreachable on ${where} — ${e?.message ?? e}`));
     ws.on('message', (buf) => {
@@ -73,14 +87,11 @@ export function askSpine({ argv = [], env = {}, WebSocket = WS, timeoutMs = ANSW
         return;
       }
       const r = parseAskFrame(buf);
-      if (r?.ask !== 'result') return;
-      if (r.ok) done(0, `browser start — ${r.launched ? 'started' : 'already running'}: ${r.detail}`);
-      else if (r.reason === 'launch-failed') done(1, `browser start FAILED — ${r.detail}`);
-      else done(1, `browser start REFUSED (${r.reason || 'no reason given'}) — ${r.detail}`);
+      if (r?.ask === 'result') done('', r);
     });
     // A close with no answer, after the connection was up: the limb drops a being whose secret it
     // does not recognise without a word — a stranger is told nothing — so this is the refusal.
-    ws.on('close', () => done(1, opened
+    ws.on('close', () => done(opened
       ? `REFUSED — the spine on ${where} closed the connection without an answer: this session's credential is unknown to it or was revoked (a spine restart forgets every credential; the next turn's session gets a new one)`
       : `spine unreachable on ${where}`));
   });

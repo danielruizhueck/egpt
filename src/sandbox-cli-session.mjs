@@ -446,7 +446,7 @@ export function createSandboxCliSession(options = {}) {
   // `options.sessionId` to `--resume`, so a resumed thread's argv is unchanged. Spread in only
   // when there is one (ccode), so the codex/pi options object is untouched.
   return withLinkRevoked(withOauthRemedy(
-    createWarmCliSession({ ...options, spawn: sandboxSpawn, ...(threadId ? { newSessionId: threadId } : {}) }),
+    createWarmCliSession({ ...options, beingLink: null, spawn: sandboxSpawn, ...(threadId ? { newSessionId: threadId } : {}) }),
     oauthToken.length,
   ), link);
 }
@@ -538,7 +538,7 @@ function readMountEntriesOf(list) {
 // THROWS, before any spawn, off win32 (there is no box) and with no POSIX bash — the caller's run
 // then FAILS, loudly, and nothing runs anywhere else.
 const LOGON_CMDLINE_MAX = 1024;
-export function spawnBoxedCommand({ targetFolder, command, commandFile, readMounts, sandboxOauthToken, spawn = nodeSpawn, platform = process.platform, gitBashCandidates, writeFile = writeFileSync, onLog = null } = {}) {
+export function spawnBoxedCommand({ targetFolder, command, commandFile, readMounts, sandboxOauthToken, beingLink = null, spawn = nodeSpawn, platform = process.platform, gitBashCandidates, writeFile = writeFileSync, onLog = null } = {}) {
   if (platform !== 'win32') throw new Error(`refused — a command a being wrote runs in its box, and the box is Windows-only on this build (platform=${platform})`);
   const bash = resolveSandboxGitBash(gitBashCandidates);
   if (!bash) throw new Error(`refused — no POSIX bash for the box: none of ${GIT_BASH_CANDIDATES.join(', ')} exists`);
@@ -548,12 +548,15 @@ export function spawnBoxedCommand({ targetFolder, command, commandFile, readMoun
     args = [commandFile.replaceAll('\\', '/')];
   }
   const oauthToken = typeof sandboxOauthToken === 'string' ? sandboxOauthToken.trim() : '';   // createSandboxCliSession's normalisation
+  const link = typeof beingLink?.mint === 'function' ? beingLink.mint() : null;   // one credential per run, revoked when it ends
   const setEnv = [
     ...(oauthToken ? [`${OAUTH_ENV_NAME}=${oauthToken}`] : []),
     `${GIT_BASH_ENV}=${bash}`, MSYS2_PATH_TYPE_ENTRY,
+    ...(link ? link.env : []),
   ];
   const argv = launcherArgv({ targetFolder, setEnv, readMounts: readMountEntriesOf(readMounts), bin: bash, args });
   const proc = spawn('powershell.exe', argv, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, cwd: targetFolder });
+  if (link) { proc?.once?.('close', link.revoke); proc?.once?.('error', link.revoke); }
   proc?.stdin?.end?.();   // a beat has no input: a command that reads stdin gets EOF, not a wait
   if (onLog) tapLaunchLine(proc?.stderr, onLog);
   return proc;

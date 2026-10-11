@@ -1338,13 +1338,13 @@ export function createBrainPool({
         // `-ReadMounts`. Spread in only when there are any, so a node without the key keeps the
         // argv it had.
         ...(sandboxReadMounts.length ? { sandboxReadMounts } : {}),
-        // ...and the one way a boxed being can ask its spine for anything (operator 2026-09-26:
-        // "for now only the browser"): a handle that mints a per-session credential for THIS being
-        // in THIS room, which sandbox-cli-session.mjs turns into three -SetEnv entries and revokes
-        // at close (src/spine/being-link.mjs). Sandboxed turns only, for the credential's reason
-        // above: an unboxed turn runs as the operator and has /chrome's own account already. Absent
-        // link (no boot wiring, every test that passes none) contributes nothing.
-        ...(sandboxed === true && beingLink ? { beingLink: beingLink.forBeing({ being, surface: scope.surface, slug }) } : {}),
+        // ...and the one way a being can ask its spine for anything (operator 2026-09-26: "for now
+        // only the browser"): a handle that mints a per-session credential for THIS being in THIS
+        // room, revoked at close (src/spine/being-link.mjs) — -SetEnv entries for a boxed session
+        // (sandbox-cli-session.mjs), spawn env for an unboxed one (warm-cli-session.mjs). Every
+        // being gets its chat's group browser (operator 2026-10-11); `boxed` decides whether its CDP
+        // is filtered. Absent link (no boot wiring, every test that passes none) contributes nothing.
+        ...(beingLink ? { beingLink: beingLink.forBeing({ being, surface: scope.surface, slug, boxed: sandboxed === true }) } : {}),
       };
 
       // Identity kickoff: prefix the first turn of a fresh thread with the feed,

@@ -646,9 +646,9 @@ export async function boxedConversationFor(state, ns, sandboxedOf) {
 // work without it, so with none it is REFUSED, like a turn: otherwise the session dies at the API with
 // a message naming neither the key nor the fix. A plain `command:` beat with none just runs without
 // the entry. Never logs the value. `platform` / `gitBashCandidates` are test seams.
-export function createHeartbeatBoxRunner({ loadState, sandboxedOf, getConfig, spawn, onLog = () => {}, platform, gitBashCandidates }) {
+export function createHeartbeatBoxRunner({ loadState, sandboxedOf, getConfig, spawn, beingLink = null, onLog = () => {}, platform, gitBashCandidates }) {
   return async ({ ns, name, cwd, command, scriptPath }) => {
-    await boxedConversationFor(await loadState(), ns, sandboxedOf);
+    const { surface } = await boxedConversationFor(await loadState(), ns, sandboxedOf);
     const say = (m) => onLog(`${name}: ${m}`);
     const sandboxOauthToken = sandboxOauthTokenOf(getConfig());
     if (scriptPath && !sandboxOauthToken) throw new Error('refused — a script_path: beat runs textecute\'s own Claude session in the box, and config.yaml\'s `sandbox_oauth_token` is unset or blank: it is the only credential a boxed session ever gets (see sandbox-cli-session.mjs, OAUTH_REMEDY)');
@@ -657,6 +657,7 @@ export function createHeartbeatBoxRunner({ loadState, sandboxedOf, getConfig, sp
       commandFile: join(HEARTBEATS_DIR, `${name.slice(ns.length + 1)}.command.sh`),
       readMounts: globalReadPathsOf(getConfig()?.global_read_paths, say),
       sandboxOauthToken, spawn, platform, gitBashCandidates, onLog: say,
+      beingLink: beingLink?.forBeing({ being: name, surface, slug: ns.slice(surface.length + 1), boxed: true }),
     });
   };
 }
@@ -2571,7 +2572,8 @@ export async function boot({
   // further down and no being can dial before shellPort.start(), at the very end of boot.
   const beingLink = createBeingLink({
     port: shellPortFrom(cfg),
-    startBrowser: () => commands.startBrowser(),
+    startBrowser: (conversation) => commands.startBrowser(conversation),
+    chromeClientFor: (conversation) => commands.chromeClientFor(conversation),
     onLog: (m) => log.line?.(`[being] ${m}`),
   });
 
@@ -3347,7 +3349,7 @@ export async function boot({
   // "boxed?" with the same resolution a turn's OS session is picked by.
   const spawnHeartbeatBoxed = createHeartbeatBoxRunner({
     loadState: _loadState, sandboxedOf: (being, ev) => brain.sandboxed(being, ev), getConfig,
-    spawn: spawnFn, onLog: (m) => log.line?.(`[heartbeat] ${m}`),
+    spawn: spawnFn, beingLink, onLog: (m) => log.line?.(`[heartbeat] ${m}`),
   });
 
   const heartbeatLoader = createHeartbeatLoader({

@@ -139,6 +139,8 @@ const RELISTEN_MAX_MS = 60_000;
 // console's authority is unchanged, only where its files land.
 const SHELL_CHAT_ID = 'lobby';
 const SHELL_USER = 'operator';
+// A being this far behind on its CDP tunnel is closed, not buffered for (operator 2026-10-11).
+const BEING_BACKLOG_MAX = 64 * 1024 * 1024;
 
 /**
  * @param {object} opts
@@ -330,10 +332,27 @@ export function createShellPort({
   // never a line a human typed — and a handler that throws still answers, so the being's client
   // always has something to print. The frame goes to onBeing.ask PARSED OR NULL: what may be asked,
   // and what a frame may carry, is the link's to decide (src/spine/being-link.mjs), not the limb's.
-  function handleBeing(raw, ws, who) {
+  // An answer that carries a TUNNEL (`browser cdp`) makes every later frame one raw CDP message for
+  // it; the limb only carries them, and closes a being that falls BEING_BACKLOG_MAX behind.
+  function handleBeing(raw, ws, conn) {
+    if (conn.tunnel) {
+      try { conn.tunnel.send(String(raw)); } catch (e) { onLog(`shell: a being's CDP frame could not be carried — ${e?.message ?? e}; closing it`); try { ws.close(); } catch { /* closing */ } }
+      return;
+    }
+    const sink = {
+      send: (text) => {
+        if (ws.bufferedAmount > BEING_BACKLOG_MAX) { onLog(`shell: a being's CDP tunnel is over ${BEING_BACKLOG_MAX / 1024 / 1024} MB behind — closing it`); sink.end(); return; }
+        pushTo(ws, text, 'being');
+      },
+      end: () => { try { ws.close(); } catch { /* closing */ } },
+    };
     const answer = (r) => pushTo(ws, askResultFrame(r && typeof r === 'object' ? r : { ok: false, reason: 'failed', detail: 'the being link answered nothing' }), 'being');
     const failed = (e) => answer({ ok: false, reason: 'failed', detail: e?.message ?? String(e) });
-    try { Promise.resolve(onBeing.ask(who, parseAskFrame(raw))).then(answer).catch(failed); }
+    const answered = (r) => {
+      answer(r);
+      if (r?.tunnel) { if (conn.gone) r.tunnel.close(); else conn.tunnel = r.tunnel; }
+    };
+    try { Promise.resolve(onBeing.ask(conn.who, parseAskFrame(raw), sink)).then(answered).catch(failed); }
     catch (e) { failed(e); }
   }
 
@@ -428,16 +447,16 @@ export function createShellPort({
     // useless on the next one.
     const nonce = newNonce();
     let authed = false;
-    let who = null;   // a /being connection's proven identity (verifyBeing), and nothing else's
+    const conn = { who: null, tunnel: null, gone: false };   // a /being connection's proven identity (verifyBeing) and its CDP tunnel
     _pending.add(ws);
     onLog('shell: a client dialed in — challenging it');
     // Handlers FIRST, challenge second: a peer that answers the instant it is challenged must
     // not answer into a socket we have not started listening to yet.
     ws.on('message', (buf) => {
-      if (!authed && being) { who = verifyBeing(buf, nonce, ws); authed = !!who; return; }
+      if (!authed && being) { conn.who = verifyBeing(buf, nonce, ws); authed = !!conn.who; return; }
       if (!authed) { authed = verifyPeer(buf, nonce, ws, { mouth }); return; }
       if (mouth) { handleMouth(buf, ws); return; }
-      if (being) { handleBeing(buf, ws, who); return; }
+      if (being) { handleBeing(buf, ws, conn); return; }
       // A MOUTH FRAME ON THE CONSOLE CONNECTION is discarded, never dispatched. It can only be a
       // misconfigured peer (one that dialled the root instead of MOUTH_PATH), and the console's
       // toInbound below would hand the raw JSON to the spine as something a human typed — a turn
@@ -466,6 +485,8 @@ export function createShellPort({
       _pending.delete(ws);
       _mouths.delete(ws);
       _beings.delete(ws);
+      conn.gone = true;
+      conn.tunnel?.close();
       // A PEER LINK THAT GOES MAY BE HOLDING A HALF-WRITTEN REPLY (src/shell/peer-mouth.mjs, THE
       // MID-STREAM DROP). The limb neither knows nor decides what is open — it reports the fact of
       // the close and the mouth table settles whatever that connection still had. A reply that

@@ -252,6 +252,10 @@ export function createWarmCliSession(options = {}) {
   let sessionId = options.sessionId ?? null;
   let pending = null;   // { resolve, reject, onUpdate, acc, settled }
   let closed = false;
+  // THE BEING LINK for an UNBOXED session (src/spine/being-link.mjs): its credential rides the spawn
+  // env, revoked at close. A boxed session's rides the launcher's -SetEnv and hands none in here.
+  const link = typeof options.beingLink?.mint === 'function' ? options.beingLink.mint() : null;
+  const env = link ? { ...process.env, ...Object.fromEntries(link.env.map((e) => [e.slice(0, e.indexOf('=')), e.slice(e.indexOf('=') + 1)])) } : null;
 
   function spawnProc() {
     // Reuse the tested confinement/model/effort/--resume arg-builder, then add
@@ -290,7 +294,7 @@ export function createWarmCliSession(options = {}) {
     }
     const bin = resolveClaudeBin(options.bin);
     onLog(`warm-cli: spawn ${bin} ${args.join(' ')}`);
-    proc = _spawn(bin, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, ...(cwd ? { cwd } : {}) });
+    proc = _spawn(bin, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, ...(cwd ? { cwd } : {}), ...(env ? { env } : {}) });
     proc.stdout?.setEncoding?.('utf8');
     proc.stdout?.on('data', onStdout);
     proc.stderr?.setEncoding?.('utf8');
@@ -506,6 +510,7 @@ export function createWarmCliSession(options = {}) {
       return { ack };
     },
     close() {
+      link?.revoke();
       closed = true;
       settleInjections(pending, 'the session was closed before the CLI ingested it');
       try { proc?.stdin?.end(); } catch { /* already closing */ }

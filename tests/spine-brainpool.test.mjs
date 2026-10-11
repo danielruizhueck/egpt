@@ -2876,16 +2876,18 @@ describe('brainpool.turn — a boxed turn is handed the being link, bound to its
     expect(link.bound).toHaveLength(1);
     expect(link.bound[0].being).toBe('e');
     expect(link.bound[0].surface).toBe('whatsapp');
+    expect(link.bound[0].boxed).toBe(true);
     // the slug of the SAME key the warm pool runs under — one address, never two
     expect(pool.calls[0].key).toBe(`e:ccode:whatsapp:${link.bound[0].slug}`);
   });
 
-  it('sandboxed:false → no beingLink at all, however the node is wired', async () => {
+  it('sandboxed:false → a beingLink too, bound unboxed (operator 2026-10-11: every being gets its chat\'s group browser)', async () => {
     const link = fakeLink();
     const { brain, pool } = harness([{ text: 'ok', sessionId: 's' }], { config: defaults(false), platform: 'win32', beingLink: link });
     await brain.turn('e', ev);
-    expect(pool.calls[0].brainOptions).not.toHaveProperty('beingLink');
-    expect(link.bound).toEqual([]);
+    expect(typeof pool.calls[0].brainOptions.beingLink.mint).toBe('function');
+    expect(link.bound).toHaveLength(1);
+    expect(link.bound[0]).toMatchObject({ being: 'e', surface: 'whatsapp', boxed: false });
   });
 
   it('no link wired (every caller before this existed) → a boxed turn\'s brainOptions carry no beingLink', async () => {

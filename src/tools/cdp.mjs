@@ -150,11 +150,75 @@ function openWsSession(url) {
   });
 }
 
+// ── CHANNEL: one CDP connection as raw messages ──────────────────────
+// send(msg) · onMessage(cb) (every listener sees every message) · onClose(cb)
+// · nextId() — the connection's ONE id space, shared by everyone sending on it
+// (a transport and the being mux) · close() · closed.
+function makeChannel(write, end) {
+  const subs = new Set(), closeCbs = new Set();
+  let id = 0, closed = false, err = null;
+  const channel = {
+    send: (m) => { if (!closed) write(JSON.stringify(m)); },
+    onMessage: (cb) => { subs.add(cb); },
+    onClose: (cb) => { if (closed) cb(err); else closeCbs.add(cb); },
+    nextId: () => ++id,
+    close: () => end(),
+    get closed() { return closed; },
+  };
+  const emit = (text) => { let m; try { m = JSON.parse(text); } catch { return; } for (const cb of [...subs]) cb(m); };
+  const fail = (e) => { if (closed) return; closed = true; err = e; for (const cb of closeCbs) cb(e); };
+  return { channel, emit, fail };
+}
+
+/** --remote-debugging-pipe framing: JSON + \0 each way. Writes wait for 'drain'. */
+export function createPipeChannel({ writable, readable }) {
+  const queue = [];
+  let blocked = false;
+  const write = (text) => {
+    if (blocked) { queue.push(text); return; }
+    if (!writable.write(text + '\0')) { blocked = true; writable.once('drain', () => { blocked = false; while (queue.length && !blocked) write(queue.shift()); }); }
+  };
+  const { channel, emit, fail } = makeChannel(write, () => { try { writable.end(); } catch {} });
+  let buf = Buffer.alloc(0);
+  readable.on('data', (chunk) => {
+    buf = Buffer.concat([buf, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
+    let i;
+    while ((i = buf.indexOf(0)) !== -1) {
+      const frame = buf.subarray(0, i);
+      buf = buf.subarray(i + 1);
+      if (frame.length) emit(frame.toString('utf8'));
+    }
+  });
+  readable.on('end', () => fail(new Error('CDP pipe closed (Chrome exited)')));
+  readable.on('close', () => fail(new Error('CDP pipe closed (Chrome exited)')));
+  readable.on('error', (e) => fail(new Error(`CDP pipe error: ${e?.message ?? e}`)));
+  return channel;
+}
+
+/** One OPEN WebSocket (a browser endpoint, or a being's /being link) as a channel. */
+export function createWsChannel(ws) {
+  const { channel, emit, fail } = makeChannel((t) => ws.send(t), () => { try { ws.close(); } catch {} });
+  ws.addEventListener('message', (e) => emit(String(e.data)));
+  ws.addEventListener('close', () => fail(new Error('CDP WebSocket closed')));
+  ws.addEventListener('error', () => fail(new Error('CDP WebSocket error')));
+  return channel;
+}
+
 /** The default transport: Chrome's own remote-debugging port. HTTP /json/*
  *  for discovery, a fresh WebSocket per session. Stateless — it resolves the
  *  host live on each call, so setCdpHostGetter keeps steering it at runtime. */
 export function createPortTransport() {
+  let browserChannel = null;
   return {
+    // The browser endpoint as ONE channel, reused while it stays open (the being mux rides it).
+    channel: () => (browserChannel ??= (async () => {
+      const { webSocketDebuggerUrl } = await fetchJson('/json/version');
+      const ws = new WebSocket(webSocketDebuggerUrl);
+      await new Promise((res, rej) => { ws.addEventListener('open', res); ws.addEventListener('error', () => rej(new Error('CDP WebSocket error'))); });
+      const ch = createWsChannel(ws);
+      ch.onClose(() => { browserChannel = null; });
+      return ch;
+    })().catch((e) => { browserChannel = null; throw e; })),
     isRunning: async () => {
       try { await fetchJson('/json/version'); return true; } catch { return false; }
     },
@@ -189,25 +253,27 @@ export function createPortTransport() {
 // 3b hands this { writable, readable } = child.stdio[3], child.stdio[4] of a
 // Chrome it direct-spawned with stdio ['inherit','inherit','inherit','pipe','pipe'].
 export function createPipeTransport({ writable, readable }) {
-  let nextId = 0;
+  return createChannelTransport(createPipeChannel({ writable, readable }));
+}
+
+// The Target-domain transport over ANY channel: the pipe above, or a being's /being link
+// (createLinkTransport). Events route by sessionId; one with none is browser-scope.
+export function createChannelTransport(channel) {
   const pending = new Map();          // id → { resolve, reject }
   const sessions = new Map();         // sessionId → target-session internals
   const browserCloseCbs = new Set();  // browser-session onClose callbacks
   const browserEventCbs = new Set();  // browser-scope event callbacks
-  let closed = false;
   let closeErr = null;
-  let buf = Buffer.alloc(0);
 
-  const failAll = (err) => {
-    if (closed) return;
-    closed = true; closeErr = err;
+  channel.onClose((err) => {
+    closeErr = err;
     for (const { reject } of pending.values()) reject(err);
     pending.clear();
     for (const s of sessions.values()) s.drop(err);
     for (const cb of browserCloseCbs) cb(err);
-  };
+  });
 
-  const dispatch = (msg) => {
+  channel.onMessage((msg) => {
     if (msg.id != null && pending.has(msg.id)) {
       const { resolve, reject } = pending.get(msg.id);
       pending.delete(msg.id);
@@ -215,41 +281,26 @@ export function createPipeTransport({ writable, readable }) {
       return;
     }
     if (msg.method) {
-      if (msg.sessionId && sessions.has(msg.sessionId)) sessions.get(msg.sessionId).emit(msg.method, msg.params);
+      if (msg.sessionId) sessions.get(msg.sessionId)?.emit(msg.method, msg.params);
       else for (const cb of browserEventCbs) cb(msg.method, msg.params);
     }
-  };
-
-  readable.on('data', (chunk) => {
-    buf = Buffer.concat([buf, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
-    let i;
-    while ((i = buf.indexOf(0)) !== -1) {
-      const frame = buf.subarray(0, i);
-      buf = buf.subarray(i + 1);
-      if (frame.length === 0) continue;
-      let msg;
-      try { msg = JSON.parse(frame.toString('utf8')); } catch { continue; }
-      dispatch(msg);
-    }
   });
-  readable.on('end', () => failAll(new Error('CDP pipe closed (Chrome exited)')));
-  readable.on('close', () => failAll(new Error('CDP pipe closed (Chrome exited)')));
-  readable.on('error', (e) => failAll(new Error(`CDP pipe error: ${e?.message ?? e}`)));
 
   const rawSend = (message) => {
-    if (closed) return Promise.reject(closeErr ?? new Error('CDP pipe closed'));
-    const id = ++nextId;
+    if (channel.closed) return Promise.reject(closeErr ?? new Error('CDP pipe closed'));
+    const id = channel.nextId();
     // Register the pending handler BEFORE writing: a response can arrive before
     // write() returns (an in-memory peer answers synchronously; a real fd pipe
     // is async but this ordering is correct either way).
     const p = new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
-    writable.write(JSON.stringify({ ...message, id }) + '\0');
+    channel.send({ ...message, id });
     return p;
   };
 
   return {
+    channel: async () => channel,
     // The connection is live until fd4 ends; no round-trip needed to know it.
-    isRunning: async () => !closed,
+    isRunning: async () => !channel.closed,
     listTargets: async () => {
       const r = await rawSend({ method: 'Target.getTargets' });
       // Shape-match the port path's /json entries so the ops stay transport-agnostic.
@@ -262,7 +313,7 @@ export function createPipeTransport({ writable, readable }) {
       return {
         send: (method, params = {}) => rawSend({ method, params }),
         onEvent(cb) { if (eventCb) browserEventCbs.delete(eventCb); eventCb = cb; browserEventCbs.add(cb); },
-        onClose(cb) { if (closed) { cb(closeErr); return; } closeCb = cb; browserCloseCbs.add(browserCb); },
+        onClose(cb) { if (channel.closed) { cb(closeErr); return; } closeCb = cb; browserCloseCbs.add(browserCb); },
         close() { if (eventCb) browserEventCbs.delete(eventCb); browserCloseCbs.delete(browserCb); },
       };
     },
@@ -279,14 +330,113 @@ export function createPipeTransport({ writable, readable }) {
       return {
         send: (method, params = {}) => rawSend({ sessionId, method, params }),
         onEvent(cb) { eventCb = cb; },
-        onClose(cb) { if (closed) cb(closeErr); else closeCb = cb; },
+        onClose(cb) { if (channel.closed) cb(closeErr); else closeCb = cb; },
         close() {
           sessions.delete(sessionId);
-          if (!closed) rawSend({ method: 'Target.detachFromTarget', params: { sessionId } }).catch(() => {});
+          if (!channel.closed) rawSend({ method: 'Target.detachFromTarget', params: { sessionId } }).catch(() => {});
         },
       };
     },
   };
+}
+
+// ── TRANSPORT: a being's /being link (src/tools/being-cdp.mjs) ────────
+// Its own chat's group Chrome, through the spine (src/spine/being-link.mjs). Node-only: the
+// import is computed so the extension bundle never follows it.
+export async function createLinkTransport(env = process.env) {
+  const { dialSpine } = await import(new URL('./ask-spine.mjs', import.meta.url).href);
+  const r = await dialSpine({ env, ask: 'browser', action: 'cdp' });
+  if (!r.result?.ok) throw new Error(r.line || `browser cdp REFUSED (${r.result.reason}) — ${r.result.detail}`);
+  return createChannelTransport(createWsChannel(r.ws));
+}
+
+// ── MUX: many clients on one group connection (spine side) ────────────
+// Each client gets its own Target.attachToBrowserTarget session: a message with no sessionId is
+// stamped with it (stripped again on the way back), ids are remapped into the connection's id
+// space, and a client may use only sessions it attached. guard(msg, url) sees every message —
+// url = the page its session is on, from the mux's own discovery session — and a reason it
+// returns refuses the message. Closing a client detaches every session it held.
+export function createCdpMux(channel) {
+  const calls = new Map();      // connection id → { resolve, reject } | { client, id, targetId }
+  const owners = new Map();     // sessionId → client
+  const targetOf = new Map();   // sessionId → targetId
+  const urls = new Map();       // targetId → url
+  let watch = null;
+  const rpc = (method, params = {}, sessionId) => new Promise((resolve, reject) => {
+    const id = channel.nextId();
+    calls.set(id, { resolve, reject });
+    channel.send({ id, method, params, ...(sessionId ? { sessionId } : {}) });
+  });
+  const seen = (t) => { if (t?.targetId) urls.set(t.targetId, t.url ?? ''); };
+  const detach = (sessionId, via) => channel.send({ id: channel.nextId(), method: 'Target.detachFromTarget', params: { sessionId }, ...(via ? { sessionId: via } : {}) });
+  channel.onMessage((m) => {
+    const call = m.id != null ? calls.get(m.id) : null;
+    if (call) {
+      calls.delete(m.id);
+      if (call.resolve) return m.error ? call.reject(new Error(m.error.message)) : call.resolve(m.result);
+      const sid = m.result?.sessionId;
+      if (sid && call.client.closed) return detach(sid);
+      if (sid) call.client.own(sid, call.targetId);
+      return call.client.deliver({ ...m, id: call.id });
+    }
+    if (m.sessionId && m.sessionId === watch) {
+      if (m.method === 'Target.targetDestroyed') urls.delete(m.params?.targetId); else seen(m.params?.targetInfo);
+      return;
+    }
+    const client = owners.get(m.sessionId);
+    if (!client) return;
+    if (m.method === 'Target.attachedToTarget') { seen(m.params?.targetInfo); client.own(m.params?.sessionId, m.params?.targetInfo?.targetId); }
+    if (m.method === 'Target.detachedFromTarget') { client.sessions.delete(m.params?.sessionId); owners.delete(m.params?.sessionId); targetOf.delete(m.params?.sessionId); }
+    client.deliver(m);
+  });
+  channel.onClose((err) => {
+    for (const c of calls.values()) c.reject?.(err);
+    for (const c of new Set(owners.values())) c.close();
+  });
+  const ready = rpc('Target.attachToBrowserTarget')
+    .then((r) => { watch = r.sessionId; return rpc('Target.setDiscoverTargets', { discover: true }, watch); });
+  ready.catch(() => {});
+
+  async function attach(sink, guard = null) {
+    await ready;
+    const { sessionId: root } = await rpc('Target.attachToBrowserTarget');
+    const client = {
+      sessions: new Set(),
+      closed: false,
+      own(sid, targetId) { if (!sid) return; client.sessions.add(sid); owners.set(sid, client); if (targetId) targetOf.set(sid, targetId); },
+      deliver(m) {
+        if (client.closed) return;
+        if (m.sessionId === root) { m = { ...m }; delete m.sessionId; }
+        sink.send(JSON.stringify(m));
+      },
+      close() {
+        if (client.closed) return;
+        client.closed = true;
+        for (const s of client.sessions) { owners.delete(s); targetOf.delete(s); if (s !== root) detach(s, root); }
+        detach(root);
+        sink.end?.();
+      },
+    };
+    client.own(root, '');
+    return {
+      send(text) {
+        if (client.closed) return;
+        let m = null;
+        try { m = JSON.parse(text); } catch { /* refused below */ }
+        const refuse = (why) => client.deliver({ id: m?.id ?? null, ...(m?.sessionId ? { sessionId: m.sessionId } : {}), error: { code: -32000, message: `refused by eGPT: ${why}` } });
+        if (!m || typeof m.method !== 'string' || !Number.isInteger(m.id)) return refuse('not a CDP command');
+        const sessionId = m.sessionId ?? root;
+        if (!client.sessions.has(sessionId)) return refuse(`session ${sessionId} is not this client's`);
+        const why = guard?.({ ...m, sessionId }, urls.get(targetOf.get(sessionId)) ?? '');
+        if (why) return refuse(why);
+        const id = channel.nextId();
+        calls.set(id, { client, id: m.id, targetId: m.method === 'Target.attachToTarget' ? m.params?.targetId : undefined });
+        channel.send({ ...m, id, sessionId });
+      },
+      close: () => client.close(),
+    };
+  }
+  return { attach };
 }
 
 // ── OPS: transport-agnostic CDP methods ───────────────────────────────
@@ -508,6 +658,7 @@ function _streamFromTab(transport, {
  */
 export function createCdpClient(transport) {
   const client = {
+    channel: () => transport.channel(),
     isRunning: () => transport.isRunning(),
 
     listTabs: async (filterRegex = null) => {
@@ -631,6 +782,7 @@ export function createCdpClient(transport) {
 // transport resolves the host live, so setCdpHostGetter still steers it.
 const _default = createCdpClient(createPortTransport());
 
+export const channel = (...a) => _default.channel(...a);
 export const isRunning = (...a) => _default.isRunning(...a);
 export const listTabs = (...a) => _default.listTabs(...a);
 export const findTab = (...a) => _default.findTab(...a);

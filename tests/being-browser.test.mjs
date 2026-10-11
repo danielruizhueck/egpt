@@ -28,7 +28,7 @@ import { fileURLToPath } from 'node:url';
 import { createShellPort } from '../src/bridges/shell-port.mjs';
 import { responseFrame, authMac, macMatches } from '../src/shell/auth.mjs';
 import { MOUTH_PATH } from '../src/shell/mouth.mjs';
-import { BEING_PATH, isBeingDial, askFrame, askResultFrame, parseAskFrame, SPINE_PORT_ENV, BEING_TOKEN_ENV, ASK_SPINE_ENV } from '../src/shell/being.mjs';
+import { BEING_PATH, isBeingDial, askFrame, askResultFrame, parseAskFrame, SPINE_PORT_ENV, BEING_TOKEN_ENV, ASK_SPINE_ENV, CDP_MODULE_ENV } from '../src/shell/being.mjs';
 import { createBeingLink, askSpineClientPath } from '../src/spine/being-link.mjs';
 import { createSandboxCliSession } from '../src/sandbox-cli-session.mjs';
 import { createCommands } from '../src/spine/commands.mjs';
@@ -40,7 +40,7 @@ const STORE = mkdtempSync(join(tmpdir(), 'egpt-being-browser-'));
 afterAll(() => { try { rmSync(STORE, { recursive: true, force: true }); } catch { /* best effort */ } });
 const TOKEN = 'sk-ant-oat01-FAKE-TEST-TOKEN-NOT-REAL';
 const SHELL_TOKEN = 'the-operators-shell-token';
-const E_IN_ACIM = { being: 'e', surface: 'room', slug: 'acim' };
+const E_IN_ACIM = { being: 'e', surface: 'room', slug: 'acim', boxed: true };
 
 // ── THE TRANSPORT SEAM (tests/peer-mouth.test.mjs's, same shape) ───────────────────────────────
 class Sock {
@@ -162,11 +162,11 @@ describe('the wire: one dial path, one two-field request', () => {
 });
 
 describe('the link: a secret per boxed session, and one request', () => {
-  it('mints three entries — the port, THIS session\'s secret, the client — and identifies its own answers only', () => {
+  it('mints four entries — the port, THIS session\'s secret, the client, the CDP module — and identifies its own answers only', () => {
     const link = createBeingLink({ port: 23475, clientPath: 'C:/x/ask-spine.mjs', startBrowser: async () => ({ ok: true }), randomBytes: fixedBytes(7) });
     const { env } = link.forBeing(E_IN_ACIM).mint();
     const secret = '07'.repeat(32);
-    expect(env).toEqual([`${SPINE_PORT_ENV}=23475`, `${BEING_TOKEN_ENV}=${secret}`, `${ASK_SPINE_ENV}=C:/x/ask-spine.mjs`]);
+    expect(env).toEqual([`${SPINE_PORT_ENV}=23475`, `${BEING_TOKEN_ENV}=${secret}`, `${ASK_SPINE_ENV}=C:/x/ask-spine.mjs`, `${CDP_MODULE_ENV}=file:///C:/x/being-cdp.mjs`]);
     expect(link.identify(authMac(secret, 'n1'), 'n1')).toEqual(E_IN_ACIM);
     // a replayed answer to ANOTHER nonce, and the operator's shell token, are nobody
     expect(link.identify(authMac(secret, 'n1'), 'n2')).toBe(null);
@@ -351,14 +351,14 @@ describe('the mint: a boxed ccode session is handed its credential, and loses it
     return { s, f, logs };
   };
 
-  it('three NAME=VALUE entries join the ONE -SetEnv element, after the existing ones; nothing else in the argv moves', () => {
+  it('four NAME=VALUE entries join the ONE -SetEnv element, after the existing ones; nothing else in the argv moves', () => {
     const link = createBeingLink({ port: 23475, clientPath: 'C:/x/ask-spine.mjs', startBrowser: async () => ({ ok: true }), randomBytes: fixedBytes(5) });
     const plain = build();
     const withLink = build({ beingLink: link.forBeing(E_IN_ACIM) });
     const secret = '05'.repeat(32);
     expect(setEnvOf(withLink.f.calls[0])).toEqual([
       ...setEnvOf(plain.f.calls[0]),
-      `${SPINE_PORT_ENV}=23475`, `${BEING_TOKEN_ENV}=${secret}`, `${ASK_SPINE_ENV}=C:/x/ask-spine.mjs`,
+      `${SPINE_PORT_ENV}=23475`, `${BEING_TOKEN_ENV}=${secret}`, `${ASK_SPINE_ENV}=C:/x/ask-spine.mjs`, `${CDP_MODULE_ENV}=file:///C:/x/being-cdp.mjs`,
     ]);
     expect(withLink.f.calls[0].filter((a) => a === '-SetEnv')).toHaveLength(1);
     const blank = (args) => args.map((v, i) => (args[i - 1] === '-SetEnv' ? '<setenv>' : v));
@@ -579,7 +579,7 @@ describe('boot wires ONE being link into the brain and the console limb', () => 
     expect(BOOT_SRC.match(/createBeingLink\(/g)).toHaveLength(1);
     expect(BOOT_SRC).toMatch(/onBeing: beingLink,/);
     expect(BOOT_SRC).toMatch(/createBrainPool\(\{[^\n]*\bbeingLink\b/);
-    expect(BOOT_SRC).toMatch(/startBrowser: \(\) => commands\.startBrowser\(\)/);
-    expect(BOOT_SRC).toMatch(/port: shellPortFrom\(cfg\),\s*startBrowser/);
+    expect(BOOT_SRC).toMatch(/port: shellPortFrom\(cfg\),\s*startBrowser: \(conversation\) => commands\.startBrowser\(conversation\),\s*chromeClientFor: \(conversation\) => commands\.chromeClientFor\(conversation\),/);
+    expect(BOOT_SRC).toMatch(/createHeartbeatBoxRunner\(\{[^}]*\bbeingLink,/);
   });
 });

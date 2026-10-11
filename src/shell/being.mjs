@@ -35,15 +35,18 @@ import { dialsPath } from './mouth.mjs';
 export const BEING_PATH = '/being';
 export function isBeingDial(req) { return dialsPath(req, BEING_PATH); }
 
-// THE THREE VARIABLES the spine hands a boxed session through the launcher's one -SetEnv element
-// (src/sandbox-cli-session.mjs). Named here, beside the frames, because the being's client reads
-// exactly these names and a spelling that drifted on one side would fail as "not a boxed session".
+// THE VARIABLES the spine hands a being's session — boxed, through the launcher's one -SetEnv element
+// (src/sandbox-cli-session.mjs); unboxed, in its spawn env (src/warm-cli-session.mjs). Named here,
+// beside the frames, because the being's client reads exactly these names and a spelling that drifted
+// on one side would fail as "not a boxed session".
 //   EGPT_SPINE_PORT   the console port to dial on 127.0.0.1 (config shell.port)
 //   EGPT_BEING_TOKEN  THIS session's own secret — never the node's shell token
 //   EGPT_ASK_SPINE    the client script, so the command a being is told is the same on every node
+//   EGPT_CDP          file URL of src/tools/being-cdp.mjs — a script's `fetch`/`WebSocket` for :9221, over this link
 export const SPINE_PORT_ENV = 'EGPT_SPINE_PORT';
 export const BEING_TOKEN_ENV = 'EGPT_BEING_TOKEN';
 export const ASK_SPINE_ENV = 'EGPT_ASK_SPINE';
+export const CDP_MODULE_ENV = 'EGPT_CDP';
 
 /** THE REQUEST. Two fields, and a frame with any third is refused (module header). */
 export function askFrame({ ask, action }) {
