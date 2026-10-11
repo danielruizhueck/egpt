@@ -70,17 +70,12 @@ const privileged = (v) => (typeof v === 'string'
   : !!v && typeof v === 'object' && Object.values(v).some(privileged));
 const realOf = (p) => { try { return realpathSync.native(p); } catch { const up = dirname(p); return up === p ? p : join(realOf(up), basename(p)); } };
 const inside = (p, dir) => { if (!p || !dir) return false; const rel = relative(realOf(dir), realOf(resolve(p))); return !rel.startsWith('..') && !isAbsolute(rel); };
-const isPaste = (k) => (k.commands ?? []).some((c) => /paste/i.test(c))
-  || (((k.modifiers ?? 0) & 6) && (/^v$/i.test(k.key ?? '') || k.code === 'KeyV' || k.windowsVirtualKeyCode === 86))
-  || (((k.modifiers ?? 0) & 8) && (k.key === 'Insert' || k.code === 'Insert' || k.windowsVirtualKeyCode === 45));
 export function boxedCdpRefusal({ method, params = {} }, url, convDir) {
   if (NOT_SERVED.test(method)) return `${method} is not served to a boxed being`;
   if (privileged(url)) return `that session is on a ${url.split(':')[0]}: page`;
   if (privileged(params)) return 'file:, chrome:, devtools:, extension and view-source: URLs are not served to a boxed being';
   if (method === 'Input.dispatchDragEvent' && params.data?.files?.length) return 'dragging local files is not served to a boxed being';
   if (/^(Browser|Page)\.setDownloadBehavior$/.test(method) && /^allow/.test(params.behavior ?? '') && !inside(params.downloadPath, convDir)) return "downloads may go only into this conversation's folder";
-  if (/^Browser\.(grantPermissions|setPermission)$/.test(method) && /clipboard/i.test(JSON.stringify(params))) return "the operator's clipboard is not served to a boxed being";
-  if (method === 'Input.dispatchKeyEvent' && isPaste(params)) return "pasting the operator's clipboard is not served to a boxed being";
   return null;
 }
 

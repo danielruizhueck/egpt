@@ -263,9 +263,6 @@ describe('refusals — blocked for a BOXED being, served to an UNBOXED one', () 
     ['Browser.crash', 'Browser.crash', {}],
     ['PWA.launchFilesInApp', 'PWA.launchFilesInApp', { manifestId: 'm', files: ['C:/Users/an/x'] }],
     ['PWA.install', 'PWA.install', { manifestId: 'm', installUrlOrBundleUrl: 'https://x/app.swbn' }],
-    ['Browser.grantPermissions clipboard', 'Browser.grantPermissions', { permissions: ['clipboardReadWrite'] }],
-    ['Ctrl+V', 'Input.dispatchKeyEvent', { type: 'keyDown', modifiers: 2, key: 'v', code: 'KeyV', windowsVirtualKeyCode: 86 }],
-    ['an editing paste command', 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', commands: ['paste'] }],
   ];
 
   async function tunnelFor(boxed) {
@@ -324,6 +321,22 @@ describe('refusals — blocked for a BOXED being, served to an UNBOXED one', () 
     await until(() => s.out.length === 4);
     expect(s.out.filter((m) => m.error)).toEqual([]);
     expect(shared.of('Browser.setDownloadBehavior')).toHaveLength(2);
+  });
+
+  // operator 2026-10-11: "it is safe to enable paste … beings use paste to talk to chatgpt"
+  it('a boxed being may paste: paste keys, the paste command, and clipboard permission grants reach Chrome', async () => {
+    const { s, t, shared } = await tunnelFor(true);
+    t.send(cmd(1, 'Input.dispatchKeyEvent', { type: 'keyDown', modifiers: 2, key: 'v', code: 'KeyV', windowsVirtualKeyCode: 86 }));
+    t.send(cmd(2, 'Input.dispatchKeyEvent', { type: 'keyDown', modifiers: 4, key: 'v', code: 'KeyV' }));
+    t.send(cmd(3, 'Input.dispatchKeyEvent', { type: 'keyDown', modifiers: 8, key: 'Insert', code: 'Insert', windowsVirtualKeyCode: 45 }));
+    t.send(cmd(4, 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', commands: ['paste'] }));
+    t.send(cmd(5, 'Browser.grantPermissions', { permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'] }));
+    t.send(cmd(6, 'Browser.setPermission', { permission: { name: 'clipboard-read' }, setting: 'granted' }));
+    await until(() => s.out.length === 6);
+    expect(s.out.filter((m) => m.error)).toEqual([]);
+    expect(shared.of('Input.dispatchKeyEvent')).toHaveLength(4);
+    expect(shared.of('Browser.grantPermissions')).toHaveLength(1);
+    expect(shared.of('Browser.setPermission')).toHaveLength(1);
   });
 });
 
