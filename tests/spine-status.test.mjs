@@ -54,7 +54,7 @@ function harness({ io, gitOut, loadState, brains, getConfig, onLog, cdp = {}, wa
     gitOut,
     brains,
     onLog,
-    spawnChromePipe: chrome.spawnChromePipe,
+    chromeHost: chrome.chromeHost,
     profileHolder: () => null,
     browserGroups: async () => ({}),
     ...(warmStats ? { warmStats } : {}),

@@ -81,6 +81,11 @@ const SESSION1_ENV = 'EGPT_SESSION1';
 // would key its marker to the wrong session.
 const isSession1 = (env) => String(env?.[SESSION1_ENV] ?? '').trim() === '1';
 
+// The Session 1 daemon HOLDS every browser group's Chrome and its pipe (src/chrome-host.mjs), so a
+// spine restart never restarts one. Loaded only there, and a module that fails to load costs the
+// browser, never the watchdog. Its spine end reads EGPT_CHROME_HOST (chrome-host.mjs CHROME_HOST_ENV).
+const chromeHostModule = isSession1(process.env) ? await import('./chrome-host.mjs').catch((e) => e) : null;
+
 // The cap a per-profile child log is rolled at, and the shape of the rolled name. Both are
 // NSSM's: AppRotateBytes 10485760 and `service-stderr-20260911T204353.610.log`. Matched rather
 // than invented so the rotated files keep sitting in the same directory looking the same to
@@ -145,6 +150,7 @@ export function createDaemonRuntime(opts = {}) {
   const clearIntervalFn = opts.clearInterval ?? clearInterval;
   const importModule = opts.importModule ?? ((url) => import(url));
   const now = opts.now ?? Date.now;
+  const createChromeHost = opts.createChromeHost ?? chromeHostModule?.createChromeHost;
 
   const rewindSidecar = opts.rewindSidecar ?? join(egptHome, 'rewind-target.txt');
   // The stand-down's equivalent of rewind-target.txt: the departing spine names the port its
@@ -160,6 +166,7 @@ export function createDaemonRuntime(opts = {}) {
   const session1 = opts.session1 ?? isSession1(processObj.env);
   const sessionKey = session1 ? 's1' : 's0';
   const sessionLabel = session1 ? 'the s1 (logon) session' : 'the s0 (service) session';
+  const chromeHost = session1 && createChromeHost ? createChromeHost({ profilesRoot: join(egptHome, 'chrome', 'profiles'), log }) : null;
   // The singleton's own file, written by the DAEMON, one per session. Distinct from
   // state/spine.pid, which the spine writes and which is shared by whichever spine holds the
   // profile — that file cannot say which session a supervisor is in, and it is why the old
@@ -883,17 +890,20 @@ export function createDaemonRuntime(opts = {}) {
     closeChildLogs();
     childLogWarned = false;
     childLogFds = openChildLogs();
+    // One profile: the service's own handles, and NSSM's capture and rotation, untouched.
+    // Several: this profile's own two files (stdin dropped — a supervised spine reads none).
+    const stdio = childLogFds ? ['ignore', childLogFds.out, childLogFds.err] : 'inherit';
     child = spawn('node', args, {
       cwd: root,
-      // One profile: the service's own handles, and NSSM's capture and rotation, untouched.
-      // Several: this profile's own two files (stdin dropped — a supervised spine reads none).
-      stdio: childLogFds ? ['ignore', childLogFds.out, childLogFds.err] : 'inherit',
+      // + the channel to this daemon's chrome-host, when it holds the browsers.
+      stdio: chromeHost ? [...(childLogFds ? stdio : ['inherit', 'inherit', 'inherit']), 'ipc'] : stdio,
       // EGPT_HOME is stated EXPLICITLY rather than inherited: one process now supervises
       // several profiles (see startProfileDaemons), and the ambient EGPT_HOME can only name
       // one of them. A spine that inherited the wrong one would be a second node on somebody
       // else's profile. Identical to today's value when there is only one profile.
-      env: { ...processObj.env, EGPT_HOME: egptHome, EGPT_SUPERVISED: '1' },
+      env: { ...processObj.env, EGPT_HOME: egptHome, EGPT_SUPERVISED: '1', ...(chromeHost && { EGPT_CHROME_HOST: '1' }) },
     });
+    chromeHost?.attach(child);
 
     child.on('exit', async (code, signal) => {
       const exitedPid = child?.pid;   // capture before child = null, below
@@ -1050,6 +1060,8 @@ export function createDaemonRuntime(opts = {}) {
     const v = gitVersion(root);
     log(`egpt-daemon up — running app from ${root} (profile ${egptHome}, ${sessionLabel})`);
     log(`version: ${v.sha} (${v.tag}, branch ${v.branch})`);
+    if (session1 && !chromeHost) log(`no chrome-host${chromeHostModule instanceof Error ? ` (${chromeHostModule.message})` : ''} — this daemon's spine launches no browser`);
+    chromeHost?.sweepOrphans();
     // ARRIVING INTO A PROFILE SOMEBODY ELSE IS HOLDING. Session-scoping the singleton opens a
     // door the profile-scoped guard used to hold shut: this daemon may now start while another
     // session's spine — or an orphan our own crashed predecessor left behind — still holds this

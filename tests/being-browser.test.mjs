@@ -407,10 +407,10 @@ describe('the mint: a boxed ccode session is handed its credential, and loses it
 // ── 4. THE REQUEST IS /chrome's LAUNCH PATH ───────────────────────────────────────────────────
 describe('browser start goes through /chrome\'s own launch path', () => {
   const kg = { node_name: 'kg', whatsapp: { chat_id: '!self' }, chrome: { bin: 'C:/x/chrome.exe', profile_dir: 'C:/x/brain' } };
-  function cmdsWith({ spawnChromePipe }) {
+  function cmdsWith({ chromeHost }) {
     const sent = [];
     const cmds = createCommands({
-      getConfig: () => kg, spawnChromePipe, profileHolder: () => null,
+      getConfig: () => kg, chromeHost, profileHolder: () => null,
       send: async (chatId, text) => sent.push(text), brains: { resolve: (name) => ({ name, type: 'ccode' }) },
     });
     return { cmds, sent };
@@ -421,7 +421,7 @@ describe('browser start goes through /chrome\'s own launch path', () => {
     const b = browser();
     const { cmds } = cmdsWith(b);
     expect(await cmds.startBrowser()).toEqual({ ok: true, launched: true, detail: 'the "brain" browser is up (pid 1001)' });
-    expect(b.calls.map((c) => [c.userDataDir, c.bin])).toEqual([['C:/x/brain', 'C:/x/chrome.exe']]);
+    expect(b.calls.map((c) => [c.profileDir, c.bin])).toEqual([['C:/x/brain', 'C:/x/chrome.exe']]);
   });
 
   it('IDEMPOTENT: a running Chrome launches nothing and says so', async () => {
@@ -444,13 +444,13 @@ describe('browser start goes through /chrome\'s own launch path', () => {
   });
 
   it('a launch that fails is reported with the launcher\'s own detail', async () => {
-    const { cmds } = cmdsWith({ spawnChromePipe: async () => { throw new Error('Chrome executable not found in standard locations'); } });
+    const { cmds } = cmdsWith({ chromeHost: { ...fakePipeChrome().chromeHost, launch: async () => { throw new Error('Chrome executable not found in standard locations'); } } });
     expect(await cmds.startBrowser()).toEqual({ ok: false, reason: 'no-browser', detail: 'Chrome executable not found in standard locations' });
   });
 
-  it('ONE launch path: /chrome and startBrowser both go through ensureChrome, the one spawnChromePipe call', () => {
+  it('ONE launch path: /chrome and startBrowser both go through ensureChrome, the one chromeHost.launch call', () => {
     const src = readFileSync(join(REPO, 'src', 'spine', 'commands.mjs'), 'utf8');
-    expect(src.match(/await spawnChromePipe\(/g)).toHaveLength(1);
+    expect(src.match(/chromeHost\.launch\(/g)).toHaveLength(1);
     const report = src.slice(src.indexOf('async function chromeReport('));
     const start = src.slice(src.indexOf('async function startBrowser('), src.indexOf('async function chromeReport('));
     expect(report).toMatch(/await ensureChrome\(conversation\)/);

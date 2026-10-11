@@ -109,7 +109,7 @@ function harness({ cdp, adapters = ADAPTERS, roomNames = [], config = {}, resolv
   const cmds = createCommands({
     getConfig: () => ({ whatsapp: { chat_id: '!conv-1' }, ...config }),
     send: async (chatId, text) => sent.push({ chatId, text }),
-    spawnChromePipe: fakePipeChrome(cdp).spawnChromePipe,   // the chat's group Chrome, answering like `cdp`
+    chromeHost: fakePipeChrome(cdp).chromeHost,   // the chat's group Chrome, answering like `cdp`
     profileHolder: () => null,
     loadAdapters: async () => adapters,
     resolveConvRoom,
@@ -241,7 +241,7 @@ describe('a room READ never mints — /rooms create is the only room path that w
     const cmds = createCommands({
       getConfig: () => ({ whatsapp: { chat_id: '!conv-1' } }),
       send: async (chatId, text) => sent.push({ chatId, text }),
-      spawnChromePipe: fakePipeChrome({ listTabs: async () => [] }).spawnChromePipe,
+      chromeHost: fakePipeChrome({ listTabs: async () => [] }).chromeHost,
       profileHolder: () => null,
       resolveConvRoom, listRoomNames: () => [],
     });

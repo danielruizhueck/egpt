@@ -2057,3 +2057,41 @@ describe('the stand-down watch keeps the daemon alive (real process, real timers
     }
   }, 40_000);
 });
+
+// The Session-1 daemon HOLDS the group Chromes (src/chrome-host.mjs): its spine gets an IPC slot and the
+// flag that tells it a host is on the other end; orphans are swept once, before the first spine.
+describe('the S1 daemon holds the group Chromes', () => {
+  const fakeHost = () => {
+    const seen = [];
+    const create = (o) => { seen.push(['create', o.profilesRoot]); return { sweepOrphans: () => seen.push(['sweep']), attach: (child) => seen.push(['attach', child]) }; };
+    return { seen, create };
+  };
+
+  it('S1: sweeps orphans, then spawns the spine with an ipc slot + EGPT_CHROME_HOST and hands the host every child', () => {
+    const h = fakeHost();
+    const { runtime, children } = makeRuntime({ session1: true, createChromeHost: h.create });
+    runtime.start();
+    runtime.spawnShell();
+    expect(children).toHaveLength(2);
+    expect(children[0].opts.stdio).toEqual(['inherit', 'inherit', 'inherit', 'ipc']);
+    expect(children[0].opts.env).toMatchObject({ EGPT_CHROME_HOST: '1' });
+    expect(h.seen).toEqual([['create', join('C:/home/.egpt', 'chrome', 'profiles')], ['sweep'], ['attach', children[0].child], ['attach', children[1].child]]);
+  });
+
+  it('S1 with per-profile logs keeps its log fds and adds the ipc slot', () => {
+    const h = fakeHost();
+    let fd = 300;
+    const { runtime, children } = makeRuntime({ session1: true, createChromeHost: h.create, perProfileLogs: true, openSync: () => fd++, fstatSync: () => ({ ino: 0, dev: 0 }), mkdirSync: () => {}, closeSync: () => {} });
+    runtime.start();
+    expect(children[0].opts.stdio).toEqual(['ignore', 300, 301, 'ipc']);
+  });
+
+  it('S0: no host, no ipc slot, no flag', () => {
+    const h = fakeHost();
+    const { runtime, children } = makeRuntime({ createChromeHost: h.create });
+    runtime.start();
+    expect(children[0].opts.stdio).toBe('inherit');
+    expect(children[0].opts.env.EGPT_CHROME_HOST).toBeUndefined();
+    expect(h.seen).toEqual([]);
+  });
+});

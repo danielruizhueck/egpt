@@ -4,7 +4,7 @@
 // CDP rides two inherited fds (3 client→Chrome writes, 4 Chrome→client reads),
 // each message ASCII JSON followed by a single \0 byte, targets discovered and
 // addressed through the Target domain (flat protocol, sessionId). This proves
-// createPipeTransport speaks that wire against a FAKE peer — two in-memory
+// createChannelTransport over createPipeChannel speaks that wire against a FAKE peer — two in-memory
 // streams, no real Chrome — and that createCdpClient's ops read the same over
 // the pipe as over the port (3a is the transport only; 3b hands it real fds).
 //
@@ -14,7 +14,7 @@
 // wrote, is itself the framing proof on both directions.
 import { describe, it, expect } from 'vitest';
 import { PassThrough } from 'node:stream';
-import { createPipeTransport, createCdpClient } from '../src/tools/cdp.mjs';
+import { createChannelTransport, createPipeChannel, createCdpClient } from '../src/tools/cdp.mjs';
 
 const tick = () => new Promise(r => setTimeout(r, 10));
 
@@ -66,7 +66,7 @@ function fakePeer(respond = script) {
       if (out !== undefined) for (const r of [].concat(out)) push(r);
     }
   });
-  const transport = createPipeTransport({ writable: toChrome, readable: toClient });
+  const transport = createChannelTransport(createPipeChannel({ writable: toChrome, readable: toClient }));
   return { transport, received, rawWrites, push, toChrome, toClient };
 }
 
@@ -102,7 +102,7 @@ describe('pipe transport — framing + id correlation', () => {
   it('reassembles a response split across readable chunks — a frame dispatches only at its \\0', async () => {
     const toChrome = new PassThrough();
     const toClient = new PassThrough();
-    const transport = createPipeTransport({ writable: toChrome, readable: toClient });
+    const transport = createChannelTransport(createPipeChannel({ writable: toChrome, readable: toClient }));
     const s = await transport.openBrowserSession();
     const pending = s.send('Whatever');
 

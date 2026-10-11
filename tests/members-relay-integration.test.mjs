@@ -72,7 +72,7 @@ function commandsFor(resolveConvRoom) {
   const cmds = createCommands({
     getConfig: () => ({ whatsapp: { chat_id: '!conv-1' } }),
     send: async (chatId, text) => sent.push({ chatId, text }),
-    spawnChromePipe: fakePipeChrome({ listTabs: async () => threeTabs }).spawnChromePipe, profileHolder: () => null,
+    chromeHost: fakePipeChrome({ listTabs: async () => threeTabs }).chromeHost, profileHolder: () => null,
     loadAdapters: async () => ADAPTERS,
     resolveConvRoom,
   });

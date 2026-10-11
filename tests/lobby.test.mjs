@@ -260,7 +260,7 @@ describe('/members in the lobby — lists the node\'s local beings E/D/L', () =>
     const cmds = createCommands({
       getConfig: () => ({ agents }),
       send: async (chatId, text) => sent.push({ chatId, text }),
-      spawnChromePipe: fakePipeChrome({ listTabs: async () => [] }).spawnChromePipe, profileHolder: () => null,
+      chromeHost: fakePipeChrome({ listTabs: async () => [] }).chromeHost, profileHolder: () => null,
       resolveConvRoom: async () => room,
     });
     return { cmds, sent, room };
@@ -304,7 +304,7 @@ describe('/members in the lobby — lists the node\'s local beings E/D/L', () =>
     const cmds = createCommands({
       getConfig: () => ({ agents: { e: { default: true }, l: {} } }),
       send: async (chatId, text) => sent.push({ chatId, text }),
-      spawnChromePipe: fakePipeChrome({ listTabs: async () => [] }).spawnChromePipe, profileHolder: () => null,
+      chromeHost: fakePipeChrome({ listTabs: async () => [] }).chromeHost, profileHolder: () => null,
       resolveConvRoom: async () => room,
     });
     await cmds.run({ chatId: '!c', surface: 'whatsapp', body: '/members' });
@@ -396,7 +396,7 @@ describe('lobby relay — @chatgpt added in the lobby fires the phase-4 relay', 
     const cmds = createCommands({
       getConfig: () => ({ agents: { e: { default: true } } }),
       send: async (chatId, text) => sent.push({ chatId, text }),
-      spawnChromePipe: fakePipeChrome({ listTabs: async () => oneTab }).spawnChromePipe, profileHolder: () => null,
+      chromeHost: fakePipeChrome({ listTabs: async () => oneTab }).chromeHost, profileHolder: () => null,
       loadAdapters: async () => ADAPTERS,
       resolveConvRoom,
     });

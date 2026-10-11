@@ -81,6 +81,40 @@ through UAC — unusable over ssh unless already elevated. Since 2026-09-14 it
 refuses a half-applied tree: prod HEAD must equal `origin/main`, no tracked file
 may differ.
 
+### The Session 1 daemon holds the browsers
+
+Since 2026-10-11 (`feat/daemon-holds-chrome`) the **Session 1 daemon** — the `egpt-daemon`
+scheduled task, not the service — launches and holds every browser group's Chrome and its CDP
+pipe (`src/chrome-host.mjs`). `/upgrade`, `/restart` and a config restart respawn only the
+spine; the new spine re-attaches to the Chromes the daemon still holds. A spine with no such
+daemon (Session 0, run by hand) has **no browser**: `/chrome` answers "no daemon chrome-host".
+
+`/upgrade` never reloads daemon code: a daemon imports its modules once, at start. Chrome exits
+the moment the process holding its pipe exits (measured 2026-10-11), so a daemon restart
+restarts every group Chrome; `--restore-last-session` reopens their tabs.
+
+**One-time, on each node, right after the `/upgrade` that ships this change** — until it runs,
+that node has no browser (the new spine finds no host under the old daemon). In the node's
+logged-on session, as the operator (no elevation; the task is the operator's):
+
+```
+Stop-ScheduledTask -TaskName egpt-daemon
+Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -match 'egpt-daemon\.mjs' -and $_.SessionId -ne 0 } | Select-Object ProcessId,CommandLine
+Start-ScheduledTask -TaskName egpt-daemon
+```
+
+The middle line must list nothing — the task is `MultipleInstances=IgnoreNew`, so a daemon still
+running makes the start a no-op; `taskkill /PID <pid> /T /F` it first. The spine is down for the
+few seconds between stop and start. Not measured: whether the old Session 1 spine dies with its
+daemon. If it does, a turn in progress is cut and the stood-down Session 0 daemon may claim the
+profile for a moment; if it survives, the new spine takes the profile from it through the ordinary
+stand-down handover (it drains its turn). Either way the new Session 1 spine ends up holding it.
+Done when `<profile>/config/logs/session1-daemon.log` shows a fresh
+`egpt-daemon up` with no `no chrome-host` line after it, and `/chrome <node>` logs
+`launched "brain" Chrome … held by the daemon`. At start the new daemon kills any
+`--remote-debugging-pipe` Chrome left on a profile under `<profile>/chrome/profiles` (an orphan
+of the old spine); nothing else.
+
 **A deploy that died partway** leaves prod HEAD unchanged, some files already new
 (one truncated), a stale lock, service never restarted. Confirm nothing holds the
 lock (`Get-Process git`), then reset:

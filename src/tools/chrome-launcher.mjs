@@ -1,9 +1,9 @@
-// tools/chrome-launcher.mjs — locate Chrome, find the brain profile, and spawn a browser group's
-// Chrome over --remote-debugging-pipe. Nothing here launches a Chrome on a debug port.
+// tools/chrome-launcher.mjs — locate Chrome, find the brain profile, the args a browser group's
+// Chrome is launched with over --remote-debugging-pipe (by the S1 daemon, src/chrome-host.mjs), and
+// the OS process probes its orphan sweep uses. Nothing here launches a Chrome on a debug port.
 
-import { spawn } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, statSync, readFileSync, openSync, closeSync, readlinkSync } from 'node:fs';
-import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { EGPT_HOME } from '../egpt-home.mjs';
 
@@ -135,7 +135,7 @@ export function resolveBrainProfile({ egptHome = EGPT_HOME, fs = defaultFs, read
 // Pipe-mode flags (chunk 3b): --remote-debugging-pipe instead of a port, and NO --remote-allow-origins
 // (that is port/WS-only). Keeps the non-default --user-data-dir (Chrome 136 requires it), --no-first-run,
 // the no-banner --silent-debugger-extension-api, and the renderer-alive flags. --load-extension still opts.
-// --restore-last-session: a relaunch (every spine restart, every eviction) reopens the group's tabs.
+// --restore-last-session: a relaunch (an eviction, a crash, a daemon restart) reopens the group's tabs.
 export function chromePipeArgs({ userDataDir, extensionDir, url = 'about:blank' }) {
   const args = [
     '--remote-debugging-pipe',
@@ -154,26 +154,6 @@ export function chromePipeArgs({ userDataDir, extensionDir, url = 'about:blank' 
   return args;
 }
 
-/**
- * Spawn a group's Chrome driven over --remote-debugging-pipe. DIRECT-SPAWN ONLY: the spine holds
- * fds 3 & 4 itself. stdio ['inherit','inherit','inherit','pipe','pipe'] hands the child fd3 (we
- * write CDP) and fd4 (we read CDP). Returns { child, writable, readable, pid } — createPipeTransport
- * in cdp.mjs takes { writable, readable }. onExit({ code, signal, error }) fires when it ends or never
- * starts; passing it also installs the child's 'error' listener (without one a failed spawn throws).
- */
-export async function spawnChromePipe({ userDataDir, extensionDir, url = 'about:blank', bin = null, onExit = null }) {
-  const chrome = bin || findChromeExecutable();
-  if (!chrome) throw new Error('Chrome executable not found in standard locations');
-  await mkdir(userDataDir, { recursive: true });
-  const args = chromePipeArgs({ userDataDir, extensionDir, url });
-  const child = spawn(chrome, args, { stdio: ['inherit', 'inherit', 'inherit', 'pipe', 'pipe'] });
-  if (onExit) {
-    child.on('error', (error) => { try { onExit({ code: null, signal: null, error }); } catch { /* supervisor's problem */ } });
-    child.on('exit', (code, signal) => { try { onExit({ code, signal, error: null }); } catch { /* supervisor's problem */ } });
-  }
-  return { child, writable: child.stdio[3], readable: child.stdio[4], pid: child.pid };
-}
-
 // Who already runs a Chrome on this --user-data-dir, or null. A running Chrome holds <dir>/lockfile
 // open without write sharing (Windows) or points <dir>/SingletonLock at <host>-<pid> (POSIX); both
 // outlive a Chrome that exited, so the probe is the open / the pid, never mere existence.
@@ -185,4 +165,20 @@ export function profileHolder(userDataDir) {
   let pid;
   try { pid = Number(/-(\d+)$/.exec(readlinkSync(join(userDataDir, 'SingletonLock')))?.[1]); } catch { return null; }
   try { process.kill(pid, 0); return `pid ${pid}`; } catch (e) { return e.code === 'EPERM' ? `pid ${pid}` : null; }
+}
+
+// Every running chrome.exe as { pid, cmd } (its command line) — the daemon's orphan sweep (src/chrome-host.mjs).
+export function chromeProcesses() {
+  if (process.platform === 'win32') {
+    const ps = "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress";
+    const out = spawnSync('powershell', ['-NoProfile', '-Command', ps], { encoding: 'utf8', windowsHide: true }).stdout?.trim();
+    return [].concat(JSON.parse(out || '[]')).map((p) => ({ pid: p.ProcessId, cmd: p.CommandLine ?? '' }));
+  }
+  const out = spawnSync('ps', ['-eo', 'pid=,args='], { encoding: 'utf8' }).stdout ?? '';
+  return out.split('\n').map((l) => /^\s*(\d+)\s+(.*)$/.exec(l)).filter(Boolean).map((m) => ({ pid: Number(m[1]), cmd: m[2] }));
+}
+
+export function killProcessTree(pid) {
+  if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true });
+  else try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
 }

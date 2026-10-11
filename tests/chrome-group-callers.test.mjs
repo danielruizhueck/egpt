@@ -34,11 +34,11 @@ function build({ state = STATE, groups = GROUPS, requestLogin, ...seams } = {}) 
     openTab: async (url) => { brainOpens.push(url); return 'B9'; },
   };
   const pipe = { listTabs: async () => [{ id: 'P1', url: 'https://pipe.example/', title: 'PipeTab' }] };
-  const { spawnChromePipe, calls } = fakePipeChrome((o) => (o.userDataDir === CHROME_BRAIN_PROFILE ? brain : pipe));
+  const { chromeHost, calls } = fakePipeChrome((o) => (o.profileDir === CHROME_BRAIN_PROFILE ? brain : pipe));
   let t = 0;
   const cmds = createCommands({
     getConfig: () => ({ node_name: 'kg', agents: { e: {} }, whatsapp: { chat_id: '!admin' } }),
-    spawnChromePipe,
+    chromeHost,
     profileHolder: () => null,
     freeMem: () => 8192 * MB,
     rssOf: () => null,
@@ -88,14 +88,14 @@ describe('startBrowser(conversation)', () => {
     const r = await cmds.startBrowser(await cmds.browserConversationOf('whatsapp', '!admin'));
     expect(r).toMatchObject({ ok: true, launched: true });
     expect(r.detail).toMatch(/the "brain" browser is up/);
-    expect(calls.map((c) => c.userDataDir)).toEqual([CHROME_BRAIN_PROFILE]);
+    expect(calls.map((c) => c.profileDir)).toEqual([CHROME_BRAIN_PROFILE]);
   });
 
   it('an unlisted chat → its shared group pipe Chrome', async () => {
     const { cmds, calls } = build();
     const r = await cmds.startBrowser(await cmds.browserConversationOf('whatsapp', '!reinie'));
     expect(r).toMatchObject({ ok: true, launched: true });
-    expect(calls.map((c) => c.userDataDir)).toEqual([sharedDir]);
+    expect(calls.map((c) => c.profileDir)).toEqual([sharedDir]);
   });
 
   it('ambiguous → no browser, one log line, never the brain', async () => {
@@ -111,7 +111,7 @@ describe('startBrowser(conversation)', () => {
     const { cmds, calls } = build();
     expect(await cmds.startBrowser()).toMatchObject({ ok: true, launched: true });
     expect(await cmds.startBrowser()).toEqual({ ok: true, alreadyRunning: true, detail: 'the "brain" browser is already running (pid 1001)' });
-    expect(calls.map((c) => c.userDataDir)).toEqual([CHROME_BRAIN_PROFILE]);
+    expect(calls.map((c) => c.profileDir)).toEqual([CHROME_BRAIN_PROFILE]);
   });
 });
 
@@ -121,7 +121,7 @@ describe('/chrome resolves the chat it was typed in', () => {
     await run(cmds, '!admin', '/chrome kg');
     expect(sent[0].text).toMatch(/attached: the "brain" browser \(pipe\)/);
     expect(sent[0].text).toMatch(/Gmail/);
-    expect(calls.map((c) => c.userDataDir)).toEqual([CHROME_BRAIN_PROFILE]);
+    expect(calls.map((c) => c.profileDir)).toEqual([CHROME_BRAIN_PROFILE]);
   });
 
   it('in an unlisted chat → the shared group Chrome\'s tabs, not the brain\'s', async () => {
@@ -129,7 +129,7 @@ describe('/chrome resolves the chat it was typed in', () => {
     await run(cmds, '!reinie', '/chrome kg');
     expect(sent[0].text).toMatch(/PipeTab/);
     expect(sent[0].text).not.toMatch(/Gmail|9221/);
-    expect(calls.map((c) => c.userDataDir)).toEqual([sharedDir]);
+    expect(calls.map((c) => c.profileDir)).toEqual([sharedDir]);
   });
 
   it('ambiguous → no browser, nothing launched', async () => {
@@ -208,7 +208,7 @@ describe('/members, /activate and /status reach the chat\'s group Chrome', () =>
     await run(cmds, '!reinie', '/members add tab 1');
     expect(sent[0].text).toMatch(/added 'pipe'/);
     expect(members.map((m) => [m.url, m.targetId])).toEqual([['https://pipe.example/', 'P1']]);
-    expect(calls.map((c) => c.userDataDir)).toEqual([sharedDir]);
+    expect(calls.map((c) => c.profileDir)).toEqual([sharedDir]);
   });
 
   it('/members reads presence from the group Chrome only when it is up — a roster never launches one', async () => {
@@ -226,7 +226,7 @@ describe('/members, /activate and /status reach the chat\'s group Chrome', () =>
     await run(cmds, '!admin', '/activate gm');
     expect(sent[0].text).toBe('reopened https://mail.google.com/ · tab B9 · active');
     expect(brainOpens).toEqual(['https://mail.google.com/']);
-    expect(calls.map((c) => c.userDataDir)).toEqual([CHROME_BRAIN_PROFILE]);
+    expect(calls.map((c) => c.profileDir)).toEqual([CHROME_BRAIN_PROFILE]);
   });
 
   it('/activate in a chat with no browser says so, and opens nothing', async () => {
@@ -244,7 +244,7 @@ describe('/members, /activate and /status reach the chat\'s group Chrome', () =>
     await run(cmds, '!reinie', '/tabs');
     await run(cmds, '!reinie', '/status');
     expect(sent[2].text).toMatch(/chrome: up · 1 brain tabs/);
-    expect(calls.map((c) => c.userDataDir)).toEqual([sharedDir]);
+    expect(calls.map((c) => c.profileDir)).toEqual([sharedDir]);
   });
 });
 

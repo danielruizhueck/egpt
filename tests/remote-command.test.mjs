@@ -126,7 +126,7 @@ function nodeStack({ config, cdp = LIVE_CDP, resolveConvRoom, loadAdapters } = {
     getConfig: () => config,
     send: (chatId, text) => bridge.send(chatId, text),
     exit: (code) => exits.push(code),
-    spawnChromePipe: fakePipeChrome(cdp).spawnChromePipe,   // the node's group Chrome, answering like `cdp`
+    chromeHost: fakePipeChrome(cdp).chromeHost,   // the node's group Chrome, answering like `cdp`
     profileHolder: () => null,
     now: () => t,
     sleep: async (ms) => { t += ms; },
@@ -588,7 +588,7 @@ describe("responder — a room-scoped command over the mesh resolves to THIS nod
     const commands = createCommands({
       getConfig: () => DO(),
       send: () => {},
-      spawnChromePipe: fakePipeChrome({ listTabs: async () => oneTab }).spawnChromePipe, profileHolder: () => null,
+      chromeHost: fakePipeChrome({ listTabs: async () => oneTab }).chromeHost, profileHolder: () => null,
       loadAdapters: async () => ADAPTERS,
       resolveConvRoom: resolve,
     });

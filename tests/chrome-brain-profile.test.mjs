@@ -1,5 +1,4 @@
-// tests/chrome-brain-profile.test.mjs — resolveBrainProfile() discovery, spawnChromePipe's
-// configured binary, and profileHolder.
+// tests/chrome-brain-profile.test.mjs — resolveBrainProfile() discovery and profileHolder.
 //
 // THE BUG (2026-07-22): /chrome hardcoded the brain profile to
 // <EGPT_HOME>/chrome/profiles/brain — a BLANK fresh profile with no ChatGPT/Claude
@@ -14,7 +13,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync, readFileSync
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { resolveBrainProfile, spawnChromePipe, profileHolder } from '../src/tools/chrome-launcher.mjs';
+import { resolveBrainProfile, profileHolder } from '../src/tools/chrome-launcher.mjs';
 
 // Build a Chrome-shaped profile at `dir`. A REAL profile needs Default/Preferences OR
 // Default/Network/Cookies; `history`/`cookies` (when non-null) seed the AI-marker files.
@@ -118,23 +117,6 @@ describe('resolveBrainProfile()', () => {
     expect(() => { out = resolveBrainProfile({ egptHome }); }).not.toThrow();
     expect(out).toBe(v2Default());
     expect(out.startsWith(egptHome)).toBe(true);
-  });
-});
-
-// spawnChromePipe's CONFIGURED binary (config `chrome.bin`) and its onExit callback. SAFE BY
-// CONSTRUCTION: `bin` points at a path that does not exist, so the operating system starts NOTHING.
-// What the test observes is the ENOENT arriving through onExit: a ChildProcess with no 'error'
-// listener turns that failure into an UNCAUGHT exception, and the spine is the process that would take.
-describe('spawnChromePipe({ bin, onExit })', () => {
-  it('runs the CONFIGURED binary, and hands a failed spawn to onExit instead of throwing', async () => {
-    const missing = join(root, 'no-such-chrome.exe');
-    const seen = [];
-    const out = await spawnChromePipe({ userDataDir: join(root, 'profile'), bin: missing, onExit: (e) => seen.push(e) });
-    expect(out.child.spawnfile).toBe(missing);   // the configured binary — not one findChromeExecutable found
-    expect(out.pid).toBeUndefined();             // nothing started
-    await new Promise((r) => setTimeout(r, 250));   // the child's 'error' event is asynchronous
-    expect(seen).toHaveLength(1);
-    expect(`${seen[0].error?.code ?? ''} ${seen[0].error?.message ?? ''}`).toMatch(/ENOENT/);
   });
 });
 

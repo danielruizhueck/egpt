@@ -50,8 +50,9 @@ import { compactionRatio } from './compaction.mjs';
 import { NODE_FILE, REGISTRY_FILE, parseEntityConfig } from './config-resolver.mjs';
 import { CONFIG_YAML_PATH, writeConfigKey } from '../tools/config-io.mjs';
 import { resolveConfigKey } from '../../config/config-schema.mjs';
-import { createCdpClient, createPipeTransport } from '../tools/cdp.mjs';
-import { resolveBrainProfile, spawnChromePipe as defaultSpawnChromePipe, profileHolder as defaultProfileHolder } from '../tools/chrome-launcher.mjs';
+import { createCdpClient, createChannelTransport } from '../tools/cdp.mjs';
+import { resolveBrainProfile, chromePipeArgs, profileHolder as defaultProfileHolder } from '../tools/chrome-launcher.mjs';
+import { connectChromeHost } from '../chrome-host.mjs';
 import { admitLaunch, estimateChromeBytes, BRAIN_GROUP, SHARED_GROUP, isSafeGroupName, chromeConversationOf } from './chrome-pool.mjs';
 import { freemem } from 'node:os';
 import { helpText } from '../interpreter.mjs';
@@ -619,12 +620,12 @@ export function createCommands({
   // Clock seam — real timers by default; tests inject a fake clock.
   now = () => Date.now(),
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
-  // Group-Chrome pool seams — a FAKE child + injected memory in tests, never a real spawn or a real
-  // OS probe. spawnChromePipe direct-spawns a pipe Chrome (the spine holds the fds); profileHolder
-  // says whether another Chrome already holds a profile; freeMem/rssOf feed the pure admission
-  // (chrome-pool.mjs); onChromeLog reports launches / evictions / deaths / refusals. Boot injects
-  // onChromeLog only (real spawn + probes).
-  spawnChromePipe = defaultSpawnChromePipe,
+  // Group-Chrome pool seams — a FAKE host + injected memory in tests, never a real spawn or a real
+  // OS probe. chromeHost is the S1 daemon that launches and holds every pipe Chrome (src/chrome-host.mjs;
+  // null → no browser); profileHolder says whether another Chrome already holds a profile; freeMem/rssOf
+  // feed the pure admission (chrome-pool.mjs); onChromeLog reports launches / evictions / deaths /
+  // refusals. Boot injects onChromeLog only (real host + probes).
+  chromeHost = connectChromeHost(),
   profileHolder = defaultProfileHolder,
   freeMem = () => freemem(),
   rssOf = defaultRssOf,
@@ -1215,9 +1216,9 @@ export function createCommands({
 
   // ─────────────────────────────────────────────────────────────────────────────
   // /chrome [<node>] — the chat's browser-group Chrome: launched over the pipe when it is not up,
-  // then its tabs. The spine spawns every Chrome itself (it must hold the pipe's fds), and a child
+  // then its tabs. The Session 1 daemon spawns and holds every Chrome (src/chrome-host.mjs), and a child
   // inherits its parent's session (measured 2026-07-15: spine SessionId 0, explorer.exe SessionId 1),
-  // so only a Session 1 spine puts the window on the operator's desktop.
+  // so the window lands on the operator's desktop; a spine with no such daemon has no browser.
   //
   // NODE GATE: `<node>` is matched against this node's own names (node_name ∪ node_alias,
   // via the shared ownNodeNamesOf). A non-match replies NOTHING AT ALL — the same
@@ -1236,9 +1237,10 @@ export function createCommands({
   // ── GROUP CHROME POOL (plans/2610091931 rev 2026-10-11) ──────────────────────────────────────
   // One pipe-driven chrome.exe per browser-group profile dir, brain included; no Chrome listens on
   // a port. brain and shared serve many chats: never evicted, and brain is never memory-gated.
-  const _groups = new Map();     // profileDir → { group, child, client, writable, readable, pid, lastUsedAt, busy }
+  // The daemon holds each Chrome (chromeHost); every decision is here, and ships with /upgrade.
+  const _groups = new Map();     // profileDir → { group, channel, client, pid, lastUsedAt, busy }
   const _ensuring = new Map();   // profileDir → in-flight launch (per-profile single-flight)
-  const chromeAlive = (e) => !!e?.child && e.child.exitCode == null && !e.child.killed;
+  const chromeAlive = (e) => !!e && !e.channel.closed;
   const evictable = (e) => !e.busy && chromeAlive(e) && e.group !== BRAIN_GROUP && e.group !== SHARED_GROUP;
   const launchEstimateBytes = () => (Number(cfg()?.chrome?.launch_estimate_mb) || CHROME_LAUNCH_ESTIMATE_MB) * MB;
   const memoryMarginBytes = () => (Number(cfg()?.chrome?.memory_margin_mb) || CHROME_MEMORY_MARGIN_MB) * MB;
@@ -1252,11 +1254,32 @@ export function createCommands({
       if (!victim || e.lastUsedAt < victim.e.lastUsedAt) victim = { dir, e };
     }
     if (!victim) return false;
-    try { victim.e.child.kill(); } catch {}
+    try { chromeHost.kill(victim.e.group); } catch {}
     _groups.delete(victim.dir);
     onChromeLog(`evicted group Chrome ${victim.dir} (pid ${victim.e.pid ?? '?'}) under memory pressure`);
     return true;
   }
+
+  const track = (group, profileDir, { pid, channel }) => {
+    const e = { group, channel, client: createCdpClient(createChannelTransport(channel)), pid, lastUsedAt: now(), busy: false };
+    _groups.set(profileDir, e);
+    return e;
+  };
+  // A restarted spine joins the Chromes the daemon still holds, before any launch — never over one.
+  const _reattached = (async () => {
+    if (!chromeHost) return;
+    chromeHost.onExit(({ group, pid, code, signal }) => {
+      for (const [dir, e] of _groups) if (e.pid === pid) _groups.delete(dir);
+      onChromeLog(`"${group}" Chrome (pid ${pid}) exited (${signal ? `signal ${signal}` : `code ${code}`}) — nothing restarted; it relaunches on next need`);
+    });
+    try {
+      for (const g of await chromeHost.list()) {
+        track(g.group, g.profileDir, g);
+        onChromeLog(`re-attached "${g.group}" Chrome ${g.profileDir} (pid ${g.pid}), held by the daemon`);
+      }
+    } catch (e) { onChromeLog(`could not list the daemon's Chromes — ${e?.message ?? e}`); }
+  })();
+  const NO_CHROME_HOST = 'this spine has no daemon chrome-host (run by hand, or not the Session 1 daemon) — it launches no browser';
 
   // THE ONE LAUNCH PATH — /chrome, a being's `browser start` / `browser cdp`, /tabs…, /members,
   // /login, the relay, a browser beat. No conversation → brain. Registry keyed by profile dir; a live
@@ -1264,7 +1287,8 @@ export function createCommands({
   // FAIL CLOSED: a refused chat, a non-brain group on the brain's dir, or a profile another Chrome
   // already holds → no browser + one log line. Never throws.
   // Resolves { group, profileDir, client, pid, launched, running, declined?, why? }.
-  function ensureChrome(conversation, { launch = true } = {}) {
+  function ensureChrome(conversation, opts) { return _reattached.then(() => ensureGroupChrome(conversation, opts)); }
+  function ensureGroupChrome(conversation, { launch = true } = {}) {
     conversation ??= { key: '', name: '', group: BRAIN_GROUP };
     const { group } = conversation;
     const profileDir = chromeProfileOf(cfg(), conversation);
@@ -1278,6 +1302,10 @@ export function createCommands({
     if (!launch) return Promise.resolve({ group, profileDir, client: null, launched: false, running: false, why: `the "${group}" browser is not running` });
     if (_ensuring.has(profileDir)) return _ensuring.get(profileDir);
     const p = (async () => {
+      if (!chromeHost) {
+        onChromeLog(`no browser for "${conversation.name ?? ''}": ${NO_CHROME_HOST}`);
+        return { group, profileDir, client: null, launched: false, running: false, why: NO_CHROME_HOST };
+      }
       const holder = profileHolder(profileDir);
       if (holder) {
         onChromeLog(`not launching "${group}" Chrome ${profileDir}: another Chrome holds it (${holder})`);
@@ -1299,23 +1327,13 @@ export function createCommands({
       }
       let spawned;
       try {
-        spawned = await spawnChromePipe({
-          userDataDir: profileDir,
-          bin: chromeBinOf(cfg()),
-          onExit: ({ code, signal, error }) => {
-            if (_groups.get(profileDir)?.pid === spawned?.pid) _groups.delete(profileDir);
-            onChromeLog(error
-              ? `group Chrome ${profileDir} never started — ${error?.message ?? error}`
-              : `group Chrome ${profileDir} exited (${signal ? `signal ${signal}` : `code ${code}`}) — nothing restarted; it relaunches on next need`);
-          },
-        });
+        spawned = await chromeHost.launch({ group, profileDir, bin: chromeBinOf(cfg()), argv: chromePipeArgs({ userDataDir: profileDir }) });
       } catch (e) {
         onChromeLog(`group Chrome ${profileDir} launch failed — ${e?.message ?? e}`);
         return { group, profileDir, client: null, launched: false, running: false, why: String(e?.message ?? e) };
       }
-      const client = createCdpClient(createPipeTransport({ writable: spawned.writable, readable: spawned.readable }));
-      _groups.set(profileDir, { group, child: spawned.child, client, writable: spawned.writable, readable: spawned.readable, pid: spawned.pid, lastUsedAt: now(), busy: false });
-      onChromeLog(`launched "${group}" Chrome ${profileDir} (pid ${spawned.pid ?? '?'}) over --remote-debugging-pipe`);
+      const { client } = track(group, profileDir, spawned);
+      onChromeLog(`launched "${group}" Chrome ${profileDir} (pid ${spawned.pid ?? '?'}) over --remote-debugging-pipe, held by the daemon`);
       return { group, profileDir, client, pid: spawned.pid, launched: true, running: true };
     })().finally(() => { _ensuring.delete(profileDir); });
     _ensuring.set(profileDir, p);

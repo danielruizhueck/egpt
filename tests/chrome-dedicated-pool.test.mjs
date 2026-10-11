@@ -3,8 +3,8 @@
 // launches its GROUP's Chrome over --remote-debugging-pipe, driven by a pipe cdpClient (3a). The
 // non-brain groups are admitted by the pure memory check (chunk 2); brain and shared are never evicted.
 //
-// NO REAL CHROME: spawnChromePipe is faked with two in-memory streams as fds 3 & 4 (like 3a's fake
-// peer) and a fake child; memory (freeMem/rssOf) is injected as plain numbers, so admission is
+// NO REAL CHROME: the daemon's chromeHost is faked over two in-memory streams as fds 3 & 4 (like 3a's
+// fake peer) and a fake child; memory (freeMem/rssOf) is injected as plain numbers, so admission is
 // deterministic. The pipe client actually speaks CDP against a scripted peer, so "a client was built
 // over the pipe" is proven by a round-trip, not by inspection.
 import { describe, it, expect } from 'vitest';
@@ -14,6 +14,7 @@ import { join, dirname } from 'node:path';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { chromePipeArgs } from '../src/tools/chrome-launcher.mjs';
+import { createPipeChannel } from '../src/tools/cdp.mjs';
 import { createCommands, CHROME_BRAIN_PROFILE } from '../src/spine/commands.mjs';
 import { chromeConversationOf } from '../src/spine/chrome-pool.mjs';
 import { readBrowserGroups } from '../src/rooms-file.mjs';
@@ -38,14 +39,15 @@ function wirePeer(toChrome, toClient) {
   });
 }
 
-// A fake spawnChromePipe: records call opts + the handles it returned, wires opts.onExit to the fake
-// child (as the real launcher does), and models memory as a shared cell — a spawn CONSUMES `cost`, a
-// child.kill() (eviction) FREES it, so pressure is deterministic.
+// A fake chromeHost (src/chrome-host.mjs connectChromeHost's shape): records launch opts + the handles
+// it made, reports exits like the daemon does, and models memory as a shared cell — a launch CONSUMES
+// `cost`, a kill (eviction) FREES it, so pressure is deterministic.
 function fakePipeSpawner({ mem = { free: Infinity }, cost = 0 } = {}) {
   const calls = [];
   const handles = [];
+  const exits = new Set();
   let pid = 1000;
-  const spawnChromePipe = async (opts) => {
+  const launch = async (opts) => {
     calls.push(opts);
     const toChrome = new PassThrough();
     const toClient = new PassThrough();
@@ -61,25 +63,23 @@ function fakePipeSpawner({ mem = { free: Infinity }, cost = 0 } = {}) {
       try { toClient.end(); } catch { /* best effort */ }
       child.emit('exit', 0, null);
     };
-    if (opts.onExit) {
-      child.on('error', (error) => opts.onExit({ code: null, signal: null, error }));
-      child.on('exit', (code, signal) => opts.onExit({ code, signal, error: null }));
-    }
     mem.free -= cost;
-    const h = { child, writable: toChrome, readable: toClient, pid: ++pid, userDataDir: opts.userDataDir };
+    const h = { child, group: opts.group, pid: ++pid, profileDir: opts.profileDir };
+    child.on('exit', (code, signal) => { for (const cb of exits) cb({ group: h.group, pid: h.pid, code, signal }); });
     handles.push(h);
-    return h;
+    return { pid: h.pid, channel: createPipeChannel({ writable: toChrome, readable: toClient }) };
   };
-  return { spawnChromePipe, calls, handles };
+  const kill = (group) => { handles.find((h) => h.group === group && !h.child.killed)?.child.kill(); };
+  return { chromeHost: { launch, kill, list: async () => [], onExit: (cb) => { exits.add(cb); } }, calls, handles };
 }
 
 function build({ config = {}, mem, cost = 0, freeMem, rssOf, profileHolder = () => null } = {}) {
-  const { spawnChromePipe, calls, handles } = fakePipeSpawner({ mem, cost });
+  const { chromeHost, calls, handles } = fakePipeSpawner({ mem, cost });
   const logs = [];
   let clk = 0;
   const cmds = createCommands({
     getConfig: () => config,
-    spawnChromePipe,
+    chromeHost,
     profileHolder,
     freeMem: freeMem ?? (() => (mem ? mem.free : Infinity)),
     rssOf: rssOf ?? (() => null),
@@ -127,8 +127,8 @@ describe('a non-brain GROUP → its group pipe Chrome + a pipe cdpClient', () =>
     const r = await cmds.chromeClientFor(SHARED);
     expect(r.profileDir).toBe(sharedDir);
     expect(calls).toHaveLength(1);
-    expect(calls[0].userDataDir).toBe(sharedDir);
-    expect(calls[0].userDataDir).not.toBe(CHROME_BRAIN_PROFILE);   // non-default (Chrome 136 requires it)
+    expect(calls[0].profileDir).toBe(sharedDir);
+    expect(calls[0].profileDir).not.toBe(CHROME_BRAIN_PROFILE);   // non-default (Chrome 136 requires it)
     expect(calls[0].bin).toBe('C:/x/chrome.exe');
     // the client speaks CDP over the pipe against the scripted peer
     const tabs = await r.client.listTabs();
@@ -138,7 +138,7 @@ describe('a non-brain GROUP → its group pipe Chrome + a pipe cdpClient', () =>
   it('group brain launches over the PIPE on chrome.profile_dir — the same pool, no port', async () => {
     const { cmds, calls } = build({ config: { chrome: { profile_dir: 'C:/x/brain' } }, mem: { free: 8192 * MB } });
     const r = await cmds.chromeClientFor(BRAIN);
-    expect(calls.map((c) => c.userDataDir)).toEqual(['C:/x/brain']);
+    expect(calls.map((c) => c.profileDir)).toEqual(['C:/x/brain']);
     expect(r.profileDir).toBe('C:/x/brain');
     expect(await r.client.listTabs()).toEqual([{ id: 'T1', type: 'page', url: 'https://x/', title: 'x' }]);
   });
@@ -148,14 +148,14 @@ describe('a non-brain GROUP → its group pipe Chrome + a pipe cdpClient', () =>
     const r = await cmds.startBrowser();
     expect(r).toMatchObject({ ok: true, launched: true });
     expect(r.detail).toMatch(/the "brain" browser is up/);
-    expect(calls.map((c) => c.userDataDir)).toEqual([CHROME_BRAIN_PROFILE]);
+    expect(calls.map((c) => c.profileDir)).toEqual([CHROME_BRAIN_PROFILE]);
   });
 
   it('brain is never memory-gated: it launches where a non-brain group is declined', async () => {
     const { cmds, calls } = build({ mem: { free: 100 * MB } });
     expect((await cmds.chromeClientFor(SHARED)).declined).toBe(true);
     expect((await cmds.chromeClientFor(BRAIN)).client).not.toBe(null);
-    expect(calls.map((c) => c.userDataDir)).toEqual([CHROME_BRAIN_PROFILE]);
+    expect(calls.map((c) => c.profileDir)).toEqual([CHROME_BRAIN_PROFILE]);
   });
 
   it('two chats in the SAME group share ONE Chrome', async () => {
@@ -253,7 +253,7 @@ describe('memory admission gates the EXTRA (non-brain) group Chromes', () => {
 
     expect(rc.client).not.toBe(null);
     expect(calls).toHaveLength(3);                       // A, B, C each spawned once
-    const aHandle = handles.find((h) => h.userDataDir.endsWith('A-1'));
+    const aHandle = handles.find((h) => h.profileDir.endsWith('A-1'));
     expect(aHandle.child.killed).toBe(true);             // the idlest (A) was evicted
     expect(logs.some((l) => /evicted group Chrome .*A-1/.test(l))).toBe(true);
 
@@ -300,7 +300,7 @@ describe('brain and shared serve many chats: never evicted', () => {
     await cmds.chromeClientFor({ key: 'a', name: 'A', group: 'A-1' });   // 1400 free
     const rb = await cmds.chromeClientFor({ key: 'b', name: 'B', group: 'B-1' });   // 1400 − 500 < 1024 → evict
     expect(rb.client).not.toBe(null);
-    expect(handles.filter((h) => h.child.killed).map((h) => h.userDataDir)).toEqual([join(dirname(CHROME_BRAIN_PROFILE), 'A-1')]);
+    expect(handles.filter((h) => h.child.killed).map((h) => h.profileDir)).toEqual([join(dirname(CHROME_BRAIN_PROFILE), 'A-1')]);
     expect(logs.filter((l) => /evicted/.test(l))).toHaveLength(1);
   });
 

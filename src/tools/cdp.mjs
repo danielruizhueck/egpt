@@ -18,14 +18,15 @@
 //   • the WS-over-port transport (createPortTransport) — HTTP /json/* for
 //     discovery + one WebSocket per endpoint, to localhost:9221. THE DEFAULT;
 //     every existing caller keeps this path byte-for-byte.
-//   • the pipe transport (createPipeTransport) — \0-delimited JSON over the
-//     two inherited fds (3 client→Chrome, 4 Chrome→client) of a Chrome
-//     launched with --remote-debugging-pipe; NO port, NO HTTP. Target
-//     discovery/addressing via the Target domain (flat protocol, sessionId).
+//   • the pipe transport (createChannelTransport over createPipeChannel) —
+//     \0-delimited JSON over the two inherited fds (3 client→Chrome, 4
+//     Chrome→client) of a Chrome launched with --remote-debugging-pipe; NO
+//     port, NO HTTP. Target discovery/addressing via the Target domain (flat
+//     protocol, sessionId). A group Chrome's fds are the S1 daemon's; the spine
+//     speaks to them through createHostChannel.
 // createCdpClient(transport) binds the ops to a chosen transport. The
 // module-level exports are a default client over the port transport, so
-// nothing downstream changes. Chunk 3b hands createPipeTransport the two fd
-// streams and routes a dedicated Chrome's client to it.
+// nothing downstream changes.
 
 let _hostGetter = null;
 
@@ -156,21 +157,22 @@ async function openWsSession(url) {
 // ── CHANNEL: one CDP connection as raw messages ──────────────────────
 // send(msg) · onMessage(cb) (every listener sees every message) · onClose(cb)
 // · nextId() — the connection's ONE id space, shared by everyone sending on it
-// (a transport and the being mux) · close() · closed.
-function makeChannel(write, end) {
+// (a transport and the being mux) · close() · closed. write/emit carry message objects.
+function makeChannel(write, end, id = 0) {
   const subs = new Set(), closeCbs = new Set();
-  let id = 0, closed = false, err = null;
+  let closed = false, err = null;
   const channel = {
-    send: (m) => { if (!closed) write(JSON.stringify(m)); },
+    send: (m) => { if (!closed) write(m); },
     onMessage: (cb) => { subs.add(cb); },
     onClose: (cb) => { if (closed) cb(err); else closeCbs.add(cb); },
     nextId: () => ++id,
     close: () => end(),
     get closed() { return closed; },
   };
-  const emit = (text) => { let m; try { m = JSON.parse(text); } catch { return; } for (const cb of [...subs]) cb(m); };
+  const emit = (m) => { for (const cb of [...subs]) cb(m); };
+  const emitText = (text) => { let m; try { m = JSON.parse(text); } catch { return; } emit(m); };
   const fail = (e) => { if (closed) return; closed = true; err = e; for (const cb of closeCbs) cb(e); };
-  return { channel, emit, fail };
+  return { channel, emit, emitText, fail };
 }
 
 /** --remote-debugging-pipe framing: JSON + \0 each way. Writes wait for 'drain'. */
@@ -181,7 +183,7 @@ export function createPipeChannel({ writable, readable }) {
     if (blocked) { queue.push(text); return; }
     if (!writable.write(text + '\0')) { blocked = true; writable.once('drain', () => { blocked = false; while (queue.length && !blocked) write(queue.shift()); }); }
   };
-  const { channel, emit, fail } = makeChannel(write, () => { try { writable.end(); } catch {} });
+  const { channel, emitText, fail } = makeChannel((m) => write(JSON.stringify(m)), () => { try { writable.end(); } catch {} });
   let buf = Buffer.alloc(0);
   readable.on('data', (chunk) => {
     buf = Buffer.concat([buf, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
@@ -189,7 +191,7 @@ export function createPipeChannel({ writable, readable }) {
     while ((i = buf.indexOf(0)) !== -1) {
       const frame = buf.subarray(0, i);
       buf = buf.subarray(i + 1);
-      if (frame.length) emit(frame.toString('utf8'));
+      if (frame.length) emitText(frame.toString('utf8'));
     }
   });
   readable.on('end', () => fail(new Error('CDP pipe closed (Chrome exited)')));
@@ -200,8 +202,8 @@ export function createPipeChannel({ writable, readable }) {
 
 /** One OPEN WebSocket (a browser endpoint, or a being's /being link) as a channel. */
 export function createWsChannel(ws) {
-  const { channel, emit, fail } = makeChannel((t) => ws.send(t), () => { try { ws.close(); } catch {} });
-  ws.addEventListener('message', (e) => emit(String(e.data)));
+  const { channel, emitText, fail } = makeChannel((m) => ws.send(JSON.stringify(m)), () => { try { ws.close(); } catch {} });
+  ws.addEventListener('message', (e) => emitText(String(e.data)));
   ws.addEventListener('close', () => fail(new Error('CDP WebSocket closed')));
   ws.addEventListener('error', () => fail(new Error('CDP WebSocket error')));
   return channel;
@@ -243,14 +245,16 @@ export function createPortTransport() {
 // session by sessionId. When fd4 ends (Chrome exits) every in-flight call
 // fails cleanly and sessions see onClose — a normal disconnect never throws.
 //
-// 3b hands this { writable, readable } = child.stdio[3], child.stdio[4] of a
-// Chrome it direct-spawned with stdio ['inherit','inherit','inherit','pipe','pipe'].
-export function createPipeTransport({ writable, readable }) {
-  return createChannelTransport(createPipeChannel({ writable, readable }));
+// The S1 daemon (src/chrome-host.mjs) holds child.stdio[3], child.stdio[4] of each
+// group Chrome as a createPipeChannel; the spine reaches it through createHostChannel.
+/** A group Chrome's connection held by the daemon, over the spine's IPC. Ids start from a
+ *  time base: a restarted spine never reuses an id the last one still has in flight there. */
+export function createHostChannel(write) {
+  return makeChannel(write, () => {}, Date.now() % 2 ** 30);
 }
 
-// The Target-domain transport over ANY channel: the pipe above, or a being's /being link
-// (createLinkTransport). Events route by sessionId; one with none is browser-scope.
+// The Target-domain transport over ANY channel: a group Chrome's (above), or a being's /being
+// link (createLinkTransport). Events route by sessionId; one with none is browser-scope.
 export function createChannelTransport(channel) {
   const pending = new Map();          // id → { resolve, reject }
   const sessions = new Map();         // sessionId → target-session internals

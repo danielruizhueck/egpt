@@ -32,7 +32,7 @@ function harness({ config = AGENTS, state = null, brains, io = {}, cdp = {}, pro
   const chrome = fakePipeChrome(cdp);
   const cmds = createCommands({
     getConfig: () => config,
-    spawnChromePipe: chrome.spawnChromePipe,
+    chromeHost: chrome.chromeHost,
     profileHolder,
     now: fakeClock.now,
     sleep: fakeClock.sleep,
@@ -2183,7 +2183,7 @@ describe('/chrome <node>', () => {
     expect(sent[0].text).toMatch(/tabs: 2/);
     expect(sent[0].text).toMatch(/ChatGPT/);
     expect(sent[0].text).toMatch(/chatgpt\.com/);
-    expect(spawns.map((s) => s.userDataDir)).toEqual([CHROME_BRAIN_PROFILE]);
+    expect(spawns.map((s) => s.profileDir)).toEqual([CHROME_BRAIN_PROFILE]);
   });
 
   it('a second /chrome kg attaches to the running Chrome — no relaunch, no pid line', async () => {
@@ -2279,7 +2279,7 @@ describe('/chrome <node>', () => {
   it('it launches into config\'s chrome.profile_dir with config\'s chrome.bin', async () => {
     const { cmds, spawns } = harness({ config: { ...AGENTS, ...kg, chrome: { bin: 'C:/x/chrome.exe', profile_dir: 'C:/x/brain' } }, cdp: reachable });
     await cmds.run({ ...self, body: '/chrome kg' });
-    expect(spawns.map((s) => [s.userDataDir, s.bin])).toEqual([['C:/x/brain', 'C:/x/chrome.exe']]);
+    expect(spawns.map((s) => [s.profileDir, s.bin])).toEqual([['C:/x/brain', 'C:/x/chrome.exe']]);
   });
 });
 
