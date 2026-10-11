@@ -11,6 +11,7 @@ import { dueForCompaction } from '../src/tools/compact-being.mjs';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fakePipeChrome } from './fake-pipe-chrome.mjs';
 
 // A readonly.yaml with two heartbeat entries (the shape heartbeat-loader writes).
 const READONLY_YAML = `heartbeats:
@@ -38,11 +39,12 @@ function threeContacts() {
   return st;
 }
 
-// cdp defaults to an always-down fake — bare /status now probes cdp.isRunning() for
-// its `chrome:` field, and a test that doesn't care about Chrome must never hit the
-// real localhost CDP port. Tests targeting the chrome field override this.
-function harness({ io, gitOut, loadState, brains, getConfig, onLog, cdp, warmStats, shellConnected, dueFor } = {}) {
+// The chat's group Chrome is a fake pipe Chrome answering like `cdp` (tests/fake-pipe-chrome.mjs);
+// /status reads it only when it is already up, so a test that wants `chrome: up` launches it first
+// (launchChat). `spawns` records every launch.
+function harness({ io, gitOut, loadState, brains, getConfig, onLog, cdp = {}, warmStats, shellConnected, dueFor } = {}) {
   const sent = [];
+  const chrome = fakePipeChrome(cdp);
   const cmds = createCommands({
     getConfig: getConfig ?? (() => ({ whatsapp: { chat_id: '!self' } })),
     send: async (chatId, text) => sent.push({ chatId, text }),
@@ -52,13 +54,15 @@ function harness({ io, gitOut, loadState, brains, getConfig, onLog, cdp, warmSta
     gitOut,
     brains,
     onLog,
-    cdp: cdp ?? { isRunning: async () => false },
+    spawnChromePipe: chrome.spawnChromePipe,
+    profileHolder: () => null,
+    browserGroups: async () => ({}),
     ...(warmStats ? { warmStats } : {}),
     ...(shellConnected ? { shellConnected } : {}),
     // the compaction probe reads ~/.claude/projects for real — always fake it here
     dueFor: dueFor ?? (() => ({ due: false })),
   });
-  return { cmds, sent };
+  return { cmds, sent, spawns: chrome.calls, launchChat: (chatId) => cmds.chatChromeOf('whatsapp', chatId) };
 }
 
 // Fake readFile keyed by path SUFFIX (transcript.md / heartbeats.readonly.yaml live at
@@ -605,24 +609,25 @@ describe('/status: enriched fields', () => {
     expect(sent[0].text).not.toMatch(/agents:/);
   });
 
-  it('chrome: up · N brain tabs — counts only tabs whose URL matches a loaded adapter', async () => {
+  it('chrome: up · N brain tabs — the chat\'s group Chrome, counting only tabs a loaded adapter drives', async () => {
     const cdp = {
-      isRunning: async () => true,
       listTabs: async () => ([
         { url: 'https://claude.ai/chat/abc' },     // matches claude-cdp adapter
         { url: 'https://chatgpt.com/c/xyz' },      // matches chatgpt-cdp adapter
         { url: 'https://example.com/nope' },       // no adapter
       ]),
     };
-    const { cmds, sent } = harness({ io: HEALTHY_IO, gitOut: HEALTHY_GIT, loadState: async () => threeContacts(), cdp });
+    const { cmds, sent, launchChat } = harness({ io: HEALTHY_IO, gitOut: HEALTHY_GIT, loadState: async () => threeContacts(), cdp });
+    await launchChat('!self');
     await cmds.run({ body: '/status', chatId: '!self', surface: 'whatsapp' });
     expect(sent[0].text).toMatch(/chrome: up · 2 brain tabs/);
   });
 
-  it('chrome: off when Chrome is not running', async () => {
-    const { cmds, sent } = harness({ io: HEALTHY_IO, gitOut: HEALTHY_GIT, loadState: async () => threeContacts() });
+  it('chrome: off when the chat\'s group Chrome is not running — and /status never launches one', async () => {
+    const { cmds, sent, spawns } = harness({ io: HEALTHY_IO, gitOut: HEALTHY_GIT, loadState: async () => threeContacts() });
     await cmds.run({ body: '/status', chatId: '!self', surface: 'whatsapp' });
     expect(sent[0].text).toMatch(/chrome: off/);
+    expect(spawns).toHaveLength(0);
   });
 
   it('warm: shows size/max from the injected warmStats seam', async () => {
@@ -654,9 +659,8 @@ describe('/status: enriched fields', () => {
 
   // Reproduce-first for the never-throw discipline: every new seam is fed a throwing
   // (or lying) fake and /status must still reply exactly once, degraded.
-  it('never throws when cdp.isRunning/listTabs, warmStats, and shellConnected all throw', async () => {
+  it('never throws when listTabs, warmStats, and shellConnected all throw', async () => {
     const cdp = {
-      isRunning: async () => { throw new Error('cdp down'); },
       listTabs: async () => { throw new Error('cdp down'); },
     };
     const { cmds, sent } = harness({
@@ -673,9 +677,10 @@ describe('/status: enriched fields', () => {
     expect(sent[0].text).not.toMatch(/warm:/);
   });
 
-  it('never throws when cdp.isRunning reports up but listTabs throws', async () => {
-    const cdp = { isRunning: async () => true, listTabs: async () => { throw new Error('json fetch failed'); } };
-    const { cmds, sent } = harness({ io: HEALTHY_IO, gitOut: HEALTHY_GIT, loadState: async () => threeContacts(), cdp });
+  it('never throws when the group Chrome is up but listTabs throws', async () => {
+    const cdp = { listTabs: async () => { throw new Error('json fetch failed'); } };
+    const { cmds, sent, launchChat } = harness({ io: HEALTHY_IO, gitOut: HEALTHY_GIT, loadState: async () => threeContacts(), cdp });
+    await launchChat('!self');
     await expect(cmds.run({ body: '/status', chatId: '!self', surface: 'whatsapp' })).resolves.toBeUndefined();
     expect(sent[0].text).toMatch(/chrome: up · 0 brain tabs/);
   });

@@ -1,45 +1,18 @@
 // tests/chrome-group-callers.test.mjs — every SPINE-side browser caller drives ITS chat's browser-group
 // Chrome (plans/2610091931 rev 2026-10-11, chunk 2). One resolver: commands.browserConversationOf
-// (registry row → chromeConversationOf against browsers.yaml). brain → today's :9221 port client;
+// (registry row → chromeConversationOf against browsers.yaml). brain → brain's pipe Chrome;
 // unlisted → the `shared` pipe Chrome; ambiguous → no browser + one log line; conversation-less → brain.
-// NO REAL CHROME: the brain port client is a fake, the pipe Chrome a fake child over two PassThroughs.
+// NO REAL CHROME: each group's Chrome is a fake child over two PassThroughs (tests/fake-pipe-chrome.mjs).
 import { describe, it, expect } from 'vitest';
-import { PassThrough } from 'node:stream';
-import { EventEmitter } from 'node:events';
 import { join, dirname } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createCommands, CHROME_BRAIN_PROFILE, loginProfilePathOf } from '../src/spine/commands.mjs';
 import { createRoomRelay } from '../src/spine/room-relay.mjs';
+import { fakePipeChrome } from './fake-pipe-chrome.mjs';
 
 const MB = 1024 * 1024;
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
-
-function fakePipeSpawner() {
-  const calls = [];
-  const spawnChromePipe = async (opts) => {
-    calls.push(opts);
-    const toChrome = new PassThrough();
-    const toClient = new PassThrough();
-    let buf = Buffer.alloc(0);
-    toChrome.on('data', (chunk) => {
-      buf = Buffer.concat([buf, chunk]);
-      let i;
-      while ((i = buf.indexOf(0)) !== -1) {
-        const frame = buf.subarray(0, i);
-        buf = buf.subarray(i + 1);
-        if (!frame.length) continue;
-        const msg = JSON.parse(frame.toString('utf8'));
-        const result = msg.method === 'Target.getTargets' ? { targetInfos: [{ targetId: 'P1', type: 'page', url: 'https://pipe.example/', title: 'PipeTab' }] } : {};
-        toClient.write(JSON.stringify({ id: msg.id, result }) + '\0');
-      }
-    });
-    const child = new EventEmitter();
-    child.exitCode = null; child.killed = false; child.kill = () => {};
-    return { child, writable: toChrome, readable: toClient, pid: 5000 + calls.length };
-  };
-  return { spawnChromePipe, calls };
-}
 
 const STATE = {
   contacts: {
@@ -53,23 +26,20 @@ const STATE = {
 };
 const GROUPS = { brain: ['eGPT Admin', 'eGPT Rodz Lulu An', 'acim', 'tpoef'], work: ['Twice'] , other: ['Twice'] };
 
-function build({ state = STATE, groups = GROUPS, requestLogin } = {}) {
-  const { spawnChromePipe, calls } = fakePipeSpawner();
-  const logs = [], sent = [], launches = [], brainActs = [], brainCloses = [];
-  const brainCdp = {
-    isRunning: async () => true,
-    cdpHost: async () => 'localhost:9221',
+function build({ state = STATE, groups = GROUPS, requestLogin, ...seams } = {}) {
+  const logs = [], sent = [], brainCloses = [], brainOpens = [];
+  const brain = {
     listTabs: async () => [{ id: 'B1', title: 'Gmail', url: 'https://mail.google.com/' }],
-    openTab: async () => 'B2',
-    activateTarget: async (id) => { brainActs.push(id); },
     closeTab: async (id) => { brainCloses.push(id); },
+    openTab: async (url) => { brainOpens.push(url); return 'B9'; },
   };
+  const pipe = { listTabs: async () => [{ id: 'P1', url: 'https://pipe.example/', title: 'PipeTab' }] };
+  const { spawnChromePipe, calls } = fakePipeChrome((o) => (o.userDataDir === CHROME_BRAIN_PROFILE ? brain : pipe));
   let t = 0;
   const cmds = createCommands({
     getConfig: () => ({ node_name: 'kg', agents: { e: {} }, whatsapp: { chat_id: '!admin' } }),
-    cdp: brainCdp,
-    launchChrome: (o) => { launches.push(o); return { ok: false }; },
     spawnChromePipe,
+    profileHolder: () => null,
     freeMem: () => 8192 * MB,
     rssOf: () => null,
     onChromeLog: (m) => logs.push(m),
@@ -81,8 +51,9 @@ function build({ state = STATE, groups = GROUPS, requestLogin } = {}) {
     send: async (chatId, text) => sent.push({ chatId, text }),
     brains: { resolve: (name) => ({ name, type: 'ccode' }) },
     ...(requestLogin ? { requestLogin } : {}),
+    ...seams,
   });
-  return { cmds, calls, logs, sent, launches, brainCdp, brainActs, brainCloses };
+  return { cmds, calls, logs, sent, brainCloses, brainOpens };
 }
 
 const sharedDir = join(dirname(CHROME_BRAIN_PROFILE), 'shared');
@@ -112,12 +83,12 @@ describe('browserConversationOf — THE resolver every browser caller routes thr
 });
 
 describe('startBrowser(conversation)', () => {
-  it('eGPT Admin (brain) → the brain port path, no pipe spawn', async () => {
+  it('eGPT Admin (brain) → brain\'s pipe Chrome on the brain profile', async () => {
     const { cmds, calls } = build();
     const r = await cmds.startBrowser(await cmds.browserConversationOf('whatsapp', '!admin'));
-    expect(r).toMatchObject({ ok: true, alreadyRunning: true });
-    expect(r.detail).toMatch(/localhost:9221/);
-    expect(calls).toHaveLength(0);
+    expect(r).toMatchObject({ ok: true, launched: true });
+    expect(r.detail).toMatch(/the "brain" browser is up/);
+    expect(calls.map((c) => c.userDataDir)).toEqual([CHROME_BRAIN_PROFILE]);
   });
 
   it('an unlisted chat → its shared group pipe Chrome', async () => {
@@ -128,29 +99,29 @@ describe('startBrowser(conversation)', () => {
   });
 
   it('ambiguous → no browser, one log line, never the brain', async () => {
-    const { cmds, calls, logs, launches } = build();
+    const { cmds, calls, logs } = build();
     const r = await cmds.startBrowser(await cmds.browserConversationOf('whatsapp', '!dup'));
     expect(r.ok).toBe(false);
     expect(r.detail).toMatch(/work, other/);
     expect(calls).toHaveLength(0);
-    expect(launches).toHaveLength(0);
     expect(logs.filter((l) => /no browser for "Twice"/.test(l))).toHaveLength(1);
   });
 
-  it('conversation-less → the brain path, unchanged', async () => {
+  it('conversation-less → brain\'s pipe Chrome; a second start reports it already running', async () => {
     const { cmds, calls } = build();
-    expect(await cmds.startBrowser()).toEqual({ ok: true, alreadyRunning: true, detail: 'the browser is already answering on localhost:9221 — nothing was launched' });
-    expect(calls).toHaveLength(0);
+    expect(await cmds.startBrowser()).toMatchObject({ ok: true, launched: true });
+    expect(await cmds.startBrowser()).toEqual({ ok: true, alreadyRunning: true, detail: 'the "brain" browser is already running (pid 1001)' });
+    expect(calls.map((c) => c.userDataDir)).toEqual([CHROME_BRAIN_PROFILE]);
   });
 });
 
 describe('/chrome resolves the chat it was typed in', () => {
-  it('in eGPT Admin → the brain port report', async () => {
+  it('in eGPT Admin → brain\'s pipe Chrome report', async () => {
     const { cmds, sent, calls } = build();
     await run(cmds, '!admin', '/chrome kg');
-    expect(sent[0].text).toMatch(/attached: localhost:9221/);
+    expect(sent[0].text).toMatch(/attached: the "brain" browser \(pipe\)/);
     expect(sent[0].text).toMatch(/Gmail/);
-    expect(calls).toHaveLength(0);
+    expect(calls.map((c) => c.userDataDir)).toEqual([CHROME_BRAIN_PROFILE]);
   });
 
   it('in an unlisted chat → the shared group Chrome\'s tabs, not the brain\'s', async () => {
@@ -158,16 +129,15 @@ describe('/chrome resolves the chat it was typed in', () => {
     await run(cmds, '!reinie', '/chrome kg');
     expect(sent[0].text).toMatch(/PipeTab/);
     expect(sent[0].text).not.toMatch(/Gmail|9221/);
-    expect(calls).toHaveLength(1);
+    expect(calls.map((c) => c.userDataDir)).toEqual([sharedDir]);
   });
 
   it('ambiguous → no browser, nothing launched', async () => {
-    const { cmds, sent, calls, launches } = build();
+    const { cmds, sent, calls } = build();
     await run(cmds, '!dup', '/chrome kg');
     expect(sent[0].text).toMatch(/no browser/);
     expect(sent[0].text).not.toMatch(/Gmail/);
     expect(calls).toHaveLength(0);
-    expect(launches).toHaveLength(0);
   });
 });
 
@@ -183,8 +153,9 @@ describe('/tabs /close drive the chat\'s group Chrome', () => {
 
   it('/close 1 in an unlisted chat never touches a brain tab', async () => {
     const { cmds, sent, brainCloses } = build();
+    await run(cmds, '!admin', '/tabs');   // brain's Chrome is up too
     await run(cmds, '!reinie', '/close 1');
-    expect(sent[0].text).toMatch(/closed 1 · PipeTab/);
+    expect(sent[1].text).toMatch(/closed 1 · PipeTab/);
     expect(brainCloses).toEqual([]);
   });
 
@@ -199,21 +170,20 @@ describe('/tabs /close drive the chat\'s group Chrome', () => {
 describe('/login follows the chat\'s group', () => {
   const recorder = () => { const seen = []; return { seen, requestLogin: async (site, o) => { seen.push({ site, ...o }); return 'logged-in'; } }; };
 
-  it('eGPT Admin → the brain conversation + the brain port client', async () => {
+  it('eGPT Admin → the brain conversation + brain\'s pipe client', async () => {
     const rec = recorder();
-    const { cmds, brainCdp } = build({ requestLogin: rec.requestLogin });
+    const { cmds } = build({ requestLogin: rec.requestLogin });
     await run(cmds, '!admin', '/login example.com');
     expect(rec.seen).toHaveLength(1);
     expect(rec.seen[0].conversation.group).toBe('brain');
-    expect(rec.seen[0].client).toBe(brainCdp);
+    expect((await rec.seen[0].client.listTabs()).map((t) => t.title)).toEqual(['Gmail']);
   });
 
   it('an unlisted chat → the shared conversation + the shared pipe client', async () => {
     const rec = recorder();
-    const { cmds, brainCdp } = build({ requestLogin: rec.requestLogin });
+    const { cmds } = build({ requestLogin: rec.requestLogin });
     await run(cmds, '!reinie', '/login example.com');
     expect(rec.seen[0].conversation.group).toBe('shared');
-    expect(rec.seen[0].client).not.toBe(brainCdp);
     expect(await rec.seen[0].client.listTabs()).toEqual([{ id: 'P1', type: 'page', url: 'https://pipe.example/', title: 'PipeTab' }]);
   });
 
@@ -223,6 +193,58 @@ describe('/login follows the chat\'s group', () => {
     await run(cmds, '!dup', '/login example.com');
     expect(rec.seen).toHaveLength(0);
     expect(sent[0].text).toMatch(/no browser/);
+  });
+});
+
+describe('/members, /activate and /status reach the chat\'s group Chrome', () => {
+  const ADAPTERS = [{ name: 'pipe-cdp', urlMatch: /pipe\.example/, homeUrl: 'https://pipe.example/' }];
+  function withRoom(members = []) {
+    const room = { slug: 'r', members: async () => members, setMember: async (m) => { const i = members.findIndex((x) => x.id === m.id); if (i >= 0) members[i] = m; else members.push(m); } };
+    return { members, ...build({ loadAdapters: async () => ADAPTERS, resolveConvRoom: async () => room, dueFor: () => ({ due: false }) }) };
+  }
+
+  it('/members add tab 1 in an unlisted chat adds the tab /tabs numbers there — shared\'s, never brain\'s', async () => {
+    const { cmds, sent, calls, members } = withRoom();
+    await run(cmds, '!reinie', '/members add tab 1');
+    expect(sent[0].text).toMatch(/added 'pipe'/);
+    expect(members.map((m) => [m.url, m.targetId])).toEqual([['https://pipe.example/', 'P1']]);
+    expect(calls.map((c) => c.userDataDir)).toEqual([sharedDir]);
+  });
+
+  it('/members reads presence from the group Chrome only when it is up — a roster never launches one', async () => {
+    const { cmds, sent, calls } = withRoom([{ kind: 'brain', id: 'pipe', state: 'muted', adapter: 'pipe-cdp', url: 'https://pipe.example/', targetId: 'P1' }]);
+    await run(cmds, '!reinie', '/members');
+    expect(sent[0].text).toMatch(/pipe {3}brain {3}inactive/);
+    expect(calls).toHaveLength(0);
+    await run(cmds, '!reinie', '/tabs');
+    await run(cmds, '!reinie', '/members');
+    expect(sent[2].text).toMatch(/pipe {3}brain {3}active/);
+  });
+
+  it('/activate in eGPT Admin reopens the member\'s tab in brain\'s Chrome', async () => {
+    const { cmds, sent, calls, brainOpens } = withRoom([{ kind: 'brain', id: 'gm', state: 'muted', adapter: 'gm', url: 'https://mail.google.com/', targetId: 'gone' }]);
+    await run(cmds, '!admin', '/activate gm');
+    expect(sent[0].text).toBe('reopened https://mail.google.com/ · tab B9 · active');
+    expect(brainOpens).toEqual(['https://mail.google.com/']);
+    expect(calls.map((c) => c.userDataDir)).toEqual([CHROME_BRAIN_PROFILE]);
+  });
+
+  it('/activate in a chat with no browser says so, and opens nothing', async () => {
+    const { cmds, sent, calls } = withRoom([{ kind: 'brain', id: 'gm', state: 'muted', adapter: 'gm', url: 'https://mail.google.com/', targetId: 'gone' }]);
+    await run(cmds, '!dup', '/activate gm');
+    expect(sent[0].text).toMatch(/^`\/activate`: no browser for this chat — .*work, other/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('/status reads the chat\'s group Chrome only when it is up — and never launches one', async () => {
+    const { cmds, sent, calls } = withRoom();
+    await run(cmds, '!reinie', '/status');
+    expect(sent[0].text).toMatch(/chrome: off/);
+    expect(calls).toHaveLength(0);
+    await run(cmds, '!reinie', '/tabs');
+    await run(cmds, '!reinie', '/status');
+    expect(sent[2].text).toMatch(/chrome: up · 1 brain tabs/);
+    expect(calls.map((c) => c.userDataDir)).toEqual([sharedDir]);
   });
 });
 
@@ -267,8 +289,9 @@ describe('boot wires the heartbeat and the room relay through the ONE resolver (
     expect(BOOT_SRC).toMatch(/activateTarget: async \(id, ev\) =>/);
     expect(BOOT_SRC).toMatch(/commands\.chatChromeOf\(ev\?\.surface, ev\?\.chatId\)/);
   });
-  it('commands gets the full cdp module (the brain client) and the chrome log', () => {
-    expect(BOOT_SRC).toMatch(/^\s+cdp,\s/m);
+  it('commands gets no port client — only the chrome log', () => {
+    expect(BOOT_SRC).not.toMatch(/^\s+cdp,\s/m);
+    expect(BOOT_SRC).not.toMatch(/import \* as cdp from/);
     expect(BOOT_SRC).toMatch(/onChromeLog: \(m\) => log\.line/);
   });
 });

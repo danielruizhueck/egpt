@@ -1,5 +1,5 @@
-// tests/chrome-brain-profile.test.mjs — resolveBrainProfile() discovery + the /chrome
-// hint dropping the extension.
+// tests/chrome-brain-profile.test.mjs — resolveBrainProfile() discovery, spawnChromePipe's
+// configured binary, and profileHolder.
 //
 // THE BUG (2026-07-22): /chrome hardcoded the brain profile to
 // <EGPT_HOME>/chrome/profiles/brain — a BLANK fresh profile with no ChatGPT/Claude
@@ -10,10 +10,11 @@
 // is read, and every candidate path stays under egptHome. The locked-file case injects a
 // throwing readFile instead of actually locking a file on Windows.
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync, readFileSync, symlinkSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { resolveBrainProfile, chromeArgs, spawnChrome } from '../src/tools/chrome-launcher.mjs';
+import { resolveBrainProfile, spawnChromePipe, profileHolder } from '../src/tools/chrome-launcher.mjs';
 
 // Build a Chrome-shaped profile at `dir`. A REAL profile needs Default/Preferences OR
 // Default/Network/Cookies; `history`/`cookies` (when non-null) seed the AI-marker files.
@@ -120,32 +121,59 @@ describe('resolveBrainProfile()', () => {
   });
 });
 
-describe('chromeArgs() without an extension', () => {
-  it('emits NO --load-extension when extensionDir is omitted', () => {
-    const args = chromeArgs({ port: 9221, userDataDir: 'C:\\x\\brain' });
-    expect(args.some((a) => a.startsWith('--load-extension'))).toBe(false);
-    expect(args).toContain('--user-data-dir=C:\\x\\brain');
-  });
-});
-
-// spawnChrome's two options added for the Session 1 direct launch (chunk 6,
-// plans/2609061200-SESSION-0-TO-1-HANDOVER-PLAN.md): the CONFIGURED binary (config `chrome.bin`)
-// and the supervision callback.
-//
-// SAFE BY CONSTRUCTION, and that is the whole reason this shape was chosen: `bin` points at a path
-// that does not exist, so the operating system starts NOTHING — no browser, no window, no CDP port.
-// What the test observes is the ENOENT arriving through onExit, which is exactly the case that
-// matters: a ChildProcess with no 'error' listener turns that failure into an UNCAUGHT exception,
-// and the spine is the process that would take.
-describe('spawnChrome({ bin, onExit })', () => {
+// spawnChromePipe's CONFIGURED binary (config `chrome.bin`) and its onExit callback. SAFE BY
+// CONSTRUCTION: `bin` points at a path that does not exist, so the operating system starts NOTHING.
+// What the test observes is the ENOENT arriving through onExit: a ChildProcess with no 'error'
+// listener turns that failure into an UNCAUGHT exception, and the spine is the process that would take.
+describe('spawnChromePipe({ bin, onExit })', () => {
   it('runs the CONFIGURED binary, and hands a failed spawn to onExit instead of throwing', async () => {
     const missing = join(root, 'no-such-chrome.exe');
     const seen = [];
-    const out = await spawnChrome({ port: 9333, userDataDir: join(root, 'profile'), bin: missing, onExit: (e) => seen.push(e) });
-    expect(out.command).toContain(missing);   // the configured binary — not one findChromeExecutable found
-    expect(out.pid).toBeUndefined();          // nothing started, which is what launchChromeDirect reads
+    const out = await spawnChromePipe({ userDataDir: join(root, 'profile'), bin: missing, onExit: (e) => seen.push(e) });
+    expect(out.child.spawnfile).toBe(missing);   // the configured binary — not one findChromeExecutable found
+    expect(out.pid).toBeUndefined();             // nothing started
     await new Promise((r) => setTimeout(r, 250));   // the child's 'error' event is asynchronous
     expect(seen).toHaveLength(1);
     expect(`${seen[0].error?.code ?? ''} ${seen[0].error?.message ?? ''}`).toMatch(/ENOENT/);
+  });
+});
+
+// profileHolder: is a Chrome already running on this --user-data-dir? Chrome leaves its lock behind
+// when it exits, so existence alone must never read as "held". The held case is a real OS hold:
+// Windows — a PowerShell holding <dir>/lockfile open share-read, as Chrome does; POSIX — a
+// SingletonLock naming this live process, as Chrome's does.
+describe('profileHolder(userDataDir)', () => {
+  it('no profile dir, or a profile with no lock → null', () => {
+    expect(profileHolder(join(root, 'nope'))).toBe(null);
+    mkdirSync(join(root, 'fresh'));
+    expect(profileHolder(join(root, 'fresh'))).toBe(null);
+  });
+
+  it('a lock left behind by a Chrome that exited → null', () => {
+    const dir = join(root, 'stale');
+    mkdirSync(dir);
+    if (process.platform === 'win32') writeFileSync(join(dir, 'lockfile'), '');
+    else symlinkSync('somehost-2147483646', join(dir, 'SingletonLock'));
+    expect(profileHolder(dir)).toBe(null);
+  });
+
+  it('a lock a live process holds → that holder', async () => {
+    const dir = join(root, 'held');
+    mkdirSync(dir);
+    if (process.platform !== 'win32') {
+      symlinkSync(`somehost-${process.pid}`, join(dir, 'SingletonLock'));
+      expect(profileHolder(dir)).toBe(`pid ${process.pid}`);
+      return;
+    }
+    const lock = join(dir, 'lockfile').replace(/'/g, "''");
+    const ps = spawn('powershell', ['-NoProfile', '-Command', `$f=[IO.File]::Open('${lock}','OpenOrCreate','ReadWrite','Read'); [Console]::Out.WriteLine('held'); [Console]::Out.Flush(); Start-Sleep 30`], { windowsHide: true });
+    try {
+      await new Promise((resolve, reject) => { ps.stdout.on('data', (d) => /held/.test(String(d)) && resolve()); ps.on('exit', reject); });
+      expect(profileHolder(dir)).toBe('EBUSY');
+    } finally {
+      const gone = new Promise((r) => ps.once('exit', r));
+      ps.kill();
+      await gone;   // the hold ends with the process; afterEach removes the dir
+    }
   });
 });

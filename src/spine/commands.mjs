@@ -50,9 +50,9 @@ import { compactionRatio } from './compaction.mjs';
 import { NODE_FILE, REGISTRY_FILE, parseEntityConfig } from './config-resolver.mjs';
 import { CONFIG_YAML_PATH, writeConfigKey } from '../tools/config-io.mjs';
 import { resolveConfigKey } from '../../config/config-schema.mjs';
-import { isRunning as cdpIsRunning, listTabs as cdpListTabs, cdpHost as cdpHostOf, openTab as cdpOpenTab, activateTarget as cdpActivateTarget, closeTab as cdpCloseTab, channel as cdpChannel, createCdpClient, createPipeTransport } from '../tools/cdp.mjs';
-import { findChromeExecutable, chromeArgs, chromeCommandLine, resolveBrainProfile, spawnChrome, spawnChromePipe as defaultSpawnChromePipe } from '../tools/chrome-launcher.mjs';
-import { admitLaunch, estimateChromeBytes, BRAIN_GROUP, isSafeGroupName, chromeConversationOf } from './chrome-pool.mjs';
+import { createCdpClient, createPipeTransport } from '../tools/cdp.mjs';
+import { resolveBrainProfile, spawnChromePipe as defaultSpawnChromePipe, profileHolder as defaultProfileHolder } from '../tools/chrome-launcher.mjs';
+import { admitLaunch, estimateChromeBytes, BRAIN_GROUP, SHARED_GROUP, isSafeGroupName, chromeConversationOf } from './chrome-pool.mjs';
 import { freemem } from 'node:os';
 import { helpText } from '../interpreter.mjs';
 import { uploadNote, radioNoteFilename, pickSpeaker } from '../radio-relay.mjs';
@@ -69,15 +69,7 @@ import { hhmm, dayBoundary } from '../dispatch-line.mjs';
 // own root. See src/tools/chrome-launcher.mjs.
 export const CHROME_BRAIN_PROFILE = resolveBrainProfile();
 
-// The scheduled task a SESSION 0 spine fires to put Chrome on the operator's visible desktop (see
-// the banner over the chrome() dispatch for which spine takes which path, and why).
-// setup/register-chrome-task.ps1 registers it; the Session-0 spine triggers it with
-// `schtasks /run /tn egpt-chrome`.
-export const CHROME_LAUNCH_TASK = 'egpt-chrome';
-const CHROME_LAUNCH_TIMEOUT_MS = 20000;   // how long to wait for a cold Chrome to bind its CDP port
-const CHROME_LAUNCH_POLL_MS = 500;
-
-// Dedicated-Chrome memory-admission defaults (chunk 3b); overridable via config chrome.launch_estimate_mb
+// Group-Chrome memory-admission defaults; overridable via config chrome.launch_estimate_mb
 // (per-Chrome cost floor) and chrome.memory_margin_mb (free-memory margin a launch must leave).
 const CHROME_LAUNCH_ESTIMATE_MB = 500;
 const CHROME_MEMORY_MARGIN_MB = 1024;
@@ -98,23 +90,6 @@ function defaultRssOf(pid) {
     return Number.isFinite(kb) && kb > 0 ? kb * 1024 : null;
   } catch { return null; }
 }
-
-// Default launch seam: fire the scheduled task and report whether schtasks accepted it. A
-// non-zero exit (the task isn't registered) or a spawn error both surface as { ok: false },
-// which drives /chrome's graceful fallback. Tests inject a fake so no real schtasks runs.
-// It IGNORES its arguments, and that is not sloppiness — it is the seam's defining limitation:
-// the task's command line was frozen when the task was registered (port 9221 and one profile),
-// so a port or a profile handed in here has nowhere to go. Half of why chunk 6 exists.
-function defaultLaunchChromeTask() {
-  try {
-    const r = spawnSync('schtasks', ['/run', '/tn', CHROME_LAUNCH_TASK], { windowsHide: true });
-    return { ok: r.status === 0 };
-  } catch { return { ok: false }; }
-}
-
-// The CDP port out of the host this node will ATTACH to — ONE formula, shared by the launch hint
-// and the direct launcher, so "launch on the port I will attach to" can never become two answers.
-const chromePortOf = (host) => String(host).split(':')[1] ?? '9221';
 
 // The --user-data-dir a launch should use. THE ONE PLACE THE PROFILE IS DECIDED (see ensureChrome's
 // banner) — no caller resolves its own.
@@ -145,59 +120,6 @@ export const loginProfilePathOf = (c, conversation) =>
 // The executable: config `chrome.bin`, else null — which lets chrome-launcher run its own
 // per-platform CHROME_PATHS search. Never a second locator here.
 const chromeBinOf = (c) => c?.chrome?.bin || null;
-
-/**
- * THE SESSION 1 LAUNCH SEAM: spawn Chrome as an ordinary child of this spine. boot.mjs injects it
- * over `launchChrome` for a Session 1 successor and for nobody else (chunk 6,
- * plans/2609061200-SESSION-0-TO-1-HANDOVER-PLAN.md); the banner over the chrome() dispatch carries
- * the session argument.
- *
- * NOT A SECOND SPAWNER. The executable search, the flag set, the profile mkdir and the spawn itself
- * are all chrome-launcher's spawnChrome — the very file chromeLaunchHint already renders its
- * command line from, which is what keeps "what I would run" and "what I tell you to run" one thing.
- * What this wrapper adds is the two things a scheduled task could never give: ARGUMENTS (a port and
- * a profile resolved per call, instead of frozen at registration) and SUPERVISION.
- *
- * SUPERVISION IS OBSERVATION, NOT OWNERSHIP — a decision, not an omission. The spine now learns
- * three facts `schtasks /run` cannot return: that the spawn was accepted, and the pid; that CDP
- * came up on the port it will attach to (chromeReport's existing poll); and that the browser died,
- * at the moment it died. It does NOT restart it. The ordinary reason a browser exits is that the
- * operator closed it, and relaunching would be arguing with them; /chrome is already the relaunch
- * verb, one word long and idempotent (isRunning() is the launch decision). A restart POLICY — how
- * many, how fast, whether a crash-looping Chrome is retried at all — is a ruling nobody has made,
- * and inventing one would put an unattended respawn loop in the runtime path.
- *
- * Returns the seam's shape, WIDENED but compatible: `ok` is all /chrome's fallback reads, and
- * `direct` / `pid` / `detail` are additive. The task hop returns none of them, so its path — every
- * node in Session 0, and every injected fake in the suite — is untouched.
- */
-export async function launchChromeDirect({ port, userDataDir, bin = null, spawn: spawnFn = spawnChrome, onLog = () => {} } = {}) {
-  try {
-    const { pid, command } = await spawnFn({
-      port,
-      userDataDir,
-      bin,
-      // The death notice. Logged, never acted on — see SUPERVISION above.
-      onExit: ({ code, signal, error }) => onLog(error
-        ? `the browser this spine launched on :${port} never started — ${error?.message ?? error}`
-        : `the browser this spine launched on :${port} exited (${signal ? `signal ${signal}` : `code ${code}`}) — nothing is being restarted; /chrome launches another`),
-    });
-    // NO PID MEANS NOTHING STARTED — Node sets pid synchronously on a successful spawn and leaves
-    // it undefined when the spawn failed (a chrome.bin that is not there). Reporting ok:true here
-    // would make /chrome sit out the whole CDP timeout and then blame the PORT instead of the
-    // binary. The child's 'error' event still arrives through onExit a tick later.
-    if (!pid) return { ok: false, direct: true, detail: `nothing started — the spawn returned no pid for ${command}` };
-    onLog(`launched pid ${pid} on :${port} — ${command}`);
-    return { ok: true, direct: true, pid, detail: command };
-  } catch (e) {
-    // The same graceful shape the task hop uses for "not registered": /chrome degrades to the hint.
-    // `direct` still true — the hint needs to know WHICH seam failed so it does not tell a Session 1
-    // operator to go register a scheduled task that would not help them.
-    const detail = String(e?.message ?? e);
-    onLog(`direct launch failed — ${detail}`);
-    return { ok: false, direct: true, detail };
-  }
-}
 
 // A fresh room's config.yaml — a commented placeholder (like the seeded templates,
 // seed.mjs). Pure comments → parses to null, so the heartbeat/transcription loaders read
@@ -638,9 +560,6 @@ export function createCommands({
   evictWarm = () => {},                  // (being, ev) -> drop that being+conversation's warm session so /agents access_level's re-point respawns fresh. brain.evict: a lastKeyByConv LOOKUP of the last warm key this pair actually ran — never a key string rebuilt here
   configPath = CONFIG_YAML_PATH,         // where /config <key>=<value> writes — the real profile config.yaml by default (injected in tests, so no test ever touches the real profile)
   io = {},                               // { stat, readFile, writeFile, mkdir, readdir, rm } — real fs by default; /status probes files + the custom branch authors through here
-  // CDP seam for /chrome, /tabs, /open, /tab, /close — the real localhost probe by
-  // default; tests inject fakes so the suite never needs a live Chrome or a real socket.
-  cdp = { isRunning: cdpIsRunning, listTabs: cdpListTabs, cdpHost: cdpHostOf, openTab: cdpOpenTab, activateTarget: cdpActivateTarget, closeTab: cdpCloseTab, channel: cdpChannel },
   // /login <site> → the auto-login limb (src/spine/login.mjs), injected by boot. Returns an
   // OUTCOME token (logged-in | needs-2fa | captcha-posted | failed | no-credential) — NEVER a
   // credential. Absent (standalone construction / a test that doesn't need it) → /login replies
@@ -697,27 +616,16 @@ export function createCommands({
   // side, so the mover and the writer can never disagree about the path. Nothing in production
   // overrides it. Only /agents rethread + /agents reset read it, through moveCliStore.
   jsonlStoreRoot = null,
-  // THE LAUNCH SEAM for /chrome, and WHICH ONE a spine gets is decided by its Windows session —
-  // in boot.mjs, once, never here (see the banner over the chrome() dispatch). The DEFAULT is the
-  // Session 0 task hop: `schtasks /run /tn egpt-chrome`, defaultLaunchChromeTask. A SESSION 1
-  // successor gets launchChromeDirect instead, which spawns Chrome as an ordinary child.
-  // Called with { port, userDataDir, bin } — the task hop ignores all three because its command
-  // line was frozen when the task was registered, which is exactly the limitation the direct
-  // launcher exists to lift. Returns { ok } — false when the task isn't registered (schtasks
-  // non-zero), when the spawn errored, or when the direct launcher could not start a browser —
-  // and that false is what drives /chrome's graceful fallback to the hint. MAY BE ASYNC: the call
-  // site awaits, so a synchronous { ok } (the task hop, and every fake in the suite) is unchanged.
-  // Tests inject a fake, so no test ever runs schtasks or spawns a real browser.
-  launchChrome = defaultLaunchChromeTask,
-  // Clock seam for /chrome's post-launch CDP poll — real timers by default; tests inject an
-  // advancing fake clock so the ~20s wait is instant and deterministic.
+  // Clock seam — real timers by default; tests inject a fake clock.
   now = () => Date.now(),
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
-  // Dedicated-Chrome pool seams (chunk 3b) — a FAKE child + injected memory in tests, never a real
-  // spawn or a real OS probe. spawnChromePipe direct-spawns a pipe Chrome (DIRECT-SPAWN only, the
-  // spine holds the fds); freeMem/rssOf feed the pure admission (chrome-pool.mjs); onChromeLog
-  // reports launches / evictions / deaths / refusals. Boot injects onChromeLog only (real spawn + probes).
+  // Group-Chrome pool seams — a FAKE child + injected memory in tests, never a real spawn or a real
+  // OS probe. spawnChromePipe direct-spawns a pipe Chrome (the spine holds the fds); profileHolder
+  // says whether another Chrome already holds a profile; freeMem/rssOf feed the pure admission
+  // (chrome-pool.mjs); onChromeLog reports launches / evictions / deaths / refusals. Boot injects
+  // onChromeLog only (real spawn + probes).
   spawnChromePipe = defaultSpawnChromePipe,
+  profileHolder = defaultProfileHolder,
   freeMem = () => freemem(),
   rssOf = defaultRssOf,
   onChromeLog = () => {},
@@ -1197,15 +1105,14 @@ export function createCommands({
     // leak to E. /tab and /close address a tab by the 1-based number /tabs prints —
     // resolved fresh against listTabs() on every call, never a stale index carried over
     // from an earlier /tabs (Chrome's own tab order can shift between commands).
-    const tabChrome = async () => (await chatChromeOf(surfaceOf(ev), ev.chatId)).client;
     const tabsMatch = /^\/tabs\s*$/i.exec(line);
-    if (tabsMatch) { await send?.(ev.chatId, await tabsReport(await tabChrome())); return; }
+    if (tabsMatch) { await send?.(ev.chatId, await tabsReport(await chatClientOf(ev))); return; }
     const openMatch = /^\/open\s+(\S+)\s*$/i.exec(line);
-    if (openMatch) { await send?.(ev.chatId, await openTabCmd(await tabChrome(), openMatch[1])); return; }
+    if (openMatch) { await send?.(ev.chatId, await openTabCmd(await chatClientOf(ev), openMatch[1])); return; }
     const tabMatch = /^\/tab\s+(\d+)\s*$/i.exec(line);
-    if (tabMatch) { await send?.(ev.chatId, await activateTabCmd(await tabChrome(), Number(tabMatch[1]))); return; }
+    if (tabMatch) { await send?.(ev.chatId, await activateTabCmd(await chatClientOf(ev), Number(tabMatch[1]))); return; }
     const closeMatch = /^\/close\s+(\d+)\s*$/i.exec(line);
-    if (closeMatch) { await send?.(ev.chatId, await closeTabCmd(await tabChrome(), Number(closeMatch[1]))); return; }
+    if (closeMatch) { await send?.(ev.chatId, await closeTabCmd(await chatClientOf(ev), Number(closeMatch[1]))); return; }
 
     // /login <site> — drive Chrome's OWN saved password into <site>'s login form on THIS chat's
     // browser-group profile (src/spine/login.mjs). Same slot as /chrome: matched BEFORE the catch-all so it
@@ -1307,51 +1214,10 @@ export function createCommands({
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // /chrome [<node>] — Chrome status from the addressed node; LAUNCHES one when none
-  // is listening, then attaches.
-  //
-  // ⚠️ WHICH SPINE MAY SPAWN CHROME DIRECTLY IS DECIDED BY ITS WINDOWS SESSION, AND THE
-  //    DECISION IS MADE ONCE IN boot.mjs — NOT HERE. A SESSION 1 SPINE SPAWNS. A SESSION 0
-  //    SPINE HOPS THROUGH THE SCHEDULED TASK. DO NOT COLLAPSE THE TWO INTO EITHER ONE. ⚠️
-  //
-  // WHAT SESSION 0 ACTUALLY COSTS — corrected 2026-09-06, because the note that stood here
-  // overstated it and the overstatement is worth naming. Session 0 isolation removed the ability
-  // to SEE a service's windows. It never removed the ability to RUN there: Session 0 has a window
-  // station, a desktop and a compositor, so a browser started in it launches, renders and serves
-  // CDP perfectly well. MEASURED ON reve THAT DAY, read-only, off the listening ports:
-  // chrome.exe pid 2388 answering CDP on :9224 — SessionId 0 — beside two Chromium-based Beeper
-  // Desktops on :9223 / :9225, all three in Session 0. setup/install-beeper-s0-service.ps1 has
-  // said so in its own header all along, and those Session 0 Desktops are the feature built on it.
-  // (Their CDP ports were closed 2026-10-11; the Desktops still run there.)
-  //
-  // So the reason a Session 0 spine does not spawn its own browser is not CAPABILITY, it is
-  // VISIBILITY AND INTERACTION. A child inherits its parent's session (verified live 2026-07-15:
-  // spine pid 19696 SessionId 0, explorer.exe SessionId 1), so a Chrome that spine started would
-  // render on a desktop nobody can look at: the operator cannot see it, cannot click it, and
-  // cannot answer the login prompt it puts up — and since Chrome single-instances per
-  // --user-data-dir, an unseen one squatting the brain profile is also a browser the operator can
-  // no longer open in their own session. /chrome exists to give the OPERATOR a browser, so on that
-  // spine the launch has to LEAVE the session: a scheduled task registered with LogonType
-  // Interactive runs in Session 1, and `schtasks /run /tn egpt-chrome` fires it (the seam's
-  // default, defaultLaunchChromeTask) — the same proven pattern as the egpt-lock-on-logon task.
-  // setup/register-chrome-task.ps1 registers it once per node; until then the seam reports
-  // { ok:false } and /chrome falls back to handing over the command line, as before. (A browser
-  // deliberately driven in Session 0 with nobody watching is a DIFFERENT feature, and it does not
-  // come in through /chrome.)
-  //
-  // A SESSION 1 SPINE IS ALREADY ON THE OPERATOR'S DESKTOP, so for it the hop buys nothing and
-  // costs everything the plan lists: `schtasks /run` is fire-and-forget, takes NO ARGUMENTS (the
-  // task's command line was frozen at registration — port 9221 and one profile), and returns
-  // nothing but "accepted", so the spine can never learn whether the browser came up, on which
-  // port, or that it died. It spawns instead, through the ONE launcher (chrome-launcher's
-  // spawnChrome — the same file the hint below renders its command line from), with the port it
-  // will attach to and the profile config names, and it watches the child. boot.mjs makes that
-  // swap for EGPT_SESSION1=1 alone, by overriding the launchChrome seam; every other node keeps
-  // the default, and this dispatch does not branch at all.
-  //
-  // ATTACHING is fine across sessions either way: CDP is plain localhost HTTP, and the session
-  // boundary isolates window stations/desktops, not the loopback network. This is exactly how the
-  // bridge already reaches Beeper Desktop at 127.0.0.1:23373 from Session 0.
+  // /chrome [<node>] — the chat's browser-group Chrome: launched over the pipe when it is not up,
+  // then its tabs. The spine spawns every Chrome itself (it must hold the pipe's fds), and a child
+  // inherits its parent's session (measured 2026-07-15: spine SessionId 0, explorer.exe SessionId 1),
+  // so only a Session 1 spine puts the window on the operator's desktop.
   //
   // NODE GATE: `<node>` is matched against this node's own names (node_name ∪ node_alias,
   // via the shared ownNodeNamesOf). A non-match replies NOTHING AT ALL — the same
@@ -1367,67 +1233,69 @@ export function createCommands({
     await send?.(ev.chatId, await chromeReport(await browserConversationOf(surfaceOf(ev), ev.chatId)));
   }
 
-  // THE ONE LAUNCH PATH — /chrome's, and since 2026-09-26 a boxed being's `browser start` too
-  // (startBrowser below; operator: "for now only the browser"). Two callers, one function, so the
-  // browser a being asks for is exactly the browser /chrome would have opened: same seam (the
-  // Session 0 task hop or a Session 1 spine's direct spawn, whichever boot injected), same port,
-  // same profile, same wait. Every probe is wrapped: an unreachable Chrome is the NORMAL resting
-  // state, not an error. Never throws. Resolves { host, running, launched, pid, direct, why }.
-  //
-  // ONE LAUNCH AT A TIME. Two beings asking at once — or a being and the operator's /chrome — must
-  // not fire two launches at one profile, so a call that arrives while a launch is in flight JOINS
-  // it and gets the same answer. Nothing is queued: the next call after it settles probes afresh,
-  // and finds the browser up.
-  // ── GROUP CHROME POOL (chunk 3b, rev 2026-10-11) ─────────────────────────────────────────────
-  // One pipe-driven chrome.exe per non-brain GROUP profile dir; the brain path below is untouched.
-  const _dedicated = new Map();          // profileDir → { child, client, writable, readable, pid, lastUsedAt, busy }
-  const _dedicatedEnsuring = new Map();  // profileDir → in-flight launch (per-profile single-flight)
+  // ── GROUP CHROME POOL (plans/2610091931 rev 2026-10-11) ──────────────────────────────────────
+  // One pipe-driven chrome.exe per browser-group profile dir, brain included; no Chrome listens on
+  // a port. brain and shared serve many chats: never evicted, and brain is never memory-gated.
+  const _groups = new Map();     // profileDir → { group, child, client, writable, readable, pid, lastUsedAt, busy }
+  const _ensuring = new Map();   // profileDir → in-flight launch (per-profile single-flight)
   const chromeAlive = (e) => !!e?.child && e.child.exitCode == null && !e.child.killed;
+  const evictable = (e) => !e.busy && chromeAlive(e) && e.group !== BRAIN_GROUP && e.group !== SHARED_GROUP;
   const launchEstimateBytes = () => (Number(cfg()?.chrome?.launch_estimate_mb) || CHROME_LAUNCH_ESTIMATE_MB) * MB;
   const memoryMarginBytes = () => (Number(cfg()?.chrome?.memory_margin_mb) || CHROME_MEMORY_MARGIN_MB) * MB;
 
-  // Evict the idlest NON-busy dedicated Chrome (lowest lastUsedAt); profile dir persists → relaunch
-  // comes up still-logged-in. The brain Chrome is not in this map, so it is never evicted.
-  function evictIdlestDedicated() {
+  // Evict the idlest evictable Chrome (lowest lastUsedAt); profile dir persists → relaunch comes up
+  // still-logged-in.
+  function evictIdlest() {
     let victim = null;
-    for (const [dir, e] of _dedicated) {
-      if (e.busy || !chromeAlive(e)) continue;
+    for (const [dir, e] of _groups) {
+      if (!evictable(e)) continue;
       if (!victim || e.lastUsedAt < victim.e.lastUsedAt) victim = { dir, e };
     }
     if (!victim) return false;
     try { victim.e.child.kill(); } catch {}
-    _dedicated.delete(victim.dir);
-    onChromeLog(`evicted dedicated Chrome ${victim.dir} (pid ${victim.e.pid ?? '?'}) under memory pressure`);
+    _groups.delete(victim.dir);
+    onChromeLog(`evicted group Chrome ${victim.dir} (pid ${victim.e.pid ?? '?'}) under memory pressure`);
     return true;
   }
 
-  // A non-brain group's Chrome: memory-admitted, pipe-spawned, driven by a pipe cdpClient.
-  // Registry keyed by profile dir; a live profile is NEVER relaunched; single-flight per profile.
-  // FAIL CLOSED: no profile (the lookup refused the chat) or the brain's own dir → no browser + one log line.
-  function ensureDedicatedChrome(conversation) {
+  // THE ONE LAUNCH PATH — /chrome, a being's `browser start` / `browser cdp`, /tabs…, /members,
+  // /login, the relay, a browser beat. No conversation → brain. Registry keyed by profile dir; a live
+  // profile is never relaunched; single-flight per profile. `launch: false` only reports a live one.
+  // FAIL CLOSED: a refused chat, a non-brain group on the brain's dir, or a profile another Chrome
+  // already holds → no browser + one log line. Never throws.
+  // Resolves { group, profileDir, client, pid, launched, running, declined?, why? }.
+  function ensureChrome(conversation, { launch = true } = {}) {
+    conversation ??= { key: '', name: '', group: BRAIN_GROUP };
+    const { group } = conversation;
     const profileDir = chromeProfileOf(cfg(), conversation);
-    if (!profileDir || profileDir === chromeProfileOf(cfg())) {
-      const why = conversation.why || `browser group "${conversation.group}" ${profileDir ? 'is the brain profile dir' : 'is unusable'}`;
+    if (!profileDir || (group !== BRAIN_GROUP && profileDir === chromeProfileOf(cfg()))) {
+      const why = conversation.why || `browser group "${group}" ${profileDir ? 'is the brain profile dir' : 'is unusable'}`;
       onChromeLog(`no browser for "${conversation.name ?? ''}": ${why}`);
-      return Promise.resolve({ dedicated: true, profileDir: null, client: null, launched: false, running: false, why });
+      return Promise.resolve({ group, profileDir: null, client: null, launched: false, running: false, why });
     }
-    const live = _dedicated.get(profileDir);
-    if (chromeAlive(live)) { live.lastUsedAt = now(); return Promise.resolve({ dedicated: true, profileDir, client: live.client, pid: live.pid, launched: false, running: true }); }
-    if (_dedicatedEnsuring.has(profileDir)) return _dedicatedEnsuring.get(profileDir);
+    const live = _groups.get(profileDir);
+    if (chromeAlive(live)) { live.lastUsedAt = now(); return Promise.resolve({ group, profileDir, client: live.client, pid: live.pid, launched: false, running: true }); }
+    if (!launch) return Promise.resolve({ group, profileDir, client: null, launched: false, running: false, why: `the "${group}" browser is not running` });
+    if (_ensuring.has(profileDir)) return _ensuring.get(profileDir);
     const p = (async () => {
-      const estimateBytes = estimateChromeBytes({
-        runningRssBytes: [..._dedicated.values()].filter(chromeAlive).map((e) => rssOf(e.pid)),
-        floorBytes: launchEstimateBytes(),
-      });
-      const marginBytes = memoryMarginBytes();
-      for (;;) {
-        const availableBytes = freeMem();
-        const canEvict = [..._dedicated.values()].some((e) => !e.busy && chromeAlive(e));
-        const d = admitLaunch({ availableBytes, estimateBytes, marginBytes, canEvict });
-        if (d.action === 'launch') break;
-        if (d.action === 'evict' && evictIdlestDedicated()) continue;
-        onChromeLog(`declined dedicated Chrome ${profileDir}: ${d.reason}`);
-        return { dedicated: true, profileDir, client: null, launched: false, running: false, declined: true, why: d.reason };
+      const holder = profileHolder(profileDir);
+      if (holder) {
+        onChromeLog(`not launching "${group}" Chrome ${profileDir}: another Chrome holds it (${holder})`);
+        return { group, profileDir, client: null, launched: false, running: false, why: `the "${group}" browser is open in a normal window; close it to hand it back to the spine` };
+      }
+      if (group !== BRAIN_GROUP) {
+        const estimateBytes = estimateChromeBytes({
+          runningRssBytes: [..._groups.values()].filter(chromeAlive).map((e) => rssOf(e.pid)),
+          floorBytes: launchEstimateBytes(),
+        });
+        const marginBytes = memoryMarginBytes();
+        for (;;) {
+          const d = admitLaunch({ availableBytes: freeMem(), estimateBytes, marginBytes, canEvict: [..._groups.values()].some(evictable) });
+          if (d.action === 'launch') break;
+          if (d.action === 'evict' && evictIdlest()) continue;
+          onChromeLog(`declined group Chrome ${profileDir}: ${d.reason}`);
+          return { group, profileDir, client: null, launched: false, running: false, declined: true, why: d.reason };
+        }
       }
       let spawned;
       try {
@@ -1435,22 +1303,22 @@ export function createCommands({
           userDataDir: profileDir,
           bin: chromeBinOf(cfg()),
           onExit: ({ code, signal, error }) => {
-            if (_dedicated.get(profileDir)?.pid === spawned?.pid) _dedicated.delete(profileDir);
+            if (_groups.get(profileDir)?.pid === spawned?.pid) _groups.delete(profileDir);
             onChromeLog(error
-              ? `dedicated Chrome ${profileDir} never started — ${error?.message ?? error}`
-              : `dedicated Chrome ${profileDir} exited (${signal ? `signal ${signal}` : `code ${code}`}) — nothing restarted; it relaunches on next need`);
+              ? `group Chrome ${profileDir} never started — ${error?.message ?? error}`
+              : `group Chrome ${profileDir} exited (${signal ? `signal ${signal}` : `code ${code}`}) — nothing restarted; it relaunches on next need`);
           },
         });
       } catch (e) {
-        onChromeLog(`dedicated Chrome ${profileDir} launch failed — ${e?.message ?? e}`);
-        return { dedicated: true, profileDir, client: null, launched: false, running: false, why: String(e?.message ?? e) };
+        onChromeLog(`group Chrome ${profileDir} launch failed — ${e?.message ?? e}`);
+        return { group, profileDir, client: null, launched: false, running: false, why: String(e?.message ?? e) };
       }
       const client = createCdpClient(createPipeTransport({ writable: spawned.writable, readable: spawned.readable }));
-      _dedicated.set(profileDir, { child: spawned.child, client, writable: spawned.writable, readable: spawned.readable, pid: spawned.pid, lastUsedAt: now(), busy: false });
-      onChromeLog(`launched dedicated Chrome ${profileDir} (pid ${spawned.pid ?? '?'}) over --remote-debugging-pipe`);
-      return { dedicated: true, profileDir, client, pid: spawned.pid, launched: true, running: true };
-    })().finally(() => { _dedicatedEnsuring.delete(profileDir); });
-    _dedicatedEnsuring.set(profileDir, p);
+      _groups.set(profileDir, { group, child: spawned.child, client, writable: spawned.writable, readable: spawned.readable, pid: spawned.pid, lastUsedAt: now(), busy: false });
+      onChromeLog(`launched "${group}" Chrome ${profileDir} (pid ${spawned.pid ?? '?'}) over --remote-debugging-pipe`);
+      return { group, profileDir, client, pid: spawned.pid, launched: true, running: true };
+    })().finally(() => { _ensuring.delete(profileDir); });
+    _ensuring.set(profileDir, p);
     return p;
   }
 
@@ -1464,107 +1332,34 @@ export function createCommands({
     } catch (e) { return { key: '', name: '', group: null, why: `browser group lookup failed — ${e?.message ?? e}` }; }
   }
 
-  // A chat's group + the client that drives it (attach-only on brain) — /tabs…, /login, the room relay.
-  async function chatChromeOf(surface, chatId) {
+  // A chat's group + the client that drives it — /tabs…, /members, /activate, /status, /login, the room relay.
+  async function chatChromeOf(surface, chatId, opts) {
     const conversation = await browserConversationOf(surface, chatId);
-    return { conversation, client: (await chromeClientFor(conversation, { attach: true })).client };
+    const { client, why } = await ensureChrome(conversation, opts);
+    return { conversation, client, why };
   }
-
-  // 3c LOOKUP: conversation → its CDP client. A non-brain group yields its group's pipe cdpClient (null
-  // when refused); the brain group and conversation-less callers keep the default port client — beings
-  // stay on the port client until 3c rewires the being cdp seam. Ensures on demand; single-flight.
-  // `attach`: never launch the brain port Chrome (a group's pipe Chrome has no other launcher).
-  async function chromeClientFor(conversation, { attach = false } = {}) {
-    if (attach && (!conversation || conversation.group === BRAIN_GROUP)) return { dedicated: false, host: null, client: cdp };
-    const r = await ensureChrome(conversation);
-    if (r?.dedicated) return { dedicated: true, profileDir: r.profileDir, client: r.client ?? null, pid: r.pid ?? null, declined: !!r.declined, why: r.why ?? '' };
-    return { dedicated: false, host: r?.host ?? null, client: cdp };
-  }
-
-  let _ensuring = null;
-  // A conversation in any group but brain gets its GROUP's pipe Chrome (above); conversation-less
-  // callers and the brain group take the byte-identical brain port path below.
-  function ensureChrome(conversation) {
-    if (conversation && conversation.group !== BRAIN_GROUP) return ensureDedicatedChrome(conversation);
-    if (_ensuring) return _ensuring;
-    _ensuring = (async () => {
-      let host = '?';
-      try { host = await cdp.cdpHost(); } catch { host = '?'; }
-
-      // Is Chrome already up? (isRunning is the launch decision — NOT whether listTabs works.)
-      let running = false;
-      try { running = await cdp.isRunning(); } catch { running = false; }
-      if (running) return { host, running: true, launched: false, pid: null, direct: false, why: '' };
-
-      // Not listening → fire the launch seam, then poll for it to bind its CDP port. THE ARGUMENTS
-      // ARE THE POINT of the Session 1 path: the port is the one this node will ATTACH to (never the
-      // task's frozen 9221) and the profile is the one config names, so the browser that comes up is
-      // the browser /chrome then talks to. The task hop ignores both, exactly as it always has.
-      // chromeProfileOf is the ONE place the profile is decided (today config's chrome.profile_dir;
-      // the per-group profile of the operator's 2026-09-22 design belongs there, not in a caller).
-      let ok = false, direct = false, why = '', pid = null;
-      try {
-        const r = await launchChrome({ port: chromePortOf(host), userDataDir: chromeProfileOf(cfg()), bin: chromeBinOf(cfg()) });
-        ok = !!r?.ok;
-        direct = !!r?.direct;          // which seam answered — the hint's remedy differs (below)
-        pid = r?.pid ?? null;
-        if (!ok) why = r?.detail ?? '';
-      } catch { ok = false; }
-      if (ok) running = await waitForChromeUp();
-      return { host, running, launched: running, pid, direct, why };
-    })().finally(() => { _ensuring = null; });
-    return _ensuring;
-  }
-
-  // What a failed launch says, for both callers: the direct spawn's own detail (or that it never
-  // bound the port), and nothing for the task hop — whose remedy, registering the task, is the
-  // hint's setup note, not a sentence of its own.
-  const triedOf = (r) => (r.direct ? (r.why || `it never bound :${chromePortOf(r.host)} within ${Math.round(CHROME_LAUNCH_TIMEOUT_MS / 1000)}s`) : null);
+  const chatClientOf = async (ev, opts) => (await chatChromeOf(surfaceOf(ev), ev.chatId, opts)).client;
 
   // A BOXED BEING'S `browser start` (src/spine/being-link.mjs): the launch path above and nothing
   // else — no arguments reach it from the being, and it lists no tabs (that is the operator's
-  // report). Idempotent: when CDP already answers it launches nothing and says so.
-  // `conversation` (browserConversationOf) picks its group's Chrome; none → the brain, as before.
+  // report). Idempotent: a running Chrome is reported, not relaunched.
   async function startBrowser(conversation) {
     const r = await ensureChrome(conversation);
-    if (r.dedicated) return r.client ? { ok: true, ...(r.launched ? { launched: true } : { alreadyRunning: true }), detail: `the "${conversation.group}" browser is ${r.launched ? 'up' : 'already running'}${r.pid ? ` (pid ${r.pid})` : ''}` } : { ok: false, reason: r.declined ? 'declined' : 'no-browser', detail: r.why };
-    if (r.running && !r.launched) return { ok: true, alreadyRunning: true, detail: `the browser is already answering on ${r.host} — nothing was launched` };
-    if (r.running) return { ok: true, launched: true, detail: `the browser is up on ${r.host}${r.pid ? ` (pid ${r.pid})` : ''}` };
-    return {
-      ok: false,
-      reason: 'launch-failed',
-      detail: triedOf(r) ?? `the launch task did not bring a browser up on ${r.host} — it may not be registered on this node (setup/register-chrome-task.ps1)`,
-    };
+    if (!r.client) return { ok: false, reason: r.declined ? 'declined' : 'no-browser', detail: r.why };
+    return { ok: true, ...(r.launched ? { launched: true } : { alreadyRunning: true }), detail: `the "${r.group}" browser is ${r.launched ? 'up' : 'already running'}${r.pid ? ` (pid ${r.pid})` : ''}` };
   }
 
-  // The report body. When none is listening the launch path above fires the seam and waits; a
-  // task that isn't registered, a direct launch that failed, or a Chrome that never binds its port
-  // all degrade to the launch hint. Never throws.
+  // The /chrome report body: the group's Chrome (launched when needed) and its tabs. Never throws.
   async function chromeReport(conversation) {
     const r = await ensureChrome(conversation);
-    if (r.dedicated && !r.client) return `no browser for this chat — ${r.why}`;
-    const host = r.dedicated ? `the "${conversation.group}" browser (pipe)` : r.host;
-    const launchedPid = r.launched ? r.pid : null;
-    if (!r.running) {
-      return chromeLaunchHint(host, {
-        // The setup note tells the operator to register the scheduled task. That is the remedy on
-        // the Session 0 path and NOT on the Session 1 one, where this spine tried to spawn the
-        // browser itself — so a direct failure reports what it tried instead of misdirecting.
-        setupNote: !r.direct,
-        tried: triedOf(r),
-      });
-    }
-
-    // Reachable (already, or after a successful launch) → attach + report tabs. A tab-list
-    // hiccup on a live Chrome degrades to the hint WITHOUT the launch note (Chrome is up).
+    if (!r.client) return `no browser for this chat — ${r.why}`;
+    const host = `the "${r.group}" browser (pipe)`;
     let tabs = null;
-    try { tabs = await (r.client ?? cdp).listTabs(); } catch { tabs = null; }
-    if (!tabs) return r.dedicated ? `${host}: its tab list failed` : chromeLaunchHint(host);
+    try { tabs = await r.client.listTabs(); } catch { tabs = null; }
+    if (!tabs) return `${host}: its tab list failed`;
 
     const lines = [`attached: ${host}`];
-    // The pid is the one fact `schtasks /run` could never hand back, so when this spine launched
-    // the browser itself it says so. The task hop returns no pid, so its report is unchanged.
-    if (launchedPid) lines.push(`launched: pid ${launchedPid}`);
+    if (r.launched && r.pid) lines.push(`launched: pid ${r.pid}`);
     lines.push(`tabs: ${tabs.length}`);
     // A few tabs only, each truncated — this lands in a chat, not a terminal.
     for (const t of tabs.slice(0, CHROME_TAB_LIMIT)) {
@@ -1573,44 +1368,6 @@ export function createCommands({
     }
     if (tabs.length > CHROME_TAB_LIMIT) lines.push(`  … +${tabs.length - CHROME_TAB_LIMIT} more`);
     return '```yaml\n' + lines.join('\n') + '\n```';
-  }
-
-  // Poll cdp.isRunning() until Chrome binds its port or the timeout elapses. The clock is
-  // injected (now/sleep), so tests advance a fake clock and never wait real time. A probe
-  // that throws mid-poll counts as "not up yet", never aborts.
-  async function waitForChromeUp() {
-    const deadline = now() + CHROME_LAUNCH_TIMEOUT_MS;
-    while (now() < deadline) {
-      let up = false;
-      try { up = await cdp.isRunning(); } catch { up = false; }
-      if (up) return true;
-      await sleep(CHROME_LAUNCH_POLL_MS);
-    }
-    return false;
-  }
-
-  // No Chrome listening → tell the operator exactly what to run, in their own session. The
-  // command line is built from chrome-launcher's OWN flag set (chromeArgs), so it can never
-  // drift from what the repo would actually spawn; the port is derived from the CDP host the
-  // node will attach to, so the two always agree. `setupNote` appends the one-liner to enable
-  // one-command launch (registering the Session-1 task) — shown only on the launch-fallback
-  // paths, not when Chrome is up but tab-listing hiccupped. `tried` replaces the "I can't open
-  // it myself" line on a SESSION 1 spine, which can and did try: saying it cannot would be a lie,
-  // and it is the one sentence in this reply an operator acts on.
-  function chromeLaunchHint(host, { setupNote = false, tried = null } = {}) {
-    const port = chromePortOf(host);
-    const exe = findChromeExecutable() ?? 'chrome';
-    const args = chromeArgs({ port, userDataDir: CHROME_BRAIN_PROFILE });
-    const lines = [
-      `no Chrome is listening on ${host}.`,
-      tried
-        ? `I tried to open one myself and it didn't come up — ${tried}.`
-        : `I can't open it myself — I run as a service in another Windows session, so any Chrome I start would be invisible to you.`,
-      `Run this in your own session and I'll attach:`,
-      '```\n' + chromeCommandLine(exe, args) + '\n```',
-    ];
-    if (setupNote) lines.push(`(run setup/register-chrome-task.ps1 on this node once to enable launch)`);
-    return lines.join('\n');
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -1668,8 +1425,8 @@ export function createCommands({
   // click → classify, with the 2FA / CAPTCHA branches) and the secret boundary. Absent seam → say so.
   async function loginCmd(ev, site) {
     if (typeof requestLogin !== 'function') return `/login: the auto-login limb isn't wired on this node`;
-    const { conversation, client } = await chatChromeOf(surfaceOf(ev), ev.chatId);
-    if (!client) return `/login: no browser for this chat${conversation?.why ? ` — ${conversation.why}` : ''}`;
+    const { conversation, client, why } = await chatChromeOf(surfaceOf(ev), ev.chatId);
+    if (!client) return `/login: no browser for this chat${why ? ` — ${why}` : ''}`;
     try { return `/login ${site} → ${await requestLogin(site, { conversation, client })}`; }
     catch (e) { return `/login: failed — ${e?.message ?? e}`; }
   }
@@ -2679,7 +2436,7 @@ export function createCommands({
       ms = [...extra.filter((m) => !stored.has(m.id)), ...ms];
     }
     let liveIds = new Set();
-    try { liveIds = new Set((await cdp.listTabs()).map((t) => t.id)); } catch { /* no Chrome → all brains inactive */ }
+    try { liveIds = new Set((await (await chatClientOf(ev, { launch: false })).listTabs()).map((t) => t.id)); } catch { /* no Chrome → all brains inactive */ }
     const lines = [`${label} (${ms.length} members):`];
     for (const m of ms) {
       const mode = STATE_TO_MODE[m.state] ?? m.state;
@@ -2742,7 +2499,7 @@ export function createCommands({
   // kind:brain, state:muted (mode:disable — "no chatter reaches it yet").
   async function membersAddTab(ev, room, n, aliasArg) {
     let tabs;
-    try { tabs = await cdp.listTabs(); } catch { await send?.(ev.chatId, 'no Chrome to list tabs from — try /chrome first'); return; }
+    try { tabs = await (await chatClientOf(ev)).listTabs(); } catch { await send?.(ev.chatId, 'no Chrome to list tabs from — try /chrome first'); return; }
     const tab = tabs[n - 1];
     if (!tab) { await send?.(ev.chatId, `no tab ${n} — ${tabs.length} open`); return; }
     const adapter = await adapterFor(tab.url);
@@ -3999,11 +3756,13 @@ export function createCommands({
     const m = (await room.members()).find((x) => x.id === id);
     if (!m) { await send?.(ev.chatId, `no member '${id}' in this conversation`); return; }
     if (m.kind !== 'brain') { await send?.(ev.chatId, `'${id}' is not a tab/brain member`); return; }
+    const { client, why } = await chatChromeOf(surfaceOf(ev), ev.chatId);
+    if (!client) { await send?.(ev.chatId, `/activate: no browser for this chat — ${why}`); return; }
     let liveIds = new Set();
-    try { liveIds = new Set((await cdp.listTabs()).map((t) => t.id)); } catch { /* no Chrome → treat as closed */ }
+    try { liveIds = new Set((await client.listTabs()).map((t) => t.id)); } catch { /* no Chrome → treat as closed */ }
     if (m.targetId && liveIds.has(m.targetId)) { await send?.(ev.chatId, `${id} already active · tab ${m.targetId}`); return; }
     let newId;
-    try { newId = await cdp.openTab(m.url); } catch (e) { await send?.(ev.chatId, `/activate: failed — ${e?.message ?? e}`); return; }
+    try { newId = await client.openTab(m.url); } catch (e) { await send?.(ev.chatId, `/activate: failed — ${e?.message ?? e}`); return; }
     await room.setMember({ ...m, targetId: newId });   // spread keeps state/adapter/url; targetId refreshed
     await send?.(ev.chatId, `reopened ${m.url} · tab ${newId ?? '?'} · active`);
   }
@@ -4180,13 +3939,13 @@ export function createCommands({
       }
     } catch { /* omit the whole block */ }
 
-    // chrome — reuses the cdp seam + this module's own adapterFor (already memoized
-    // loadAdapters). Never blocks/throws on a down Chrome.
+    // chrome — this chat's group Chrome, only if it is already up (a status read never launches
+    // one) + this module's own adapterFor (already memoized loadAdapters). Never throws.
     try {
-      const running = await cdp.isRunning();
-      if (running) {
+      const client = await chatClientOf(ev, { launch: false });
+      if (client) {
         let tabs = [];
-        try { tabs = await cdp.listTabs(); } catch { tabs = []; }
+        try { tabs = await client.listTabs(); } catch { tabs = []; }
         let n = 0;
         for (const t of tabs) {
           try { if (await adapterFor(t?.url)) n++; } catch { /* skip this tab */ }
@@ -4434,5 +4193,5 @@ export function createCommands({
   // above). `/e`/`/egpt` now carry no special meaning at all and fall through to the generic
   // catch-all like any other unrecognized token.
 
-  return { isCommand, phraseCommand, runPhrase, run, runCaptured, remoteNode, nodeCommandForMe, makeNodeExplicit, currentRoomOf, startBrowser, chromeClientFor, browserConversationOf, chatChromeOf };
+  return { isCommand, phraseCommand, runPhrase, run, runCaptured, remoteNode, nodeCommandForMe, makeNodeExplicit, currentRoomOf, startBrowser, chromeClientFor: ensureChrome, browserConversationOf, chatChromeOf };
 }

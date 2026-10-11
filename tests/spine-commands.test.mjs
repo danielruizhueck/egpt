@@ -1,10 +1,10 @@
 // Operator slash commands: recognition (Self DM / authorized), lifecycle exits,
 // and the loop intercept (a command is never routed to the brain).
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createCommands, normalizeAgentsArgs, AGENTS_USAGE, RETIRED_AGENT_SUBS, AGENT_SUB_ALIASES, SINGULAR_CMD, PLURAL_OF, launchChromeDirect, CHROME_BRAIN_PROFILE, chromeProfileOf } from '../src/spine/commands.mjs';
+import { createCommands, normalizeAgentsArgs, AGENTS_USAGE, RETIRED_AGENT_SUBS, AGENT_SUB_ALIASES, SINGULAR_CMD, PLURAL_OF, CHROME_BRAIN_PROFILE, chromeProfileOf } from '../src/spine/commands.mjs';
 import { createSpine } from '../src/spine/spine.mjs';
 import { createTranscript } from '../src/spine/transcript.mjs';
 import { contextSinceLastTurn } from '../src/transcript-log.mjs';
@@ -15,26 +15,25 @@ import { emptyState, ensureContact, getBeing, getContact, patchContact } from '.
 // THE mention matcher itself — imported so the ambiguity test can assert that /agents and the
 // ROUTER pick the same being for a token two agents claim, instead of restating the rule by hand.
 import { addressed } from '../src/spine/router.mjs';
+import { fakePipeChrome } from './fake-pipe-chrome.mjs';
 
 // THE NODE'S OWN `agents:` BLOCK is part of every harness, because /agents resolves the word the
 // operator typed through the router's wake vocabulary (2026-09-17: a handle, never a bare key), and
 // a real node always declares its beings. `e` and `d` declare no `handles:`, so each answers to its
 // own key, exactly as wakeTokens says. A test that passes its own `config` merges into this.
 const AGENTS = { agents: { e: {}, d: {} } };
-function harness({ config = AGENTS, state = null, brains, io = {}, cdp, launch, clock, resolveConvRoom, onRoomChange, logTranscript, scopeOf, backlogOf, timeZone } = {}) {
+function harness({ config = AGENTS, state = null, brains, io = {}, cdp = {}, profileHolder = () => null, clock, resolveConvRoom, onRoomChange, logTranscript, scopeOf, backlogOf, timeZone } = {}) {
   const sent = [], exits = [], rewinds = [], writes = [], evicts = [], roomChanges = [], logged = [];
   const files = {};   // any command-authored files (e.g. /rooms create's config.yaml)
   let st = state;
-  // /chrome launch + clock seams: default to a fake that reports "task not registered"
-  // and an advancing fake clock, so NO command test ever runs real schtasks or waits real
-  // wall-clock time (both seams are consumed ONLY by /chrome's chromeReport). The seam is
-  // `launchChrome` (not launchChromeTask) since chunk 6: the task hop is its DEFAULT, not its
-  // identity — a Session 1 spine is handed a direct spawner through the same door.
+  // The group Chrome is a fake pipe Chrome answering like `cdp` (tests/fake-pipe-chrome.mjs), and the
+  // clock is a fake, so no command test spawns a browser or waits real wall-clock time.
   const fakeClock = clock ?? (() => { let t = 0; return { now: () => t, sleep: async (ms) => { t += ms; } }; })();
+  const chrome = fakePipeChrome(cdp);
   const cmds = createCommands({
     getConfig: () => config,
-    ...(cdp ? { cdp } : {}),
-    launchChrome: launch ?? (() => ({ ok: false })),
+    spawnChromePipe: chrome.spawnChromePipe,
+    profileHolder,
     now: fakeClock.now,
     sleep: fakeClock.sleep,
     send: async (chatId, text) => sent.push({ chatId, text }),
@@ -60,7 +59,7 @@ function harness({ config = AGENTS, state = null, brains, io = {}, cdp, launch, 
     logTranscript: logTranscript ?? (async (ev, reply) => { logged.push({ ev, reply }); return true; }),
     onRoomChange: (surface, slug) => { roomChanges.push({ surface, slug }); onRoomChange?.(surface, slug); },
   });
-  return { cmds, sent, exits, rewinds, writes, evicts, files, roomChanges, logged, getState: () => st };
+  return { cmds, sent, exits, rewinds, writes, evicts, files, roomChanges, logged, spawns: chrome.calls, getState: () => st };
 }
 
 describe('commands.isCommand', () => {
@@ -2160,44 +2159,48 @@ describe('/agents <handle>|all — bare status view, usage, and /e/egpt retireme
   });
 });
 
-// /chrome <node> — ATTACH-ONLY Chrome status, answered ONLY by the addressed node.
-// The CDP seam is injected everywhere here: these tests never reach a real Chrome
-// and never open a socket. The node gate is the same wake-word principle as the
-// mesh's self-set (node_name ∪ node_alias): a non-addressed node says NOTHING, so
-// on a shared Beeper account exactly one node answers.
+// /chrome <node> — the chat's group Chrome (brain when the chat has no group row), answered ONLY by
+// the addressed node. The spawn is a fake pipe Chrome everywhere here: no real Chrome, no socket.
+// The node gate is the same wake-word principle as the mesh's self-set (node_name ∪ node_alias): a
+// non-addressed node says NOTHING, so on a shared Beeper account exactly one node answers.
 describe('/chrome <node>', () => {
   const self = { chatId: '!self', surface: 'whatsapp' };
   const kg = { node_name: 'kg', whatsapp: { chat_id: '!self' } };
   const reachable = {
-    isRunning: async () => true,
-    cdpHost: async () => 'localhost:9221',
     listTabs: async () => ([
       { title: 'ChatGPT', url: 'https://chatgpt.com/c/abc' },
       { title: 'Claude', url: 'https://claude.ai/chat/def' },
     ]),
   };
-  const unreachable = {
-    isRunning: async () => false,
-    cdpHost: async () => 'localhost:9221',
-    listTabs: async () => { throw new Error('Cannot reach Chrome at localhost:9221'); },
-  };
+  const tabsFail = { listTabs: async () => { throw new Error('tab list failed'); } };
 
-  it('/chrome kg on the kg node with Chrome reachable reports attached + the host + tab info', async () => {
-    const { cmds, sent } = harness({ config: { ...AGENTS, ...kg }, cdp: reachable });
+  it('/chrome kg on the kg node launches brain\'s Chrome over the pipe and reports it + the tabs', async () => {
+    const { cmds, sent, spawns } = harness({ config: { ...AGENTS, ...kg }, cdp: reachable });
     await cmds.run({ ...self, body: '/chrome kg' });
     expect(sent).toHaveLength(1);
-    expect(sent[0].text).toMatch(/attached/i);
-    expect(sent[0].text).toMatch(/localhost:9221/);
+    expect(sent[0].text).toMatch(/attached: the "brain" browser \(pipe\)/);
+    expect(sent[0].text).toMatch(/launched: pid \d+/);
     expect(sent[0].text).toMatch(/tabs: 2/);
     expect(sent[0].text).toMatch(/ChatGPT/);
     expect(sent[0].text).toMatch(/chatgpt\.com/);
+    expect(spawns.map((s) => s.userDataDir)).toEqual([CHROME_BRAIN_PROFILE]);
+  });
+
+  it('a second /chrome kg attaches to the running Chrome — no relaunch, no pid line', async () => {
+    const { cmds, sent, spawns } = harness({ config: { ...AGENTS, ...kg }, cdp: reachable });
+    await cmds.run({ ...self, body: '/chrome kg' });
+    await cmds.run({ ...self, body: '/chrome kg' });
+    expect(spawns).toHaveLength(1);
+    expect(sent[1].text).toMatch(/attached/);
+    expect(sent[1].text).not.toMatch(/launched:/);
   });
 
   // The whole point of the gate: `do` must not answer a question addressed to `kg`.
-  it('/chrome kg on the `do` node replies NOTHING AT ALL (silent — only the addressed node answers)', async () => {
-    const { cmds, sent } = harness({ config: { ...AGENTS,  node_name: 'do', whatsapp: { chat_id: '!self' } }, cdp: reachable });
+  it('/chrome kg on the `do` node replies NOTHING AT ALL and launches nothing', async () => {
+    const { cmds, sent, spawns } = harness({ config: { ...AGENTS,  node_name: 'do', whatsapp: { chat_id: '!self' } }, cdp: reachable });
     await cmds.run({ ...self, body: '/chrome kg' });
     expect(sent).toHaveLength(0);
+    expect(spawns).toHaveLength(0);
   });
 
   it('a node_alias matches too (the addressed name is any of node_name ∪ node_alias)', async () => {
@@ -2214,41 +2217,32 @@ describe('/chrome <node>', () => {
     expect(sent[0].text).toMatch(/attached/i);
   });
 
-  // NOT an error: no Chrome listening is the normal resting state. The node cannot
-  // open one itself (Session 0 service — an invisible browser), so it hands the
-  // operator the exact command line to run in THEIR session.
-  it('/chrome kg with Chrome NOT reachable reports the launch command line (no throw, not a failure)', async () => {
-    const { cmds, sent } = harness({ config: { ...AGENTS, ...kg }, cdp: unreachable });
+  it('the brain profile open in a normal window → the clear answer, nothing launched over it', async () => {
+    const { cmds, sent, spawns } = harness({ config: { ...AGENTS, ...kg }, cdp: reachable, profileHolder: () => 'EBUSY' });
     await cmds.run({ ...self, body: '/chrome kg' });
-    expect(sent).toHaveLength(1);
-    expect(sent[0].text).toMatch(/no chrome/i);
-    expect(sent[0].text).toMatch(/--remote-debugging-port=9221/);
-    expect(sent[0].text).toMatch(/--user-data-dir=/);
-    expect(sent[0].text).not.toMatch(/failed|error/i);
-    // The reason it can't do it itself must land in the chat, not just in a comment.
-    expect(sent[0].text).toMatch(/session/i);
+    expect(sent[0].text).toBe('no browser for this chat — the "brain" browser is open in a normal window; close it to hand it back to the spine');
+    expect(spawns).toHaveLength(0);
   });
 
-  it('a listTabs failure after a live isRunning degrades to the launch hint, never a throw', async () => {
-    const { cmds, sent } = harness({
-      config: kg,
-      cdp: { ...unreachable, isRunning: async () => true },
-    });
+  it('a tab-list failure on a live Chrome is reported, never a throw', async () => {
+    const { cmds, sent } = harness({ config: kg, cdp: tabsFail });
     await expect(cmds.run({ ...self, body: '/chrome kg' })).resolves.toBeUndefined();
     expect(sent).toHaveLength(1);
+    expect(sent[0].text).toMatch(/its tab list failed/);
   });
 
   // Bare /chrome = usage, self-naming. Every node answers this ONE short line (it is
   // the discovery path: it tells the operator the valid args). The expensive status
   // payload stays strictly single-node.
   it('bare /chrome shows a short usage line naming THIS node', async () => {
-    const { cmds, sent } = harness({ config: { ...AGENTS,  node_name: 'kg', node_alias: ['reve'], whatsapp: { chat_id: '!self' } }, cdp: reachable });
+    const { cmds, sent, spawns } = harness({ config: { ...AGENTS,  node_name: 'kg', node_alias: ['reve'], whatsapp: { chat_id: '!self' } }, cdp: reachable });
     await cmds.run({ ...self, body: '/chrome' });
     expect(sent).toHaveLength(1);
     expect(sent[0].text).toMatch(/`\/chrome` <node>/);   // token quoted — the reply is not itself a command
     expect(sent[0].text).toMatch(/kg/);
     expect(sent[0].text).toMatch(/reve/);
     expect(sent[0].text).not.toMatch(/attached/i);   // never the status payload
+    expect(spawns).toHaveLength(0);
   });
 
   // An unknown arg is a NON-MATCH, and a non-match is silent — same rule as `do`
@@ -2267,16 +2261,12 @@ describe('/chrome <node>', () => {
     expect(cmds.isCommand({ body: '/chrome kg', chatId: '!group', surface: 'whatsapp', authorized: true })).toBe(true);
   });
 
-  it('a non-operator /chrome is never run (no reply, no CDP probe)', async () => {
-    let probed = false;
-    const { cmds, sent } = harness({
-      config: kg,
-      cdp: { ...reachable, isRunning: async () => { probed = true; return true; } },
-    });
+  it('a non-operator /chrome is never run (no reply, no launch)', async () => {
+    const { cmds, sent, spawns } = harness({ config: kg, cdp: reachable });
     const ev = { body: '/chrome kg', chatId: '!group', surface: 'whatsapp' };
     expect(cmds.isCommand(ev)).toBe(false);   // the loop never reaches run()
     expect(sent).toHaveLength(0);
-    expect(probed).toBe(false);
+    expect(spawns).toHaveLength(0);
   });
 
   // Regression lock: /chrome must not fall through to the "recognized" catch-all.
@@ -2286,164 +2276,10 @@ describe('/chrome <node>', () => {
     expect(sent[0].text).not.toMatch(/recognized/);
   });
 
-  // ── LAUNCH (Session-0 → Session-1 scheduled-task hop) ──────────────────────────
-  // Unreachable is no longer just a hint: /chrome fires the `egpt-chrome` scheduled
-  // task (via the injected launch seam — a fake here, `schtasks /run /tn egpt-chrome`
-  // in prod), polls CDP up to ~20s (fake advancing clock → instant), then attaches.
-
-  it('/chrome kg unreachable → fires the launch task, waits, attaches, replies with tabs', async () => {
-    const launched = [];
-    // isRunning stays false until the launch fires, then comes up on the 2nd poll (proves it WAITS).
-    let polls = 0;
-    const cdp = {
-      isRunning: async () => launched.length > 0 && ++polls >= 2,
-      cdpHost: async () => 'localhost:9221',
-      listTabs: async () => ([
-        { title: 'ChatGPT', url: 'https://chatgpt.com/c/abc' },
-        { title: 'Claude', url: 'https://claude.ai/chat/def' },
-      ]),
-    };
-    const launch = () => { launched.push('fire'); return { ok: true }; };
-    const { cmds, sent } = harness({ config: { ...AGENTS, ...kg }, cdp, launch });
+  it('it launches into config\'s chrome.profile_dir with config\'s chrome.bin', async () => {
+    const { cmds, spawns } = harness({ config: { ...AGENTS, ...kg, chrome: { bin: 'C:/x/chrome.exe', profile_dir: 'C:/x/brain' } }, cdp: reachable });
     await cmds.run({ ...self, body: '/chrome kg' });
-    expect(launched).toHaveLength(1);             // the launch task WAS fired (schtasks recorded)
-    expect(polls).toBeGreaterThanOrEqual(2);      // it polled CDP, not just checked once
-    expect(sent).toHaveLength(1);
-    expect(sent[0].text).toMatch(/attached/i);
-    expect(sent[0].text).toMatch(/localhost:9221/);
-    expect(sent[0].text).toMatch(/tabs: 2/);
-    expect(sent[0].text).toMatch(/ChatGPT/);
-    expect(sent[0].text).not.toMatch(/no chrome/i);   // NOT the fallback hint
-  });
-
-  it('/chrome kg unreachable + launch task NOT registered (schtasks non-zero) → command-line fallback + setup note, no throw', async () => {
-    const launched = [];
-    const launch = () => { launched.push('fire'); return { ok: false }; };
-    const { cmds, sent } = harness({ config: { ...AGENTS, ...kg }, cdp: unreachable, launch });
-    await expect(cmds.run({ ...self, body: '/chrome kg' })).resolves.toBeUndefined();
-    expect(launched).toHaveLength(1);                  // it TRIED (fired the task) …
-    expect(sent).toHaveLength(1);
-    expect(sent[0].text).toMatch(/no chrome/i);        // … then fell back to the hint
-    expect(sent[0].text).toMatch(/--remote-debugging-port=9221/);
-    expect(sent[0].text).toMatch(/register-chrome-task\.ps1/);   // the one-line setup note
-    expect(sent[0].text).not.toMatch(/failed|error/i);
-  });
-
-  it('/chrome kg unreachable, launch fires but Chrome never comes up within the timeout → same graceful fallback', async () => {
-    const launched = [];
-    const launch = () => { launched.push('fire'); return { ok: true }; };
-    // unreachable.isRunning is always false; the advancing fake clock makes the ~20s poll instant.
-    const { cmds, sent } = harness({ config: { ...AGENTS, ...kg }, cdp: unreachable, launch });
-    await expect(cmds.run({ ...self, body: '/chrome kg' })).resolves.toBeUndefined();
-    expect(launched).toHaveLength(1);
-    expect(sent).toHaveLength(1);
-    expect(sent[0].text).toMatch(/no chrome/i);
-    expect(sent[0].text).toMatch(/register-chrome-task\.ps1/);
-  });
-
-  it('/chrome kg reachable attaches immediately and NEVER fires the launch task', async () => {
-    const launched = [];
-    const launch = () => { launched.push('fire'); return { ok: true }; };
-    const { cmds, sent } = harness({ config: { ...AGENTS, ...kg }, cdp: reachable, launch });
-    await cmds.run({ ...self, body: '/chrome kg' });
-    expect(launched).toHaveLength(0);                 // Chrome already up → no launch fired
-    expect(sent[0].text).toMatch(/attached/i);
-    expect(sent[0].text).toMatch(/tabs: 2/);
-  });
-
-  it('/chrome kg on the `do` node fires NO launch and stays silent (gate before any launch)', async () => {
-    const launched = [];
-    const launch = () => { launched.push('fire'); return { ok: true }; };
-    const { cmds, sent } = harness({ config: { ...AGENTS,  node_name: 'do', whatsapp: { chat_id: '!self' } }, cdp: unreachable, launch });
-    await cmds.run({ ...self, body: '/chrome kg' });
-    expect(sent).toHaveLength(0);
-    expect(launched).toHaveLength(0);
-  });
-});
-
-// ── THE LAUNCH SEAM IS PICKED BY WINDOWS SESSION (chunk 6) ───────────────────────────────────
-// A Session 0 spine keeps the scheduled-task hop; a Session 1 successor spawns Chrome as an
-// ordinary child, with the port it will attach to and the profile config names. Every seam here
-// is injected: no test in this file spawns a browser, runs schtasks, or touches a real desktop.
-describe('/chrome: the Session 0 hop and the Session 1 direct spawn', () => {
-  const self = { chatId: '!self', surface: 'whatsapp' };
-  const kg = { node_name: 'kg', whatsapp: { chat_id: '!self' } };
-  const unreachable = {
-    isRunning: async () => false,
-    cdpHost: async () => 'localhost:9221',
-    listTabs: async () => { throw new Error('Cannot reach Chrome at localhost:9221'); },
-  };
-  // Down at the launch decision, up on the next probe — a launcher that actually worked.
-  const comesUp = () => {
-    let up = false;
-    return {
-      isRunning: async () => { const was = up; up = true; return was; },
-      cdpHost: async () => 'localhost:9333',
-      listTabs: async () => ([{ title: 'ChatGPT', url: 'https://chatgpt.com/c/abc' }]),
-    };
-  };
-
-  it('the seam is handed the port this node will ATTACH to, and the profile + binary config names', async () => {
-    const calls = [];
-    const config = { ...kg, chrome: { bin: 'C:/x/chrome.exe', profile_dir: 'C:/x/brain' } };
-    const cdp = { ...unreachable, cdpHost: async () => 'localhost:9333' };
-    const { cmds } = harness({ config, cdp, launch: (o) => { calls.push(o); return { ok: false }; } });
-    await cmds.run({ ...self, body: '/chrome kg' });
-    // Never the task's frozen 9221, and never a profile the operator did not name.
-    expect(calls).toEqual([{ port: '9333', userDataDir: 'C:/x/brain', bin: 'C:/x/chrome.exe' }]);
-  });
-
-  it('with no chrome: block it falls back to the discovered brain profile and lets the launcher find the binary', async () => {
-    const calls = [];
-    const { cmds } = harness({ config: { ...AGENTS, ...kg }, cdp: unreachable, launch: (o) => { calls.push(o); return { ok: false }; } });
-    await cmds.run({ ...self, body: '/chrome kg' });
-    expect(calls[0]).toEqual({ port: '9221', userDataDir: CHROME_BRAIN_PROFILE, bin: null });
-  });
-
-  it('a Session 1 direct launch reports the pid — the one fact `schtasks /run` could never return', async () => {
-    // async on purpose: the direct launcher returns a promise, and the call site must await it.
-    const launch = async () => ({ ok: true, direct: true, pid: 4242, detail: 'chrome.exe --remote-debugging-port=9333' });
-    const { cmds, sent } = harness({ config: { ...AGENTS, ...kg }, cdp: comesUp(), launch });
-    await cmds.run({ ...self, body: '/chrome kg' });
-    expect(sent[0].text).toMatch(/attached: localhost:9333/);
-    expect(sent[0].text).toMatch(/launched: pid 4242/);
-  });
-
-  it('the Session 0 task hop reports exactly what it always did — no pid line, because it has none', async () => {
-    const { cmds, sent } = harness({ config: { ...AGENTS, ...kg }, cdp: comesUp(), launch: () => ({ ok: true }) });
-    await cmds.run({ ...self, body: '/chrome kg' });
-    expect(sent[0].text).toMatch(/attached: localhost:9333/);
-    expect(sent[0].text).not.toMatch(/launched:/);
-  });
-
-  it('a direct launch that fails degrades to the hint and does NOT send the operator off to register a scheduled task', async () => {
-    const launch = async () => ({ ok: false, direct: true, detail: 'Chrome executable not found in standard locations' });
-    const { cmds, sent } = harness({ config: { ...AGENTS, ...kg }, cdp: unreachable, launch });
-    await cmds.run({ ...self, body: '/chrome kg' });
-    expect(sent[0].text).toMatch(/no Chrome is listening/);
-    expect(sent[0].text).toMatch(/I tried to open one myself/);
-    expect(sent[0].text).toMatch(/Chrome executable not found/);
-    // Registering the task is the SESSION 0 remedy. Offering it here would be a wrong instruction,
-    // and so would "I can't open it myself" from a spine that just tried.
-    expect(sent[0].text).not.toMatch(/register-chrome-task\.ps1/);
-    expect(sent[0].text).not.toMatch(/I can't open it myself/);
-  });
-
-  it('a direct launch whose browser never binds the port says THAT, rather than blaming a missing task', async () => {
-    const { cmds, sent } = harness({ config: { ...AGENTS, ...kg }, cdp: unreachable, launch: async () => ({ ok: true, direct: true, pid: 7 }) });
-    await cmds.run({ ...self, body: '/chrome kg' });
-    expect(sent[0].text).toMatch(/never bound :9221/);
-    expect(sent[0].text).not.toMatch(/register-chrome-task\.ps1/);
-  });
-
-  // The Session 0 wording is load-bearing and unchanged: it is what tells the operator WHY the
-  // node is asking them to run a command line instead of just opening a browser.
-  it('the Session 0 fallback keeps its own sentence and its setup note (regression lock)', async () => {
-    const { cmds, sent } = harness({ config: { ...AGENTS, ...kg }, cdp: unreachable, launch: () => ({ ok: false }) });
-    await cmds.run({ ...self, body: '/chrome kg' });
-    expect(sent[0].text).toMatch(/I can't open it myself — I run as a service in another Windows session/);
-    expect(sent[0].text).toMatch(/register-chrome-task\.ps1/);
-    expect(sent[0].text).not.toMatch(/I tried to open one myself/);
+    expect(spawns.map((s) => [s.userDataDir, s.bin])).toEqual([['C:/x/brain', 'C:/x/chrome.exe']]);
   });
 });
 
@@ -2483,80 +2319,6 @@ describe('chromeProfileOf(c, conversation) — browser-group profiles', () => {
     expect(chromeProfileOf({}, { name: 'x' })).toBe(null);
     expect(chromeProfileOf({}, { name: 'x', group: '../brain' })).toBe(null);
     expect(chromeProfileOf({}, { name: 'x', group: 'a/b' })).toBe(null);
-  });
-});
-
-// launchChromeDirect itself, against an injected spawn seam — chrome-launcher's real spawnChrome
-// is never called here, so nothing in this suite can put a window on anyone's desktop.
-describe('launchChromeDirect() — the Session 1 launcher', () => {
-  it('spawns through chrome-launcher with the port, the profile and the configured binary, and reports the pid', async () => {
-    const seen = [];
-    const spawn = async (o) => { seen.push(o); return { pid: 4242, command: 'chrome.exe --remote-debugging-port=9333' }; };
-    const r = await launchChromeDirect({ port: '9333', userDataDir: 'C:/x/brain', bin: 'C:/x/chrome.exe', spawn });
-    expect(r).toMatchObject({ ok: true, direct: true, pid: 4242 });
-    expect(seen[0]).toMatchObject({ port: '9333', userDataDir: 'C:/x/brain', bin: 'C:/x/chrome.exe' });
-    expect(typeof seen[0].onExit).toBe('function');   // supervision is wired, not optional
-  });
-
-  it('turns a spawn failure into the graceful-fallback shape, never a throw', async () => {
-    const logs = [];
-    const spawn = async () => { throw new Error('Chrome executable not found in standard locations'); };
-    const r = await launchChromeDirect({ port: '9221', userDataDir: 'C:/x/brain', spawn, onLog: (m) => logs.push(m) });
-    expect(r).toMatchObject({ ok: false, direct: true });
-    expect(r.detail).toMatch(/not found/);
-    expect(logs.join('\n')).toMatch(/direct launch failed/);
-  });
-
-  it('a spawn that starts nothing (no pid — a chrome.bin that is not there) is ok:false, not a 20-second wait', async () => {
-    const spawn = async () => ({ pid: undefined, command: 'C:/nope/chrome.exe --remote-debugging-port=9333' });
-    const r = await launchChromeDirect({ port: '9333', userDataDir: 'C:/x/brain', spawn });
-    expect(r).toMatchObject({ ok: false, direct: true });
-    expect(r.detail).toMatch(/nothing started/);
-  });
-
-  it('a browser that exits is REPORTED and never relaunched — supervision is observation, not ownership', async () => {
-    const logs = [];
-    let spawns = 0, onExit = null;
-    const spawn = async (o) => { spawns++; onExit = o.onExit; return { pid: 4242, command: 'chrome.exe' }; };
-    await launchChromeDirect({ port: '9333', userDataDir: 'C:/x/brain', spawn, onLog: (m) => logs.push(m) });
-    onExit({ code: 0, signal: null, error: null });
-    expect(logs.some((l) => /exited \(code 0\)/.test(l))).toBe(true);
-    expect(logs.some((l) => /nothing is being restarted/.test(l))).toBe(true);
-    expect(spawns).toBe(1);   // ← the assertion that matters: no restart policy grew in here
-  });
-
-  it('a browser that never starts arrives through the same callback (the child `error` path)', async () => {
-    const logs = [];
-    let onExit = null;
-    const spawn = async (o) => { onExit = o.onExit; return { pid: 4242, command: 'chrome.exe' }; };
-    await launchChromeDirect({ port: '9333', userDataDir: 'C:/x/brain', spawn, onLog: (m) => logs.push(m) });
-    onExit({ code: null, signal: null, error: new Error('spawn ENOENT') });
-    expect(logs.some((l) => /never started — spawn ENOENT/.test(l))).toBe(true);
-  });
-});
-
-// The CHOICE lives in boot.mjs and cannot be exercised here: driving the non-successor path for
-// real would fire `schtasks /run /tn egpt-chrome` at the operator's live desktop. So it is locked
-// at the source, the way this file already locks browseTab's eviction and the editor's `case`s.
-describe('boot picks the launcher by session (source lock — the negative path must never be run for real)', () => {
-  const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
-  const BOOT_SRC = readFileSync(join(REPO, 'src', 'spine', 'boot.mjs'), 'utf8');
-  const CMD_SRC = readFileSync(join(REPO, 'src', 'spine', 'commands.mjs'), 'utf8');
-  const injections = BOOT_SRC.split('\n').filter((l) => /launchChrome:/.test(l));
-
-  it('a Session 1 successor gets the direct launcher, from exactly one place', () => {
-    expect(injections).toHaveLength(1);
-    expect(injections[0]).toMatch(/\.\.\.\(session1 \?/);
-    expect(injections[0]).toMatch(/launchChromeDirectFn/);
-  });
-
-  it('a non-successor gets NO launch key at all, so commands.mjs\'s own default — the task hop — stands', () => {
-    expect(injections[0]).toMatch(/: \{\}\)/);   // the else branch is an EMPTY object, not a second launcher
-    expect(CMD_SRC).toContain('  launchChrome = defaultLaunchChromeTask,');
-  });
-
-  it('and the task hop is still in src/ — a Session 0 node has no other way onto a visible desktop', () => {
-    expect(CMD_SRC).toContain("spawnSync('schtasks', ['/run', '/tn', CHROME_LAUNCH_TASK]");
   });
 });
 
@@ -2763,7 +2525,7 @@ describe('/tabs /open /tab /close', () => {
     expect(sent[0].text).toMatch(/mail\.google\.com/);
   });
 
-  it('/open <url> calls cdp.openTab with that url and names it in the reply', async () => {
+  it('/open <url> opens a tab at that url in the chat\'s group Chrome and names it in the reply', async () => {
     const opened = [];
     const { cmds, sent } = harness({ config: cfg, cdp: { openTab: async (url) => { opened.push(url); return 'NEWID'; } } });
     await cmds.run({ ...self, body: '/open https://example.com' });
@@ -2807,31 +2569,10 @@ describe('/tabs /open /tab /close', () => {
     for (const s of sent) expect(s.text).not.toMatch(/recognized/);
   });
 
-  // REGRESSION LOCK (live hang, tools/cdp.mjs fetchJson deadline): a dead Chrome whose
-  // port is still LISTENING (zombie PID) makes fetchJson's HTTP probe hang forever with
-  // no deadline — tabsReport's `catch { return 'no Chrome to list tabs from …' }` can
-  // never fire because a hang is not a rejection. This exercises the REAL cdp.mjs (no
-  // injected `cdp:` override) so the fix at the fetchJson chokepoint is what's under
-  // test, not a stand-in.
-  it('a hung Chrome (port open, never answers) times out — /tabs gets the friendly fallback, not an eternal wait', async () => {
-    vi.useFakeTimers();
-    vi.stubGlobal('fetch', vi.fn((url, opts) => new Promise((_resolve, reject) => {
-      opts?.signal?.addEventListener('abort', () => {
-        const e = new Error('The operation was aborted');
-        e.name = 'AbortError';
-        reject(e);
-      });
-    })));
-    try {
-      const { cmds, sent } = harness({ config: cfg });   // no cdp override — real cdp.mjs
-      const p = cmds.run({ ...self, body: '/tabs' });
-      await vi.advanceTimersByTimeAsync(3000);
-      await p;
-      expect(sent[0].text).toMatch(/no Chrome to list tabs from — try \/chrome first/);
-    } finally {
-      vi.unstubAllGlobals();
-      vi.useRealTimers();
-    }
+  it('a chat with no browser gets the friendly fallback, never a throw', async () => {
+    const { cmds, sent } = harness({ config: cfg, profileHolder: () => 'EBUSY' });
+    await cmds.run({ ...self, body: '/tabs' });
+    expect(sent[0].text).toMatch(/no Chrome to list tabs from — try \/chrome first/);
   });
 });
 

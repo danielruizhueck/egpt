@@ -31,7 +31,7 @@ const TARGETS = [
 ];
 
 // A scripted Chrome on the far end of a --remote-debugging-pipe: \0-framed JSON both ways.
-function fakeChrome(name = 'chrome') {
+function fakeChrome(name = 'chrome', { silent = [] } = {}) {
   const toChrome = new PassThrough();
   const toClient = new PassThrough();
   const seen = [];
@@ -44,6 +44,7 @@ function fakeChrome(name = 'chrome') {
       const m = JSON.parse(buf.slice(0, i));
       buf = buf.slice(i + 1);
       seen.push(m);
+      if (silent.includes(m.method)) continue;   // a Chrome that never answers this method
       const reply = (result) => push({ id: m.id, result, ...(m.sessionId ? { sessionId: m.sessionId } : {}) });
       switch (m.method) {
         case 'Target.attachToBrowserTarget': reply({ sessionId: `${name}-B${++n}` }); break;
@@ -446,8 +447,7 @@ describe('being-cdp — /json and ws://…/devtools over the link, everything el
   const saved = {};
   afterEach(() => { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } });
 
-  async function realSpine() {
-    const shared = fakeChrome('shared');
+  async function realSpine(shared = fakeChrome('shared')) {
     const { link } = linkWith({ shared });
     const port = createShellPort({ port: 0, token: 'shell-token', reapPort: () => 0, onBeing: link, onLog: () => {} });
     const wss = port.start();
@@ -496,6 +496,22 @@ describe('being-cdp — /json and ws://…/devtools over the link, everything el
     ws.send(JSON.stringify({ id: 1, method: 'Target.getTargets' }));
     expect((await got).result.targetInfos).toHaveLength(2);
     ws.close();
+    port.stop();
+  });
+
+  it('fetch honours an AbortSignal, so cdp.mjs\'s deadline reaches through the being wire', async () => {
+    const shared = fakeChrome('shared', { silent: ['Target.getTargets'] });
+    const { port } = await realSpine(shared);
+    const { fetch } = await import('../src/tools/being-cdp.mjs');
+    const before = new AbortController();
+    before.abort();
+    await expect(fetch('http://localhost:9221/json', { signal: before.signal })).rejects.toMatchObject({ name: 'AbortError' });
+    const ac = new AbortController();
+    const pending = fetch('http://localhost:9221/json', { signal: ac.signal });
+    await until(() => shared.of('Target.getTargets').length === 1);   // dialled, and the Chrome never answers
+    ac.abort();
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    await until(() => shared.of('Target.detachFromTarget').length >= 1);   // and the link is closed
     port.stop();
   });
 

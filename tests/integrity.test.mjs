@@ -246,11 +246,6 @@ const KNOWN_PLATFORM_DEBT = [
     code: "spawn('powershell.exe', argv, { stdio:",
     why: 'THE SAME LAUNCHER, FOR A BEING\'S HEARTBEAT COMMAND (added 2026-09-28, operator: "structural: no ai … the command runs under their unprivileged account"). spawnBoxedCommand runs a command a being wrote in <room>/heartbeats/ through setup/sandbox-logon-launcher.ps1, built by the same launcherArgv as the entry above, and it throws BEFORE this spawn whenever the platform is not win32 ("the box is Windows-only on this build") — the heartbeat run then FAILS, loudly, and the command runs nowhere else (never falling back to the spine\'s own shell, which would be the operator). Same debt as the entry above, same REAL FIX: a POSIX equivalent of the launcher.',
   },
-  {
-    file: 'src/spine/commands.mjs',
-    code: "spawnSync('schtasks', ['/run', '/tn', CHROME_LAUNCH_TASK]",
-    why: 'FOUND BY THIS SCAN 2026-09-04. Windows-only (schtasks triggers the Session-1 Chrome task), but it DEGRADES rather than breaks: the try/catch turns a POSIX ENOENT into { ok: false }, which is already /chrome\'s graceful-fallback path. Soft debt — it is the launch SEAM that is Windows-shaped, and the seam is injectable, so the real fix is a per-platform default launcher rather than a branch here. HALF PAID 2026-09-06 (chunk 6 of the Session 0 -> Session 1 handover plan): a SESSION 1 spine no longer takes this path at all. boot.mjs overrides the seam with launchChromeDirect, which spawns Chrome through src/tools/chrome-launcher.mjs — one function, per-platform since CHROME_PATHS, and supervised. THE ENTRY STAYS BECAUSE THE CALL STAYS: schtasks is now the SESSION 0 fallback, and it is not about capability (a Session 0 Chrome runs and serves CDP fine — measured on reve the same day, chrome.exe pid 2388 on :9224, SessionId 0) but about putting the window on a desktop the operator can actually see and click. A node with nobody logged in still has no other way to do that, so the line is still reachable and still Windows-shaped.',
-  },
 ];
 
 const ALLOWLIST = [...PORTABLE_BY_DESIGN, ...KNOWN_PLATFORM_DEBT];
@@ -574,6 +569,31 @@ describe('the retired Beeper Desktop service names are gone from the tree', () =
       return !BARE_PRIMARY.test(src) && !BARE_SECONDARY.test(src) && !RETIRED_HAND_NAMES.test(src);
     });
     expect(stale, 'these no longer name a retired service - drop them from MAY_NAME_THE_OLD_SERVICES').toEqual([]);
+  });
+});
+
+// No Chrome listens on a debug port (operator 2026-10-11): an open 127.0.0.1:9221 let a boxed being
+// in another chat drive the operator's signed-in brain Chrome. Every group's Chrome is spine-held over
+// --remote-debugging-pipe, so no shipped source may name the port flag outside a comment.
+describe('no production source launches Chrome on a debug port', () => {
+  const SHIPPED = /^(src|setup|config|migrations|bin|extension\/src)\/|^[^/]+\.(mjs|js|ps1|cmd|vbs)$/;
+  const files = execSync('git ls-files', { cwd: ROOT, encoding: 'utf8' }).split('\n')
+    .filter((f) => SHIPPED.test(f) && /\.(mjs|js|jsx|ps1|psm1|cmd|bat|vbs|json|ya?ml)$/.test(f));
+  const COMMENT = /^\s*(\/\/|\/?\*|#|REM\b|'|::)/i;
+
+  it('scans the shipped sources (sanity)', () => {
+    expect(files).toContain('src/tools/chrome-launcher.mjs');
+    expect(files).toContain('src/spine/commands.mjs');
+  });
+
+  it('no non-comment line passes --remote-debugging-port', () => {
+    const hits = [];
+    for (const f of files) {
+      readFileSync(join(ROOT, f), 'utf8').split('\n').forEach((line, i) => {
+        if (/remote-debugging-port/.test(line) && !COMMENT.test(line)) hits.push(`${f}:${i + 1}: ${line.trim()}`);
+      });
+    }
+    expect(hits).toEqual([]);
   });
 });
 

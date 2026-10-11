@@ -35,6 +35,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { createCommands } from '../src/spine/commands.mjs';
+import { fakePipeChrome } from './fake-pipe-chrome.mjs';
 import { createMeshService } from '../src/spine/mesh.mjs';
 import { createSpine } from '../src/spine/spine.mjs';
 import { encodeMesh, parseMesh } from '../src/mesh/relay.mjs';
@@ -125,8 +126,8 @@ function nodeStack({ config, cdp = LIVE_CDP, resolveConvRoom, loadAdapters } = {
     getConfig: () => config,
     send: (chatId, text) => bridge.send(chatId, text),
     exit: (code) => exits.push(code),
-    cdp,
-    launchChrome: () => ({ ok: false }),   // the seam was renamed in chunk 6; a stale key here would silently restore the REAL schtasks default
+    spawnChromePipe: fakePipeChrome(cdp).spawnChromePipe,   // the node's group Chrome, answering like `cdp`
+    profileHolder: () => null,
     now: () => t,
     sleep: async (ms) => { t += ms; },
     resolveConvRoom,
@@ -204,7 +205,7 @@ describe('origin — the local and broadcast paths are untouched', () => {
     expect(envelopes(bridge)).toHaveLength(0);
     expect(plain(bridge)).toHaveLength(1);
     expect(plain(bridge)[0]).toMatchObject({ chat: 'lobby' });
-    expect(plain(bridge)[0].text).toContain('attached: 127.0.0.1:9221');
+    expect(plain(bridge)[0].text).toContain('attached: the "brain" browser');
   });
 
   it('/chrome do in a SHARED BEEPER chat is unchanged: broadcast + gate, NO envelope, kg silent', async () => {
@@ -417,7 +418,7 @@ describe('responder — an arriving envelope carrying a node-addressed command',
     expect(relayReplies).toHaveLength(1);
     const finalFrame = parseMesh(relayReplies[0].text);
     expect(finalFrame).toMatchObject({ by: 'don.do', re: 'shell.kg', post_id: 'post-1', done: true });
-    expect(finalFrame.body).toContain('attached: 127.0.0.1:9221');
+    expect(finalFrame.body).toContain('attached: the "brain" browser');
   });
 
   it('a NON node-addressable command falls through to the being — /restart can never arrive', async () => {
@@ -587,7 +588,7 @@ describe("responder — a room-scoped command over the mesh resolves to THIS nod
     const commands = createCommands({
       getConfig: () => DO(),
       send: () => {},
-      cdp: { listTabs: async () => oneTab },
+      spawnChromePipe: fakePipeChrome({ listTabs: async () => oneTab }).spawnChromePipe, profileHolder: () => null,
       loadAdapters: async () => ADAPTERS,
       resolveConvRoom: resolve,
     });
@@ -750,7 +751,7 @@ describe('dispatch.default_node', () => {
     const { bridge, spine } = nodeStack({ config });
     await spine.handleInbound({ ...SHELL, body: '/chrome' });
     await flush();
-    expect(plain(bridge)[0].text).toContain('attached: 127.0.0.1:9221');
+    expect(plain(bridge)[0].text).toContain('attached: the "brain" browser');
   });
 
   it('/open <url> travels to default_node too — an ARGUMENT is not a node of its own, so the fallback still applies', async () => {

@@ -38,6 +38,7 @@ const TEST_HOME = vi.hoisted(() => {
   return dir;
 });
 import { createCommands } from '../src/spine/commands.mjs';
+import { fakePipeChrome } from './fake-pipe-chrome.mjs';
 import { Room } from '../src/room-core.mjs';
 import { EGPT_HOME } from '../src/egpt-home.mjs';
 import { sanitizeName } from '../src/sanitize.mjs';
@@ -108,7 +109,8 @@ function harness({ cdp, adapters = ADAPTERS, roomNames = [], config = {}, resolv
   const cmds = createCommands({
     getConfig: () => ({ whatsapp: { chat_id: '!conv-1' }, ...config }),
     send: async (chatId, text) => sent.push({ chatId, text }),
-    ...(cdp ? { cdp } : {}),
+    spawnChromePipe: fakePipeChrome(cdp).spawnChromePipe,   // the chat's group Chrome, answering like `cdp`
+    profileHolder: () => null,
     loadAdapters: async () => adapters,
     resolveConvRoom,
     // The bridge's chat NAME→id resolver seam (boot injects bridge.resolveChatId). Absent by
@@ -239,7 +241,8 @@ describe('a room READ never mints — /rooms create is the only room path that w
     const cmds = createCommands({
       getConfig: () => ({ whatsapp: { chat_id: '!conv-1' } }),
       send: async (chatId, text) => sent.push({ chatId, text }),
-      cdp: { listTabs: async () => [] },
+      spawnChromePipe: fakePipeChrome({ listTabs: async () => [] }).spawnChromePipe,
+      profileHolder: () => null,
       resolveConvRoom, listRoomNames: () => [],
     });
     return { cmds, sent, writes, snapshot: () => JSON.stringify(st), rooms: () => st.contacts?.room ?? {} };

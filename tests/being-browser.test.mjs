@@ -32,6 +32,7 @@ import { BEING_PATH, isBeingDial, askFrame, askResultFrame, parseAskFrame, SPINE
 import { createBeingLink, askSpineClientPath } from '../src/spine/being-link.mjs';
 import { createSandboxCliSession } from '../src/sandbox-cli-session.mjs';
 import { createCommands } from '../src/spine/commands.mjs';
+import { fakePipeChrome } from './fake-pipe-chrome.mjs';
 import { askSpine } from '../src/tools/ask-spine.mjs';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -406,69 +407,51 @@ describe('the mint: a boxed ccode session is handed its credential, and loses it
 // ── 4. THE REQUEST IS /chrome's LAUNCH PATH ───────────────────────────────────────────────────
 describe('browser start goes through /chrome\'s own launch path', () => {
   const kg = { node_name: 'kg', whatsapp: { chat_id: '!self' }, chrome: { bin: 'C:/x/chrome.exe', profile_dir: 'C:/x/brain' } };
-  function cmdsWith({ cdp, launch }) {
-    let t = 0;
+  function cmdsWith({ spawnChromePipe }) {
     const sent = [];
     const cmds = createCommands({
-      getConfig: () => kg, cdp, launchChrome: launch, now: () => t, sleep: async (ms) => { t += ms; },
+      getConfig: () => kg, spawnChromePipe, profileHolder: () => null,
       send: async (chatId, text) => sent.push(text), brains: { resolve: (name) => ({ name, type: 'ccode' }) },
     });
     return { cmds, sent };
   }
-  // Down until the launch seam fires, up on the next probe — a launcher that really worked.
-  function browser() {
-    const s = { up: false, launched: 0, probes: 0 };
-    s.cdp = { isRunning: async () => { s.probes++; return s.up; }, cdpHost: async () => 'localhost:9221', listTabs: async () => [{ title: 'ChatGPT', url: 'https://chatgpt.com/' }] };
-    s.launch = async (o) => { s.launched++; s.args = o; await Promise.resolve(); s.up = true; return { ok: true, direct: true, pid: 4242, detail: 'chrome.exe' }; };
-    return s;
-  }
+  const browser = () => fakePipeChrome({ listTabs: async () => [{ id: 'T1', title: 'ChatGPT', url: 'https://chatgpt.com/' }] });
 
-  it('it hands the launch seam exactly what /chrome hands it — the attach port, config\'s profile and binary', async () => {
+  it('it launches brain\'s Chrome over the pipe with config\'s profile and binary — no port', async () => {
     const b = browser();
     const { cmds } = cmdsWith(b);
-    expect(await cmds.startBrowser()).toEqual({ ok: true, launched: true, detail: 'the browser is up on localhost:9221 (pid 4242)' });
-    expect(b.args).toEqual({ port: '9221', userDataDir: 'C:/x/brain', bin: 'C:/x/chrome.exe' });
+    expect(await cmds.startBrowser()).toEqual({ ok: true, launched: true, detail: 'the "brain" browser is up (pid 1001)' });
+    expect(b.calls.map((c) => [c.userDataDir, c.bin])).toEqual([['C:/x/brain', 'C:/x/chrome.exe']]);
   });
 
-  it('IDEMPOTENT: CDP already answering launches nothing and says so', async () => {
+  it('IDEMPOTENT: a running Chrome launches nothing and says so', async () => {
     const b = browser();
-    b.up = true;
     const { cmds } = cmdsWith(b);
-    expect(await cmds.startBrowser()).toEqual({ ok: true, alreadyRunning: true, detail: 'the browser is already answering on localhost:9221 — nothing was launched' });
-    expect(b.launched).toBe(0);
+    await cmds.startBrowser();
+    expect(await cmds.startBrowser()).toEqual({ ok: true, alreadyRunning: true, detail: 'the "brain" browser is already running (pid 1001)' });
+    expect(b.calls).toHaveLength(1);
   });
 
   it('TWO CONCURRENT STARTS LAUNCH ONE BROWSER — and a /chrome arriving in the middle joins it too', async () => {
     const b = browser();
     const { cmds, sent } = cmdsWith(b);
     const [one, two] = await Promise.all([cmds.startBrowser(), cmds.startBrowser(), cmds.run({ chatId: '!self', surface: 'whatsapp', body: '/chrome kg' })]);
-    expect(b.launched).toBe(1);
+    expect(b.calls).toHaveLength(1);
     expect(one.ok && two.ok).toBe(true);
-    expect(sent[0]).toMatch(/attached: localhost:9221/);
-    // ...and once it has settled, the next ask probes afresh and finds it up
+    expect(sent[0]).toMatch(/attached: the "brain" browser \(pipe\)/);
     expect(await cmds.startBrowser()).toMatchObject({ ok: true, alreadyRunning: true });
-    expect(b.launched).toBe(1);
+    expect(b.calls).toHaveLength(1);
   });
 
-  it('a direct launch that fails is reported with the launcher\'s own detail', async () => {
-    const b = browser();
-    const { cmds } = cmdsWith({ cdp: b.cdp, launch: async () => ({ ok: false, direct: true, detail: 'Chrome executable not found in standard locations' }) });
-    expect(await cmds.startBrowser()).toEqual({ ok: false, reason: 'launch-failed', detail: 'Chrome executable not found in standard locations' });
+  it('a launch that fails is reported with the launcher\'s own detail', async () => {
+    const { cmds } = cmdsWith({ spawnChromePipe: async () => { throw new Error('Chrome executable not found in standard locations'); } });
+    expect(await cmds.startBrowser()).toEqual({ ok: false, reason: 'no-browser', detail: 'Chrome executable not found in standard locations' });
   });
 
-  it('a browser that never binds the port says so; the Session 0 task hop names its own remedy', async () => {
-    const down = { isRunning: async () => false, cdpHost: async () => 'localhost:9221', listTabs: async () => [] };
-    const direct = cmdsWith({ cdp: down, launch: async () => ({ ok: true, direct: true, pid: 7 }) });
-    expect((await direct.cmds.startBrowser()).detail).toMatch(/never bound :9221 within 20s/);
-    const hop = cmdsWith({ cdp: down, launch: () => ({ ok: false }) });
-    expect(await hop.cmds.startBrowser()).toMatchObject({ ok: false, reason: 'launch-failed' });
-    expect((await hop.cmds.startBrowser()).detail).toMatch(/register-chrome-task\.ps1/);
-  });
-
-  it('ONE launch path: /chrome and startBrowser both go through ensureChrome, and launchChrome is called in one place', () => {
+  it('ONE launch path: /chrome and startBrowser both go through ensureChrome, the one spawnChromePipe call', () => {
     const src = readFileSync(join(REPO, 'src', 'spine', 'commands.mjs'), 'utf8');
-    expect(src.match(/await launchChrome\(/g)).toHaveLength(1);
-    const report = src.slice(src.indexOf('async function chromeReport('), src.indexOf('function waitForChromeUp'));
+    expect(src.match(/await spawnChromePipe\(/g)).toHaveLength(1);
+    const report = src.slice(src.indexOf('async function chromeReport('));
     const start = src.slice(src.indexOf('async function startBrowser('), src.indexOf('async function chromeReport('));
     expect(report).toMatch(/await ensureChrome\(conversation\)/);
     expect(start).toMatch(/await ensureChrome\(conversation\)/);

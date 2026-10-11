@@ -78,10 +78,7 @@ async function fetchJson(path) {
         `likely a zombie Chrome (process died, port still held). Close it and run /chrome to relaunch.`
       );
     }
-    throw new Error(
-      `Cannot reach Chrome at ${host}. ` +
-      `Run /chrome inside egpt to launch one with the extension, or start Chrome yourself with --remote-debugging-port=${host.split(':')[1]}.`
-    );
+    throw new Error(`Cannot reach Chrome at ${host}.`);
   }
   finally { clearTimeout(timer); }
   if (!res.ok) throw new Error(`Chrome ${path} returned ${res.status}`);
@@ -214,18 +211,7 @@ export function createWsChannel(ws) {
  *  for discovery, a fresh WebSocket per session. Stateless — it resolves the
  *  host live on each call, so setCdpHostGetter keeps steering it at runtime. */
 export function createPortTransport() {
-  let browserChannel = null;
   return {
-    // The browser endpoint as ONE channel, reused while it stays open (the being mux rides it).
-    channel: () => (browserChannel ??= (async () => {
-      const { webSocketDebuggerUrl } = await fetchJson('/json/version');
-      const { WebSocket } = await cdpWire();
-      const ws = new WebSocket(webSocketDebuggerUrl);
-      await new Promise((res, rej) => { ws.addEventListener('open', res); ws.addEventListener('error', () => rej(new Error('CDP WebSocket error'))); });
-      const ch = createWsChannel(ws);
-      ch.onClose(() => { browserChannel = null; });
-      return ch;
-    })().catch((e) => { browserChannel = null; throw e; })),
     isRunning: async () => {
       try { await fetchJson('/json/version'); return true; } catch { return false; }
     },
@@ -789,7 +775,6 @@ export function createCdpClient(transport) {
 // transport resolves the host live, so setCdpHostGetter still steers it.
 const _default = createCdpClient(createPortTransport());
 
-export const channel = (...a) => _default.channel(...a);
 export const isRunning = (...a) => _default.isRunning(...a);
 export const listTabs = (...a) => _default.listTabs(...a);
 export const findTab = (...a) => _default.findTab(...a);

@@ -1,15 +1,8 @@
-// tools/chrome-launcher.mjs — locate and spawn Chrome for the egpt shell.
-//
-// One Chrome per host: same browser hosts the bus.html tab, the brain tabs
-// (chatgpt, claude logged in to the persistent profile), and the egpt
-// extension (loaded via --load-extension). Both shell (CDP-over-proxy)
-// and extension (chrome.debugger) attach to the same bus tab so events
-// actually cross between surfaces — separate Chromes give each surface
-// its own bus.html instance with its own JS heap, and they never see each
-// other's posts.
+// tools/chrome-launcher.mjs — locate Chrome, find the brain profile, and spawn a browser group's
+// Chrome over --remote-debugging-pipe. Nothing here launches a Chrome on a debug port.
 
 import { spawn } from 'node:child_process';
-import { existsSync, readdirSync, statSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, statSync, readFileSync, openSync, closeSync, readlinkSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { EGPT_HOME } from '../egpt-home.mjs';
@@ -139,122 +132,6 @@ export function resolveBrainProfile({ egptHome = EGPT_HOME, fs = defaultFs, read
   return v2Default;
 }
 
-/**
- * The exact flag set spawnChrome uses — extracted so a caller can RENDER the
- * command line without spawning (the spine's /chrome hands it to the operator to
- * run in their own session; see src/spine/commands.mjs). One source for the flags:
- * spawnChrome builds its argv from here, so the printed line and the spawned
- * process can never drift apart.
- *
- * @param {object} opts               - same shape as spawnChrome's
- * @returns {string[]} argv after the executable
- */
-export function chromeArgs({ port, userDataDir, extensionDir, url = 'about:blank' }) {
-  const args = [
-    `--remote-debugging-port=${port}`,
-    // Chrome 112+ rejects CDP WebSocket upgrades unless Origin is
-    // either absent or in --remote-allow-origins. The egpt extension
-    // talks to the bus tab from chrome-extension://<id>; the bridges
-    // and brain CDP code talk from a Node process (no Origin header).
-    // '*' covers both. Connections to chromePort are still localhost-
-    // only; the proxy on PROXY_PORT is what gates LAN access.
-    '--remote-allow-origins=*',
-    `--user-data-dir=${userDataDir}`,
-    '--no-first-run',
-    // Chrome ~137+ disables the --load-extension CLI switch by default
-    // (DisableLoadExtensionCommandLineSwitch feature flag). Without
-    // turning that feature OFF, the extension never loads even with
-    // --load-extension on the command line — Chrome silently ignores
-    // it. We always pass --load-extension when extensionDir is set,
-    // so always opt out of the disable here.
-    '--disable-features=ChromeWhatsNewUI,DisableLoadExtensionCommandLineSwitch',
-    '--silent-debugger-extension-api',
-    // Keep the renderer ALIVE when the window is occluded / unfocused / on
-    // another virtual desktop. Without these, Chrome throttles & suspends
-    // layout for a backgrounded tab, so CDP DOM ops (getBoundingClientRect,
-    // coordinate clicks, scrollIntoView) silently fail — the WhatsApp-Web
-    // glove's open/read/send break unless the window is foreground (operator
-    // 2026-06-09). visibilityState still reports 'hidden' when unfocused, so
-    // WhatsApp keeps firing notifications — we get the afferent trigger AND
-    // reliable efferent DOM ops at once. (Window must still be non-minimized.)
-    '--disable-backgrounding-occluded-windows',
-    '--disable-background-timer-throttling',
-    '--disable-renderer-backgrounding',
-    '--new-window',
-  ];
-  if (extensionDir) {
-    // --load-extension loads the extension for this browser session even if
-    // it isn't permanently installed in the profile. We do NOT pass
-    // --disable-extensions-except — that would suppress every other
-    // extension the user installed in this profile (password manager,
-    // ad blocker, etc.) and make spawned Chrome look different from a
-    // manual launch. Users who want the egpt extension to persist across
-    // manual launches should install it via chrome://extensions →
-    // Developer Mode → Load unpacked → extension/dist.
-    args.push(`--load-extension=${extensionDir}`);
-  }
-  args.push(url);
-  return args;
-}
-
-/** Render an exe + argv as a copy-pasteable command line (quote anything with a space). */
-export function chromeCommandLine(exe, args) {
-  return [exe, ...args].map((a) => (/\s/.test(a) ? `"${a}"` : a)).join(' ');
-}
-
-/**
- * Spawn Chrome detached so it survives this Node process exiting.
- * Returns immediately — call waitForChromeReady() to know when CDP is up.
- *
- * WHICH SPINE MAY CALL THIS, and it is a question about WINDOWS SESSIONS: a child inherits its
- * parent's session, so a Session 1 spine (the logon successor) puts the window on the operator's
- * desktop and may call this freely, while a Session 0 spine would put it on a desktop nobody can
- * look at. NOT because Session 0 cannot run a browser — it plainly can, measured on reve
- * 2026-09-06: chrome.exe pid 2388 serving CDP on :9224, SessionId 0 — but because the operator
- * cannot see it, click it, or answer a login prompt on it, and Chrome single-instances per
- * --user-data-dir, so an unseen one holding the brain profile is one they then cannot open
- * themselves. A Session 0 spine therefore hops through the `egpt-chrome` scheduled task instead.
- * The whole decision lives in ONE place — boot.mjs's launchChrome injection, explained in the
- * banner over the /chrome dispatch in src/spine/commands.mjs.
- *
- * DETACHED IS DELIBERATE, and it is what makes onExit OBSERVATION rather than ownership: the
- * browser must outlive an /upgrade or a /restart (the spine bounces often — the operator's
- * logged-in tabs must not go with it).
- *
- * @param {object} opts
- * @param {number} opts.port          - --remote-debugging-port (private, localhost-only)
- * @param {string} opts.userDataDir   - persistent profile directory
- * @param {string} [opts.extensionDir]- absolute path to unpacked extension (loaded via --load-extension)
- * @param {string} [opts.url]         - initial URL (default: about:blank)
- * @param {string} [opts.bin]         - the Chrome binary to run (config `chrome.bin`); UNSET = findChromeExecutable()
- * @param {function} [opts.onExit]    - ({ code, signal, error }) => void, fired when this Chrome ends
- *   or never starts. Passing it ALSO installs the child's 'error' listener — a ChildProcess without
- *   one turns a failed spawn into an UNCAUGHT exception, which in the spine's runtime path is a
- *   crash. Callers that want that loud old behaviour simply omit it.
- */
-export async function spawnChrome({ port, userDataDir, extensionDir, url = 'about:blank', bin = null, onExit = null }) {
-  const chrome = bin || findChromeExecutable();
-  if (!chrome) throw new Error('Chrome executable not found in standard locations');
-  await mkdir(userDataDir, { recursive: true });
-  const args = chromeArgs({ port, userDataDir, extensionDir, url });
-
-  const child = spawn(chrome, args, {
-    detached: true,
-    stdio: 'ignore',
-  });
-  if (onExit) {
-    // Both ends of "this Chrome is not running", through one callback: a spawn that never started
-    // (ENOENT on a configured chrome.bin) and a browser that has since exited. Wrapped, because a
-    // throwing supervisor must not become an unhandled rejection inside a child-process event.
-    child.on('error', (error) => { try { onExit({ code: null, signal: null, error }); } catch { /* supervisor's problem */ } });
-    child.on('exit', (code, signal) => { try { onExit({ code, signal, error: null }); } catch { /* supervisor's problem */ } });
-  }
-  child.unref();
-  // The exact Target the shell echoes on /chrome — exe + flags as spawned.
-  const command = chromeCommandLine(chrome, args);
-  return { pid: child.pid, command };
-}
-
 // Pipe-mode flags (chunk 3b): --remote-debugging-pipe instead of a port, and NO --remote-allow-origins
 // (that is port/WS-only). Keeps the non-default --user-data-dir (Chrome 136 requires it), --no-first-run,
 // the no-banner --silent-debugger-extension-api, and the renderer-alive flags. --load-extension still opts.
@@ -276,11 +153,11 @@ export function chromePipeArgs({ userDataDir, extensionDir, url = 'about:blank' 
 }
 
 /**
- * Spawn a DEDICATED Chrome driven over --remote-debugging-pipe. DIRECT-SPAWN ONLY: the spine must
- * hold fds 3 & 4 itself (the Session-0 task hop cannot pass fds), so this is never routed through the
- * scheduled-task seam. stdio ['inherit','inherit','inherit','pipe','pipe'] hands the child fd3 (we
+ * Spawn a group's Chrome driven over --remote-debugging-pipe. DIRECT-SPAWN ONLY: the spine holds
+ * fds 3 & 4 itself. stdio ['inherit','inherit','inherit','pipe','pipe'] hands the child fd3 (we
  * write CDP) and fd4 (we read CDP). Returns { child, writable, readable, pid } — createPipeTransport
- * in cdp.mjs takes { writable, readable }. onExit mirrors spawnChrome's (wrapped, optional).
+ * in cdp.mjs takes { writable, readable }. onExit({ code, signal, error }) fires when it ends or never
+ * starts; passing it also installs the child's 'error' listener (without one a failed spawn throws).
  */
 export async function spawnChromePipe({ userDataDir, extensionDir, url = 'about:blank', bin = null, onExit = null }) {
   const chrome = bin || findChromeExecutable();
@@ -295,21 +172,15 @@ export async function spawnChromePipe({ userDataDir, extensionDir, url = 'about:
   return { child, writable: child.stdio[3], readable: child.stdio[4], pid: child.pid };
 }
 
-/**
- * Poll Chrome's /json/version until it responds or timeout elapses.
- * @param {number} port
- * @param {number} [timeoutMs=15000]
- * @returns {Promise<object>} the parsed /json/version response
- */
-export async function waitForChromeReady(port, timeoutMs = 15000) {
-  const deadline = Date.now() + timeoutMs;
-  let lastErr = null;
-  while (Date.now() < deadline) {
-    try {
-      const r = await fetch(`http://localhost:${port}/json/version`);
-      if (r.ok) return await r.json();
-    } catch (e) { lastErr = e; }
-    await new Promise(resolve => setTimeout(resolve, 250));
+// Who already runs a Chrome on this --user-data-dir, or null. A running Chrome holds <dir>/lockfile
+// open without write sharing (Windows) or points <dir>/SingletonLock at <host>-<pid> (POSIX); both
+// outlive a Chrome that exited, so the probe is the open / the pid, never mere existence.
+export function profileHolder(userDataDir) {
+  if (process.platform === 'win32') {
+    try { closeSync(openSync(join(userDataDir, 'lockfile'), 'r+')); return null; }
+    catch (e) { return e.code === 'ENOENT' ? null : e.code; }
   }
-  throw new Error(`Chrome not ready on :${port} after ${timeoutMs}ms${lastErr ? ` (${lastErr.message})` : ''}`);
+  let pid;
+  try { pid = Number(/-(\d+)$/.exec(readlinkSync(join(userDataDir, 'SingletonLock')))?.[1]); } catch { return null; }
+  try { process.kill(pid, 0); return `pid ${pid}`; } catch (e) { return e.code === 'EPERM' ? `pid ${pid}` : null; }
 }

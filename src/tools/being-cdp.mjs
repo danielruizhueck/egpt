@@ -12,11 +12,17 @@ const HOST = 'localhost:9221';
 const pageUrl = (id) => `ws://${HOST}/devtools/page/${id}`;
 const entry = (t) => ({ id: t.targetId, type: t.type, title: t.title, url: t.url, webSocketDebuggerUrl: pageUrl(t.targetId) });
 
-// One link per call, closed when the call is done.
-async function overLink(fn) {
-  const transport = await createLinkTransport(process.env);
-  try { return await fn(await transport.openBrowserSession()); }
-  finally { (await transport.channel()).close(); }
+// One link per call, closed when the call is done — or when `signal` aborts it (cdp.mjs's deadline).
+async function overLink(fn, signal) {
+  signal?.throwIfAborted();
+  const link = createLinkTransport(process.env);
+  let onAbort;
+  const aborted = new Promise((_, reject) => { onAbort = () => reject(signal.reason); signal?.addEventListener('abort', onAbort, { once: true }); });
+  try { return await Promise.race([link.then(async (t) => fn(await t.openBrowserSession())), aborted]); }
+  finally {
+    signal?.removeEventListener('abort', onAbort);
+    link.then(async (t) => (await t.channel()).close(), () => {});
+  }
 }
 
 export async function fetch(input, init) {
@@ -39,7 +45,7 @@ export async function fetch(input, init) {
     if (verb === 'close') { await s.send('Target.closeTarget', { targetId }); return new Response('Target is closing'); }
     if (verb === 'activate') { await s.send('Target.activateTarget', { targetId }); return new Response('Target activated'); }
     return new Response(`Unknown command: ${path}`, { status: 404 });
-  });
+  }, init?.signal);
 }
 
 // A page endpoint attaches to its target and stamps that session on what the script sends (and

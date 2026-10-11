@@ -35,7 +35,6 @@ import { reapPort } from '../tools/reap-port.mjs';
 // (tests/beeper-whoami.test.mjs): GET /v1/accounts with a candidate's OWN token. Imported, never
 // re-implemented — a second probe here would be a second thing to get wrong about what a 401 means.
 import { probe as probeBeeperEndpoint } from '../tools/beeper-whoami.mjs';
-import * as cdp from '../tools/cdp.mjs';
 import { Room, CONVERSATIONS_ROOT, ROOMS_ROOT, AGENTS_ROOT, HEARTBEATS_DIR } from '../room-core.mjs';
 import { loadAdapterModule } from '../adapters/registry.mjs';
 import {
@@ -72,7 +71,7 @@ import { createIngest, lifecycleExit, isShellConnectMarker } from './ingest.mjs'
 // Absent EGPT_SESSION1 this is one `false` and nothing else runs — every Session 0 spine, every
 // test and every other node take the identical path they took before it existed.
 import { isSession1Successor, announceStanddown, SESSION1_ENV } from './successor-announce.mjs';
-import { createCommands, launchChromeDirect, loginProfilePathOf } from './commands.mjs';
+import { createCommands, loginProfilePathOf } from './commands.mjs';
 import { createLoginLimb } from './login.mjs';
 import { readChromeCredential } from '../tools/chrome-creds.mjs';
 import { createBeingLink } from './being-link.mjs';
@@ -988,9 +987,6 @@ export async function boot({
   // The dial itself, injected the same way probeEndpoint / reapPort / startWhisperServer are, so a
   // test can observe the announce WITHOUT opening a real socket. Only ever called when session1.
   announceStanddown: announceStanddownFn = announceStanddown,
-  // /chrome's direct launcher (chunk 6), injected for the same reason and only ever reached when
-  // session1: a test asserts the wiring without spawning a real browser onto a real desktop.
-  launchChromeDirect: launchChromeDirectFn = launchChromeDirect,
   exit = (code) => process.exit(code),// how a lifecycle command leaves (the daemon respawns on 42/43/44)
   setInterval: setIntervalFn = globalThis.setInterval,       // the spine tick-timer seam; injected so a test can observe the effective cadence
   clearInterval: clearIntervalFn = globalThis.clearInterval,
@@ -2974,7 +2970,7 @@ export async function boot({
   // logged, or posted (chrome-creds logs nothing). The profile is the one that group's Chrome uses
   // (loginProfilePathOf → chromeProfileOf, the SAME source commands.mjs launches into).
   // The admin post goes through boot's EXISTING noticeToChannel — never a second posting path.
-  // `cdp` here is the chat's group client (commands.chatChromeOf); the module's own for brain.
+  // `cdp` here is the chat's group client (commands.chatChromeOf).
   const loginCdpOf = (cdp) => ({
     openOrFocus: async (url) => {
       let origin = null; try { origin = new URL(url).origin; } catch {}
@@ -2995,7 +2991,7 @@ export async function boot({
     screenshot: (targetId) => cdp.captureScreenshot(targetId),
   });
   // The credential is read from the conversation's GROUP profile (loginProfilePathOf).
-  const requestLogin = (domain, { conversation = null, client = cdp } = {}) => createLoginLimb({
+  const requestLogin = (domain, { conversation = null, client } = {}) => createLoginLimb({
     cdp: loginCdpOf(client), bridge: { noticeToChannel }, getConfig, log: (m) => log.line?.(m),
     readCredential: (d) => readChromeCredential({ profilePath: loginProfilePathOf(getConfig(), conversation), domain: d }),
   }).requestLogin(domain);
@@ -3101,18 +3097,6 @@ export async function boot({
       if (surface !== SHELL_SURFACE) return;
       shellPort.setHeader(computeShellHeader({ nodeName: node_name, agents: cfg.agents, defaultNode: cfg.dispatch?.default_node, currentRoom: slug }));
     },
-    // ── WHICH SPINE MAY SPAWN CHROME (chunk 6, plans/2609061200-SESSION-0-TO-1-HANDOVER-PLAN.md).
-    // THE DEFAULT STAYS THE TASK HOP for every node, and this is the only place that is decided.
-    // A Session 0 spine's child inherits Session 0, and while a browser there runs and serves CDP
-    // perfectly well (measured on reve 2026-09-06: chrome.exe pid 2388 on :9224, SessionId 0), it
-    // renders on a desktop the operator cannot see, click, or log in to — so /chrome, whose whole
-    // job is to hand the OPERATOR a browser, hops through `schtasks /run /tn egpt-chrome` there.
-    // A SESSION 1 SUCCESSOR ALREADY HAS THAT DESKTOP, so it spawns Chrome as an ordinary child
-    // instead, which is the only way the spine gets to pass arguments (the port it will attach to,
-    // the profile config names) and to hear that the browser died. Same flag, same spread, same
-    // reason as the reap guard above: a non-successor's options object is byte-for-byte the one it
-    // was before. onLog is this file's, so a death notice lands in the node's log like any other.
-    ...(session1 ? { launchChrome: (o) => launchChromeDirectFn({ ...o, onLog: (m) => log.line?.(`[chrome] ${m}`) }) } : {}),
     backlogOf: (ev) => spineLate?.backlogOf(ev) ?? [],   // /recap — the spine's wake backlog for this chat (spineLate, above)
     timeZone: transcriptTimeZone,                        // …read out on the transcript's own clock
     // /fork + /send + /end (operator 2026-10-01) — the beeper ops the three verbs need, ALL off the
@@ -3160,7 +3144,6 @@ export async function boot({
     },
     logToGroup,                                          // per-command audit → config.log_to_group (fail-closed, see above); the dispatch chokepoint emits ONE metadata-only line per command
     requestLogin,                                        // /login <site> → the auto-login limb (src/spine/login.mjs); returns an outcome token, never a credential
-    cdp,                                                 // the brain port client — the full driver, so /login and the relay drive it too
     onChromeLog: (m) => log.line?.(`[chrome] ${m}`),    // group Chrome launches / refusals ("no browser for …")
     onLog: (m) => log.line?.(`[command] ${m}`),
   });

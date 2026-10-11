@@ -1,8 +1,7 @@
-// tests/chrome-dedicated-pool.test.mjs — the per-GROUP Chrome pool (plans/2610091931 chunk 3b, rev
-// 2026-10-11). A conversation in any group but `brain` (config/browsers.yaml; unlisted → `shared`)
-// launches its GROUP's Chrome over --remote-debugging-pipe, driven by a pipe cdpClient (3a), admitted
-// by the pure memory check (chunk 2). The `brain` group (and every conversation-less caller) keeps
-// today's brain Chrome on :9221, untouched.
+// tests/chrome-dedicated-pool.test.mjs — the per-GROUP Chrome pool (plans/2610091931 rev 2026-10-11).
+// EVERY group, `brain` included (config/browsers.yaml; unlisted → `shared`; no conversation → brain),
+// launches its GROUP's Chrome over --remote-debugging-pipe, driven by a pipe cdpClient (3a). The
+// non-brain groups are admitted by the pure memory check (chunk 2); brain and shared are never evicted.
 //
 // NO REAL CHROME: spawnChromePipe is faked with two in-memory streams as fds 3 & 4 (like 3a's fake
 // peer) and a fake child; memory (freeMem/rssOf) is injected as plain numbers, so admission is
@@ -74,23 +73,17 @@ function fakePipeSpawner({ mem = { free: Infinity }, cost = 0 } = {}) {
   return { spawnChromePipe, calls, handles };
 }
 
-function build({ config = {}, mem, cost = 0, freeMem, rssOf } = {}) {
+function build({ config = {}, mem, cost = 0, freeMem, rssOf, profileHolder = () => null } = {}) {
   const { spawnChromePipe, calls, handles } = fakePipeSpawner({ mem, cost });
   const logs = [];
   let clk = 0;
-  // Shared path: a DOWN cdp + a failing launch seam, so startBrowser resolves without a real socket.
-  const sharedCdp = {
-    isRunning: async () => false, cdpHost: async () => 'localhost:9221', listTabs: async () => [],
-    openTab: async () => {}, activateTarget: async () => {}, closeTab: async () => {},
-  };
   const cmds = createCommands({
     getConfig: () => config,
-    cdp: sharedCdp,
     spawnChromePipe,
+    profileHolder,
     freeMem: freeMem ?? (() => (mem ? mem.free : Infinity)),
     rssOf: rssOf ?? (() => null),
     onChromeLog: (m) => logs.push(m),
-    launchChrome: () => ({ ok: false }),
     now: () => (clk += 1),
     sleep: async () => {},
     send: async () => {},
@@ -125,7 +118,6 @@ describe('a non-brain GROUP → its group pipe Chrome + a pipe cdpClient', () =>
   it('pipe-spawns <profiles-root>/<group>, with the configured binary, and builds a working pipe client', async () => {
     const { cmds, calls } = build({ config: { chrome: { bin: 'C:/x/chrome.exe' } } });
     const r = await cmds.chromeClientFor(SHARED);
-    expect(r.dedicated).toBe(true);
     expect(r.profileDir).toBe(sharedDir);
     expect(calls).toHaveLength(1);
     expect(calls[0].userDataDir).toBe(sharedDir);
@@ -136,12 +128,27 @@ describe('a non-brain GROUP → its group pipe Chrome + a pipe cdpClient', () =>
     expect(tabs).toEqual([{ id: 'T1', type: 'page', url: 'https://x/', title: 'x' }]);
   });
 
-  it('group brain stays on today\'s :9221 port path (no pipe spawn) — admin_channel plays no part', async () => {
-    const { cmds, calls } = build({ config: { chrome: {} }, mem: { free: 8192 * MB } });
+  it('group brain launches over the PIPE on chrome.profile_dir — the same pool, no port', async () => {
+    const { cmds, calls } = build({ config: { chrome: { profile_dir: 'C:/x/brain' } }, mem: { free: 8192 * MB } });
     const r = await cmds.chromeClientFor(BRAIN);
-    expect(r.dedicated).toBe(false);
-    expect(r.host).toBe('localhost:9221');
-    expect(calls).toHaveLength(0);
+    expect(calls.map((c) => c.userDataDir)).toEqual(['C:/x/brain']);
+    expect(r.profileDir).toBe('C:/x/brain');
+    expect(await r.client.listTabs()).toEqual([{ id: 'T1', type: 'page', url: 'https://x/', title: 'x' }]);
+  });
+
+  it('no conversation → the brain group, discovered profile when chrome.profile_dir is unset', async () => {
+    const { cmds, calls } = build({ mem: { free: 8192 * MB } });
+    const r = await cmds.startBrowser();
+    expect(r).toMatchObject({ ok: true, launched: true });
+    expect(r.detail).toMatch(/the "brain" browser is up/);
+    expect(calls.map((c) => c.userDataDir)).toEqual([CHROME_BRAIN_PROFILE]);
+  });
+
+  it('brain is never memory-gated: it launches where a non-brain group is declined', async () => {
+    const { cmds, calls } = build({ mem: { free: 100 * MB } });
+    expect((await cmds.chromeClientFor(SHARED)).declined).toBe(true);
+    expect((await cmds.chromeClientFor(BRAIN)).client).not.toBe(null);
+    expect(calls.map((c) => c.userDataDir)).toEqual([CHROME_BRAIN_PROFILE]);
   });
 
   it('two chats in the SAME group share ONE Chrome', async () => {
@@ -154,12 +161,11 @@ describe('a non-brain GROUP → its group pipe Chrome + a pipe cdpClient', () =>
 });
 
 describe('FAIL CLOSED: a chat the lookup refused gets NO browser and one log line', () => {
-  it('a chat listed in two groups → no client, nothing spawned, never the brain port client', async () => {
+  it('a chat listed in two groups → no client, nothing spawned, never the brain', async () => {
     const { cmds, calls, logs } = build({ mem: { free: 8192 * MB } });
     const conv = chromeConversationOf({ conversation_path: 'x/eGPT Admin-2609121344' }, { brain: ['eGPT Admin'], work: ['eGPT Admin'] });
     const r = await cmds.chromeClientFor(conv);
     expect(r.client).toBe(null);
-    expect(r.host).toBeUndefined();
     expect(calls).toHaveLength(0);
     expect(logs.filter((l) => /no browser for "eGPT Admin".*brain, work/.test(l))).toHaveLength(1);
   });
@@ -183,7 +189,7 @@ describe('FAIL CLOSED: a chat the lookup refused gets NO browser and one log lin
 });
 
 describe('browsers.yaml end to end — an operator edit moves a chat without a restart', () => {
-  it('eGPT Rodz Lulu An: brain (port path) → removed from brain → shared (pipe)', async () => {
+  it('eGPT Rodz Lulu An: brain\'s Chrome → removed from brain → shared\'s Chrome', async () => {
     const home = mkdtempSync(join(tmpdir(), 'egpt-browsers-'));
     const saved = process.env.EGPT_HOME;
     try {
@@ -195,13 +201,13 @@ describe('browsers.yaml end to end — an operator edit moves a chat without a r
       const entry = { conversation_path: '.egpt/conversations/whatsapp/eGPT Rodz Lulu An-2609201419' };   // live shape: no pushedName
 
       const before = await cmds.chromeClientFor(chromeConversationOf(entry, await readBrowserGroups()));
-      expect(before.dedicated).toBe(false);
-      expect(calls).toHaveLength(0);
+      expect(before.profileDir).toBe(CHROME_BRAIN_PROFILE);
+      expect(calls).toHaveLength(1);
 
       writeFileSync(file, 'groups:\n  brain: [ "eGPT Admin" ]\n');
       const after = await cmds.chromeClientFor(chromeConversationOf(entry, await readBrowserGroups()));
       expect(after.profileDir).toBe(sharedDir);
-      expect(calls).toHaveLength(1);
+      expect(calls).toHaveLength(2);
     } finally {
       process.env.EGPT_HOME = saved;
       rmSync(home, { recursive: true, force: true });
@@ -213,7 +219,6 @@ describe('memory admission gates the EXTRA (non-brain) group Chromes', () => {
   it('LAUNCHES when free memory is well above the margin', async () => {
     const { cmds, calls } = build({ mem: { free: 8192 * MB } });
     const r = await cmds.chromeClientFor(SHARED);
-    expect(r.dedicated).toBe(true);
     expect(r.client).not.toBe(null);
     expect(calls).toHaveLength(1);
   });
@@ -239,12 +244,11 @@ describe('memory admission gates the EXTRA (non-brain) group Chromes', () => {
     await cmds.chromeClientFor(B);   // free 1600 → 1000
     const rc = await cmds.chromeClientFor(C);   // 1000 − 500 < 1024 → evict idlest (A), free 1600, launch C
 
-    expect(rc.dedicated).toBe(true);
     expect(rc.client).not.toBe(null);
     expect(calls).toHaveLength(3);                       // A, B, C each spawned once
     const aHandle = handles.find((h) => h.userDataDir.endsWith('A-1'));
     expect(aHandle.child.killed).toBe(true);             // the idlest (A) was evicted
-    expect(logs.some((l) => /evicted dedicated Chrome .*A-1/.test(l))).toBe(true);
+    expect(logs.some((l) => /evicted group Chrome .*A-1/.test(l))).toBe(true);
 
     // the evicted profile persists on disk → a later ensure relaunches it (room is free again here)
     mem.free = 8192 * MB;
@@ -280,10 +284,57 @@ describe('per-profile single-flight + never-relaunch-a-live-profile', () => {
   });
 });
 
-describe('the brain path is inert and unchanged', () => {
-  it('INERT: a conversation-less startBrowser never touches the pipe spawner', async () => {
-    const { cmds, calls } = build({});
-    await cmds.startBrowser();   // today's shared launch path
+describe('brain and shared serve many chats: never evicted', () => {
+  it('under pressure the idlest OTHER group is evicted, though brain and shared are idler', async () => {
+    const mem = { free: 3200 * MB };
+    const { cmds, handles, logs } = build({ mem, cost: 600 * MB });
+    await cmds.chromeClientFor(BRAIN);                                    // idlest; 2600 free
+    await cmds.chromeClientFor(SHARED);                                   // next idlest; 2000 free
+    await cmds.chromeClientFor({ key: 'a', name: 'A', group: 'A-1' });   // 1400 free
+    const rb = await cmds.chromeClientFor({ key: 'b', name: 'B', group: 'B-1' });   // 1400 − 500 < 1024 → evict
+    expect(rb.client).not.toBe(null);
+    expect(handles.filter((h) => h.child.killed).map((h) => h.userDataDir)).toEqual([join(dirname(CHROME_BRAIN_PROFILE), 'A-1')]);
+    expect(logs.filter((l) => /evicted/.test(l))).toHaveLength(1);
+  });
+
+  it('with only brain and shared up, a newcomer that does not fit is DECLINED, never them', async () => {
+    const mem = { free: 2200 * MB };
+    const { cmds, handles } = build({ mem, cost: 600 * MB });
+    await cmds.chromeClientFor(BRAIN);
+    await cmds.chromeClientFor(SHARED);                                   // 1000 free
+    const r = await cmds.chromeClientFor({ key: 'a', name: 'A', group: 'A-1' });
+    expect(r.declined).toBe(true);
+    expect(handles.some((h) => h.child.killed)).toBe(false);
+  });
+});
+
+describe('a profile another Chrome already holds is never launched over', () => {
+  it('brain open in a normal window → no spawn, one log line, a clear answer', async () => {
+    const asked = [];
+    const { cmds, calls, logs } = build({ mem: { free: 8192 * MB }, profileHolder: (dir) => { asked.push(dir); return 'EBUSY'; } });
+    const r = await cmds.startBrowser(BRAIN);
+    expect(r).toEqual({ ok: false, reason: 'no-browser', detail: 'the "brain" browser is open in a normal window; close it to hand it back to the spine' });
+    expect(asked).toEqual([CHROME_BRAIN_PROFILE]);
     expect(calls).toHaveLength(0);
+    expect(logs.filter((l) => /not launching "brain" Chrome .*another Chrome holds it \(EBUSY\)/.test(l))).toHaveLength(1);
+  });
+
+  it('the holder is asked only when about to launch — never for a Chrome the pool already runs', async () => {
+    let held = false;
+    const { cmds, calls } = build({ mem: { free: 8192 * MB }, profileHolder: () => (held ? 'EBUSY' : null) });
+    const first = await cmds.chromeClientFor(SHARED);
+    held = true;   // our own pipe Chrome now holds the lockfile
+    const again = await cmds.chromeClientFor(SHARED);
+    expect(again.client).toBe(first.client);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('once the window closes, the next ask launches it over the pipe', async () => {
+    let held = 'EBUSY';
+    const { cmds, calls } = build({ mem: { free: 8192 * MB }, profileHolder: () => held });
+    expect((await cmds.chromeClientFor(SHARED)).client).toBe(null);
+    held = null;
+    expect((await cmds.chromeClientFor(SHARED)).client).not.toBe(null);
+    expect(calls).toHaveLength(1);
   });
 });

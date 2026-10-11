@@ -29,6 +29,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCommands } from '../src/spine/commands.mjs';
+import { fakePipeChrome } from './fake-pipe-chrome.mjs';
 import { createSpine } from '../src/spine/spine.mjs';
 import { createRoomRelay } from '../src/spine/room-relay.mjs';
 import { createMemberResolver } from '../src/spine/boot.mjs';
@@ -71,7 +72,7 @@ function commandsFor(resolveConvRoom) {
   const cmds = createCommands({
     getConfig: () => ({ whatsapp: { chat_id: '!conv-1' } }),
     send: async (chatId, text) => sent.push({ chatId, text }),
-    cdp: { listTabs: async () => threeTabs },
+    spawnChromePipe: fakePipeChrome({ listTabs: async () => threeTabs }).spawnChromePipe, profileHolder: () => null,
     loadAdapters: async () => ADAPTERS,
     resolveConvRoom,
   });
