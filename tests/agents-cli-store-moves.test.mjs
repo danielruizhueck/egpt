@@ -140,14 +140,14 @@ describe('/agents rethread files the retiring thread\'s CLI store beside the tra
     expect(sent.at(-1).text).toContain("e's CLI store moved to transcripts/thread-abc.cli");
   });
 
-  it('/agents rethread all moves EVERY resident being\'s own store, each under its own thread id', async () => {
+  it('/agents rethread force all moves EVERY resident being\'s own store, each under its own thread id', async () => {
     const { state, room } = seed({ e: { threadId: 'thread-e' }, wren: { threadId: 'thread-w' } });
     seedTranscript(room, 'thread-e');
     seedStore('thread-e', 'E\n');
     seedStore('thread-w', 'W\n');
 
     const { cmds } = harness({ state });
-    await cmds.run({ chatId: JID, surface: SURFACE, body: '/agents rethread all' });
+    await cmds.run({ chatId: JID, surface: SURFACE, body: '/agents rethread force all' });
 
     expect(readdirSync(storeRoot)).toEqual([]);
     expect(readFileSync(storeFileIn(room.transcriptsDir, 'thread-e'), 'utf8')).toBe('E\n');
@@ -211,7 +211,7 @@ describe('/agents reset carries every retiring being\'s CLI store into the archi
     seedStore('thread-w', 'W\n');
 
     const { cmds, sent } = harness({ state });
-    await cmds.run({ chatId: JID, surface: SURFACE, body: '/agents reset all' });
+    await cmds.run({ chatId: JID, surface: SURFACE, body: '/agents reset force all' });
 
     const archived = archivedDir(slug);
     expect(archived).toBeTruthy();

@@ -483,9 +483,9 @@ describe('/agents mode in an alias room — stored on the alias, read by the gat
     expect(st.contacts.whatsapp[SUPER_LIVE]).toEqual({ ...SUPER_ALIAS, agents: { egpt: { mode: 'accum' } } });
   });
 
-  it('`/agents mode accum all` in the super channel: every resident on the alias, the origin untouched', async () => {
+  it('`/agents mode accum force all` in the super channel: every resident on the alias, the origin untouched', async () => {
     const { cmds, getState } = live();
-    await cmds.run(at(SUPER_LIVE, '/agents mode accum all'));
+    await cmds.run(at(SUPER_LIVE, '/agents mode accum force all'));
     const st = getState();
     for (const b of ['egpt', 'codex', 'ken']) expect(st.contacts.whatsapp[ORIGIN].agents[b].mode).toBeUndefined();
     expect(st.contacts.whatsapp[SUPER_LIVE].agents).toEqual({ egpt: { mode: 'accum' }, codex: { mode: 'accum' }, ken: { mode: 'accum' } });

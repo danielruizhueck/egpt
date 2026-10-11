@@ -22,7 +22,7 @@ import { loadPermissionLevel, ACCESS_LEVELS, isAccessLevel } from './permission-
 // through the SAME scan a typed @mention goes through, never a matcher of its own. `addressed`
 // over a single already-extracted token is the house single-token lookup (src/spine/mesh.mjs's
 // findAgentByToken, src/spine/heartbeat-loader.mjs's `agent:`); `addressableTokens` LISTS the
-// valid handles in the refusal. See agentsCmd's HANDLE → KEY block.
+// valid handles in the not-hosted log line. See agentsCmd's HANDLE → KEY block.
 import { addressed, addressableTokens } from './router.mjs';
 import { superChannelAlive } from './gating.mjs';
 import { stat as fsStat, readFile as fsReadFile, writeFile as fsWriteFile, mkdir as fsMkdir, readdir as fsReaddir, rm as fsRm, rename as fsRename } from 'node:fs/promises';
@@ -322,10 +322,10 @@ const NODE_ADDRESSABLE = /^\/(chrome|status|tabs|tab|open|close|members?|config|
 // mention p`). That is the price of keeping the scope chain contiguous, and it is only
 // payable because every verb's arity is FIXED and its value comes from a closed set.
 //
-//   /agents <handle>|all [<conv>]                             status
-//   /agents refresh|rethread|reset <handle>|all [<conv>]
-//   /agents mode <mode> <handle>|all [<conv>]                 (`auto` is a deprecated alias of `mode`)
-//   /agents access_level <level> <handle>|all [<conv>]        (level: see ACCESS_LEVELS)
+//   /agents <handle>|force all [<conv>]                       status
+//   /agents refresh|rethread|reset <handle>|force all [<conv>]
+//   /agents mode <mode> <handle>|force all [<conv>]           (`auto` is a deprecated alias of `mode`)
+//   /agents access_level <level> <handle>|force all [<conv>]  (level: see ACCESS_LEVELS)
 //
 // The object-first order (`/agents e rethread`) is GONE — operator 2026-08-29, "remove legacy
 // ways". It is DETECTED and named rather than left to misparse: a line that silently does the
@@ -364,7 +364,7 @@ const LIVE_AGENT_SUBS = Object.keys(AGENT_SUB_ARITY).filter((v) => !Object.hasOw
 // Every level name in the operator-facing text comes from ACCESS_LEVELS (permission-levels.mjs),
 // never a literal: the tier list is spelled out in ONE place, and a new tier updates this line,
 // the refusals below and /help together or not at all. Same rule now holds for the verb list.
-export const AGENTS_USAGE = `usage: /agents [<verb>] [<value>] <handle>|all [<conversation>] — verbs: refresh | rethread | reset | mode <${AUTO_MODES.join('|')}> | access_level <${ACCESS_LEVELS.join('|')}>. Bare \`/agents <handle>|all\` shows status. <conversation> is the rest of the line, spaces and all: \`/agents refresh e eGPT Rodz Lulu An\`.`;
+export const AGENTS_USAGE = `usage: /agents [<verb>] [<value>] <handle>|force all [<conversation>] — verbs: refresh | rethread | reset | mode <${AUTO_MODES.join('|')}> | access_level <${ACCESS_LEVELS.join('|')}>. Bare \`/agents <handle>|force all\` shows status; bare \`all\` is refused. <conversation> is the rest of the line, spaces and all: \`/agents refresh e eGPT Rodz Lulu An\`.`;
 
 // args (already whitespace-split) -> what agentsCmd wants: { args: [handle, verb, value],
 // slug }, or { retired } for the old order. Pure; exported for tests.
@@ -374,6 +374,11 @@ export const AGENTS_USAGE = `usage: /agents [<verb>] [<value>] <handle>|all [<co
 // Admin"). It was one token, and chat names and slugs carry spaces (`eGPT Rodz Lulu An-
 // 2609201419`), so `refresh e eGPT Rodz Lulu An` resolved "eGPT" and answered `don't know
 // where to put "Rodz Lulu An"`. With nothing left over in any shape, that reply went too.
+// `force all` is ONE target (operator 2026-10-11); the conversation starts after it.
+const FORCE_ALL = 'force all';
+const targetAt = (args, i) => (args[i]?.toLowerCase() === 'force' && args[i + 1]?.toLowerCase() === 'all'
+  ? { handle: FORCE_ALL, slug: args.slice(i + 2).join(' ') || null }
+  : { handle: args[i], slug: args.slice(i + 1).join(' ') || null });
 export function normalizeAgentsArgs(args) {
   // Alias → live verb BEFORE the arity lookup, and the canonical verb is what downstream reads:
   // `auto` is resolved to `mode` here so the dispatch, confirmations and help all speak one verb.
@@ -381,8 +386,8 @@ export function normalizeAgentsArgs(args) {
   if (verb && Object.hasOwn(AGENT_SUB_ARITY, verb)) {
     const takesValue = AGENT_SUB_ARITY[verb] === 1;
     const value = takesValue ? args[1] : undefined;
-    const handle = takesValue ? args[2] : args[1];
-    return { args: [handle, verb, value], slug: args.slice(takesValue ? 3 : 2).join(' ') || null };
+    const { handle, slug } = targetAt(args, takesValue ? 2 : 1);
+    return { args: [handle, verb, value], slug };
   }
   // No leading verb: either the bare status form (`<handle> [<conv>]`) or the retired
   // object-first order, which is recognisable exactly — and worth recognising, to say so. The
@@ -391,7 +396,8 @@ export function normalizeAgentsArgs(args) {
   if (second && Object.hasOwn(AGENT_SUB_ARITY, second)) {
     return { retired: { handle: args[0], verb: args[1], rest: args.slice(2) } };
   }
-  return { args: [args[0]], slug: args.slice(1).join(' ') || null };
+  const { handle, slug } = targetAt(args, 0);
+  return { args: [handle], slug };
 }
 
 // The whole surface is PLURAL (operator 2026-08-29: "we should keep only '/agents', '/rooms',
@@ -1021,12 +1027,12 @@ export function createCommands({
     // conversation survived untouched by a reset meant to cover "this conversation". /agents
     // fixes that by taking the being explicitly, never assuming defaultKey.
     //
-    //   /agents <handle>|all [<conv>]                             → status (bare, see agentsStatus)
-    //   /agents refresh <handle>|all [<conv>]                     → re-feed identity + directives into the RUNNING thread
-    //   /agents rethread <handle>|all [<conv>]                    → clear threadId + roll transcript.md; everything else survives
-    //   /agents reset <handle>|all [<conv>]                       → archive + wipe + reseed
-    //   /agents mode <mode> <handle>|all [<conv>]                 → was /agents auto <mode> (alias kept), and /e auto <mode>
-    //   /agents access_level <level> <handle>|all [<conv>]        → was /e access all|regular
+    //   /agents <handle>|force all [<conv>]                       → status (bare, see agentsStatus)
+    //   /agents refresh <handle>|force all [<conv>]               → re-feed identity + directives into the RUNNING thread
+    //   /agents rethread <handle>|force all [<conv>]              → clear threadId + roll transcript.md; everything else survives
+    //   /agents reset <handle>|force all [<conv>]                 → archive + wipe + reseed
+    //   /agents mode <mode> <handle>|force all [<conv>]           → was /agents auto <mode> (alias kept), and /e auto <mode>
+    //   /agents access_level <level> <handle>|force all [<conv>]  → was /e access all|regular
     //
     // See § COMMAND GRAMMAR at module scope for the shape and why the target trails.
     // `[<conv>]` and `=<slug>` are the same thing said two ways.
@@ -1041,8 +1047,8 @@ export function createCommands({
     // /e reset/auto/access. Given = resolved through resolveTarget — the SAME fuzzy/jid
     // resolver /e auto <mode> <target> and /e reset <target> already used, reused verbatim
     // (same error/ambiguity semantics). `<handle>` is a being's agents.<being> map key
-    // (`e`, `wren`, …); `all` applies the subcommand to every being residentsOf() finds on
-    // that conversation's entry. See agentsCmd() for the full dispatch.
+    // (`e`, `wren`, …); `force all` applies the subcommand to every being residentsOf() finds on
+    // that conversation's entry (bare `all` is refused). See agentsCmd() for the full dispatch.
     const agentsMatch = /^\/agents(?:=(\S+))?(?:\s+(.+?))?\s*$/i.exec(line);
     if (agentsMatch) {
       const raw = (agentsMatch[2] ?? '').trim().split(/\s+/).filter(Boolean);
@@ -1518,7 +1524,7 @@ export function createCommands({
   // ordered defaultKey-first when resident so the persona reads first in a multi-being
   // reply/status — and routes to the per-subcommand handler. Every handler below takes the
   // ALREADY-resolved (surface, jid, where, handles[, …, state, named]) — none of them re-parse
-  // or re-resolve. `named` is the reply's word for the being(s): the keys for `all`, and for a
+  // or re-resolve. `named` is the reply's word for the being(s): the keys for `force all`, and for a
   // single target the operator's own token plus the key when the two differ.
   async function agentsCmd(ev, slugArg, args) {
     const [handleArg, subRaw, valueRaw] = args;
@@ -1548,7 +1554,14 @@ export function createCommands({
     // 'sandbox': it worked everywhere except here, leaving a hand edit of conversations.yaml
     // as the only way in.
     if (sub === 'access_level' && !isAccessLevel(valueRaw?.toLowerCase())) {
-      await send?.(ev.chatId, `usage: /agents access_level ${ACCESS_LEVELS.join('|')} <handle>|all`);
+      await send?.(ev.chatId, `usage: /agents access_level ${ACCESS_LEVELS.join('|')} <handle>|force all`);
+      return;
+    }
+    // `all` is REFUSED (operator 2026-10-11); ONE reply on a shared chat — the secondary stays silent.
+    if (handleArg.toLowerCase() === 'all') {
+      const forced = ['/agents', subRaw, valueRaw, FORCE_ALL, slugArg].filter(Boolean).join(' ');
+      if (String(cfg().node_role ?? '').trim().toLowerCase() === 'secondary') onLog(`/agents: "all" refused — the primary replies`);
+      else await send?.(ev.chatId, `/agents: \`all\` changes every being at once — say \`${forced}\` to mean it. Nothing was changed.`);
       return;
     }
 
@@ -1616,21 +1629,22 @@ export function createCommands({
     // Order matters and this is the order: a CLAIMED handle beats residency, so kg's stray `e:`
     // record can never win `e` back from egpt and re-create the very bug above.
     //
-    // Anything else is not a being here: REFUSED by name, with what IS addressable, and returned
-    // before a single write or transcript roll. `named` is what the REPLY calls the being — as
+    // Anything else is not a being here: SILENT on this node (logged), returned before a single
+    // write or transcript roll. `named` is what the REPLY calls the being — as
     // typed, plus the key when they differ, because "✅ e rethread" while the record says `egpt`
     // is how this went unnoticed.
     let handles, named;
-    if (handleArg === 'all') {
-      // `all` = every being residentsOf() finds on that conversation's entry — the exact
+    if (handleArg === FORCE_ALL) {
+      // `force all` = every being residentsOf() finds on that conversation's entry — the exact
       // registry-block owner /rooms's members roster is silent on (residentsOf reads
       // entry.agents.<being> blocks, conversations-state.mjs). Ordered defaultKey-first (when
       // resident) so the persona is always the first block/reply in a multi-being result; the
       // rest keep residentsOf()'s own order. These are KEYS already — nothing to resolve.
+      // Each node reads its OWN state, so it changes and reports only its own residents.
       const entry = getContact(state, surface, jid)?.entry;
       handles = residentsOf(entry);
       if (handles.includes(defaultKey)) handles = [defaultKey, ...handles.filter((h) => h !== defaultKey)];
-      if (!handles.length) { await send?.(ev.chatId, `/agents: no resident beings ${where}`); return; }
+      if (!handles.length) { onLog(`/agents: force all — no resident beings ${where} on this node`); return; }
       named = handles.join(', ');
     } else {
       const typed = handleArg.toLowerCase();
@@ -1652,12 +1666,9 @@ export function createCommands({
         ?? (!configKey(typed) ? residents.find((h) => String(h).toLowerCase() === typed) : null)
         ?? null;
       if (!key) {
-        // NOT MINE, SO NOT MY ANSWER: the word names a being that exists here only as a key (or as
-        // a record some turn seeded), so the node that answers to it is another one. It stays
-        // silent rather than talking over the node that is doing the work.
-        const elsewhere = configKey(typed) || String(defaultKey).toLowerCase() === typed;
-        if (elsewhere) { onLog(`/agents: "${handleArg}" is a being KEY here, not a handle this node answers to — left for the node whose being answers to it`); return; }
-        await send?.(ev.chatId, `/agents: no being ${where} answers to "${handleArg}" — nothing was changed. addressable: ${[...new Set(addressableTokens(agentsMap))].join(', ')}, all`);
+        // NOT MINE, SO NOT MY ANSWER (operator 2026-10-11: "if agent doesn't reside on a node, it
+        // says nothing"): the host node answers; a name no node hosts gets no chat reply at all.
+        onLog(`/agents: no being on this node answers to "${handleArg}" — silent (addressable here: ${[...new Set(addressableTokens(agentsMap))].join(', ')})`);
         return;
       }
       handles = [key];

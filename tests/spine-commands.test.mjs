@@ -447,13 +447,13 @@ describe('/agents reset <handle>|all — archive + registry wipe + reseed, one s
     expect(eAfter).toEqual(before);   // byte-for-byte untouched
   });
 
-  it('/agents reset all wipes EVERY resident being on the entry', async () => {
+  it('/agents reset force all wipes EVERY resident being on the entry', async () => {
     let state = ensureContact(emptyState(), 'whatsapp', '1234@s.whatsapp.net', { pushedName: 'diego', slugHint: 'diego' }).state;
     state = patchContact(state, 'whatsapp', '1234@s.whatsapp.net', {
       agents: { e: { mode: 'on' }, wren: { mode: 'mention' }, d: { mode: 'accum' } },
     });
     const { cmds, getState } = harness({ state, io: { rename: async () => {}, mkdir: async () => {} } });
-    await cmds.run({ chatId: '1234@s.whatsapp.net', surface: 'whatsapp', body: '/agents reset all' });
+    await cmds.run({ chatId: '1234@s.whatsapp.net', surface: 'whatsapp', body: '/agents reset force all' });
     const reloaded = getState();
     for (const h of ['e', 'wren', 'd']) {
       expect(getBeing(reloaded, 'whatsapp', '1234@s.whatsapp.net', h).present).toBe(false);
@@ -757,13 +757,13 @@ describe('/agents rethread <handle>|all — clears ONLY threadId, mode/access_le
     expect(renames.some(([from]) => from === room.baseDir())).toBe(false);
   });
 
-  it('/agents rethread all clears threadId for EVERY resident being, leaving each one\'s own mode intact', async () => {
+  it('/agents rethread force all clears threadId for EVERY resident being, leaving each one\'s own mode intact', async () => {
     let state = ensureContact(emptyState(), 'whatsapp', '1234@s.whatsapp.net', { pushedName: 'diego', slugHint: 'diego' }).state;
     state = patchContact(state, 'whatsapp', '1234@s.whatsapp.net', {
       agents: { e: { mode: 'on', threadId: 'e-t' }, wren: { mode: 'mention', threadId: 'wren-t' }, d: { mode: 'accum', threadId: 'd-t' } },
     });
     const { cmds, getState } = harness({ state });
-    await cmds.run({ chatId: '1234@s.whatsapp.net', surface: 'whatsapp', body: '/agents rethread all' });
+    await cmds.run({ chatId: '1234@s.whatsapp.net', surface: 'whatsapp', body: '/agents rethread force all' });
     const reloaded = getState();
     for (const h of ['e', 'wren', 'd']) {
       const b = getBeing(reloaded, 'whatsapp', '1234@s.whatsapp.net', h);
@@ -870,12 +870,12 @@ describe('/agents rethread <handle>|all — clears ONLY threadId, mode/access_le
     expect(eWindowAfter.slice(0, eWindowBefore.length)).toEqual(eWindowBefore);   // e's own boundary never moved
   });
 
-  it('/agents rethread all writes ONE boundary line per rethreaded being, each under its own label', async () => {
+  it('/agents rethread force all writes ONE boundary line per rethreaded being, each under its own label', async () => {
     const surface = 'whatsapp', jid = '1234@s.whatsapp.net';
     let state = ensureContact(emptyState(), surface, jid, { pushedName: 'diego', slugHint: 'diego' }).state;
     state = patchContact(state, surface, jid, { agents: { e: { threadId: 'e-t' }, wren: { threadId: 'wren-t' } } });
     const { cmds, logged } = harness({ state });
-    await cmds.run({ chatId: jid, surface, body: '/agents rethread all' });
+    await cmds.run({ chatId: jid, surface, body: '/agents rethread force all' });
 
     expect(logged.map((l) => l.reply.being)).toEqual(['e', 'wren']);
     for (const l of logged) expect(l.reply.surfaced).toBe(false);
@@ -1129,14 +1129,14 @@ describe('/agents refresh|rethread|reset - the three conversation-lifecycle verb
       });
     });
 
-    it('/agents refresh all arms EVERY resident being', async () => {
+    it('/agents refresh force all arms EVERY resident being', async () => {
       let state = ensureContact(emptyState(), SURFACE, JID, CTX).state;
       state = patchContact(state, SURFACE, JID, {
         agents: { e: { threadId: 'e-t', identityInjectedAt: 'x' }, wren: { threadId: 'wren-t', identityInjectedAt: 'y' } },
       });
       const room = Room.forChat(SURFACE, getContact(state, SURFACE, JID).slug);
       const { cmds, getState } = harness({ state, io: transcriptIo(room) });
-      await cmds.run({ chatId: JID, surface: SURFACE, body: '/agents refresh all' });
+      await cmds.run({ chatId: JID, surface: SURFACE, body: '/agents refresh force all' });
       const agents = getContact(getState(), SURFACE, JID).entry.agents;
       expect(agents.e.identityInjectedAt).toBeNull();
       expect(agents.wren.identityInjectedAt).toBeNull();
@@ -1356,13 +1356,13 @@ describe('/agents access_level all|regular <handle>|all — points access_level 
 
   // THE scoping generalization: access_level is no longer defaultKey-only — `all` writes
   // EVERY resident being's own access_level and evicts EACH being's own warm key.
-  it("/agents access_level regular all sets EVERY resident being's accessLevel and evicts each one's own warm key", async () => {
+  it("/agents access_level regular force all sets EVERY resident being's accessLevel and evicts each one's own warm key", async () => {
     let state = ensureContact(emptyState(), 'whatsapp', '1234@s.whatsapp.net', { pushedName: 'diego', slugHint: 'diego' }).state;
     state = patchContact(state, 'whatsapp', '1234@s.whatsapp.net', {
       agents: { e: { mode: 'on' }, wren: { mode: 'mention' } },
     });
     const { cmds, evicts, getState } = harness({ state });
-    await cmds.run({ chatId: '1234@s.whatsapp.net', surface: 'whatsapp', body: '/agents access_level regular all' });
+    await cmds.run({ chatId: '1234@s.whatsapp.net', surface: 'whatsapp', body: '/agents access_level regular force all' });
     expect(evicts).toEqual(expect.arrayContaining([
       { being: 'e', surface: 'whatsapp', chatId: '1234@s.whatsapp.net' },
       { being: 'wren', surface: 'whatsapp', chatId: '1234@s.whatsapp.net' },
@@ -1380,7 +1380,7 @@ describe('/agents access_level all|regular <handle>|all — points access_level 
       await cmds.run({ chatId: '1234@s.whatsapp.net', surface: 'whatsapp', body });
       // The refusal NAMES EVERY LEVEL, because it is built from ACCESS_LEVELS. It used to say
       // all|regular, which hid the third tier from the one person guaranteed to be reading it.
-      expect(sent[0].text).toBe('usage: /agents access_level regular|all|sandbox <handle>|all');
+      expect(sent[0].text).toBe('usage: /agents access_level regular|all|sandbox <handle>|force all');
       expect(sent[0].text).not.toMatch(/recognized/);
     }
   });
@@ -1610,7 +1610,7 @@ describe('/agents writes, evicts and REPORTS where the being actually lives (sco
   // rule), so `all` can straddle two conversations. The three FOLDER verbs act on ONE folder —
   // they archive it, roll its transcript.md, move CLI stores into its transcripts/ — so a split
   // is refused BY NAME before a single write or roll, rather than half-done across two.
-  it('a verb that acts on a FOLDER refuses an `all` whose beings live in different conversations — nothing is written, nothing is rolled', async () => {
+  it('a verb that acts on a FOLDER refuses a `force all` whose beings live in different conversations — nothing is written, nothing is rolled', async () => {
     let state = seedJoined();
     state = patchContact(state, 'whatsapp', GROUP, { agents: { e: { mode: 'on' }, wren: { mode: 'on' } } });
     const renames = [];
@@ -1622,7 +1622,7 @@ describe('/agents writes, evicts and REPORTS where the being actually lives (sco
       scopeOf: (being, ev) => (being === 'wren' ? { surface: 'room', chatId: 'wren', pinned: true }
         : ((ev.surface === 'whatsapp' && ev.chatId === GROUP) ? { surface: 'room', chatId: 'acim' } : null)),
     });
-    await cmds.run({ chatId: GROUP, surface: 'whatsapp', body: '/agents reset all' });
+    await cmds.run({ chatId: GROUP, surface: 'whatsapp', body: '/agents reset force all' });
 
     expect(sent[0].text).toMatch(/e lives in room\/acim/);
     expect(sent[0].text).toMatch(/wren lives in room\/wren/);
@@ -1633,7 +1633,7 @@ describe('/agents writes, evicts and REPORTS where the being actually lives (sco
 
   // ...while the per-BEING field write has no such problem: access_level is filed on each
   // being's own scope and each is evicted at its own address.
-  it("access_level DOES cover a split `all` — each being's grant lands on its own scope, each eviction at its own address", async () => {
+  it("access_level DOES cover a split `force all` — each being's grant lands on its own scope, each eviction at its own address", async () => {
     let state = seedJoined();
     state = ensureContact(state, 'room', 'wren', {}).state;
     state = patchContact(state, 'whatsapp', GROUP, { agents: { e: { mode: 'on' }, wren: { mode: 'on' } } });
@@ -1643,7 +1643,7 @@ describe('/agents writes, evicts and REPORTS where the being actually lives (sco
       scopeOf: (being, ev) => (being === 'wren' ? { surface: 'room', chatId: 'wren', pinned: true }
         : ((ev.surface === 'whatsapp' && ev.chatId === GROUP) ? { surface: 'room', chatId: 'acim' } : null)),
     });
-    await cmds.run({ chatId: GROUP, surface: 'whatsapp', body: '/agents access_level all all' });
+    await cmds.run({ chatId: GROUP, surface: 'whatsapp', body: '/agents access_level all force all' });
 
     expect(getBeing(getState(), 'room', 'acim', 'e').accessLevel).toBe('all');
     expect(getBeing(getState(), 'room', 'wren', 'wren').accessLevel).toBe('all');
@@ -1914,13 +1914,12 @@ describe('/agents <verb> <handle> — the HANDLE names the being, the KEY is wha
     });
   }
 
-  // A handle NOBODY claims: refused BY NAME, with what is addressable, and — the property that
+  // A handle NOBODY claims: no chat reply (operator 2026-10-11), and — the property that
   // actually cost a transcript — nothing written and nothing rolled.
-  it('/agents rethread zzz is refused by name; nothing is written, nothing is rolled', async () => {
+  it('/agents rethread zzz is silent; nothing is written, nothing is rolled', async () => {
     const renames = [];
     const { sent, writes, getState } = await run('/agents rethread zzz', { renames });
-    expect(sent[0].text).toMatch(/no being here answers to "zzz"/);
-    expect(sent[0].text).toMatch(/addressable: e, egpt, ekg, egptkg, w, wren/);
+    expect(sent).toEqual([]);
     expect(writes).toHaveLength(0);
     expect(renames).toEqual([]);
     expect(getBeing(getState(), SURFACE, JID, 'egpt').threadId).toBe('thread-abc');   // E untouched
@@ -1947,8 +1946,8 @@ describe('/agents <verb> <handle> — the HANDLE names the being, the KEY is wha
   });
 
   // REGRESSION LOCK: `all` never went through a handle at all, and still doesn't.
-  it('/agents rethread all still covers every resident being, keys unchanged', async () => {
-    const { sent, getState } = await run('/agents rethread all', { state: seed({ wren: { threadId: 'wren-t' } }) });
+  it('/agents rethread force all still covers every resident being, keys unchanged', async () => {
+    const { sent, getState } = await run('/agents rethread force all', { state: seed({ wren: { threadId: 'wren-t' } }) });
     expect(getBeing(getState(), SURFACE, JID, 'egpt').threadId).toBeNull();
     expect(getBeing(getState(), SURFACE, JID, 'wren').threadId).toBeNull();
     expect(sent.at(-1).text).toMatch(/egpt, wren rethread/);              // keys, no "(…)" qualifier
@@ -1967,6 +1966,107 @@ describe('/agents <verb> <handle> — the HANDLE names the being, the KEY is wha
     const { getState } = await run('/agents rethread x', { state, config });
     expect(getBeing(getState(), SURFACE, JID, routerPick).threadId).toBeNull();
     expect(getBeing(getState(), SURFACE, JID, routerPick === 'alpha' ? 'beta' : 'alpha').threadId).not.toBeNull();
+  });
+});
+
+// ── RESIDENT-ONLY ANSWERS, `all` REFUSED UNLESS `force all` (operator ruling 2026-10-11: "if agent
+// doesn't reside on a node, it says nothing. refuses "all". unless "force all"") ───────────────────
+// Live, in a shared chat: do posted `/agents: no being here answers to "e"` while kg applied it; and
+// `/agents mode accum all` changed every kg being at once (egpt, codex, ken, eplus, pi).
+describe('/agents across two nodes — only the host answers; `all` refused, `force all` per node', () => {
+  const SURFACE = 'whatsapp', CHAT = 'UuY6K6ly3BV3Ye7QqIne', CTX = { pushedName: 'SPOILER ALERT', slugHint: 'spoiler' };
+  const KG_BEINGS = ['egpt', 'codex', 'ken', 'eplus', 'pi'];
+  const DO_BEINGS = ['egpt', 'dren'];
+  const KG_CFG = { node_name: 'kg', node_role: 'primary', agents: {
+    egpt: { default: true, handles: ['e', 'egpt', 'ekg', 'egptkg'] }, codex: { handles: ['c', 'codex'] },
+    ken: { handles: ['k', 'ken'] }, eplus: { handles: ['eplus'] }, pi: { handles: ['pi'] },
+  } };
+  const DO_CFG = { node_name: 'do', node_role: 'secondary', agents: {
+    egpt: { default: true, handles: ['d', 'don', 'egptdo'] }, dren: { handles: ['dren'] },
+  } };
+  const seed = (beings) => patchContact(ensureContact(emptyState(), SURFACE, CHAT, CTX).state, SURFACE, CHAT,
+    { agents: Object.fromEntries(beings.map((b) => [b, { mode: 'mention', threadId: `thr-${b}` }])) });
+  const node = (config, beings) => {
+    let st = seed(beings);
+    const sent = [], writes = [], logs = [];
+    const cmds = createCommands({
+      getConfig: () => config, defaultKey: 'egpt',
+      send: async (chatId, text) => sent.push({ chatId, text }),
+      loadState: async () => st, writeState: async (s) => { writes.push(s); st = s; },
+      onLog: (m) => logs.push(m),
+    });
+    return { cmds, sent, writes, logs, getState: () => st };
+  };
+  const both = async (body) => {
+    const kg = node(KG_CFG, KG_BEINGS), dn = node(DO_CFG, DO_BEINGS);
+    for (const n of [kg, dn]) await n.cmds.run({ chatId: CHAT, surface: SURFACE, body, authorized: true });
+    return { kg, dn };
+  };
+  const modes = (n) => Object.fromEntries(Object.entries(getContact(n.getState(), SURFACE, CHAT).entry.agents).map(([b, v]) => [b, v.mode]));
+
+  it('`/agents mode accum e`: kg applies it to egpt; do posts NOTHING and writes nothing (THE reproduce)', async () => {
+    const { kg, dn } = await both('/agents mode accum e');
+    expect(kg.sent.map((s) => s.text)).toEqual(['✅ e (egpt) mode here → accum']);
+    expect(modes(kg).egpt).toBe('accum');
+    expect(dn.sent).toEqual([]);
+    expect(dn.writes).toHaveLength(0);
+    expect(dn.logs.some((l) => /"e"/.test(l))).toBe(true);
+  });
+
+  it('a name nobody hosts: no chat reply on either node, nothing written', async () => {
+    const { kg, dn } = await both('/agents rethread zzz');
+    for (const n of [kg, dn]) { expect(n.sent).toEqual([]); expect(n.writes).toHaveLength(0); }
+  });
+
+  it('`/agents mode accum all`: ONE refusal, from the primary only, naming `force all`; nothing changes anywhere', async () => {
+    const { kg, dn } = await both('/agents mode accum all');
+    expect(kg.sent).toHaveLength(1);
+    expect(kg.sent[0].text).toMatch(/`\/agents mode accum force all`/);
+    expect(kg.sent[0].text).toMatch(/Nothing was changed/);
+    expect(dn.sent).toEqual([]);
+    for (const n of [kg, dn]) expect(n.writes).toHaveLength(0);
+  });
+
+  it('every verb and the bare status form refuse `all` the same way (case-insensitive)', async () => {
+    for (const body of ['/agents all', '/agents rethread all', '/agents reset ALL', '/agents refresh all', '/agents access_level regular all']) {
+      const { kg, dn } = await both(body);
+      expect(kg.sent, body).toHaveLength(1);
+      expect(kg.sent[0].text, body).toMatch(/force all/);
+      expect(dn.sent, body).toEqual([]);
+      for (const n of [kg, dn]) expect(n.writes, body).toHaveLength(0);
+    }
+  });
+
+  it('`/agents mode accum force all`: each node changes ONLY its own residents and reports only those', async () => {
+    const { kg, dn } = await both('/agents mode accum force all');
+    expect(modes(kg)).toEqual(Object.fromEntries(KG_BEINGS.map((b) => [b, 'accum'])));
+    expect(modes(dn)).toEqual(Object.fromEntries(DO_BEINGS.map((b) => [b, 'accum'])));
+    expect(kg.sent.map((s) => s.text)).toEqual(['✅ egpt, codex, ken, eplus, pi mode here → accum']);
+    expect(dn.sent.map((s) => s.text)).toEqual(['✅ egpt, dren mode here → accum']);
+  });
+
+  it('`force all` on a node with no resident beings in the chat says nothing', async () => {
+    const n = node(DO_CFG, []);
+    await n.cmds.run({ chatId: CHAT, surface: SURFACE, body: '/agents mode accum force all', authorized: true });
+    expect(n.sent).toEqual([]);
+    expect(n.writes).toHaveLength(0);
+  });
+
+  // No handle-less fan-out exists: `/agents mode accum` gets usage and changes nothing.
+  it('the bare `/agents mode accum` (no target) changes nothing', async () => {
+    const { kg, dn } = await both('/agents mode accum');
+    for (const n of [kg, dn]) { expect(n.writes).toHaveLength(0); expect(n.sent.map((s) => s.text)).toEqual([AGENTS_USAGE]); }
+  });
+
+  it('a lone node (node_role unset) answers its own beings and refuses `all` itself', async () => {
+    const { node_role, ...lone } = KG_CFG;
+    const n = node(lone, KG_BEINGS);
+    await n.cmds.run({ chatId: CHAT, surface: SURFACE, body: '/agents mode accum all', authorized: true });
+    expect(n.sent).toHaveLength(1);
+    expect(n.sent[0].text).toMatch(/force all/);
+    expect(n.writes).toHaveLength(0);
+    await n.cmds.run({ chatId: CHAT, surface: SURFACE, body: '/agents mode accum e', authorized: true });
+    expect(n.sent.at(-1).text).toBe('✅ e (egpt) mode here → accum');
   });
 });
 
@@ -2028,21 +2128,22 @@ describe('/agents <handle>|all — bare status view, usage, and /e/egpt retireme
     expect(sent[1].text).toMatch(/allowed_tools: \[Read, Write, Bash\]/);
   });
 
-  it('/agents all (bare) returns ONE fenced-yaml block per resident being, defaultKey first', async () => {
+  it('/agents force all (bare) returns ONE fenced-yaml block per resident being, defaultKey first', async () => {
     let state = ensureContact(emptyState(), 'whatsapp', '!room', { pushedName: 'fam', slugHint: 'fam' }).state;
     // inserted wren BEFORE e, to prove the ordering is defaultKey-first by RULE, not by
     // accident of insertion order
     state = patchContact(state, 'whatsapp', '!room', { agents: { wren: { mode: 'mention' }, e: { mode: 'on' } } });
     const { cmds, sent } = harness({ state });
-    await cmds.run({ chatId: '!room', surface: 'whatsapp', body: '/agents all' });
+    await cmds.run({ chatId: '!room', surface: 'whatsapp', body: '/agents force all' });
     expect(sent[0].text).toMatch(/being: e[\s\S]*\n---\n[\s\S]*being: wren/);
   });
 
-  it('/agents all (bare) with no resident beings reports so, rather than an empty fenced block', async () => {
+  // A node with no residents here says nothing (operator 2026-10-11) — never an empty fenced block.
+  it('/agents force all (bare) with no resident beings is silent, rather than an empty fenced block', async () => {
     const state = ensureContact(emptyState(), 'whatsapp', '!room', { pushedName: 'fam', slugHint: 'fam' }).state;
     const { cmds, sent } = harness({ state });
-    await cmds.run({ chatId: '!room', surface: 'whatsapp', body: '/agents all' });
-    expect(sent[0].text).toMatch(/no resident beings/);
+    await cmds.run({ chatId: '!room', surface: 'whatsapp', body: '/agents force all' });
+    expect(sent).toEqual([]);
   });
 
   // operator 2026-08-29: dolly answered "/agents wren" with a plausible-looking status block
@@ -2050,19 +2151,18 @@ describe('/agents <handle>|all — bare status view, usage, and /e/egpt retireme
   // hears, regardless of which node the named being actually lives on, and resolveBeingDef's
   // OWN fallback ("no agent entry -> a bare def, keeps it runnable") let that fallback dress
   // itself up as a real status. Neither configured (no config.agents entry) nor resident (no
-  // per-conversation being block) -> refuse plainly instead of fabricating one.
+  // per-conversation being block) -> nothing is fabricated, and (operator 2026-10-11) nothing is said.
   //
   // The refusal MOVED (2026-09-17, the handle->key resolution): it used to be rendered by
   // agentsBeingBlock as a fenced `being: wren / not configured on this node` — status-only, so
   // `/agents rethread wren` still wrote a record for it. It is now agentsCmd's ONE refusal, ahead
   // of every verb, and it lists what the operator could have typed. The property this test
   // guards is unchanged: wren is named, and no status is fabricated for it.
-  it('/agents <unconfigured handle> refuses plainly rather than fabricating a status for a being not on this node', async () => {
+  it('/agents <unconfigured handle> is silent rather than fabricating a status for a being not on this node', async () => {
     const state = ensureContact(emptyState(), 'whatsapp', '!room', { pushedName: 'fam', slugHint: 'fam' }).state;
     const { cmds, sent } = harness({ state });
     await cmds.run({ chatId: '!room', surface: 'whatsapp', body: '/agents wren' });
-    expect(sent[0].text).toMatch(/no being here answers to "wren"/);
-    expect(sent[0].text).not.toMatch(/thread_id/);
+    expect(sent).toEqual([]);
   });
 
   // A being with no standing config.yaml entry but genuine per-conversation residency
@@ -2844,6 +2944,12 @@ describe('/agents grammar — verb first, target last, no legacy order', () => {
   it('`all` reads as the target, in either arity, and is never mistaken for a value', () => {
     expect(parse('reset all')).toMatchObject({ args: ['all', 'reset', undefined], slug: null });
     expect(parse('access_level all all')).toMatchObject({ args: ['all', 'access_level', 'all'], slug: null });
+  });
+
+  it('`force all` is ONE target in either arity; the conversation still follows it', () => {
+    expect(parse('mode accum force all spoiler alert')).toMatchObject({ args: ['force all', 'mode', 'accum'], slug: 'spoiler alert' });
+    expect(parse('rethread FORCE ALL')).toMatchObject({ args: ['force all', 'rethread', undefined], slug: null });
+    expect(parse('force all')).toMatchObject({ args: ['force all'], slug: null });
   });
 
   it('no verb = the bare status form, which also takes a trailing conversation', () => {
