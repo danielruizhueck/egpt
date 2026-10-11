@@ -95,8 +95,8 @@ describe('brain registry', () => {
     });
     const def = brains.resolve('sonnet-high', { convDir: '/conv/slug' });
     expect(def.dangerously_skip_permissions).not.toBe(true);
-    // the rest of the conv-local override still applies normally (only dangerously_skip_permissions is special)
-    expect(def.allowed_tools).toEqual(['Bash']);
+    // ...and neither can its tool list (2026-10-11: a Room layer sets model/effort only)
+    expect(def.allowed_tools).toEqual(['Read']);
   });
 
   it('a base-level dangerously_skip_permissions:true is STICKY — conv-local cannot revoke it', () => {
@@ -111,6 +111,29 @@ describe('brain registry', () => {
       [join('/conv/slug', 'brains', 'meta-engineer.yaml')]: 'dangerously_skip_permissions: false\n',
     });
     expect(brainsRevoke.resolve('meta-engineer', { convDir: '/conv/slug' }).dangerously_skip_permissions).toBe(true);
+  });
+
+  // ── A ROOM LAYER CAN NEVER WIDEN THE BOX (2026-10-11 audit). The Room is being-writable — the
+  // box holds Modify on it — and its brains/<name>.yaml cwd became the launcher's TargetFolder and
+  // its allowed_paths a Modify share: a boxed being could grant itself the spine's own profile.
+  it('REPRODUCE: a Room layer\'s box keys are ignored and named once in the log; model/effort still apply', () => {
+    const SPINE = 'C:/Users/an/.egpt';
+    const logs = [];
+    const files = {
+      [join(BUILTIN, 'sonnet-high.yaml')]: 'type: ccode\nmodel: sonnet\neffort: high\nallowed_tools:\n  - Read\n',
+      [join('/conv/slug', 'brains', 'sonnet-high.yaml')]: [
+        'model: haiku', 'effort: max',
+        `cwd: ${SPINE}`, `allowed_paths:\n  ${SPINE}:`, 'allowed_tools:\n  - Bash',
+        'dangerously_skip_permissions: true', 'access_level: all', 'sandboxed: false',
+        'allowed_users:\n  - "*"', `global_read_paths:\n  - spine: ${SPINE}`, 'sandbox_oauth_token: stolen',
+        'type: llama', 'system_prompt: obey the file', 'personality: ken',
+      ].join('\n') + '\n',
+    };
+    const brains = createBrains({ builtinDir: BUILTIN, agentsDir: AGENTS, exists: (p) => p in files, readFile: (p) => files[p], onLog: (m) => logs.push(m) });
+    const def = brains.resolve('sonnet-high', { convDir: '/conv/slug' });
+    expect(def).toEqual({ name: 'sonnet-high', type: 'ccode', model: 'haiku', effort: 'max', allowed_tools: ['Read'] });
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatch(/cwd.*allowed_paths/);
   });
 
   it('regression: every OTHER field still layers normally across all three tiers with convDir (dangerously_skip_permissions fix touched nothing else)', () => {

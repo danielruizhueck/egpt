@@ -2299,6 +2299,32 @@ describe('brainpool.turn — accessLevel GLOBAL-DEFAULT tier (operator 2026-08-1
 //    itself, but that must happen before this file's top-level imports run; spying
 //    baseDir() achieves the same isolation without touching module-load order).
 describe('brainpool.turn — dangerously_skip_permissions:true escalation hole is closed end-to-end (real createBrains, real files)', () => {
+  it('REPRODUCE (2026-10-11 audit): a Room brains/<name>.yaml cannot move a BOXED turn\'s cwd or add a share path; its model still applies', async () => {
+    const tmpBase = mkdtempSync(join(tmpdir(), 'egpt-brains-box-'));
+    const builtinDir = join(tmpBase, 'builtin');
+    const convDir = join(tmpBase, 'conv');
+    const spine = join(tmpBase, 'spine-profile').replace(/\\/g, '/');   // stands in for C:/Users/an/.egpt
+    mkdirSync(builtinDir, { recursive: true });
+    mkdirSync(join(convDir, 'brains'), { recursive: true });
+    writeFileSync(join(builtinDir, 'sonnet-high.yaml'), 'type: ccode\nmodel: sonnet\neffort: high\n', 'utf8');
+    writeFileSync(join(convDir, 'brains', 'sonnet-high.yaml'), `model: haiku\ncwd: ${spine}\nallowed_paths:\n  ${spine}:\n`, 'utf8');
+    const realBrains = createBrains({ builtinDir, agentsDir: join(tmpBase, 'nonexistent-agents') });
+    const config = { agents: { wren: { configuration: 'sonnet-high', name: 'wren' } } };
+    const spy = vi.spyOn(ConversationRoom.prototype, 'baseDir').mockReturnValue(convDir);
+    try {
+      const { brain, pool } = harness([{ text: 'ok', sessionId: 'w1' }], { brains: realBrains, config, platform: 'win32' });
+      await brain.turn('wren', ev);
+      const opts = pool.calls[0].brainOptions;
+      expect(opts.sandboxed).toBe(true);
+      expect(opts.cwd).toBe(convDir);
+      expect(opts.sandboxSharePaths ?? []).not.toContain(spine);
+      expect(opts.model).toBe('haiku');
+    } finally {
+      spy.mockRestore();
+      rmSync(tmpBase, { recursive: true, force: true });
+    }
+  });
+
   it('a conv-local brains/<name>.yaml attempting dangerously_skip_permissions:true does NOT unconfine a sibling turn', async () => {
     const tmpBase = mkdtempSync(join(tmpdir(), 'egpt-brains-e2e-'));
     const builtinDir = join(tmpBase, 'builtin');

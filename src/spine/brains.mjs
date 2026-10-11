@@ -16,7 +16,7 @@
 // can set just the fields it cares about:
 //   src/brains/             shipped built-ins
 //   ~/.egpt-secondary/config/agents/ the canonical profile home for TYPE files
-//   <slug>/brains/          one conversation only
+//   <slug>/brains/          one conversation only — model/effort only (being-writable)
 // config/agents overrides the built-in — UNLESS the built-in is NEWER, since the profile
 // file is a seeded copy of it and every seeded file resolves by prefer-newer (see resolve
 // below). A conversation's own brains/ wins over both regardless.
@@ -30,6 +30,7 @@ import { preferNewer } from '../prefer-newer.mjs';
 
 export const BUILTIN_BRAINS_DIR = fileURLToPath(new URL('../brains/', import.meta.url));
 export const PROFILE_AGENTS_DIR = join(EGPT_HOME, 'config', 'agents');
+const ROOM_LAYER_KEYS = ['model', 'effort'];
 
 export function createBrains({
   builtinDir = BUILTIN_BRAINS_DIR,
@@ -106,16 +107,17 @@ export function createBrains({
       const basePaths = seeded === builtinPath ? [profilePath, builtinPath] : [builtinPath, profilePath];
       let def = null;
       for (const p of basePaths) { const layer = loadFrom(p, name); if (layer) def = { ...(def ?? {}), ...layer }; }
-      // dangerously_skip_permissions: true is a BASE-LAYERS-ONLY property (operator 2026-08:
-      // the escalation-hole fix) — read from the built-in/profile merge BEFORE the conv-local
-      // layer ever touches it, so a conversation's own brains/<name>.yaml can neither GRANT it
-      // nor REVOKE a base-level grant. It stays fully immune to the conv-local layer in both
-      // directions.
-      const baseDangerouslySkipPermissions = def?.dangerously_skip_permissions === true;
+      // THE ROOM LAYER MAY ONLY TUNE, NEVER WIDEN. The Room is being-writable (the box holds
+      // Modify on it), so its brains/<name>.yaml sets ROOM_LAYER_KEYS and nothing else — not cwd,
+      // allowed_paths, allowed_tools, dangerously_skip_permissions or any key added later.
       const convPath = convDir && join(convDir, 'brains', `${name}.yaml`);
-      if (convPath) { const layer = loadFrom(convPath, name); if (layer) def = { ...(def ?? {}), ...layer }; }
+      const room = convPath ? loadFrom(convPath, name) : null;
+      if (room) {
+        const ignored = Object.keys(room).filter((k) => !ROOM_LAYER_KEYS.includes(k));
+        if (ignored.length) onLog(`brain ${name} @ ${convPath}: ignored ${ignored.join(', ')} — a Room layer sets only ${ROOM_LAYER_KEYS.join('/')}`);
+        def = { ...(def ?? {}), ...Object.fromEntries(Object.entries(room).filter(([k]) => ROOM_LAYER_KEYS.includes(k))) };
+      }
       if (!def) return null;
-      if (baseDangerouslySkipPermissions) def.dangerously_skip_permissions = true; else delete def.dangerously_skip_permissions;
       return { name, ...def };
     },
   };
