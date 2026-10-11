@@ -5,6 +5,29 @@ Whatever is signed into one conversation's Chrome (Gmail, ClassDojo, …) is inv
 every other, because each has its own `--user-data-dir`. Ends "my Gmail is shared with all
 my conversations." A conversation launches its own Chrome, and that Chrome is tied to it.
 
+## Revision 2026-10-11 — NAMED BROWSER GROUPS (operator; supersedes decisions 2, 4 and 6's "brain stays on :9221")
+
+"Browser isolation is very important." A being drives ONLY its own group's Chrome.
+
+1. **The map lives in `~/.egpt/config/browsers.yaml`** — operator-only (no pool ACE on `.egpt\config`).
+   NOT the conversation's own config.yaml: that is in the being-writable Room, so a being could flip
+   its own `chrome.dedicated` (same class as the brains-layer hole closed in a06395a). `chrome.dedicated`
+   / `parseDedicatedFlag` is retired, not kept beside the new map.
+2. **Keyed by chat NAME** (same on both nodes; `admin_channel` already names by name). Slugs differ per node.
+3. **Groups:** the existing `brain` profile (Gmail/ClassDojo/AWS) is the group of `eGPT Admin` +
+   `eGPT Rodz Lulu An`. Every chat NOT listed uses the `shared` group — a NEW, empty profile
+   (`chrome/profiles/shared`). Group name = profile dir name. One Chrome per group, memory-admitted.
+4. **Pipe-only for EVERY group, `brain` included.** No Chrome listens on a port; beings reach their
+   group's Chrome only through the spine. Everything that uses `:9221` today is rerouted first.
+5. Login (`/login`, credential read) follows the chat's GROUP profile.
+
+```yaml
+# ~/.egpt/config/browsers.yaml
+groups:
+  brain: [ "eGPT Admin", "eGPT Rodz Lulu An" ]
+# any chat not listed → shared
+```
+
 ## Decisions (operator-approved 2026-10-09)
 
 1. **Profile permanent, process pooled.** `chrome/profiles/<conversation-slug>` persists on
