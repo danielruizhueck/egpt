@@ -170,6 +170,67 @@ describe('3 — pause on REPETITION: the same thing said again, however slowly',
   });
 });
 
+// LIVE, dolly 2026-10-11 ("SPOILER ALERT" super room, whatsapp:rkniPmoluCSQzNVsIaoP): kg's E posts its
+// placeholder through the Rodz account, later EDITED into the reply. Three ordinary E turns:
+//   15:04:56 / 15:06:21 / 15:08:01 incoming Rodz: "🐶 E: ⏳ Thinking… 🏰<kg/e>"
+//   15:08:02 guard: … auto-STOP — the same line 3× in 10 min: “⏳ Thinking… 🏰”
+describe('5 — eGPT\'s own STATUS placeholders are not a repeated LINE (dolly 2026-10-11)', () => {
+  const SIG_KG_E = encodeNodeSignature('kg', 'e');
+  const peer = (core) => `🐶 E: ${core} 🏰${SIG_KG_E}`;
+
+  it('REPRODUCE 15:04-15:08: three "⏳ Thinking… 🏰" placeholders in 10 min do not stop the channel', () => {
+    let t = 0;
+    const g = createStopGuard({ now: () => t });
+    const actions = [];
+    for (const dt of [0, 85_000, 100_000]) { t += dt; actions.push(g.noteBeing('A', null, { body: peer('⏳ Thinking…'), author: 'Rodz' })); }
+    expect(actions).not.toContain('stop');
+  });
+
+  it('Queued (N ahead) variants are exempt too, alone or alternating with Thinking', () => {
+    let t = 0;
+    const g = createStopGuard({ now: () => t });
+    const actions = [];
+    for (const core of ['⏳ Queued (1 ahead)…', '⏳ Queued (1 ahead)…', '⏳ Queued (1 ahead)…', '⏳ Thinking…', '⏳ Queued (2 ahead)…', '⏳ Thinking…', '⏳ Queued (2 ahead)…']) {
+      t += 3 * MIN;
+      actions.push(g.noteBeing('A', null, { body: peer(core), author: 'Rodz' }));
+    }
+    expect(actions).not.toContain('stop');
+  });
+
+  it('three identical REAL lines still stop it — including one that only starts like a placeholder', () => {
+    for (const core of ['Gracias, Caro 🥹 No me fui', '⏳ Thinking… sobre el almuerzo']) {
+      let t = 0;
+      const g = createStopGuard({ now: () => t });
+      let last;
+      for (let i = 0; i < 3; i++) { t += 3 * MIN; last = g.noteBeing('A', null, { body: peer(core), author: 'Rodz' }); }
+      expect(last).toBe('stop');
+      expect(g.reasonOf('A')).toContain(core.slice(0, 20));
+    }
+  });
+
+  it('a placeholder still consumes a RATE slot — it is the peer\'s turn, it just carries no line', () => {
+    let t = 0;
+    const g = createStopGuard({ now: () => t });
+    let last;
+    for (let i = 0; i < 6; i++) { t += 5_000; last = g.noteBeing('A', null, { body: peer('⏳ Thinking…'), author: 'Rodz' }); }
+    expect(last).toBe('stop');
+    expect(g.reasonOf('A')).toMatch(/6 non-human turns in 2 min/);
+  });
+
+  it('through the spine (real identity): the peer node\'s placeholders leave the channel running', async () => {
+    let t = 0;
+    const guard = createStopGuard({ now: () => t });
+    const { spine, said } = buildSpine({ guard });
+    const SIG_DO_E = encodeNodeSignature('do', 'e');
+    for (let i = 0; i < 3; i++) {
+      t += 2 * MIN;
+      await spine.handleInbound({ body: `🐶 E: ⏳ Thinking… 🌉${SIG_DO_E}`, from: rodz({ msgKey: `ph-${i}` }) });
+    }
+    expect(guard.blocked(CH)).toBe(false);
+    expect(said).toEqual([]);
+  });
+});
+
 describe('4 — a pause is ANNOUNCED in the channel, once, with the way out', () => {
   it('the stop posts one notice naming the trigger and `resume`; the warn posts nothing', async () => {
     let t = 0;

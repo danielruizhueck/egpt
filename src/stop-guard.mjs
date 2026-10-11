@@ -66,6 +66,7 @@ import { EGPT_HOME } from './egpt-home.mjs';
 // THE codec, imported — never a second copy of the frame regex here (src/node-signature.mjs
 // is the one definition the outbound wrap, the inbound envelope and this gate all share).
 import { hasNodeSignature, stripNodeSignature, stripRenderedNodeSignature } from './node-signature.mjs';
+import { THINKING, QUEUED } from './spine/sender.mjs';
 
 // THE KILL SWITCH, as a file. Profile ROOT — beside config/ and state/, deliberately
 // visible — so `ls ~/.egpt` shows a stopped node at a glance and `rm ~/.egpt/STOP` is the
@@ -220,14 +221,22 @@ const BEING_STAMP = /^\s*[^\p{L}\p{N}\s]{1,4}\s+[\p{L}\p{N}_-]{1,24}\s*[:：]\s*
  *   4. trim + collapse whitespace, so a re-wrapped repeat is still a repeat.
  * NOT stripped: the visible bridge_signature_* decoration, emoji, punctuation, case. Those are
  * constant per node anyway (so they never hide a repeat) and folding them could hide a
- * difference. '' for a message with no text — a silence is not a LINE (see noteBeing).
+ * difference. '' for a message with no text — a silence is not a LINE (see noteBeing) — and for
+ * eGPT's own STATUS placeholder (isStatusLine): a turn's ack, not something said.
  */
 export function normalizeLine(text) {
-  return stripRenderedNodeSignature(stripNodeSignature(String(text ?? '')))
+  const line = stripRenderedNodeSignature(stripNodeSignature(String(text ?? '')))
     .replace(BEING_STAMP, '')
     .trim()
     .replace(/\s+/g, ' ');
+  return isStatusLine(line) ? '' : line;
 }
+
+// sender.mjs's THINKING / QUEUED(n), alone or with only the visible signature decoration around
+// them (no letter, no digit). Live 2026-10-11: three ordinary E turns read as “⏳ Thinking… 🏰” 3×.
+const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const STATUS = new RegExp([THINKING, QUEUED('\0')].map(escRe).join('|').replace('\0', '\\d+'), 'u');
+const isStatusLine = (line) => STATUS.test(line) && !/[\p{L}\p{N}]/u.test(line.replace(STATUS, ''));
 
 // A line, clipped for a chat notice / a log line.
 const clip = (s, n = 80) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);

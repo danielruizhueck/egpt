@@ -64,7 +64,7 @@ const commandMark = (verbs = []) => `⚙️ processing ${verbs.length > 1 ? 'com
 // legible record of WHAT ran is the transcript stage-direction (dispatch-line.limbAction), written
 // regardless of verbose — so suppressing this chat line drops no record.
 const quietLimbMark = () => '✓';
-const THINKING = `${LIVE_FRAME_MARK} Thinking…`;   // NOT a lone emoji (renders oversized in some clients)
+export const THINKING = `${LIVE_FRAME_MARK} Thinking…`;   // NOT a lone emoji (renders oversized in some clients)
 // A mention that arrives while THIS conversation's train is still running gets its
 // OWN placeholder immediately (the operator's per-message ack), opened in the QUEUED
 // state — `ahead` = how many trains run before it. When its turn starts it flips to
@@ -73,7 +73,7 @@ const THINKING = `${LIVE_FRAME_MARK} Thinking…`;   // NOT a lone emoji (render
 // text, so two coexisting "⏳ Thinking…" placeholders would collapse onto one id (the
 // live "stuck placeholder" bug). A queued placeholder's text differs from THINKING
 // and — via `ahead` — from every other queued one, so each resolves to its own id.
-const QUEUED = (ahead) => `${LIVE_FRAME_MARK} Queued (${ahead} ahead)…`;
+export const QUEUED = (ahead) => `${LIVE_FRAME_MARK} Queued (${ahead} ahead)…`;
 
 // THE MESSAGE IS APPEND-ONLY (operator 2026-08-28: "the message is replaced for a 'final'
 // message, and the in-transit thinking is deleted … sometimes it is writing something and
