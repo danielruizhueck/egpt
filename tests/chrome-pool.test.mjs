@@ -5,6 +5,7 @@
 import { describe, it, expect } from 'vitest';
 import { join, basename } from 'node:path';
 import { estimateChromeBytes, admitLaunch, chromeConversationOf, MB } from '../src/spine/chrome-pool.mjs';
+import { parse } from '../src/conversations-state.mjs';
 
 describe('admitLaunch() — the pure memory-admission table', () => {
   // A fixed frame: a 500 MB estimate, a 1024 MB margin. available is what varies.
@@ -76,47 +77,101 @@ describe('estimateChromeBytes() — deterministic per-Chrome cost', () => {
 // config/browsers.yaml's `groups:` map, as rooms-file.readBrowserGroups returns it.
 const GROUPS = { brain: ['eGPT Admin', 'eGPT Rodz Lulu An'] };
 
+// A registry entry exactly as the live conversations.yaml stores it: conversation_path only. The chat
+// name lives in the slug (and, on some entries only, in the jid key's comment).
+const at = (slug) => ({ conversation_path: `.egpt/conversations/whatsapp/${slug}` });
+
 describe('chromeConversationOf() — entry + browsers.yaml groups → { key, name, group }', () => {
   it('a chat listed under brain → brain (both operator-named chats)', () => {
-    const admin = { conversation_path: '.egpt/conversations/whatsapp/eGPT Admin-2601010000', pushedName: 'eGPT Admin' };
-    expect(chromeConversationOf(admin, GROUPS)).toEqual({ key: 'eGPT Admin-2601010000', name: 'eGPT Admin', group: 'brain' });
-    expect(chromeConversationOf({ slug: 'rla-1', pushedName: 'eGPT Rodz Lulu An' }, GROUPS).group).toBe('brain');
+    expect(chromeConversationOf(at('eGPT Admin-2609121344'), GROUPS)).toEqual({ key: 'eGPT Admin-2609121344', name: 'eGPT Admin', group: 'brain' });
+    expect(chromeConversationOf(at('eGPT Rodz Lulu An-2609201419'), GROUPS).group).toBe('brain');
   });
 
   it('an unlisted chat → shared', () => {
-    const entry = { conversation_path: '.egpt/conversations/whatsapp/Reinie Alvino-2607150057', pushedName: 'Reinie Alvino', slug: 'reinie-x' };
-    expect(chromeConversationOf(entry, GROUPS)).toEqual({ key: 'Reinie Alvino-2607150057', name: 'Reinie Alvino', group: 'shared' });
+    expect(chromeConversationOf(at('Reinie Alvino-2607150057'), GROUPS)).toEqual({ key: 'Reinie Alvino-2607150057', name: 'Reinie Alvino', group: 'shared' });
   });
 
   it('no browsers.yaml (empty map) → every chat is shared, eGPT Admin included', () => {
-    expect(chromeConversationOf({ pushedName: 'eGPT Admin' }, {}).group).toBe('shared');
+    expect(chromeConversationOf(at('eGPT Admin-2609121344'), {}).group).toBe('shared');
   });
 
   it('a chat in TWO groups → no group (no browser), with the reason; never a silent pick', () => {
-    const d = chromeConversationOf({ pushedName: 'eGPT Admin' }, { brain: ['eGPT Admin'], work: ['eGPT Admin'] });
+    const d = chromeConversationOf(at('eGPT Admin-2609121344'), { brain: ['eGPT Admin'], work: ['eGPT Admin'] });
     expect(d.group).toBe(null);
     expect(d.why).toMatch(/brain, work/);
   });
 
   it('a group name that is not a safe single path segment → no group', () => {
     for (const bad of ['../brain', 'a/b', 'a\\b', '..', 'CON', ' brain', 'x:y']) {
-      const d = chromeConversationOf({ pushedName: 'Diego' }, { [bad]: ['Diego'] });
+      const d = chromeConversationOf(at('Diego-2605201243'), { [bad]: ['Diego'] });
       expect(d.group, bad).toBe(null);
       expect(d.why, bad).toMatch(/not a safe/);
     }
   });
 
   it('a nameless chat matches no listed member (an empty "" entry included) → shared', () => {
-    expect(chromeConversationOf({ slug: 'x-1' }, { brain: [''] }).group).toBe('shared');
+    expect(chromeConversationOf({}, { brain: [''] }).group).toBe('shared');
   });
 
   it('key falls back to entry.slug; a backslash conversation_path still yields the dir name', () => {
-    expect(chromeConversationOf({ slug: 'diego-2605201243', pushedName: 'Diego' }, {}).key).toBe('diego-2605201243');
-    const entry = { conversation_path: 'C:\\Users\\an\\.egpt\\conversations\\whatsapp\\Grp-2601010000', pushedName: 'Grp' };
+    expect(chromeConversationOf({ slug: 'diego-2605201243' }, {}).key).toBe('diego-2605201243');
+    const entry = { conversation_path: 'C:\\Users\\an\\.egpt\\conversations\\whatsapp\\Grp-2601010000' };
     expect(chromeConversationOf(entry, {}).key).toBe('Grp-2601010000');
   });
 
   it('empty entry → shared (no throw)', () => {
     expect(chromeConversationOf()).toEqual({ key: '', name: '', group: 'shared' });
+  });
+});
+
+// The LIVE registry: reve's conversations.yaml carries no pushedName key. parse() re-hydrates one
+// from the jid key's `# <name>` comment, but 224 of 318 live whatsapp entries have no comment — the
+// slug (`<sanitizeSlug(name)>-<yymmddhhmm>`, conversations-state ensureContact) is the one carrier
+// every entry has.
+describe('chromeConversationOf() — the live registry shape', () => {
+  const LIVE = [
+    'contacts:',
+    '  whatsapp:',
+    '    89xiqJ8w1iDuKtD4a5BY: # eGPT Rodz Lulu An',
+    '      conversation_path: .egpt/conversations/whatsapp/eGPT Rodz Lulu An-2609201419',
+    '    trYqoMoH7jETBozvcOQh: # eGPT Admin',
+    '      conversation_path: .egpt/conversations/whatsapp/eGPT Admin-2609121344',
+    '    YKI87ChI5P2N437k7VBc: # eGPT Rodz Lulu An-egpt split',
+    '      conversation_path: .egpt/conversations/whatsapp/eGPT Rodz Lulu An-egpt split-2610050252',
+    '    noCommentAdminJid000:',
+    '      conversation_path: .egpt/conversations/whatsapp/eGPT Admin-2609121345',
+    '',
+  ].join('\n');
+  const wa = parse(LIVE).contacts.whatsapp;
+  const groupOf = (jid) => chromeConversationOf(wa[jid], GROUPS).group;
+
+  it('the commented live entries resolve to brain through the real registry reader', () => {
+    expect(groupOf('89xiqJ8w1iDuKtD4a5BY')).toBe('brain');
+    expect(groupOf('trYqoMoH7jETBozvcOQh')).toBe('brain');
+  });
+
+  it('a live entry with NO name comment still resolves by its slug', () => {
+    expect(wa.noCommentAdminJid000.pushedName).toBe('');
+    expect(groupOf('noCommentAdminJid000')).toBe('brain');
+  });
+
+  it('a raw entry with no pushedName field (conversation_path only) resolves by its slug', () => {
+    expect(chromeConversationOf(at('eGPT Rodz Lulu An-2609201419'), GROUPS).group).toBe('brain');
+  });
+
+  it('the split chat does NOT match "eGPT Rodz Lulu An"', () => {
+    expect(groupOf('YKI87ChI5P2N437k7VBc')).toBe('shared');
+  });
+
+  it("dolly's slug for the same chat (another creation stamp) → the same group", () => {
+    expect(chromeConversationOf(at('eGPT Rodz Lulu An-2609201420'), GROUPS).group).toBe('brain');
+  });
+
+  it('a listed name with characters sanitizeSlug changes still matches its slug', () => {
+    expect(chromeConversationOf(at('Mamá Papá chat-2601010000'), { family: ['Mamá/Papá: chat'] }).group).toBe('family');
+  });
+
+  it('the slug is the one carrier: a pushedName that disagrees with it is not consulted', () => {
+    expect(chromeConversationOf({ ...at('Reinie Alvino-2607150057'), pushedName: 'eGPT Admin' }, GROUPS).group).toBe('shared');
   });
 });

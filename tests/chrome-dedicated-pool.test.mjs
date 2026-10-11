@@ -156,7 +156,7 @@ describe('a non-brain GROUP → its group pipe Chrome + a pipe cdpClient', () =>
 describe('FAIL CLOSED: a chat the lookup refused gets NO browser and one log line', () => {
   it('a chat listed in two groups → no client, nothing spawned, never the brain port client', async () => {
     const { cmds, calls, logs } = build({ mem: { free: 8192 * MB } });
-    const conv = chromeConversationOf({ slug: 'x-1', pushedName: 'eGPT Admin' }, { brain: ['eGPT Admin'], work: ['eGPT Admin'] });
+    const conv = chromeConversationOf({ conversation_path: 'x/eGPT Admin-2609121344' }, { brain: ['eGPT Admin'], work: ['eGPT Admin'] });
     const r = await cmds.chromeClientFor(conv);
     expect(r.client).toBe(null);
     expect(r.host).toBeUndefined();
@@ -192,7 +192,7 @@ describe('browsers.yaml end to end — an operator edit moves a chat without a r
       const file = join(home, 'config', 'browsers.yaml');
       writeFileSync(file, 'groups:\n  brain: [ "eGPT Admin", "eGPT Rodz Lulu An" ]\n');
       const { cmds, calls } = build({ mem: { free: 8192 * MB } });
-      const entry = { conversation_path: 'x/eGPT Rodz Lulu An-2601010000', pushedName: 'eGPT Rodz Lulu An' };
+      const entry = { conversation_path: '.egpt/conversations/whatsapp/eGPT Rodz Lulu An-2609201419' };   // live shape: no pushedName
 
       const before = await cmds.chromeClientFor(chromeConversationOf(entry, await readBrowserGroups()));
       expect(before.dedicated).toBe(false);

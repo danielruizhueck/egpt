@@ -61,15 +61,18 @@ export const isSafeGroupName = (g) => typeof g === 'string' && g !== '' && sanit
 // THE GROUP LOOKUP: a conversation's registry ENTRY + config/browsers.yaml's `groups:` map
 // (rooms-file.readBrowserGroups) → the descriptor ensureChrome takes, `{ key, name, group }`.
 //   • key   — basename of `conversation_path`, else `entry.slug`.
-//   • name  — `pushedName`, matched against the group lists by exact chat name.
-//   • group — the one group listing the name; unlisted → `shared`. Listed in two groups, or in a
-//     group whose name is not a safe path segment → null (no browser) plus `why`. Never a silent pick.
+//   • name  — the key minus its `-yymmddhhmm` creation stamp: the chat name as the slug carries it,
+//     sanitized (conversations-state ensureContact mints and renames slugs by this rule). Every entry
+//     has it; pushedName is only a key comment in the live file and absent on most entries.
+//   • group — the one group listing the name (compared as sanitizeSlug(listed)); unlisted → `shared`.
+//     Listed in two groups, or in a group whose name is not a safe path segment → null (no browser)
+//     plus `why`. Never a silent pick.
 export function chromeConversationOf(entry = {}, groups = {}) {
   const path = String(entry?.conversation_path ?? '').replace(/\\/g, '/');
   const key = (path ? basename(path) : '') || entry?.slug || '';
-  const name = String(entry?.pushedName ?? '').trim();
+  const name = key.replace(/-\d{10}$/, '');
   const hits = Object.entries(groups ?? {})
-    .filter(([, members]) => name && [].concat(members ?? []).some((m) => String(m).trim() === name))
+    .filter(([, members]) => name && [].concat(members ?? []).some((m) => sanitizeSlug(m) === name))
     .map(([g]) => g);
   if (hits.length > 1) return { key, name, group: null, why: `"${name}" is listed in browser groups ${hits.join(', ')}` };
   const group = hits[0] ?? SHARED_GROUP;
