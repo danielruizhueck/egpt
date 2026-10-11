@@ -9,10 +9,10 @@ my conversations." A conversation launches its own Chrome, and that Chrome is ti
 
 "Browser isolation is very important." A being drives ONLY its own group's Chrome.
 
-1. **The map lives in `~/.egpt/config/browsers.yaml`** — operator-only (no pool ACE on `.egpt\config`).
-   NOT the conversation's own config.yaml: that is in the being-writable Room, so a being could flip
-   its own `chrome.dedicated` (same class as the brains-layer hole closed in a06395a). `chrome.dedicated`
-   / `parseDedicatedFlag` is retired, not kept beside the new map.
+1. **The map lives in `~/.egpt/config/browsers.yaml`** — operator-only (no pool ACE on `.egpt\config`),
+   one place listing every group. It REPLACES `chrome.dedicated` (read today from the operator-only
+   `config/rooms.yaml` rung, boot.mjs ~1313; the chrome-pool.mjs ~53 comment saying "the conversation's
+   own config.yaml" is stale) — `parseDedicatedFlag` is retired, not kept beside the new map.
 2. **Keyed by chat NAME** (same on both nodes; `admin_channel` already names by name). Slugs differ per node.
 3. **Groups:** the existing `brain` profile (Gmail/ClassDojo/AWS) is the group of `eGPT Admin` +
    `eGPT Rodz Lulu An`. Every chat NOT listed uses the `shared` group — a NEW, empty profile
