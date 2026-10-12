@@ -1,10 +1,13 @@
 // src/tools/ask-spine.mjs — what a BOXED BEING runs to ask its spine for the browser:
 //
 //     node "$EGPT_ASK_SPINE" browser start
+//     node "$EGPT_ASK_SPINE" browser login [site]
 //
-// The whole vocabulary today is that one request (operator 2026-09-26: "for now only the
-// browser"), and the being passes NOTHING with it: the spine decides what is launched, on which
-// port, with which profile (src/shell/being.mjs header). This script only carries the request:
+// The vocabulary is `browser start` (carries NOTHING: the spine decides what is launched, on which
+// port, with which profile) and `browser login` (operator 2026-10-12: a being triggers the SAME
+// auto-login /login runs, for its OWN group — it may name only the `site` it is stuck on, and the
+// spine reads and types the credential, never the being; src/shell/being.mjs header). This script
+// only carries the request:
 // it reads the port and its own session secret from the environment the spine handed the boxed
 // session (src/spine/being-link.mjs mints both), dials /being on 127.0.0.1, answers the challenge
 // with that secret — which never leaves this process (src/shell/auth.mjs) — sends the request,
@@ -20,7 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { parseAuthFrame, responseFrame } from '../shell/auth.mjs';
 import { BEING_PATH, SPINE_PORT_ENV, BEING_TOKEN_ENV, askFrame, parseAskFrame } from '../shell/being.mjs';
 
-const USAGE = 'usage: node "$EGPT_ASK_SPINE" browser start';
+const USAGE = 'usage: node "$EGPT_ASK_SPINE" browser start | node "$EGPT_ASK_SPINE" browser login [site]';
 // The spine waits up to 20 s for a cold Chrome to bind its CDP port (commands.mjs), so the client
 // waits a good deal longer than that before it calls the spine silent.
 const ANSWER_TIMEOUT_MS = 60_000;
@@ -36,12 +39,24 @@ const ANSWER_TIMEOUT_MS = 60_000;
 export function askSpine({ argv = [], env = {}, WebSocket = WS, timeoutMs = ANSWER_TIMEOUT_MS } = {}) {
   const fail = (line) => Promise.resolve({ code: 1, line: `ask-spine: ${line}` });
   const [ask = '', action = '', ...rest] = argv;
-  // The one request, spelled exactly. Anything else is refused HERE rather than sent: the spine
-  // would refuse it too, and a being should learn the vocabulary without a round trip.
-  if (ask !== 'browser' || action !== 'start' || rest.length) return fail(`the spine serves exactly one request — ${USAGE}`);
-  return dialSpine({ env, ask, action, WebSocket, timeoutMs }).then(({ ws, result: r, line }) => {
+  // The requests, spelled exactly. Anything else is refused HERE rather than sent: the spine would
+  // refuse it too, and a being should learn the vocabulary without a round trip. `browser login`
+  // may carry the one site the being is stuck on (the same parameter /login takes); start carries
+  // nothing.
+  if (ask !== 'browser') return fail(`the spine serves browser requests — ${USAGE}`);
+  let site = '';
+  if (action === 'start') { if (rest.length) return fail(`browser start takes no arguments — ${USAGE}`); }
+  else if (action === 'login') { if (rest.length > 1) return fail(`browser login takes at most a site — ${USAGE}`); site = rest[0] || ''; }
+  else return fail(`the spine serves browser start and browser login — ${USAGE}`);
+  return dialSpine({ env, ask, action, site, WebSocket, timeoutMs }).then(({ ws, result: r, line }) => {
     ws?.close();
     if (!r) return { code: 1, line: `ask-spine: ${line}` };
+    if (action === 'login') {
+      // r.detail is the limb's OUTCOME TOKEN (logged-in | needs-2fa | captcha-posted | no-credential
+      // | failed), or the link's own detail on a refusal — never the credential (src/spine/login.mjs).
+      if (r.ok) return { code: 0, line: `ask-spine: browser login — ${r.detail}` };
+      return { code: 1, line: `ask-spine: browser login — ${r.reason && r.reason !== r.detail ? `${r.reason}: ` : ''}${r.detail || 'failed'}` };
+    }
     if (r.ok) return { code: 0, line: `ask-spine: browser start — ${r.launched ? 'started' : 'already running'}: ${r.detail}` };
     if (r.reason === 'launch-failed') return { code: 1, line: `ask-spine: browser start FAILED — ${r.detail}` };
     return { code: 1, line: `ask-spine: browser start REFUSED (${r.reason || 'no reason given'}) — ${r.detail}` };
@@ -51,7 +66,7 @@ export function askSpine({ argv = [], env = {}, WebSocket = WS, timeoutMs = ANSW
 // THE DIAL, shared with cdp.mjs's createLinkTransport: one request, resolved { ws, result } at an ok
 // answer — the socket left open, so a `browser cdp` answer is a tunnel from then on — else
 // { line, result? }. Never throws.
-export function dialSpine({ env, ask, action, WebSocket = WS, timeoutMs = ANSWER_TIMEOUT_MS }) {
+export function dialSpine({ env, ask, action, site = '', WebSocket = WS, timeoutMs = ANSWER_TIMEOUT_MS }) {
   const fail = (line) => Promise.resolve({ line });
   const secret = String(env[BEING_TOKEN_ENV] ?? '').trim();
   const port = Number(env[SPINE_PORT_ENV]);
@@ -83,7 +98,7 @@ export function dialSpine({ env, ask, action, WebSocket = WS, timeoutMs = ANSWER
         // The answer and the request go out together: the limb reads them in order, and a request
         // it receives before trusting this connection is dropped, never replayed.
         ws.send(responseFrame(secret, auth.nonce));
-        ws.send(askFrame({ ask, action }));
+        ws.send(askFrame({ ask, action, site }));
         return;
       }
       const r = parseAskFrame(buf);

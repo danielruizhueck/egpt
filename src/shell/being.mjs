@@ -14,9 +14,11 @@
 //
 // SO THE VOCABULARY IS CLOSED AND THE REQUEST CARRIES NOTHING. A being names a thing (`ask`) and
 // what to do to it (`action`), and that is the whole frame. There is no executable, no flag, no
-// port, no profile and no URL anywhere in it — the spine alone decides what is launched, from its
-// own config — and a frame that carries ANY other field is refused, never ignored, so a being that
-// tries to hand one over learns on the spot that it cannot (src/spine/being-link.mjs).
+// port and no profile anywhere in it — the spine alone decides what is launched, from its own
+// config — and a frame that carries ANY other field is refused, never ignored, so a being that
+// tries to hand one over learns on the spot that it cannot (src/spine/being-link.mjs). The ONE
+// exception is `browser login`, which may carry the `site` it is stuck on — the same parameter the
+// operator's /login takes; every other request still refuses a site (src/spine/being-link.mjs).
 //
 // `browser` + `start` is step 1 of the operator's 2026-09-22 browser design (a Chrome per
 // conversation-group profile, launched by the spine as `an`, reached by beings only THROUGH the
@@ -48,9 +50,11 @@ export const BEING_TOKEN_ENV = 'EGPT_BEING_TOKEN';
 export const ASK_SPINE_ENV = 'EGPT_ASK_SPINE';
 export const CDP_MODULE_ENV = 'EGPT_CDP';
 
-/** THE REQUEST. Two fields, and a frame with any third is refused (module header). */
-export function askFrame({ ask, action }) {
-  return JSON.stringify({ ask: String(ask ?? ''), action: String(action ?? '') });
+/** THE REQUEST. `ask` + `action`, plus the one optional `site` (browser login only, module
+ * header); omitted when empty, so every other request is byte-identical to before. */
+export function askFrame({ ask, action, site } = {}) {
+  const s = String(site ?? '');
+  return JSON.stringify({ ask: String(ask ?? ''), action: String(action ?? ''), ...(s ? { site: s } : {}) });
 }
 
 /**
@@ -90,10 +94,13 @@ export function parseAskFrame(raw) {
         detail: j.detail ? String(j.detail) : '',
       };
     }
+    // `site` is a recognized field (browser login's target), so it is NOT reported as `extra`; the
+    // link honors it only for login and refuses it on every other request (src/spine/being-link.mjs).
     return {
       ask: j.ask,
       action: typeof j.action === 'string' ? j.action : '',
-      extra: Object.keys(j).filter((k) => k !== 'ask' && k !== 'action'),
+      ...(typeof j.site === 'string' && j.site ? { site: j.site } : {}),
+      extra: Object.keys(j).filter((k) => k !== 'ask' && k !== 'action' && k !== 'site'),
     };
   } catch { /* not JSON → not a being frame */ }
   return null;

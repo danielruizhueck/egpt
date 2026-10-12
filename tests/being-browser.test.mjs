@@ -30,6 +30,7 @@ import { responseFrame, authMac, macMatches } from '../src/shell/auth.mjs';
 import { MOUTH_PATH } from '../src/shell/mouth.mjs';
 import { BEING_PATH, isBeingDial, askFrame, askResultFrame, parseAskFrame, SPINE_PORT_ENV, BEING_TOKEN_ENV, ASK_SPINE_ENV, CDP_MODULE_ENV } from '../src/shell/being.mjs';
 import { createBeingLink, askSpineClientPath } from '../src/spine/being-link.mjs';
+import { createLoginLimb } from '../src/spine/login.mjs';
 import { createSandboxCliSession } from '../src/sandbox-cli-session.mjs';
 import { createCommands } from '../src/spine/commands.mjs';
 import { fakePipeChrome } from './fake-pipe-chrome.mjs';
@@ -564,5 +565,158 @@ describe('boot wires ONE being link into the brain and the console limb', () => 
     expect(BOOT_SRC).toMatch(/createBrainPool\(\{[^\n]*\bbeingLink\b/);
     expect(BOOT_SRC).toMatch(/port: shellPortFrom\(cfg\),\s*startBrowser: \(conversation\) => commands\.startBrowser\(conversation\),\s*chromeClientFor: \(conversation\) => commands\.chromeClientFor\(conversation\),/);
     expect(BOOT_SRC).toMatch(/createHeartbeatBoxRunner\(\{[^}]*\bbeingLink,/);
+  });
+  // browser login reuses the SAME requestLogin /login calls — one limb, wired into the being link.
+  it('the auto-login limb /login uses is handed to the being link as requestLogin', () => {
+    expect(BOOT_SRC).toMatch(/requestLogin: \(site, o\) => requestLogin\(site, o\),/);
+  });
+});
+
+// ── 7. BROWSER LOGIN: A BEING TRIGGERS THE SAME AUTO-LOGIN /login RUNS, FOR ITS OWN GROUP ───────
+// (operator 2026-10-12). A being hit a login wall in its group Chrome and had to ask the operator
+// to type /login. Now it asks the spine directly — the SAME requestLogin limb, the SAME group the
+// chat resolves to. It may name only the `site`; it cannot point login at another chat/group, and
+// the credential never crosses back — only the limb's outcome token.
+describe('the wire carries the one login site, and nothing else changes', () => {
+  it('browser login round-trips its site; a no-site frame is byte-identical to before', () => {
+    expect(parseAskFrame(askFrame({ ask: 'browser', action: 'login', site: 'chatgpt.com' }))).toEqual({ ask: 'browser', action: 'login', site: 'chatgpt.com', extra: [] });
+    expect(parseAskFrame(askFrame({ ask: 'browser', action: 'start' }))).toEqual({ ask: 'browser', action: 'start', extra: [] });
+    expect(parseAskFrame(askFrame({ ask: 'browser', action: 'login' }))).toEqual({ ask: 'browser', action: 'login', extra: [] });
+    // a field that is NOT the login site is still reported by name, never by value
+    const smuggled = parseAskFrame(JSON.stringify({ ask: 'browser', action: 'login', site: 'x', executable: 'C:/evil.exe' }));
+    expect(smuggled).toMatchObject({ site: 'x', extra: ['executable'] });
+    expect(JSON.stringify(smuggled)).not.toContain('evil');
+  });
+});
+
+describe('the link: browser login runs /login\'s own limb for the being\'s group', () => {
+  // The real auto-login limb (src/spine/login.mjs) with fake CDP + credential seams, so the whole
+  // chain being-link → requestLogin → readCredential runs without a browser. The password is a
+  // SENTINEL we then prove never leaves the limb.
+  const SENTINEL = 'p@ssw0rd-SENTINEL-MUST-NOT-LEAK';
+  const fakeCdp = {
+    openOrFocus: async () => ({ targetId: 'T1' }),
+    evaluate: async (_id, expr) => {
+      if (expr.includes('no-password-input')) return { ok: true, username: { selector: '#u' }, password: { selector: '#p' }, form: null, submit: { selector: '#s', box: { x: 1, y: 1, width: 2, height: 2 } } };
+      if (expr.includes('hasPw')) return 'logged-in';
+      return null;
+    },
+    click: async () => true,
+    fill: async () => true,
+    screenshot: async () => '',
+  };
+  const realLogin = (cred) => (site, { conversation, client }) => {
+    realLogin.calls.push({ site, conversation, client });
+    return createLoginLimb({ cdp: fakeCdp, bridge: { noticeToChannel: async () => {} }, readCredential: async () => cred }).requestLogin(site);
+  };
+  realLogin.calls = [];
+
+  function loginLink({ requestLogin, readGroups = async () => ({ acim: ['acim'] }), client = { channel: () => ({}) } } = {}) {
+    const logs = [];
+    const link = createBeingLink({
+      port: 1,
+      startBrowser: async () => ({ ok: true }),
+      chromeClientFor: async () => ({ client }),
+      requestLogin,
+      readGroups,
+      onLog: (m) => logs.push(m),
+    });
+    link.forBeing(E_IN_ACIM).mint();
+    return { link, logs };
+  }
+  const login = (link, frame) => link.ask(E_IN_ACIM, parseAskFrame(JSON.stringify({ ask: 'browser', action: 'login', ...frame })));
+
+  it('a being\'s browser login runs the limb against ITS group\'s client and returns ok — credential never crosses or is logged', async () => {
+    realLogin.calls = [];
+    const { link, logs } = loginLink({ requestLogin: realLogin({ username: 'u', password: SENTINEL }) });
+    const r = await login(link, { site: 'chatgpt.com' });
+    expect(r.ok).toBe(true);
+    expect(r.detail).toBe('logged-in');          // the outcome token, nothing more
+    expect(realLogin.calls[0].site).toBe('chatgpt.com');
+    expect(realLogin.calls[0].conversation.group).toBe('acim');   // its OWN group, from who.slug
+    // the credential is nowhere the being or the log can see it
+    expect(JSON.stringify(r)).not.toContain(SENTINEL);
+    expect(logs.join('\n')).not.toContain(SENTINEL);
+    expect(logs.join('\n')).toMatch(/^e \(room\/acim\) asked browser login → logged-in$/);
+    // and nothing but ok + token survives onto the wire (what the being's client actually reads)
+    expect(parseAskFrame(askResultFrame(r))).toMatchObject({ ask: 'result', ok: true, detail: 'logged-in' });
+    expect(askResultFrame(r)).not.toContain(SENTINEL);
+  });
+
+  it('no saved credential → the token no-credential, exit path ok:false, still no leak', async () => {
+    const { link } = loginLink({ requestLogin: realLogin(null) });
+    const r = await login(link, { site: 'chatgpt.com' });
+    expect(r).toMatchObject({ ok: false, login: 'no-credential', detail: 'no-credential' });
+  });
+
+  it('a being CANNOT name another chat/group/profile — a group field is refused as an argument, login never runs', async () => {
+    let ran = 0;
+    const { link } = loginLink({ requestLogin: () => { ran++; return 'logged-in'; } });
+    for (const extra of [{ site: 'x', group: 'other' }, { site: 'x', chatId: '!other' }, { site: 'x', profile: 'C:/Users/an' }]) {
+      const r = await login(link, extra);
+      expect(r).toMatchObject({ ok: false, reason: 'bad-request' });
+    }
+    expect(ran).toBe(0);
+  });
+
+  it('the login site is refused on browser start / browser cdp — those stay argument-free', async () => {
+    let ran = 0;
+    const link = createBeingLink({ port: 1, startBrowser: async () => { ran++; return { ok: true }; }, chromeClientFor: async () => ({ client: { channel: () => ({}) } }), requestLogin: () => { ran++; return 'logged-in'; }, readGroups: async () => ({ acim: ['acim'] }) });
+    link.forBeing(E_IN_ACIM).mint();
+    for (const action of ['start', 'cdp']) {
+      const r = await link.ask(E_IN_ACIM, parseAskFrame(JSON.stringify({ ask: 'browser', action, site: 'x' })));
+      expect(r, action).toMatchObject({ ok: false, reason: 'bad-request' });
+    }
+    expect(ran).toBe(0);
+  });
+
+  it('a node with no login limb wired refuses browser login as unknown — never a half-answer', async () => {
+    const { link } = loginLink({ requestLogin: null });
+    expect(await login(link, { site: 'x' })).toMatchObject({ ok: false, reason: 'unknown' });
+  });
+
+  it('no browser group for the chat → no-browser, the limb never runs', async () => {
+    let ran = 0;
+    const { link } = loginLink({ requestLogin: () => { ran++; return 'logged-in'; }, readGroups: async () => ({ acim: ['acim'], beta: ['acim'] }) });   // listed in two groups → null, no browser
+    expect(await login(link, { site: 'x' })).toMatchObject({ ok: false, reason: 'no-browser' });
+    expect(ran).toBe(0);
+  });
+});
+
+describe('ask-spine: browser login over a real in-process spine', () => {
+  async function spine(requestLogin) {
+    const link = createBeingLink({ port: 0, startBrowser: async () => ({ ok: true }), chromeClientFor: async () => ({ client: { channel: () => ({}) } }), requestLogin, readGroups: async () => ({ acim: ['acim'] }) });
+    const port = createShellPort({ port: 0, token: SHELL_TOKEN, reapPort: () => 0, onBeing: link, onLog: () => {} });
+    const wss = port.start();
+    await new Promise((r) => wss.once('listening', r));
+    const live = wss.address().port;
+    const m = link.forBeing(E_IN_ACIM).mint();
+    const env = Object.fromEntries(m.env.map((e) => [e.slice(0, e.indexOf('=')), e.slice(e.indexOf('=') + 1)]));
+    env[SPINE_PORT_ENV] = String(live);
+    return { port, env };
+  }
+
+  it('logged-in: exit 0, the token is the line; the site reaches the limb', async () => {
+    let seen = null;
+    const { port, env } = await spine((site) => { seen = site; return 'logged-in'; });
+    const r = await askSpine({ argv: ['browser', 'login', 'chatgpt.com'], env });
+    expect(r).toEqual({ code: 0, line: 'ask-spine: browser login — logged-in' });
+    expect(seen).toBe('chatgpt.com');
+    port.stop();
+  });
+
+  it('no-credential: exit 1, the token is the line', async () => {
+    const { port, env } = await spine(() => 'no-credential');
+    expect(await askSpine({ argv: ['browser', 'login', 'chatgpt.com'], env })).toEqual({ code: 1, line: 'ask-spine: browser login — no-credential' });
+    port.stop();
+  });
+
+  it('more than one site is refused before a dial — the limb takes a single site', async () => {
+    let dialled = 0;
+    class NeverDial { constructor() { dialled++; } }
+    const r = await askSpine({ argv: ['browser', 'login', 'a', 'b'], env: { [BEING_TOKEN_ENV]: 'x', [SPINE_PORT_ENV]: '1' }, WebSocket: NeverDial });
+    expect(r.code).toBe(1);
+    expect(r.line).toMatch(/browser login takes at most a site/);
+    expect(dialled).toBe(0);
   });
 });

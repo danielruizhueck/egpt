@@ -88,12 +88,13 @@ const quoted = (v) => JSON.stringify(String(v ?? '').slice(0, 40));
  * @param {number} opts.port                       the console port the being dials (boot's shellPortFrom(cfg))
  * @param {(c: object) => Promise<object>} opts.startBrowser the /chrome launch path, shared (commands.startBrowser), given the being's conversation — resolves { ok, launched|alreadyRunning, reason?, detail }
  * @param {(c: object) => Promise<object>} [opts.chromeClientFor] commands.chromeClientFor — the conversation's group CDP client ({ client: { channel() } })
+ * @param {(site: string, o: { conversation: object, client: object }) => Promise<string>} [opts.requestLogin] boot's EXISTING auto-login limb, the SAME one /login calls (boot.requestLogin → src/spine/login.mjs). Reads Chrome's own saved credential for the group's profile, types it, returns an OUTCOME TOKEN only — never the credential.
  * @param {() => Promise<object>} [opts.readGroups] config/browsers.yaml's groups (default rooms-file.readBrowserGroups, read fresh per ask)
  * @param {string} [opts.clientPath]               the client script handed in ASK_SPINE_ENV (default askSpineClientPath()); being-cdp.mjs sits beside it
  * @param {(m: string) => void} [opts.onLog]       the AUDIT line, one per request
  * @param {typeof nodeRandomBytes} [opts.randomBytes]
  */
-export function createBeingLink({ port, startBrowser, chromeClientFor = null, readGroups = readBrowserGroups, clientPath = askSpineClientPath(), onLog = () => {}, randomBytes = nodeRandomBytes } = {}) {
+export function createBeingLink({ port, startBrowser, chromeClientFor = null, requestLogin = null, readGroups = readBrowserGroups, clientPath = askSpineClientPath(), onLog = () => {}, randomBytes = nodeRandomBytes } = {}) {
   const live = new Map();       // secret -> { being, surface, slug, boxed }
   const tunnels = new Map();    // who -> its open CDP tunnels, closed when its secret is revoked
   const muxes = new WeakMap();  // a group's CDP channel -> its mux
@@ -134,6 +135,20 @@ export function createBeingLink({ port, startBrowser, chromeClientFor = null, re
       // A TUNNEL: answered once, then every frame on the connection is one raw CDP message to the
       // chat's group Chrome (shell-port handleBeing).
       cdp: openCdp,
+      // THE AUTO-LOGIN LIMB for the being's OWN group — the same requestLogin /login calls, over the
+      // same group client openCdp uses (conversationOf + chromeClientFor). The being names only the
+      // `site` it is stuck on; the group is conversationOf(who), so nothing it sends can point login
+      // at another chat/group/profile. The spine reads and types the credential; only the OUTCOME
+      // TOKEN crosses back (never the credential).
+      login: async (who, _sink, _tag, frame) => {
+        if (typeof requestLogin !== 'function') return { ok: false, reason: 'unknown', detail: 'the auto-login limb is not wired on this node' };
+        const c = await conversationOf(who);
+        if (!c.group) return noBrowser(c);
+        const r = await chromeClientFor(c);
+        if (typeof r?.client?.channel !== 'function') return { ok: false, reason: 'launch-failed', detail: r?.why || `group ${c.group} has no browser` };
+        const token = await requestLogin(frame?.site || '', { conversation: c, client: r.client });
+        return { ok: token === 'logged-in', login: String(token), detail: String(token) };
+      },
     },
   };
 
@@ -156,6 +171,7 @@ export function createBeingLink({ port, startBrowser, chromeClientFor = null, re
   // What one request did, as the audit line says it and the being's client prints it.
   function outcomeOf(r) {
     if (r?.tunnel) return `tunnel — ${r.detail}`;
+    if (typeof r?.login === 'string') return r.login;   // the limb's outcome token (logged-in | needs-2fa | …)
     if (r?.ok) return r.launched ? `launched — ${r.detail ?? ''}` : `already running — ${r.detail ?? ''}`;
     return `${r?.reason ?? 'failed'} — ${r?.detail ?? ''}`;
   }
@@ -189,9 +205,14 @@ export function createBeingLink({ port, startBrowser, chromeClientFor = null, re
         return refuse('bad-request', `the spine takes no arguments — it alone decides what runs; this request also carried: ${frame.extra.map((k) => quoted(k)).join(', ')}`, what);
       }
       const run = Object.hasOwn(ASKS, frame.ask) && Object.hasOwn(ASKS[frame.ask], frame.action) ? ASKS[frame.ask][frame.action] : null;
-      if (!run) return refuse('unknown', 'the spine serves browser start and browser cdp, nothing else', what);
+      if (!run) return refuse('unknown', 'the spine serves browser start, browser cdp and browser login, nothing else', what);
+      // `site` is browser login's alone; carried on any other request it is an argument like any
+      // other, and the spine decides what runs — so it is refused, never silently dropped.
+      if (frame.site && !(frame.ask === 'browser' && frame.action === 'login')) {
+        return refuse('bad-request', 'the spine takes no arguments for this request; it also carried: "site"', what);
+      }
       let r;
-      try { r = await run(who, sink, tag); }
+      try { r = await run(who, sink, tag, frame); }
       catch (e) { r = { ok: false, reason: 'launch-failed', detail: String(e?.message ?? e) }; }
       onLog(`${tag} asked ${frame.ask} ${frame.action} → ${outcomeOf(r)}`);
       return r;

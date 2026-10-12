@@ -2570,6 +2570,9 @@ export async function boot({
     port: shellPortFrom(cfg),
     startBrowser: (conversation) => commands.startBrowser(conversation),
     chromeClientFor: (conversation) => commands.chromeClientFor(conversation),
+    // browser login → the SAME auto-login limb /login calls (requestLogin, defined below); read at
+    // call time, like startBrowser above, since no being can dial before boot finishes.
+    requestLogin: (site, o) => requestLogin(site, o),
     onLog: (m) => log.line?.(`[being] ${m}`),
   });
 
