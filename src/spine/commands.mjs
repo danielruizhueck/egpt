@@ -546,6 +546,7 @@ export function resolveSecondaryParticipantId(config, selfIds = []) {
 
 export function createCommands({
   getConfig = () => ({}),
+  floodBan = null,                       // the media-flood auto-ban (src/flood-ban.mjs) — /unban clears, /bans lists; the SAME instance the bridges observe into. Null (standalone) → both commands say it isn't wired.
   send: rawSend,                         // (chatId, text) -> deliver a plain system reply
   exit = (code) => process.exit(code),
   writeRewindTarget,
@@ -1191,6 +1192,15 @@ export function createCommands({
     // targetId is no longer live), refreshing its targetId. A no-op when already live.
     const activateMatch = /^\/activate\s+(\S+)\s*$/i.exec(line);
     if (activateMatch) { await activate(ev, activateMatch[1]); return; }
+
+    // /bans — list the media-flood auto-bans currently active (src/flood-ban.mjs). /unban [name]
+    // — clear the active ban(s) in THIS chat (optional name = a banned sender's display name or
+    // id); the bans are in-memory, so this is a live clear, not a config write. Pre-catch-all,
+    // the same slot as /recap/activate; written as `<name>Match = /^\/word` for the help drift guard.
+    const bansMatch = /^\/bans\b/i.exec(line);
+    if (bansMatch) { await send?.(ev.chatId, bansReport()); return; }
+    const unbanMatch = /^\/unban\b[ \t]*(.*)$/i.exec(line);
+    if (unbanMatch) { await send?.(ev.chatId, unbanHere(ev, unbanMatch[1]?.trim() || null)); return; }
 
     // /join — type /join [<name>|<node>] to spin a private side-group that is a VIEW (alias) of this
     // chat's conversation (one shared thread, two chats); /split — /split [<name>|<node>] spins a
@@ -3810,6 +3820,25 @@ export function createCommands({
     try { newId = await client.openTab(m.url); } catch (e) { await send?.(ev.chatId, `/activate: failed — ${e?.message ?? e}`); return; }
     await room.setMember({ ...m, targetId: newId });   // spread keeps state/adapter/url; targetId refreshed
     await send?.(ev.chatId, `reopened ${m.url} · tab ${newId ?? '?'} · active`);
+  }
+
+  // /bans — the media-flood auto-bans currently active across every chat (src/flood-ban.mjs).
+  // /unban [name] clears the ban(s) in the chat it was typed in; name = a banned sender's
+  // display name or id. Both read the ONE in-memory floodBan boot shares with the bridges, so a
+  // clear is live, not a config write; null (standalone) → both say it isn't wired.
+  function bansReport() {
+    if (!floodBan) return 'flood-ban not wired on this node';
+    const bans = floodBan.list();
+    if (!bans.length) return 'no active flood bans';
+    const now = Date.now();
+    const lines = bans.map((b) => `${b.senderName} in ${b.chatName} — ${Math.max(1, Math.ceil((b.until - now) / 60_000))}m left`);
+    return [`${bans.length} active flood ban${bans.length === 1 ? '' : 's'}:`, ...lines].join('\n');
+  }
+  function unbanHere(ev, name) {
+    if (!floodBan) return 'flood-ban not wired on this node';
+    const n = floodBan.unban(surfaceOf(ev), ev.chatId, name);
+    if (n) return `cleared ${n} flood ban${n === 1 ? '' : 's'}${name ? ` matching "${name}"` : ''} here`;
+    return name ? `no flood ban matching "${name}" here` : 'no active flood ban here';
   }
 
   // `/status <target>` NODE GATE (operator ruling 2026-07-25) — classify <target> BEFORE

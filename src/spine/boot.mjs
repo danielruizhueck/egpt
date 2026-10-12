@@ -41,6 +41,7 @@ import {
   CONV_YAML_PATH, readState as readConvState, writeState as writeConvState, slugDir, getContact, residentsOf, LOBBY_SLUG, fixedSlugFor,
 } from '../conversations-state.mjs';
 import { createStopGuard, STOP_FILE, stopFilePresent, writeStopFile } from '../stop-guard.mjs';
+import { createFloodBan } from '../flood-ban.mjs';
 import { createLasso } from '../lasso.mjs';
 import { CLEAN_EXIT_CODE } from '../daemon-runtime.mjs';
 
@@ -2028,7 +2029,24 @@ export async function boot({
   // BEFORE the spine exists, so until it does they meet "no resume, no backlog" (the cutoff stays
   // bridge start), never a reference to a spine that is not there yet. Bound right after createSpine.
   let spineLate = null;
+  // MEDIA-FLOOD auto-ban (src/flood-ban.mjs) — ONE instance, shared by every bridge connection
+  // and by /unban + /bans. The bridge keys bans on the RAW account id it holds; the facade folds
+  // it to the canonical surface (surfaceOf, the SAME fold isAllowedUser uses below) so a ban the
+  // ear created is clearable by /unban on the spine's folded ev.surface. In-memory: a restart
+  // re-arms detection, same as the loop guard.
+  const floodBan = createFloodBan({
+    count: Number.isFinite(cfg.media_flood?.count) ? cfg.media_flood.count : 5,
+    windowMs: Number.isFinite(cfg.media_flood?.window_ms) ? cfg.media_flood.window_ms : 20_000,
+    cooldownMs: Number.isFinite(cfg.media_flood?.cooldown_ms) ? cfg.media_flood.cooldown_ms : 600_000,
+    neverBan: Array.isArray(cfg.media_flood?.never_ban) ? cfg.media_flood.never_ban : [],
+    onLog: (m) => log.line?.(`[media-flood] ${m}`),
+  });
+  const floodBanForBridge = {
+    isBanned: (network, chatId, senderId) => floodBan.isBanned(surfaceOf(network), chatId, senderId),
+    observe: (network, chatId, senderId, meta) => floodBan.observe(surfaceOf(network), chatId, senderId, meta),
+  };
   const sharedBridgeOpts = {
+    floodBan: floodBanForBridge,
     userName: cfg.whatsapp?.user_name ?? cfg.user_name ?? null,
     // Per-surface authorization (operator 2026-07-02): ids are per-surface
     // NAMESPACES — a WhatsApp jid authorizes nothing on Telegram — so the sender
@@ -3054,6 +3072,7 @@ export async function boot({
   };
   const commands = createCommands({
     getConfig,
+    floodBan,                                         // /unban + /bans — the SAME in-memory instance the bridges observe into
     send: commandTranscript.send,
     exit: announceAndExit,
     writeRewindTarget: (ref) => writeFile(join(EGPT_HOME, 'rewind-target.txt'), ref, 'utf8'),

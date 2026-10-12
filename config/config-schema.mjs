@@ -2743,6 +2743,45 @@ export const CONFIG_SCHEMA = {
     so they stay usable in the channel that got paused.)
   `,
 
+  media_flood: `
+    The MEDIA-FLOOD auto-ban (src/flood-ban.mjs, wired in src/spine/boot.mjs into the
+    Beeper bridge dispatch). A single sender dumping a BURST of media (GIFs / stickers
+    / images — "a whatsapp virus") into one chat pollutes E's accumulated context and
+    bloats the chat's media/ folder; this mutes that sender automatically.
+
+    (NOT the \`lasso\` block's "flooding" — that is the node's OUTBOUND emit ceiling.
+    This is an INBOUND per-sender mute, a different concept with its own key.)
+
+    TRIGGER: one sender posting >= \`count\` media attachments within \`window_ms\`, in
+    one (surface, chat) → that (surface, chat, sender) is BANNED for \`cooldown_ms\`.
+
+    WHILE BANNED: EVERY inbound message from that sender in that chat — media AND plain
+    text — is DROPPED in the bridge BEFORE persistMedia + onIncoming: no media/ save, no
+    transcript write, no dispatch. The one message that TIPS the ban is dropped too.
+
+    AUTO-UNBAN: the ban expires \`cooldown_ms\` after it tripped, lazily (checked on the
+    next message / isBanned — no timer). A node restart re-arms detection from empty
+    (the bans are in-memory, never persisted), same as the loop \`guard\`.
+
+    A ban logs ONE line when it trips and one when it lifts; it posts NOTHING into any
+    chat. \`/bans\` lists active bans; \`/unban [name]\` clears the ban(s) in the chat it
+    is typed in (there is no manual \`/ban\` — detection is automatic). Our own sends
+    never reach the counter (the bridge's wasSentByUs own-send gate drops them upstream).
+
+    KEYS:
+      count
+        DEFAULT: 5 — media attachments within \`window_ms\` that trip the ban.
+        0 or negative = the whole feature OFF.
+      window_ms
+        DEFAULT: 20000 — the sliding window, in ms.
+      cooldown_ms
+        DEFAULT: 600000 (10 min) — how long the sender stays muted before auto-unban.
+      never_ban
+        DEFAULT: [] — senders that can NEVER be banned, each matched against the
+        sender's id OR display name (case-insensitive). Add the operator here to be
+        safe from a self-ban on a legitimate media burst.
+  `,
+
   warm: `
     Warm-session pool for the resident brain processes (src/warm-sessions.mjs; E
     stays resident so its context lives in memory instead of re-spawning +

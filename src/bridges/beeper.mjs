@@ -724,6 +724,11 @@ export async function startBeeperBridge(opts = {}) {
     // host resolves it; falls back to the legacy whatsapp.media.audio_transcribe
     // during migration). Transcription is its own concern, not a media subkey.
     transcribeCfg = null,
+    // MEDIA-FLOOD auto-ban (src/flood-ban.mjs, wired by boot). A sender who dumps a burst of
+    // media into a chat is muted; while muted EVERY message of theirs — media AND text — is
+    // dropped HERE, before persistMedia + onIncoming, so nothing hits disk or the spine. Null
+    // (a directly-built bridge) ⇒ no flood gate, byte-identical to before.
+    floodBan = null,
   } = opts;
   const token = beeperToken || process.env.BEEPER_ACCESS_TOKEN;
   // The bare-reply gate's vocabulary (replyWakeWords above), resolved ONCE. Absent/empty ⇒ it IS
@@ -2109,6 +2114,20 @@ export async function startBeeperBridge(opts = {}) {
     } else if (tsMs < backlogCutoffMs - holdGraceMs) {
       isBacklog = true;
       onLog(`beeper: backlog message [${info.title}] (${new Date(tsMs).toISOString()} < cutoff ${new Date(backlogCutoffMs).toISOString()}) — backfilled to transcript, not dispatched`);
+    }
+
+    // MEDIA-FLOOD BAN (src/flood-ban.mjs). Own sends already returned above (wasSentByUs), so
+    // the counter never sees our own output. A banned sender's message — media AND text — is
+    // dropped HERE, before persistMedia/transcription/onIncoming, so nothing of theirs hits
+    // disk or the spine; and the one message that TIPS the ban is dropped too. Live traffic
+    // only: a backlog replay is backfill, never a flood (isBacklog bypasses the gate).
+    if (floodBan && !isBacklog) {
+      const senderId = msg.senderID || chatID;
+      if (floodBan.isBanned(acct, chatID, senderId)) return;   // muted — no save, no dispatch
+      const isMediaMsg = Array.isArray(msg.attachments) && msg.attachments.length > 0
+        && !(msg.type === 'VOICE' || msg.type === 'AUDIO');   // voice notes are legit, transcribed to text
+      const { justBanned } = floodBan.observe(acct, chatID, senderId, { isMedia: isMediaMsg, senderName: senderDisplay(msg), chatName: info.title });
+      if (justBanned) return;   // this message tipped the flood → drop it too (floodBan logged the notice)
     }
 
     let _voiceAtt = null, _voicePath = null, _voiceCaption = null;

@@ -22,6 +22,7 @@ import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
 import { startBeeperBridge, newerMsgId, transcriptionForNoteId, crossAccountMsgKey, LISTENING_REACTION } from '../src/bridges/beeper.mjs';
+import { createFloodBan } from '../src/flood-ban.mjs';
 import { EGPT_HOME } from '../src/egpt-home.mjs';
 import { encodeMesh } from '../src/mesh/relay.mjs';
 import { surfaceOf, createIdentity } from '../src/spine/identity.mjs';
@@ -1832,6 +1833,43 @@ describe('beeper bridge', () => {
       : [{ id: '3', text: 'earlier unrelated', isSender: false }]));
     const id = await bridge.sendAndGetId(TXT, { chatId: chat });
     expect(id).toBe('5');
+  });
+});
+
+// MEDIA-FLOOD AUTO-BAN (src/flood-ban.mjs). A sender who dumps a media burst ("a whatsapp
+// virus") is muted; while muted EVERY message of theirs — media AND text — is dropped in the
+// bridge BEFORE persistMedia (onMedia) + onIncoming, so nothing of theirs hits disk or the
+// spine. Drives the real bridge with a real floodBan injected, the same seam boot wires.
+describe('beeper bridge — media-flood auto-ban drops a flooder before persistMedia + onIncoming', () => {
+  const imgA = () => liveMsg({ senderID: 'A', senderName: 'Flooder', isSender: false, type: 'IMAGE', text: null, attachments: [fakeAttachment({ name: `g-${Math.random().toString(36).slice(2)}.jpg`, mimeType: 'image/jpeg' })] });
+
+  it('the flood (incl. the message that tips it) and the flooder\'s later text are dropped; a notice fires once; another sender passes', async () => {
+    const notices = [];
+    const floodBan = createFloodBan({ count: 2, windowMs: 60_000, cooldownMs: 60_000, onLog: (m) => notices.push(m) });
+    const { incoming, media } = await startBridge({ floodBan });
+
+    // image #1 — under the limit: saved to media/ AND announced to the model, as normal.
+    fake.emit({ type: 'message.upserted', entries: [imgA()] });
+    await waitFor(() => incoming.length === 1 && media.length === 1);
+
+    // image #2 — tips the ban: THIS one is itself dropped (no save, no announce), notice fires.
+    fake.emit({ type: 'message.upserted', entries: [imgA()] });
+    await waitFor(() => notices.some((m) => /^flood-ban: /.test(m)));
+
+    // A banned sender's later PLAIN TEXT is dropped too; a different sender B is unaffected.
+    fake.emit({ type: 'message.upserted', entries: [liveMsg({ senderID: 'A', senderName: 'Flooder', isSender: false, text: 'hola igual?' })] });
+    fake.emit({ type: 'message.upserted', entries: [liveMsg({ senderID: 'B', senderName: 'Caro', isSender: false, text: 'SENTINEL' })] });
+    await waitFor(() => incoming.some((x) => x.text === 'SENTINEL'));
+    await new Promise((r) => setTimeout(r, 50));   // let the dropped A-messages settle (same pattern as the media:off test)
+
+    // A produced exactly ONE save + ONE announce (image #1). #2 and the text never reached disk/spine.
+    expect(media).toHaveLength(1);
+    expect(incoming.filter((x) => x.from.userId === 'A')).toHaveLength(1);
+    expect(incoming.some((x) => x.text === 'hola igual?')).toBe(false);
+    expect(notices.filter((m) => /^flood-ban: /.test(m))).toHaveLength(1);   // the notice is emitted ONCE
+    expect(notices[0]).toMatch(/^flood-ban: .+ in .+ — 2 media in 60s, muted 1m$/);   // name = senderDisplay (id for a non-LID fixture)
+    // B's sentinel went through untouched — the pipe is alive, only the flooder is muted.
+    expect(incoming.some((x) => x.text === 'SENTINEL' && x.from.userId === 'B')).toBe(true);
   });
 });
 
