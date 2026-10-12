@@ -1871,6 +1871,25 @@ describe('beeper bridge — media-flood auto-ban drops a flooder before persistM
     // B's sentinel went through untouched — the pipe is alive, only the flooder is muted.
     expect(incoming.some((x) => x.text === 'SENTINEL' && x.from.userId === 'B')).toBe(true);
   });
+
+  // allowed_users (the operator + anyone he authorizes) are NEVER flood-banned (operator 2026-10-12:
+  // "people in allowed_users must not be banned"). The gate skips observe/isBanned for them entirely.
+  it('an allowed_user is never flood-banned — every media + text keeps flowing, no notice', async () => {
+    const notices = [];
+    const floodBan = createFloodBan({ count: 2, windowMs: 60_000, cooldownMs: 60_000, onLog: (m) => notices.push(m) });
+    const { incoming, media } = await startBridge({ floodBan, isAllowedUser: (id) => id === 'A' });
+
+    fake.emit({ type: 'message.upserted', entries: [imgA()] });
+    fake.emit({ type: 'message.upserted', entries: [imgA()] });
+    fake.emit({ type: 'message.upserted', entries: [imgA()] });   // well past count:2 — but A is authorized
+    fake.emit({ type: 'message.upserted', entries: [liveMsg({ senderID: 'A', senderName: 'Flooder', isSender: false, text: 'SENTINEL-OP' })] });
+    await waitFor(() => incoming.some((x) => x.text === 'SENTINEL-OP'));
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(media).toHaveLength(3);                                          // all three images saved + announced
+    expect(incoming.filter((x) => x.from.userId === 'A')).toHaveLength(4);  // 3 media announces + 1 text
+    expect(notices.some((m) => /^flood-ban: /.test(m))).toBe(false);       // never banned
+  });
 });
 
 // NETWORK PIN (operator 2026-07-06: multi-network mesh) — the same chat NAME can

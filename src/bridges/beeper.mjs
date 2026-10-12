@@ -2121,7 +2121,7 @@ export async function startBeeperBridge(opts = {}) {
     // dropped HERE, before persistMedia/transcription/onIncoming, so nothing of theirs hits
     // disk or the spine; and the one message that TIPS the ban is dropped too. Live traffic
     // only: a backlog replay is backfill, never a flood (isBacklog bypasses the gate).
-    if (floodBan && !isBacklog) {
+    if (floodBan && !isBacklog && !isAllowedUser(msg.senderID || chatID, acct)) {   // allowed_users are never flood-banned (operator 2026-10-12)
       const senderId = msg.senderID || chatID;
       if (floodBan.isBanned(acct, chatID, senderId)) return;   // muted — no save, no dispatch
       const isMediaMsg = Array.isArray(msg.attachments) && msg.attachments.length > 0
