@@ -397,6 +397,23 @@ describe('warm-session pool', () => {
     expect(made[1].opts.effort).toBe('xhigh');
   });
 
+  it('evicts + reopens an IDLE session when only verbose_thinking changes (operator 2026-10-11, HFM: turned off, still verbose)', async () => {
+    const { makeSession, made } = heldFactory();
+    const pool = createWarmPool({ makeSession });
+    await pool.run('k', 'a', () => {}, { brainOptions: { sessionId: 'SID00001', model: 'opus', effort: 'high', verboseThinking: true } });
+    await pool.run('k', 'b', () => {}, { brainOptions: { sessionId: 'SID00001', model: 'opus', effort: 'high', verboseThinking: false } });
+    expect(made.length).toBe(2);
+    expect(made[1].opts).toMatchObject({ sessionId: 'SID00001', verboseThinking: false });
+  });
+
+  it('LOCK: a caller that states no verboseThinking (compaction\'s /compact) reuses the warm session', async () => {
+    const { makeSession, made } = heldFactory();
+    const pool = createWarmPool({ makeSession });
+    await pool.run('k', 'a', () => {}, { brainOptions: { sessionId: 'SID00001', model: 'opus', effort: 'high', verboseThinking: true } });
+    await pool.run('k', '/compact', () => {}, { brainOptions: { sessionId: 'SID00001', model: 'opus' } });
+    expect(made.length).toBe(1);
+  });
+
   it('does NOT evict a BUSY session — the new configuration waits for the turn in flight', async () => {
     const { makeSession, made } = heldFactory();
     const pool = createWarmPool({ makeSession });
