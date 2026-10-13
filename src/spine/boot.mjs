@@ -39,6 +39,7 @@ import { Room, CONVERSATIONS_ROOT, ROOMS_ROOT, AGENTS_ROOT, HEARTBEATS_DIR } fro
 import { loadAdapterModule } from '../adapters/registry.mjs';
 import {
   CONV_YAML_PATH, readState as readConvState, writeState as writeConvState, slugDir, getContact, residentsOf, LOBBY_SLUG, fixedSlugFor,
+  aliasMouthInfo, setAliasMouthChat,
 } from '../conversations-state.mjs';
 import { createStopGuard, STOP_FILE, stopFilePresent, writeStopFile } from '../stop-guard.mjs';
 import { createFloodBan } from '../flood-ban.mjs';
@@ -311,7 +312,7 @@ export function makeShellAwareBridge(bridge, shellPort) {
 // guess, never a dropped reply: every refusal below names the connection, the reason, and which
 // connection is going to speak instead. The Self-DM is the honest, permanent case — Rodz is not a
 // participant, there is no room on that account to translate to, and the ear answers forever.
-export function makePeerMouth({ peer, bridge, bridgeOf = null, owns = () => false, localMouth = null, speak = speakThroughPeer, stream = startPeerStream, reactor = reactThroughPeer, onLog = () => {} } = {}) {
+export function makePeerMouth({ peer, bridge, bridgeOf = null, owns = () => false, localMouth = null, speak = speakThroughPeer, stream = startPeerStream, reactor = reactThroughPeer, mouthRoomFor = null, rememberMouthRoom = null, onLog = () => {} } = {}) {
   if (!peer && !localMouth) return null;      // no peer_spine and no second account ⇒ no mouth ⇒ createSender is handed none ⇒ nothing changes
   // THE ONE RESOLVER (sender.mjs makeOutbound), built once. No peerMouth is handed to it, so its
   // own route thunk is inert — this IS the peer mouth, and all that is wanted here is which of
@@ -329,6 +330,18 @@ export function makePeerMouth({ peer, bridge, bridgeOf = null, owns = () => fals
     const here = localMouth?.(being, chatId) ?? null;
     if (!here) return null;                   // one connection, one account, or an unplaceable chat
     const short = shortChatId(chatId);
+    // THE STORED MOUTH ROOM, PREFERRED — no live guessing (operator 2026-10-12). A super/side-room's
+    // main↔second mapping is derived below from the mouth's roster/chat-list; a COLD derivation (after
+    // a restart, before a message has landed in the room) misses and the reply drops. If the alias
+    // carries `mouth_chat`, deliver straight to it — every roster/key read below is skipped. Absent,
+    // the live derivation runs AND self-heals the alias (persist, further down). `aliasInfo.isAlias`
+    // is read once here and reused there, so a non-alias chat pays no extra state write.
+    let aliasInfo = null;
+    if (mouthRoomFor) { try { aliasInfo = await mouthRoomFor(short); } catch (e) { onLog(`could not read the stored mouth room for ${short} — deriving it live: ${e?.message ?? e}`); } }
+    if (aliasInfo?.mouthChat) {
+      onLog(`${short} is ${shortChatId(aliasInfo.mouthChat)} on '${here.name}' — the mouth says this reply, in its STORED room`);
+      return { connection: here.name, home: here.home, bridge: here.bridge, chatId: aliasInfo.mouthChat };
+    }
     // WHO THE MOUTH IS, MEASURED, not declared: the phone identity its install reports for itself
     // (/v1/accounts — src/bridges/beeper.mjs selfIdentities). This is the field `peer_spine.accounts`
     // has been naming by hand, and a node holding both connections in one spine has no reason to
@@ -423,6 +436,10 @@ export function makePeerMouth({ peer, bridge, bridgeOf = null, owns = () => fals
     // the routine outcome it used to read as — it is the one thing this whole path exists to
     // prevent — so it says so, names every way that was tried, and names who is speaking instead.
     if (!found.ok) { onLog(`MOUTH UNREACHABLE: '${here.name}' IS in ${short} but none of the ways to find its own room worked — ${tried.join('; ')} — '${here.home}' says this reply`); return null; }
+    // SELF-HEAL: persist the derived second-account room onto the alias (only when this chat IS an
+    // alias that lacked it) so the next reply — and every one after a restart — takes the STORED path
+    // above instead of re-deriving. The write is best-effort and no-ops when unchanged.
+    if (aliasInfo?.isAlias && rememberMouthRoom) { try { await rememberMouthRoom(short, found.chatId); } catch (e) { onLog(`could not persist the mouth room for ${short}: ${e?.message ?? e}`); } }
     onLog(`${short} on '${here.home}' is ${shortChatId(found.chatId)} on '${here.name}' — the mouth says this reply, in its own room`);
     return { connection: here.name, home: here.home, bridge: here.bridge, chatId: found.chatId };
   };
@@ -2649,7 +2666,21 @@ export async function boot({
   // read as ABSENT (a one-connection node still gets `peerMouth === null`, which is what turns
   // the whole feature off for it).
   const localMouthAvailable = [...connectionOfBridge.values()].some((a, i, all) => all.some((b, j) => j !== i && !reachesTheSameChats(a, b)));
-  const peerMouth = makePeerMouth({ peer: peerSpine, bridge, bridgeOf: rawBridgeOf, owns: (c) => shellPort.owns(c), localMouth: localMouthAvailable ? localMouthFor : null, onLog: mouthLog });
+  // mouthRoomFor/rememberMouthRoom (operator 2026-10-12): the super/side-room main↔second mapping,
+  // read from and healed onto the SAME conversations-state the router/gating share (no second store).
+  // The read is one load per routed reply; the write only when a cold alias just got its first id
+  // (setAliasMouthChat returns the same state otherwise, so writeState is skipped).
+  const peerMouth = makePeerMouth({
+    peer: peerSpine, bridge, bridgeOf: rawBridgeOf, owns: (c) => shellPort.owns(c),
+    localMouth: localMouthAvailable ? localMouthFor : null,
+    mouthRoomFor: async (chatId) => aliasMouthInfo(await _loadState(), chatId),
+    rememberMouthRoom: async (chatId, mouthChatId) => {
+      const s = await _loadState();
+      const next = setAliasMouthChat(s, chatId, mouthChatId);
+      if (next !== s) { await _writeState(next); mouthLog(`stored mouth room for ${chatId} → ${shortChatId(mouthChatId)}`); }
+    },
+    onLog: mouthLog,
+  });
 
   // Shell-aware bridge facade (makeShellAwareBridge, top of file): the STREAMING senders
   // (E's persona sender + the brain-member relay sender) render through their injected
@@ -2829,7 +2860,14 @@ export async function boot({
     transcript: createTranscript({ contacts, persona: labelOf(defaultKey), defaultKey, labelOf, timeZone: transcriptTimeZone, io, currentRoomOf: (surface) => commands.currentRoomOf(surface), onLog: (m) => log.line?.(`[transcript] ${m}`) }),
     // peerMouth (operator 2026-09-05): THE reply path, so THE place the mouth decision is made —
     // null on a node with no peer_spine, and the sender is then byte-identical to before.
-    sender: createSender({ bridge: shellAwareBridge, bridgeOf: shellAwareBridgeOf, bodyEmojiOf, labelOf, agentSignatureOpenOf, agentSignatureCloseOf, defaultKey, peerMouth, onLog: mouthLog }),
+    // onUndeliverable (operator 2026-10-12): a reply the mouth can place in NEITHER the routed room
+    // nor the origin is no longer dropped silently — it surfaces on log_to_group through the EXISTING
+    // audit poster (forward ref to logToGroup below, like currentRoomOf above: only fires at reply
+    // time). log_to_group unset ⇒ logToGroup is a no-op post and the daemon line (sender's onLog) is
+    // all there is — no crash, no second channel.
+    sender: createSender({ bridge: shellAwareBridge, bridgeOf: shellAwareBridgeOf, bodyEmojiOf, labelOf, agentSignatureOpenOf, agentSignatureCloseOf, defaultKey, peerMouth,
+      onUndeliverable: async ({ being, chatId, origin, reason }) => { try { await logToGroup(`⚠ reply to ${chatId} (${being}) undeliverable: ${reason}`); } catch { /* best-effort: a failed notice never affects the reply */ } },
+      onLog: mouthLog }),
     // The real cadence registry the spine's tick() drives. The heartbeat LOADER
     // (below) collects every declarative heartbeat and registers it here, so each
     // beat rides the loop's own tick instead of a side timer (operator 2026-07-01).

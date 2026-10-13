@@ -1669,3 +1669,83 @@ describe('the one placement takes a reaction back off, on the account that place
     expect(calls.reacts).toEqual([{ chat: AS_PRIMARY, msgKey: STEERED_KEY, timestamp: STEERED_TS, emoji: '👀' }]);
   });
 });
+
+// ── 12. THE STORED MOUTH ROOM — no cold-derivation drop, and self-heal (operator 2026-10-12) ──────
+// THE LIVE BUG (Favel/super): a reply routed to a super room by its MAIN id is handed to the MOUTH;
+// the mouth must translate that to ITS OWN room id. The mapping was re-derived LIVE every reply from
+// the mouth's roster/chat-list, and a COLD derivation (after a restart, before any message had
+// arrived in the super room) missed → the reply was dropped. The fix stores the second-account room
+// id on the alias (`mouth_chat`): read it first (no guessing), and when it is absent, derive live
+// AND persist what was derived so the next reply — and every one after a restart — is cold-proof.
+//
+// The rig is §8/§9's ear+mouth shape (one node, two connections) driving makePeerMouth.route()
+// DIRECTLY, with the two store seams boot wires to conversations-state. Call counters prove which
+// path ran. `found.chatId` is the mouth's OWN (short) id for the chat — SECONDARY_CHAT_ID.
+describe('makePeerMouth.route — the persisted mouth room is preferred, and a cold alias self-heals', () => {
+  const MOUTH_FULL = SECONDARY_CHAT_ID;   // what findChatByKey resolves on the mouth's own chat list (short form)
+  function superRig({ info = { isAlias: true, mouthChat: null }, withStore = true } = {}) {
+    const logs = [];
+    const earCalls = { chatHasParticipant: 0, chatRaw: 0, selfIdentities: 0 };
+    const mouthCalls = { selfIdentities: 0, listChatsRaw: 0 };
+    const ear = {
+      ...fakeBridge(),
+      async selfIdentities() { earCalls.selfIdentities += 1; return [PRIMARY_NUM]; },
+      async chatHasParticipant(_c, id) { earCalls.chatHasParticipant += 1; return id === SECONDARY_NUM; },
+      async chatRaw() { earCalls.chatRaw += 1; return AS_PRIMARY; },
+      async listChatsRaw() { return [AS_PRIMARY]; },
+    };
+    const mouthBridge = {
+      ...fakeBridge(),
+      async selfIdentities() { mouthCalls.selfIdentities += 1; return [SECONDARY_NUM]; },
+      async listChatsRaw() { mouthCalls.listChatsRaw += 1; return [AS_SECONDARY]; },
+    };
+    const mouthRoomForCalls = [];
+    const remembered = [];
+    const peerMouth = makePeerMouth({
+      peer: null, bridge: ear,
+      localMouth: () => ({ name: 'secondary', home: 'primary', bridge: mouthBridge }),
+      ...(withStore ? {
+        mouthRoomFor: async (cid) => { mouthRoomForCalls.push(cid); return info; },
+        rememberMouthRoom: async (cid, mid) => { remembered.push({ cid, mid }); },
+      } : {}),
+      onLog: (m) => logs.push(m),
+    });
+    return { peerMouth, earCalls, mouthCalls, mouthRoomForCalls, remembered, logs };
+  }
+
+  it('FIX 2 — a stored mouth_chat is delivered to DIRECTLY; the roster/chat-list is never consulted', async () => {
+    const { peerMouth, earCalls, mouthCalls, remembered, logs } = superRig({ info: { isAlias: true, mouthChat: MOUTH_FULL } });
+    const r = await peerMouth.route(CHAT_ID, 'e');
+    expect(r).toMatchObject({ connection: 'secondary', home: 'primary', chatId: MOUTH_FULL });
+    // The whole live derivation is skipped — THE point of storing it (the cold path that dropped).
+    expect(earCalls).toEqual({ chatHasParticipant: 0, chatRaw: 0, selfIdentities: 0 });
+    expect(mouthCalls).toEqual({ selfIdentities: 0, listChatsRaw: 0 });
+    expect(remembered).toEqual([]);                            // already stored → nothing re-written
+    expect(logs.join('\n')).toMatch(/in its STORED room/);
+  });
+
+  it('FIX 1b — a COLD alias (no mouth_chat) derives live AND persists the derived id to the alias', async () => {
+    const { peerMouth, earCalls, mouthCalls, remembered } = superRig({ info: { isAlias: true, mouthChat: null } });
+    const r = await peerMouth.route(CHAT_ID, 'e');
+    expect(r).toMatchObject({ connection: 'secondary', chatId: MOUTH_FULL });   // derived the right room…
+    expect(earCalls.chatHasParticipant).toBeGreaterThan(0);                     // …by actually deriving
+    expect(mouthCalls.listChatsRaw).toBeGreaterThan(0);
+    expect(remembered).toEqual([{ cid: CHAT_ID, mid: MOUTH_FULL }]);            // …and SELF-HEALED the alias
+  });
+
+  it('an ORDINARY chat (not an alias) derives live but persists NOTHING — no write on the hot path', async () => {
+    const { peerMouth, remembered, mouthCalls } = superRig({ info: { isAlias: false, mouthChat: null } });
+    const r = await peerMouth.route(CHAT_ID, 'e');
+    expect(r).toMatchObject({ chatId: MOUTH_FULL });
+    expect(mouthCalls.listChatsRaw).toBeGreaterThan(0);        // derived
+    expect(remembered).toEqual([]);                            // but a non-alias is never persisted
+  });
+
+  it('REGRESSION — with NO store wired, a reply still translates & delivers to the mouth\'s room, unchanged', async () => {
+    const { peerMouth, mouthCalls, remembered } = superRig({ withStore: false });
+    const r = await peerMouth.route(CHAT_ID, 'e');
+    expect(r).toMatchObject({ connection: 'secondary', chatId: MOUTH_FULL });
+    expect(mouthCalls.listChatsRaw).toBeGreaterThan(0);        // the working path (arrival IN the room) is untouched
+    expect(remembered).toEqual([]);
+  });
+});

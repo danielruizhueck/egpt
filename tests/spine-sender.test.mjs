@@ -510,4 +510,41 @@ describe('sender — routed-target drop falls back to the origin chat (never a s
     expect(bridge.streams[0].finals).toEqual(['hola']);       // delivered in place on the routed room
     expect(bridge.sent).toHaveLength(0);                      // no fresh send anywhere
   });
+
+  // FIX 3 (operator 2026-10-12): when the mouth is in NEITHER the routed room NOR the origin, both
+  // sends return null. That used to be a SILENT return (the reply vanished). It must instead invoke
+  // the injected notify ONCE, so the drop surfaces on log_to_group.
+  function bothUnreachableBridge(...dead) {
+    const sent = [], streams = [];
+    const set = new Set(dead);
+    return {
+      sent, streams,
+      send(chat, text, opts) { if (set.has(chat)) return null; sent.push({ chat, text, opts }); return { ok: true, chatId: chat }; },
+      startStream(chat, init, opts) {
+        const h = { chat, init, opts, frames: [], finals: [], delivered: false, update(t) { h.frames.push(t); }, async finish(t) { h.finals.push(t); } };
+        streams.push(h); return h;
+      },
+    };
+  }
+
+  it('BOTH the routed room and the origin refuse the send → onUndeliverable is called ONCE with chat/being/reason', async () => {
+    const SUPER = '!super', ORIGIN = '!origin';
+    const bridge = bothUnreachableBridge(SUPER, ORIGIN);
+    const calls = [];
+    const out = createSender({ bridge, bodyEmojiOf: () => '🐶', onUndeliverable: async (o) => calls.push(o) })
+      .open(SUPER, { being: 'e', replyTo: 'm1', origin: ORIGIN });
+    await out.finish({ text: 'la respuesta perdida' });
+    expect(bridge.sent).toHaveLength(0);                       // nothing landed anywhere — the drop
+    expect(calls).toHaveLength(1);                             // …but it was NOT silent
+    expect(calls[0]).toMatchObject({ being: 'e', chatId: SUPER, origin: ORIGIN });
+    expect(calls[0].reason).toMatch(/both refused the send/);
+  });
+
+  it('BOTH refuse but NO notify wired → no throw, behaviour is the pre-fix drop (byte-identical)', async () => {
+    const SUPER = '!super', ORIGIN = '!origin';
+    const bridge = bothUnreachableBridge(SUPER, ORIGIN);
+    const out = createSender({ bridge, bodyEmojiOf: () => '🐶' }).open(SUPER, { being: 'e', origin: ORIGIN });
+    await expect(out.finish({ text: 'sin notificador' })).resolves.toBeUndefined();
+    expect(bridge.sent).toHaveLength(0);
+  });
 });

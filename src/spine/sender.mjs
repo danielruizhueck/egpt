@@ -337,7 +337,7 @@ export function makeOutbound({ bridge, bridgeOf = null, peerMouth = null, onLog 
   };
 }
 
-export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null, labelOf = () => null, agentSignatureOpenOf = () => '', agentSignatureCloseOf = () => '', defaultKey = 'e', peerMouth = null, onLog = () => {} } = {}) {
+export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null, labelOf = () => null, agentSignatureOpenOf = () => '', agentSignatureCloseOf = () => '', defaultKey = 'e', peerMouth = null, onUndeliverable = () => {}, onLog = () => {} } = {}) {
   if (!bridge) throw new Error('createSender: bridge is required');
   const textOf = (v) => (typeof v === 'string' ? v : v?.text ?? '');
   const outbound = makeOutbound({ bridge, bridgeOf, peerMouth, onLog });
@@ -346,13 +346,20 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
       const { bridge: bridgeForThisBeing, route: peerRoute } = outbound(being, chatId);
       // ROUTED-TARGET FALLBACK (never a silent drop): a send the sending account can't place on the
       // routed room (a super/alias room it isn't a member of → resolveChatId null → DROPPED) re-sends
-      // to the origin chat, which always resolves (the message just arrived there). origin unset / ==
-      // chatId ⇒ byte-identical to before.
+      // to the origin chat. origin unset / == chatId ⇒ byte-identical to before. When the mouth is
+      // the sender it may be in NEITHER (not the base chat either) → both sends null: NOT a silent
+      // return — notify (onUndeliverable, default no-op → byte-identical when unset), so the drop is
+      // at least surfaced to the logging group instead of vanishing.
       const deliverHere = async (payload, sendOpts) => {
         const r = await bridgeForThisBeing.send(chatId, payload, sendOpts);
         if (r || !origin || origin === chatId) return r;
         onLog(`sender: ${being} reply undeliverable to routed ${chatId} — delivering to origin ${origin}`);
-        return bridgeForThisBeing.send(origin, payload, sendOpts);
+        const r2 = await bridgeForThisBeing.send(origin, payload, sendOpts);
+        if (!r2) {
+          onLog(`sender: ${being} reply ALSO undeliverable to origin ${origin} — neither room accepted it, notifying`);
+          await onUndeliverable({ being, chatId, origin, reason: `routed room ${chatId} and origin ${origin} both refused the send` });
+        }
+        return r2;
       };
       // mode:auto — E impersonates the operator, so the reply is PLAIN operator text:
       // NO persona line (no body_emoji/label tag passed → the port stamps nothing), no

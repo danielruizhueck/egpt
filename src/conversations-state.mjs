@@ -1559,6 +1559,41 @@ export function superChannelFor(state, surface, chatId) {
   return null;
 }
 
+// ── THE PERSISTED MOUTH ROOM (operator 2026-10-12) ───────────────────────────
+// A super/side-room lives on BOTH accounts under DIFFERENT ids; the mouth (second account) must
+// deliver to ITS id. That main↔second mapping was re-derived LIVE every reply and never stored, so a
+// COLD derivation (after a restart, before a message had arrived in the room) missed and the reply
+// was dropped. `mouth_chat` stores the second-account room id ON the alias entry, beside transcript/
+// super — a plain scalar that rides aliasContact's `extra` and that every registry reader skips
+// (entry.aliasOf short-circuits them), so it never leaks into config/resident resolution and
+// survives serialize (alias entries pass through untouched). Read RAW, like aliasTranscriptKeyOf.
+// The mouth route has no ev.surface, so BOTH helpers key by chatId across surfaces.
+
+// { isAlias, mouthChat } for `chatId`: whether it is an alias at all (so the mouth knows whether a
+// freshly-derived id is worth persisting) and its stored second-account room, if any.
+export function aliasMouthInfo(state, chatId) {
+  for (const bucket of Object.values(state?.contacts ?? {})) {
+    const entry = bucket?.[chatId];
+    if (entry?.aliasOf) return { isAlias: true, mouthChat: entry.mouth_chat ?? null };
+  }
+  return { isAlias: false, mouthChat: null };
+}
+
+// Persist the derived second-account room onto `chatId`'s alias entry. Writes ONLY when missing or
+// changed (the reply path is hot) — returns the SAME state object otherwise so the caller skips the
+// write; a non-alias chatId is a no-op. Keeps every other field (aliasOf/transcript/super/agents).
+export function setAliasMouthChat(state, chatId, mouthChatId) {
+  if (!chatId || !mouthChatId) return state;
+  for (const [surface, bucket] of Object.entries(state?.contacts ?? {})) {
+    const entry = bucket?.[chatId];
+    if (!entry?.aliasOf) continue;
+    if (entry.mouth_chat === mouthChatId) return state;        // unchanged → no write
+    const nextBucket = { ...bucket, [chatId]: { ...entry, mouth_chat: mouthChatId } };
+    return { ...state, contacts: { ...(state.contacts ?? {}), [surface]: nextBucket } };
+  }
+  return state;                                                // not an alias → nothing to persist
+}
+
 // THE write side of _beingBlock — every per-being field write (mode, threadId, access_level,
 // …) lands in the ONE place getBeing reads: `entry.agents.<being>`, merged over the block's
 // existing fields (siblings survive), like patchContact. Phase 1 (operator 2026-08-14): there
