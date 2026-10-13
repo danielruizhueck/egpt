@@ -667,7 +667,10 @@ export function createRouter({ getAgents = () => ({}), defaultBeing = 'e', addre
       // matched no agent is the persona's, and so is a bare message. `address: null` explicitly —
       // nothing addressed this being, so there is no handle to take off the prompt, and every
       // target this function can return carries the field (see targetFor).
-      if (!targets.length) targets.push({ being: defaultBeing, mention: ev?.mention, address: null });
+      // `fallthrough: true` — NOBODY was explicitly addressed; this is the persona default, not a
+      // real @mention. The per-being echo gate (spine.mjs) reads it so a being's own plain signed
+      // line never wakes the persona by default (only an explicit cross-being address does).
+      if (!targets.length) targets.push({ being: defaultBeing, mention: ev?.mention, address: null, fallthrough: true });
       return { ...targets[0], targets };
     },
   };

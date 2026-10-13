@@ -2292,15 +2292,8 @@ export async function boot({
         // that received the note holds that room, so it is recorded here first, into the same
         // record an arrival writes, as placeHeartbeatChat does for a send with no arrival.
         outboundFor: (chatId) => { rememberArrival(chatId, name); return outbound(null, chatId); },
-        // CROSS-BRIDGE OWN-VOICE ECHO (operator 2026-10-09). "did ANY of this node's bridges send
-        // this audio?" — late-bound like outboundFor (the sibling bridges are built after this one,
-        // so it reads bridgeByEndpoint at CALL time) and fanned "any yes" exactly as bridge-fanout
-        // fans wasSentByUs. Closes the two-account split: E's voice reply goes out on the MOUTH
-        // bridge and its echo arrives on the EAR bridge under a different room id, so the EAR's own
-        // chat-qualified _sentIds misses it; this lets the EAR find the MOUTH's sent-audio key by
-        // BYTES alone (beeper.mjs ownVoiceEcho). A one-connection node fans over the single bridge —
-        // its own store — so it is byte-identical to the baseline.
-        isOwnAudioEcho: (sha) => [...bridgeByEndpoint.values()].some((b) => !!b?.wasAudioSentByUs?.(sha)),
+        // The two-account voice echo is now dropped by SOURCE (sender ∈ mouth identities) before
+        // whisper — the cross-bridge audio-hash fan it replaced is gone (beeper.mjs, 2026-10-13).
         earIdentities };   // the operator's account: excepted from "a reaction by a mouth is ours" (beeper.mjs _maybeEmitReactions)
       const port = lasso.wrap(await createBeeperBridgePort(opts, startBridge ? { start: startBridge } : {}));
       const owned = ear && wakesOn(ep);

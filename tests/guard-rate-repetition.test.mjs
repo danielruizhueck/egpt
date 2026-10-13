@@ -27,7 +27,7 @@ import { parseMesh } from '../src/mesh/relay.mjs';
 
 const MIN = 60_000;
 // THIS node is kg. Its mouth signs every frame it commits — including the ⏳ placeholders.
-const SIG_KG = encodeNodeSignature('kg', 'egpt');
+const SIG_KG = encodeNodeSignature('kg', 'e');   // E's own being key — the SAME key the router resolves ('e'), so the per-being echo gate sees author === the persona it would wake and suppresses it
 const SIG_DO = encodeNodeSignature('do', 'don');
 
 // ── the spine, wired the way boot wires it: the REAL identity (so the invisible frame is

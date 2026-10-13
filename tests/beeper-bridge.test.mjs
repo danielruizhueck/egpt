@@ -484,11 +484,12 @@ describe('beeper bridge', () => {
     expect(incoming.some((i) => i.from.isStageDirection)).toBe(false);
   });
 
-  // OWN-MESSAGE SUPPRESSION is by wasSentByUs (the ids we sent), NOT a leading-emoji check
-  // (that fallback was removed 2026-07-12 — no emoji may reach a decision). A reply E sent is dropped
-  // when it echoes back EVEN when it does NOT lead with the persona emoji.
-  it("suppresses E's own re-ingested reply by id — even one that does NOT lead with the persona emoji", async () => {
-    const { bridge, incoming } = await startBridge();
+  // OWN OUTPUT is recognised by wasSentByUs (the ids we sent), NOT a leading-emoji check. Since
+  // 2026-10-13 it is no longer DROPPED at the bridge (that blocked a same-node sibling's @mention):
+  // it reaches onIncoming marked `from.fromNode` (this node) so the SPINE's per-being echo gate
+  // suppresses the wake. Marking works for a reply even WITHOUT the persona emoji.
+  it("marks E's own re-ingested reply as own output (from.fromNode) — even one that does NOT lead with the persona emoji", async () => {
+    const { bridge, incoming } = await startBridge({ nodeName: 'kg' });
     await sendSettled(bridge, '🐶 egpt: roger', { chatId: CHAT('chat-1') });        // resolves + remembers its confirmed id
     await sendSettled(bridge, 'plain reply no emoji', { chatId: CHAT('chat-1') });  // a reply with NO leading persona emoji
     // Both echo back under the ids BEEPER assigned them (that is the only id the WS
@@ -497,8 +498,9 @@ describe('beeper bridge', () => {
     fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: fake.posts[1].confirmedID, text: 'plain reply no emoji' })] });
     fake.emit({ type: 'message.upserted', entries: [liveMsg({ text: 'sentinel-human' })] });
     await waitFor(() => incoming.some((i) => i.text === 'sentinel-human'));
-    expect(incoming.map((i) => i.text)).not.toContain('🐶 egpt: roger');       // suppressed: we sent that id
-    expect(incoming.map((i) => i.text)).not.toContain('plain reply no emoji');  // …and one without the emoji too
+    expect(incoming.find((i) => i.text === '🐶 egpt: roger')?.from.fromNode).toBe('kg');        // marked ours (spine suppresses the wake)
+    expect(incoming.find((i) => i.text === 'plain reply no emoji')?.from.fromNode).toBe('kg');  // …and one without the emoji too
+    expect(incoming.find((i) => i.text === 'sentinel-human').from.fromNode ?? null).toBe(null);  // the human line is NOT ours
   });
 
   it('converts inbound HTML message text to markdown before dispatch', async () => {
@@ -895,33 +897,34 @@ describe('beeper bridge', () => {
     expect(media.map((m) => m.kind)).toEqual(['image']);      // audio skipped by policy
   });
 
-  it("mode:auto echo: E's OWN plain reply (no persona marker) is suppressed by its sent id, but the operator's genuinely-typed line passes through", async () => {
+  it("mode:auto echo: E's OWN plain reply (no persona marker) is marked own output by its sent id, but the operator's genuinely-typed line is not", async () => {
     // In an auto chat E sends PLAIN operator text — no 🐶 body_emoji — so the
-    // persona-marker guard cannot catch its echo; the sent-id set IS the suppression
-    // key (refinement #4). The operator's OWN typed line is isSender too but was never
-    // sent by us, so it is NOT suppressed and reaches the host to accumulate.
-    const { bridge, incoming } = await startBridge();   // NO personaEmoji — auto sends carry none
+    // persona-marker guard cannot catch its echo; the sent-id set IS the own-output
+    // key. The operator's OWN typed line is isSender too but was never sent by us, so
+    // it is NOT marked and reaches the host to accumulate.
+    const { bridge, incoming } = await startBridge({ nodeName: 'kg' });   // NO personaEmoji — auto sends carry none
     await sendSettled(bridge, 'all good, talk soon', { chatId: CHAT('chat-1') });
     fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: fake.posts[0].confirmedID, isSender: true, text: 'all good, talk soon' })] });   // E's reply, echoed back under its real id
     fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: 'op-id', isSender: true, text: 'note for later' })] });                          // operator's OWN typed message
     await waitFor(() => incoming.some((i) => i.text === 'note for later'));
-    expect(incoming.map((i) => i.text)).not.toContain('all good, talk soon');   // echo suppressed: we sent that id
-    expect(incoming.find((i) => i.text === 'note for later').from.isSender).toBe(true);   // operator's own line passes through → spine accumulates it
+    expect(incoming.find((i) => i.text === 'all good, talk soon')?.from.fromNode).toBe('kg');   // marked ours (spine suppresses) — we sent that id
+    expect(incoming.find((i) => i.text === 'note for later').from.fromNode ?? null).toBe(null);  // operator's own line is NOT ours → spine accumulates it
+    expect(incoming.find((i) => i.text === 'note for later').from.isSender).toBe(true);
   });
 
-  it("a node's own MESH ENVELOPE echo IS suppressed like any other self-send (two-node topology: DOLLY sees it via normal cross-account delivery, not self-reingestion; reverts the 2026-07-05 self-relay exemption)", async () => {
+  it("a node's own MESH ENVELOPE echo is marked own output by its sent id (the spine's mesh branch drops it; DOLLY sees it via normal cross-account delivery)", async () => {
     // With a real second node (DOLLY, a second Beeper account) on the other end of
     // the chain, each node sees the OTHER account's posts via normal cross-account
-    // delivery and never needs to re-see its own. So a mesh envelope this node just
-    // posted is an ordinary self-echo — the sent-id set suppresses it exactly like any
-    // other message; there's no reason to special-case the provenance tail.
-    const { bridge, incoming } = await startBridge();
+    // delivery and never needs to re-see its own. A mesh envelope this node just posted
+    // echoes back as an ordinary self-echo — marked from.fromNode by its sent id, and the
+    // SPINE's mesh branch drops it (kindOf 'echo'); there's no reason to special-case the tail.
+    const { bridge, incoming } = await startBridge({ nodeName: 'kg' });
     const envelope = '```\nQGRvbiBob2xh\n\n---\nfrom: Me\nto: don.do\nmid: chain-1\nenc: b64\n```';
     await sendSettled(bridge, envelope, { chatId: CHAT('chat-1') });
     fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: fake.posts[0].confirmedID, text: envelope })] });   // our own post, echoed back under its real id
     fake.emit({ type: 'message.upserted', entries: [liveMsg({ text: 'a real message' })] });
     await waitFor(() => incoming.some((i) => i.text === 'a real message'));
-    expect(incoming.map((i) => i.text)).not.toContain(envelope);   // echo suppressed: we sent that id
+    expect(incoming.find((i) => i.text === envelope)?.from.fromNode).toBe('kg');   // marked ours → spine's mesh branch drops it
   });
 
   // MULTIPATH MESH FUZZY-DROP (operator live test 2026-07-06): the word-bag fallback (built for
@@ -954,15 +957,15 @@ describe('beeper bridge', () => {
 
   // REGRESSION LOCK (a): the node's OWN envelope echo is STILL suppressed — now because we
   // sent that id, which is also why the foreign forward above survives. One rule, both cases.
-  it("a node's OWN mesh-envelope echo is STILL suppressed (73fc57a invariant) — by its sent id, the same rule that lets the foreign forward through", async () => {
-    const { bridge, incoming } = await startBridge();
+  it("a node's OWN mesh-envelope echo is marked own output (73fc57a invariant) — by its sent id, the same rule that lets the foreign forward through", async () => {
+    const { bridge, incoming } = await startBridge({ nodeName: 'kg' });
     const chat = CHAT('egpt-mesh-do-kg');
     const env = encodeMesh({ by: 'An', body: 'hola @don answer please a longer body here', from: 'HFM', from_node: 'kg', to: 'don.do', post_id: 'p-2', via: 'carol.kg' });
     await sendSettled(bridge, env, { chatId: chat });
     fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: fake.posts[0].confirmedID, chatID: chat, text: env })] });   // our own post, echoed back
     fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: 'sentinel-own', chatID: chat, text: 'a real message' })] });
     await waitFor(() => incoming.some((i) => i.from.msgKey === 'sentinel-own'));
-    expect(incoming.some((i) => i.from.msgKey === fake.posts[0].confirmedID)).toBe(false);   // suppressed: we sent that id
+    expect(incoming.find((i) => i.from.msgKey === fake.posts[0].confirmedID)?.from.fromNode).toBe('kg');   // marked ours → spine's mesh branch drops it; foreign forward (not ours) still flows
   });
 
   // REGRESSION LOCK (b): the 2026-06-25/28 wizard echo-loop guard. WhatsApp can hand our OWN
@@ -971,8 +974,8 @@ describe('beeper bridge', () => {
   // the TEXT, never the ID, and the echo still arrives under the id Beeper gave our send. Identity
   // holds the flood guard that resemblance was hired for — and, unlike the bag, it cannot mistake a
   // human's paste for our own words.
-  it('a reformatted echo of our own menu (one line, re-marked) is STILL suppressed — by its id, not by its words', async () => {
-    const { bridge, incoming } = await startBridge();
+  it('a reformatted echo of our own menu (one line, re-marked) is STILL marked own output — by its id, not by its words', async () => {
+    const { bridge, incoming } = await startBridge({ nodeName: 'kg' });
     const chat = CHAT('chat-1');
     const menu = 'egpt · conversations (newest first)\n  0) ✦ @egpt — global default brain\n  1) Joyce Vicente · e:haiku/mention\n  2) SPOILER ALERT · e:sonnet/mention\n(reply a number · q quit)';
     const echo = 'egpt · conversations (newest first) 0) ✦ @egpt — global default brain - 1) Joyce Vicente · e:haiku/mention - 2) SPOILER ALERT · e:sonnet/mention - reply a number · q quit';   // reformatted one-line echo
@@ -980,7 +983,7 @@ describe('beeper bridge', () => {
     fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: fake.posts[0].confirmedID, chatID: chat, text: echo })] });
     fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: 'sentinel-menu', chatID: chat, text: 'a real human line' })] });
     await waitFor(() => incoming.some((i) => i.from.msgKey === 'sentinel-menu'));
-    expect(incoming.some((i) => i.from.msgKey === fake.posts[0].confirmedID)).toBe(false);   // no echo-loop, no word-bag needed
+    expect(incoming.find((i) => i.from.msgKey === fake.posts[0].confirmedID)?.from.fromNode).toBe('kg');   // marked ours by id (spine suppresses) — no word-bag needed
   });
 
   it('dedups re-upserts of the same id (receipts/edits)', async () => {
@@ -1138,88 +1141,37 @@ describe('beeper bridge', () => {
     expect(fake.posts.some((p) => p.replyToMessageID === 'own-echo')).toBe(false);
   });
 
-  // THE TWO-ACCOUNT SPLIT (operator 2026-10-09) — REPRODUCE-FIRST for OUR real topology, the gap the
-  // single-account test above cannot reach. One spine drives TWO bridges: a PRIMARY (the EAR) and a
-  // SECONDARY (the MOUTH), each a separate startBeeperBridge with its OWN _sentIds, and one real chat
-  // is a DIFFERENT room id per account. E's voice reply is sent on the MOUTH (keyed in the MOUTH's
-  // store under the MOUTH's room id); the echo arrives on the EAR (different store, different room id),
-  // so the EAR's per-bridge, chat-qualified wasSentByUs MISSES it and E is re-prompted + double-👂'd.
-  // Boot wires each bridge an isOwnAudioEcho that fans the CHAT-INDEPENDENT audio store across every
-  // bridge and takes any yes (the same "ask every connection" the fan-out wasSentByUs uses); the EAR
-  // then finds the MOUTH's sent-audio key by BYTES alone and routes the echo into the SAME own-output
-  // path. FAILS on the baseline (local wasSentByUs only); PASSES with the cross-bridge resolver.
-  it('two-account split: a voice reply sent on the MOUTH bridge, echoing on the EAR bridge under a different room id, is suppressed via the cross-bridge resolver (not the local ledger)', async () => {
-    const OWN = 'egpt-split-voice-reply-bytes', HUMAN = 'a-humans-spoken-words-split';
-    const sha = (b) => createHash('sha256').update(Buffer.from(b)).digest('hex');
-    const MOUTH_ROOM = CHAT('mouth-room'), EAR_ROOM = CHAT('ear-room');   // one real chat, a DIFFERENT room id per account
+  // SOURCE GATE FOR VOICE (operator 2026-10-13) — the two-account voice echo, now by SENDER not
+  // byte-hash. A being's synthesized reply re-enters on the EAR carrying the MOUTH's senderID (∈
+  // `ours` = speakingIdentities − earIdentities), so it is OUR output and is DROPPED before whisper:
+  // not transcribed, not surfaced, no 👂. A human voice note (sender ∉ ours) still transcribes + 👂s.
+  // This replaces the deleted cross-bridge audio-hash fan.
+  it('SOURCE: an incoming audio from a MOUTH identity is dropped before transcription; a human voice note still transcribes + 👂s', async () => {
+    const MOUTH = ['@dolly-egpt:beeper.com', '+13472576794'];   // what the mouth install reports for itself
+    const whisper = [];                                          // every file whisper is asked to transcribe
+    const { bridge, incoming } = await startBridge({
+      speakingIdentities: async () => MOUTH,                     // the EAR knows the mouth's identities (boot wires this)
+      transcribe: async (p) => { whisper.push(p); return 'fake transcript'; },
+      echoPlan: () => ({ rank: 1, winner: true }),               // a genuine note WOULD get a 👂
+      resolveTranscriptionService: async () => ({ enabled: true, postsBack: true }),
+    });
 
-    // Each account is its OWN Beeper install (own port) with its OWN seen-state dir, so the mouth's
-    // _sentIds is genuinely invisible to the ear — the split, modelled honestly. The EAR rides the
-    // suite's `fake` (afterEach closes it; its `posts` is what a 👂 lands in).
-    const mouthFake = await startFakeBeeper();
-    const mouthState = mkdtempSync(join(tmpdir(), 'egpt-beeper-mouth-'));
-    const earState = mkdtempSync(join(tmpdir(), 'egpt-beeper-ear-'));
+    // 1) E's own synthesized reply echoes back — sender IS the mouth → dropped before whisper.
+    fake.emit({ type: 'message.upserted', entries: [liveMsg({
+      id: 'own-voice', senderID: '@dolly-egpt:beeper.com', isSender: false, text: null, type: 'VOICE', attachments: [voiceAtt('egpt-synth')],
+    })] });
+    // 2) A human's voice note — sender is NOT the mouth → transcribed + surfaced + 👂'd.
+    fake.emit({ type: 'message.upserted', entries: [liveMsg({
+      id: 'human-voice', senderID: '@whatsapp_lid-human:beeper.local', isSender: false, text: null, type: 'VOICE', attachments: [voiceAtt('a-human')],
+    })] });
 
-    // The node's bridge set, read at CALL time — exactly how boot's isOwnAudioEcho reads
-    // bridgeByEndpoint (the siblings are built after the first one).
-    const nodeBridges = [];
-    const isOwnAudioEcho = (s) => nodeBridges.some((b) => !!b?.wasAudioSentByUs?.(s));
-
-    const build = async (f, state, extra) => {
-      const incoming = [];
-      const sub = f.subscribed();
-      const b = await startBeeperBridge({
-        beeperToken: 'test-token', baseUrl: `http://127.0.0.1:${f.port}`, wsUrl: `ws://127.0.0.1:${f.port}/v1/ws`,
-        stateDir: state, onIncoming: (t, from) => incoming.push({ t, from }), onMedia: () => {},
-        transcribe: async () => 'fake transcript',
-        onLog: (m) => { if (/failed|DROPPED|error/i.test(m)) console.error('[BRIDGELOG]', m); },
-        postsBackDelayMs: 0, ...extra,
-      });
-      bridges.push(b); nodeBridges.push(b);
-      await waitFor(() => f.subscribed() > sub);
-      await b.startupReady;
-      return { b, incoming };
-    };
-
-    try {
-      const { b: mouth } = await build(mouthFake, mouthState, {});                         // SECONDARY: speaks, never wakes
-      const { b: ear, incoming } = await build(fake, earState, {                           // PRIMARY: the ear
-        isOwnAudioEcho,
-        echoPlan: () => ({ rank: 1, winner: true }),                                       // a genuine note WOULD get a 👂
-        resolveTranscriptionService: async () => ({ enabled: true, postsBack: true }),
-      });
-
-      // 1) E's voice reply goes out on the MOUTH bridge → its bytes key lands in the MOUTH's store,
-      //    under the MOUTH's room id. The EAR's own store never sees it — that is the split.
-      const sentOgg = join(mouthState, 'egpt-voice-reply-split.ogg');
-      writeFileSync(sentOgg, OWN);
-      const sent = await mouth.sendMedia(MOUTH_ROOM, sentOgg);
-      await sent.confirmedId;
-      expect(mouth.wasAudioSentByUs(sha(OWN))).toBe(true);
-      expect(ear.wasAudioSentByUs(sha(OWN))).toBe(false);     // the EAR's own ledger does NOT have it (the split)
-      expect(isOwnAudioEcho(sha(OWN))).toBe(true);            // …but the node-level fan finds the MOUTH's key
-
-      // 2) The SAME bytes re-enter as an incoming voice note on the EAR, under the EAR's room id
-      //    (delivered only to the EAR's fake). The cross-bridge resolver recognizes it → the EAR
-      //    records the note's id as ours, so the spine's kindOf==='echo' prompts nobody.
-      fake.emit({ type: 'message.upserted', entries: [liveMsg({
-        chatID: EAR_ROOM, id: 'split-echo', isSender: false, text: null, type: 'VOICE', attachments: [voiceAtt(OWN)],
-      })] });
-      await waitFor(() => incoming.find((i) => i.from.msgKey === 'split-echo'));            // still transcribed + logged
-      expect(ear.wasSentByUs(EAR_ROOM, 'split-echo')).toBe(true);                           // FAILS on baseline — the echo would re-prompt
-
-      // 3) LOCK: a human voice note (different bytes) on the EAR is NOT ours — it still prompts + 👂s.
-      fake.emit({ type: 'message.upserted', entries: [liveMsg({
-        chatID: EAR_ROOM, id: 'human-note-split', isSender: false, text: null, type: 'VOICE', attachments: [voiceAtt(HUMAN)],
-      })] });
-      await waitFor(() => fake.posts.some((p) => p.replyToMessageID === 'human-note-split'));
-      expect(ear.wasSentByUs(EAR_ROOM, 'human-note-split')).toBe(false);
-      expect(fake.posts.some((p) => p.replyToMessageID === 'split-echo')).toBe(false);      // our own re-entering .ogg posts no 👂
-    } finally {
-      await mouthFake.close();
-      rmSync(mouthState, { recursive: true, force: true });
-      rmSync(earState, { recursive: true, force: true });
-    }
+    await waitFor(() => fake.posts.some((p) => p.replyToMessageID === 'human-voice'));
+    // the human note ran whisper, surfaced, and drew a 👂 …
+    expect(whisper).toHaveLength(1);
+    expect(incoming.find((i) => i.from.msgKey === 'human-voice')).toBeTruthy();
+    // … and OUR OWN voice output ran NO whisper, surfaced nothing, posted no 👂.
+    expect(incoming.find((i) => i.from.msgKey === 'own-voice')).toBeFalsy();
+    expect(fake.posts.some((p) => p.replyToMessageID === 'own-voice')).toBe(false);
   });
 
   // 👂 THE FALLBACK KEY THAT WAS NOT A KEY (live, 2026-09-12) — REPRODUCE-FIRST.
@@ -2093,13 +2045,13 @@ describe('beeper bridge — wake words (own handles only, no injection)', () => 
     expect(incoming[0].from.atEAnywhere).toBe(true);
   });
 
-  it("the node's OWN persona reply (multi-line 🐶 header) is dropped when it echoes back (its sent id)", async () => {
-    const { bridge, incoming } = await startBridge();
+  it("the node's OWN persona reply (multi-line 🐶 header) is marked own output when it echoes back (its sent id)", async () => {
+    const { bridge, incoming } = await startBridge({ nodeName: 'kg' });
     await sendSettled(bridge, '🐶 egpt\nmy own reply', { chatId: CHAT('chat-1') });
     fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: fake.posts[0].confirmedID, text: '🐶 egpt\nmy own reply' })] });
     fake.emit({ type: 'message.upserted', entries: [liveMsg({ isSender: false, text: 'sentinel-own' })] });
     await waitFor(() => incoming.some((m) => m.text === 'sentinel-own'));
-    expect(incoming.map((m) => m.text)).not.toContain('🐶 egpt\nmy own reply');   // dropped: we sent that id
+    expect(incoming.find((m) => m.text === '🐶 egpt\nmy own reply')?.from.fromNode).toBe('kg');   // marked ours (spine suppresses the wake) — we sent that id
   });
 });
 
@@ -2643,6 +2595,33 @@ describe('beeper bridge — a quote-reply to a being\'s post names that being (o
     expect(m.from.replyToId).toBe('7143');
   });
 
+  // CROSS-NODE REPLY — NO DOUBLE-WAKE (operator 2026-10-13). A reply quoting a PEER node's post
+  // (do/egpt) fails the node check on kg → replyToBeing null → a bare reply does NOT wake kg's E
+  // (dolly, where the frame matches its own node, wakes there). The node check is what scopes a
+  // reply to THIS node's beings; dropping it was the sole cause of the cross-node double-wake.
+  it('a reply quoting a PEER node\'s egpt post names nobody on this node (no cross-node double-wake)', async () => {
+    const { incoming } = await startBridge({ nodeName: 'kg' });
+    fake.messages.set(CHAT('chat-1'), [{ id: 'peer-1', text: `🐶 E: lo dije yo${encodeNodeSignature('do', 'egpt')}`, isSender: false }]);
+    fake.emit(quoteReply('peer-1', 're peer'));
+    const m = await arrival(incoming, 're peer');
+    expect(m.from.replyToBeing ?? null).toBe(null);   // peer-node frame fails the node check → names nobody here
+    expect(m.from.replyToBot).toBe(false);            // …so a bare reply does not wake E (mention rules unchanged)
+    expect(m.from.replyToId).toBe('peer-1');
+  });
+
+  // SAME-NODE SIBLING REPLY STILL WAKES (operator 2026-10-13). A reply quoting a sibling's OWN
+  // post (kg/eplus) passes the node check → replyToBeing names the sibling → the router admits the
+  // reply and E+ wakes. Confirms restoring the node check does not block a same-node reply.
+  it('a reply quoting E+\'s own (kg/eplus) post names eplus → the sibling wakes', async () => {
+    const { incoming } = await startBridge({ nodeName: 'kg' });
+    fake.messages.set(CHAT('chat-1'), [{ id: 'eplus-1', text: `🐶 E+: aquí va${encodeNodeSignature('kg', 'eplus')}`, isSender: false }]);
+    fake.emit(quoteReply('eplus-1', 're sib'));
+    const m = await arrival(incoming, 're sib');
+    expect(m.from.replyToBeing).toBe('eplus');   // same-node frame passes the node check
+    expect(m.from.replyToBot).toBe(true);        // → the router admits the reply, E+ wakes
+    expect(m.from.replyToId).toBe('eplus-1');
+  });
+
   it('a post the bridge never saw (a restart): the chat\'s recent list is read, and names the being', async () => {
     const { incoming } = await startBridge({ nodeName: 'kg' });
     fake.messages.set(CHAT('chat-1'), [{ id: '7150', text: KEN_POST, isSender: false }]);
@@ -2707,14 +2686,15 @@ describe('beeper bridge — a quote-reply to a being\'s post names that being (o
 describe('beeper bridge — own-send suppression is id-exact (shared account)', () => {
   const chat = CHAT('chat-1');
 
-  it("our OWN send, echoed back under its CONFIRMED id (≠ the pendingMessageID), never re-enters dispatch", async () => {
-    const { bridge, incoming } = await startBridge();
+  it("our OWN send, echoed back under its CONFIRMED id (≠ the pendingMessageID), is marked own output (from.fromNode) so the spine suppresses the wake", async () => {
+    const { bridge, incoming } = await startBridge({ nodeName: 'kg' });
     await sendSettled(bridge, 'egpt says hi', { chatId: chat });
     const confirmed = fake.posts[0].confirmedID;
     fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: confirmed, chatID: chat, text: 'egpt says hi' })] });
     fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: 'sentinel-echo', chatID: chat, isSender: false, text: 'a real message' })] });
     await waitFor(() => incoming.some((i) => i.from.msgKey === 'sentinel-echo'));
-    expect(incoming.map((i) => i.text)).not.toContain('egpt says hi');   // no self-loop
+    expect(incoming.find((i) => i.from.msgKey === confirmed)?.from.fromNode).toBe('kg');   // marked ours by id → spine suppresses the wake (no self-loop)
+    expect(incoming.find((i) => i.from.msgKey === 'sentinel-echo').from.fromNode ?? null).toBe(null);   // the human line is not ours
   });
 
   it("a human PASTING the bot's own text back (same words, DIFFERENT id) DISPATCHES — resemblance must never suppress", async () => {

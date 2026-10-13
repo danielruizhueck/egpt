@@ -81,11 +81,6 @@ import { createEarProbe, injectViaTelegram } from '../ear-probe.mjs';
 export const _BEEPER_LOG = join(EGPT_HOME, 'config', 'logs', 'beeper.log');
 const SEEN_PROCESSED_CAP = 3000;
 const SEEN_SENT_CAP = 500;
-// Chat-independent own-sent AUDIO keys (operator 2026-10-09). Size-bounded FIFO like _sentIds, but
-// NOT persisted: a voice reply's echo returns within seconds of the same process, and an identical
-// audio much later must not be suppressed forever. Far fewer voice sends than text sends, so a
-// small cap is ample (the echo is near-immediate); matches _ourStreamIds' bound style.
-const SENT_AUDIO_CAP = 200;
 const SEEN_COMPACT_EVERY = 1000;   // appends between jsonl compactions
 const RECONNECT_MIN_MS = 3_000;
 const RECONNECT_MAX_MS = 60_000;
@@ -711,15 +706,6 @@ export async function startBeeperBridge(opts = {}) {
     // the mark comes from the mouth on its own copy. Late-bound by boot (the mouth is built after the
     // bridges). Default null → no mark at all: there is no second placement in this limb.
     outboundFor = null,
-    // CROSS-BRIDGE OWN-VOICE RESOLVER (operator 2026-10-09). "did ANY of this node's bridges send
-    // this audio?" — injected by boot so the EAR bridge recognizes a voice reply the MOUTH bridge
-    // sent. Our two-account split sends E's .ogg on the MOUTH bridge (recorded in ITS store under
-    // ITS room id) while the echo arrives on the EAR bridge under a DIFFERENT room id, so this
-    // bridge's chat-qualified _sentIds never sees it. Fans across every bridge's wasAudioSentByUs
-    // and takes any yes — the SAME shape wasSentByUs fans (bridge-fanout.mjs), late-bound exactly
-    // as outboundFor is. Null (a one-connection node, or a directly-constructed bridge) ⇒ only the
-    // local stores answer, byte-identical to the single-account baseline.
-    isOwnAudioEcho = null,
     // Whisper binary/model config — now sourced from transcription.whisper (the
     // host resolves it; falls back to the legacy whatsapp.media.audio_transcribe
     // during migration). Transcription is its own concern, not a media subkey.
@@ -1265,14 +1251,6 @@ export async function startBeeperBridge(opts = {}) {
   // the second chat's message.
   const msgKeyOf = (chatID, id) => `${chatID}|${id}`;
   const _sentIds = new Set();
-  // CHAT-INDEPENDENT own-sent AUDIO keys (operator 2026-10-09). The baseline records a voice
-  // reply's bytes key into _sentIds CHAT-QUALIFIED (msgKeyOf), which answers only for the SAME
-  // bridge in the SAME room. In the two-account split the reply goes out on the MOUTH bridge and
-  // the echo arrives on the EAR bridge under a DIFFERENT room id, so the mouth's room id must not
-  // be needed to find it. This set holds the bare sha256 of the audio bytes, queried by
-  // wasAudioSentByUs and fanned across this node's bridges by boot's isOwnAudioEcho. Keyed on BYTES
-  // ALONE — never sender/reply/transcript. Bounded + non-persisted per SENT_AUDIO_CAP's note.
-  const _sentAudioKeys = new Set();
   const _processedIds = new Set();   // incoming ids already handled (message.upserted re-fires on receipts/edits)
   const _seenPath = join(stateDir, 'beeper-seen.jsonl');
   let _seenAppends = 0;
@@ -1689,22 +1667,13 @@ export async function startBeeperBridge(opts = {}) {
       // live self-reply loop, observed 2026-08-10).
       const { r, confirmedId } = await postAndConfirm(chatID, body, captionText, { matchFileName: caption ? null : up.fileName });
       onLog(`beeper: media sent [${chatID}] ${basename(filePath)} (${up.mimeType || 'unknown'})`);
-      // OWN VOICE ECHO KEY (operator 2026-10-09). An AUDIO send (every voice reply) re-enters as an
-      // incoming note: its id differs from this send's, and its re-transcription carries no node
-      // signature, so neither the id gate (wasSentByUs) nor fromThisNode — the text echo gates —
-      // recognizes it. Its AUDIO BYTES are identical on the way back, so record THIS file's bytes
-      // key (the decode layer's sha256Hex) into the SAME own-send ledger the id path uses
-      // (rememberSent/_sentIds); the incoming voice gate (dispatchMessage) matches on it and routes
-      // the echo into the ordinary own-output suppression. Keyed off the LOCAL file type, so it is
-      // independent of whatever the upload echoes back. (Single ear/mouth bridge: a split across two
-      // accounts is a different room per account — this per-bridge, chat-qualified ledger does not
-      // reach it; see the voice-echo test's note.)
+      // BASELINE OWN-VOICE KEY (operator 2026-10-13). An audio send re-enters with a different id
+      // and no node frame; its BYTES are identical, so record this file's bytes key into _sentIds
+      // (chat-qualified, exactly as the id path). The incoming voice gate matches it ONLY on a
+      // single-account install — the two-account echo is dropped by SOURCE before whisper. (The old
+      // cross-bridge audio fan is gone; SOURCE owns the split.)
       if (mimeTypeFor(filePath).startsWith('audio/')) {
-        try {
-          const audioKey = sha256Hex(await readFile(filePath));
-          rememberSent(audioKey, chatID);                                       // baseline: local, chat-qualified (single ear/mouth bridge)
-          _sentAudioKeys.add(audioKey); _capSet(_sentAudioKeys, SENT_AUDIO_CAP);   // cross-bridge: chat-independent, found from a sibling bridge by bytes alone
-        }
+        try { rememberSent(sha256Hex(await readFile(filePath)), chatID); }
         catch (e) { onLog(`beeper: could not key own voice send for echo suppression [${chatID}/${filePath}] — ${e?.message ?? e}`); }
       }
       return { ok: true, chatId: chatID, pendingMessageID: r?.pendingMessageID, confirmedId };
@@ -2055,14 +2024,19 @@ export async function startBeeperBridge(opts = {}) {
     await _maybeEmitReactions(msg);
     await _maybeEmitEdits(msg);   // a re-upsert with changed text → an edit stage-direction (before dedup)
     if (msg.type === 'REACTION') return;   // bare reaction event: no body to route
-    // OWN-SEND GATE (the only suppression): drop this message iff WE sent this exact
-    // (chat, id). First let any send still in flight in this chat finish resolving its
-    // CONFIRMED id — a send's echo routinely arrives before its POST even returns, and
-    // waiting is what makes the answer EXACT instead of a text guess. The operator's
-    // own messages, a paste of our own words, and a peer node's sends all carry
-    // isSender:true on this shared account and all pass — only our own id doesn't.
+    // First let any send still in flight in this chat finish resolving its CONFIRMED id — a send's
+    // echo routinely arrives before its POST returns, so the id check below is EXACT, not a guess.
     await _awaitSends(chatID);
-    if (wasSentByUs(chatID, msg.id)) return;
+    // OWN OUTPUT, BY SOURCE (operator 2026-10-13): the sender is one of the MOUTH / being-speaking
+    // identities (speakingIdentities − earIdentities — the ear/OPERATOR is excepted), or, as a
+    // narrow baseline fallback where a being and the operator share one account, our own id. It is
+    // NOT dropped wholesale (that blocked a same-node sibling's @mention): it is stamped `fromNode`
+    // on the envelope so the spine's PER-BEING echo gate suppresses only a wake of the AUTHOR, never
+    // a different being. The same idKey/isOneOf/ours proof _maybeEmitReactions already uses.
+    const _ear = new Set((await earIdentities()).map(idKey));
+    const _ours = new Set(((await speakingIdentities()) ?? []).map(idKey).filter((k) => k && !_ear.has(k)));
+    const senderIsOurs = _ours.size > 0 && !!msg.senderID && await isOneOf(chatID, idKey(msg.senderID), _ours);
+    const ownOutput = senderIsOurs || wasSentByUs(chatID, msg.id);
     // Beeper delivers text as HTML; convert it to markdown so the model + transcript
     // see prose, not markup (the inbound complement of the outbound md→HTML path;
     // src/html-to-markdown.mjs).
@@ -2116,12 +2090,12 @@ export async function startBeeperBridge(opts = {}) {
       onLog(`beeper: backlog message [${info.title}] (${new Date(tsMs).toISOString()} < cutoff ${new Date(backlogCutoffMs).toISOString()}) — backfilled to transcript, not dispatched`);
     }
 
-    // MEDIA-FLOOD BAN (src/flood-ban.mjs). Own sends already returned above (wasSentByUs), so
-    // the counter never sees our own output. A banned sender's message — media AND text — is
-    // dropped HERE, before persistMedia/transcription/onIncoming, so nothing of theirs hits
-    // disk or the spine; and the one message that TIPS the ban is dropped too. Live traffic
-    // only: a backlog replay is backfill, never a flood (isBacklog bypasses the gate).
-    if (floodBan && !isBacklog && !isAllowedUser(msg.senderID || chatID, acct)) {   // allowed_users are never flood-banned (operator 2026-10-12)
+    // MEDIA-FLOOD BAN (src/flood-ban.mjs). Our OWN output is exempt (!ownOutput) so the counter
+    // never sees it — it no longer returns before this point (per-being echo flows on), so the
+    // guard is explicit now. A banned sender's message — media AND text — is dropped HERE, before
+    // persistMedia/transcription/onIncoming, so nothing of theirs hits disk or the spine; and the
+    // one message that TIPS the ban is dropped too. Live traffic only: a backlog replay is backfill.
+    if (floodBan && !isBacklog && !ownOutput && !isAllowedUser(msg.senderID || chatID, acct)) {   // allowed_users are never flood-banned (operator 2026-10-12)
       const senderId = msg.senderID || chatID;
       if (floodBan.isBanned(acct, chatID, senderId)) return;   // muted — no save, no dispatch
       const isMediaMsg = Array.isArray(msg.attachments) && msg.attachments.length > 0
@@ -2132,6 +2106,10 @@ export async function startBeeperBridge(opts = {}) {
 
     let _voiceAtt = null, _voicePath = null, _voiceCaption = null;
     if ((msg.type === 'VOICE' || msg.type === 'AUDIO') && Array.isArray(msg.attachments) && msg.attachments.length) {
+      // OUR OWN VOICE OUTPUT (operator 2026-10-13): an incoming audio from a MOUTH identity is a
+      // being's synthesized reply echoing back — DROP it before whisper (don't transcribe, don't
+      // process). SOURCE replaces the cross-bridge byte-hash for the two-account topology.
+      if (senderIsOurs) { onLog(`beeper: own voice output re-entered [${info.title}] — dropped before transcription (source)`); return; }
       isVoice = true;
       const att = msg.attachments.find(a => a.isVoiceNote || a.type === 'audio') || msg.attachments[0];
       const path = await attachmentToLocalPath(att);
@@ -2178,26 +2156,14 @@ export async function startBeeperBridge(opts = {}) {
         let audioHash = null;
         try { audioHash = sha256Hex(await readFile(path)); }
         catch (e) { onLog(`beeper: 👂 NOT echoed [${info.title}] — the note's audio is unreadable, so this node cannot compute the co-account-stable echo key, and echoing on a node-local one double-👂s. Still transcribed + logged; a peer that can read the audio echoes it (${e?.message ?? e})`); }
-        // OWN VOICE REPLY RE-ENTERING (operator 2026-10-09). A voice reply (.ogg) this node sent
-        // comes back as an incoming AUDIO note. Its re-transcription is not byte-identical to the
-        // text and carries no node signature, so the text echo gates miss it — but the AUDIO BYTES
-        // are identical, and sendMedia recorded this .ogg's bytes key into the SAME own-send ledger
-        // the id path uses (_sentIds). Match it there (chat-qualified, exactly as the id path) and
-        // route into the EXISTING own-output path: record THIS note's id as ours so the spine
-        // classifies it kindOf==='echo' (recorded, prompts nobody). It still transcribes + logs — a
-        // being never deletes a message — it just wakes no one, and (rank 0, the existing echo:false
-        // opt-out) posts no 👂 of our own words either. Keyed on the BYTES alone, never the sender or
-        // the quoted id, so a human's voice note that merely replies to or quotes E is NOT suppressed.
-        //
-        // THE TWO-ACCOUNT SPLIT (operator 2026-10-09). Local wasSentByUs is per-bridge AND
-        // chat-qualified, so when the MOUTH bridge sent the .ogg (its own _sentIds, its own room id)
-        // the EAR bridge's lookup MISSES the echo. isOwnAudioEcho — injected by boot — fans the
-        // chat-independent audio store across EVERY bridge this node holds and takes any yes (the
-        // SAME "ask every connection" the fan-out wasSentByUs uses), so the EAR finds the MOUTH's
-        // sent-audio key by BYTES alone and takes the identical own-output path. A one-connection
-        // node has only its own store to fan, so this adds nothing there.
-        const ownVoiceEcho = audioHash != null && !!msg.id
-          && (wasSentByUs(chatID, audioHash) || !!isOwnAudioEcho?.(audioHash));
+        // BASELINE OWN-VOICE FALLBACK (operator 2026-10-13). The two-account echo is dropped by
+        // SOURCE above (sender ∈ MOUTH). This narrow byte-key covers the ONE case SOURCE cannot: a
+        // SINGLE-account install (being and operator share the account, so `ours` is empty) that
+        // runs TTS — a being's own .ogg re-enters with a new id and no frame, but IDENTICAL bytes,
+        // which sendMedia recorded into _sentIds. Match it there (chat-qualified, local only — the
+        // cross-bridge fan is gone, SOURCE owns the split) and route into the own-output path:
+        // record THIS note's id as ours → the spine's kindOf==='echo' prompts nobody; rank 0 → no 👂.
+        const ownVoiceEcho = audioHash != null && !!msg.id && wasSentByUs(chatID, audioHash);
         if (ownVoiceEcho) { onLog(`beeper: own voice reply re-entered [${info.title}] — recorded, prompts nobody`); rememberSent(msg.id, chatID); }
         const plan = (audioHash == null || ownVoiceEcho) ? { rank: 0, winner: false } : echoPlan(audioHash);
         const echoOn = plan.rank >= 1 && !tooOldForEcho;   // is an echo POSSIBLE at all for this note on this node?
@@ -2493,6 +2459,11 @@ export async function startBeeperBridge(opts = {}) {
     }
     const from = {
       chatId: chatID,                       // opaque Beeper room id (for send-back)
+      // OUR OWN OUTPUT (operator 2026-10-13): stamp this node's name so the spine's per-being echo
+      // gate classifies it (kindOf 'echo'). A SIGNED line already carries its frame — identity reads
+      // the node/being off that and ignores this — so this only matters for UNSIGNED own-output
+      // (an id'd send with no frame): author stays null there → it wakes nobody.
+      ...(ownOutput ? { fromNode: nodeName } : {}),
       chatName: info.title,
       chatType: info.type === 'group' ? 'group' : 'private',
       network: acct || 'whatsapp',          // origin network (Beeper accountID); default 'whatsapp'
@@ -2704,11 +2675,6 @@ export async function startBeeperBridge(opts = {}) {
     removeReaction: (chatId, messageId, key) => removeReaction(chatId, messageId, key),   // the 🎧 mark's removal (port `unreact`)
     sendMedia:     (chatId, filePath, opts)  => sendMedia(chatId, filePath, opts),
     wasSentByUs:   (chatId, messageId)       => wasSentByUs(chatId, messageId),
-    // CROSS-BRIDGE own-voice query (operator 2026-10-09): "did THIS bridge send audio with this
-    // sha?" — chat-independent, so a sibling bridge (the EAR) can ask the MOUTH without its room
-    // id. Boot fans this across every bridge (isOwnAudioEcho) exactly as the fan-out facade fans
-    // wasSentByUs. Pure set membership, like wasSentByUs.
-    wasAudioSentByUs: (sha)                  => _sentAudioKeys.has(sha),
     // Deterministic-name surface (operator 2026-06-10): callers and slash
     // files work with names/slugs; room ids stay an internal detail.
     listChats,

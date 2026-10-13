@@ -27,7 +27,7 @@ import { formatDispatchLine } from '../dispatch-line.mjs';
 // envelope beside fromMember. Anything else would mean re-ordering the pipeline so a guard runs
 // before the envelope is built, and "the InboundEvent is built ONCE and consumed by all paths"
 // (C7.6e, spine.mjs:50) is the contract that keeps ev.body and ev.line from disagreeing.
-import { decodeNodeSignature, hasNodeSignature, renderNodeSignature } from '../node-signature.mjs';
+import { decodeNodeSignature, decodeBeingSignature, hasNodeSignature, renderNodeSignature } from '../node-signature.mjs';
 
 // Beeper tags each message with its origin NETWORK; map it to the conversation
 // SURFACE (the slugDir bucket) and the dispatch-line NODE (the entry-point tag).
@@ -152,6 +152,10 @@ export function createIdentity({ formatLine = formatDispatchLine, now = () => Da
         // of our own sends that escaped the bridge's echo gate would read HUMAN in the room.
         // Every genuine bridge inbound carries no `from.fromNode` → null, exactly as before.
         fromNode: signed ? (decodeNodeSignature(rawBody) ?? '') : (f.fromNode ?? null),
+        // WHICH BEING authored this, off the SAME frame (`<node>/<being>`) — the per-being echo
+        // gate reads it to suppress a wake of the AUTHOR only (spine.mjs). null = a node-only frame
+        // or an unsigned message. A synthetic may hand it over as f.fromBeing (none today → null).
+        fromBeing: signed ? decodeBeingSignature(rawBody) : (f.fromBeing ?? null),
         // WHERE THIS MESSAGE ACTUALLY ARRIVED, when that is not where it is being dispatched:
         // { surface, chatId, chatName } of the ORIGIN conversation. Carried exactly as fromMember
         // and fromNode are, and for the same reason — a synthetic that RE-ADDRESSES an already-built

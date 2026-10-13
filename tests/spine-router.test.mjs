@@ -339,7 +339,7 @@ describe('addressed() — a bare handle opening the message (operator 2026-07-27
   it('a surface-pinned agent still drops out: kg`s `don Pedro…` on beeper falls through to the persona', async () => {
     const router = createRouter({ getAgents: () => KG, defaultBeing: 'egpt' });
     const beeper = await router.resolve({ ...ev('don Pedro me dijo que sí'), surface: 'beeper' });
-    expect(beeper.targets).toEqual([{ being: 'egpt', mention: ev('x').mention, address: null }]);   // unmentioned persona → gated silent
+    expect(beeper.targets).toEqual([{ being: 'egpt', mention: ev('x').mention, address: null, fallthrough: true }]);   // unmentioned persona → gated silent
     const shell = await router.resolve({ ...ev('don Pedro me dijo que sí'), surface: SHELL_SURFACE });
     expect(shell.mesh?.being).toBe('don');
   });
@@ -362,7 +362,7 @@ describe('addressed() — a bare handle opening the message (operator 2026-07-27
     });
     it('REPRODUCE-FIRST: the ROUTER carries it — `wren ping` falls through to the persona, `@wren ping` does not', async () => {
       const off = createRouter({ getAgents: () => KG, defaultBeing: 'egpt', addressWithoutAt: false });
-      expect((await off.resolve(ev('wren ping'))).targets).toEqual([{ being: 'egpt', mention: ev('x').mention, address: null }]);
+      expect((await off.resolve(ev('wren ping'))).targets).toEqual([{ being: 'egpt', mention: ev('x').mention, address: null, fallthrough: true }]);
       expect((await off.resolve(ev('@wren ping'))).mesh?.being).toBe('wren');
       // …and ON (the default) is untouched: no option = today's live behaviour.
       const on = createRouter({ getAgents: () => KG, defaultBeing: 'egpt' });
@@ -393,7 +393,7 @@ describe('router.resolve — allowed_users gate (operator 2026-08-15)', () => {
     const arouter = createRouter({ getAgents: () => agents, defaultBeing: 'egpt' });
     const r = await arouter.resolve({ ...ev('@wren do X'), senderId: 'stranger' });
     expect(r.being).toBe('egpt');                                  // falls through to the persona
-    expect(r.targets).toEqual([{ being: 'egpt', mention: ev('x').mention, address: null }]);   // no refusal, no trace of @wren
+    expect(r.targets).toEqual([{ being: 'egpt', mention: ev('x').mention, address: null, fallthrough: true }]);   // no refusal, no trace of @wren
   });
 
   it('a sender ON the GLOBAL allowed_users reaches the being directly', async () => {

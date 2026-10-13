@@ -260,15 +260,16 @@ export function createSpine({
   // auto-STOP the channel when either trigger — the RATE or REPETITION — trips. The tripping
   // turn still runs; the STOP pauses the NEXT one (blocked() is checked at the top of every
   // dispatch path).
-  async function guardCountNonHuman(ev, channel) {
+  async function guardCountNonHuman(ev, channel, crossBeingWake = false) {
     // NO CHANNEL, NO COUNT — an ENVELOPE (see handleFast). Without this the count would pile up
     // under a literal `null` key shared by every relay channel on the node, and stopChannel(null)
     // refuses it, so it could only ever log a stop that never happened.
     if (channel == null) return;
     // OUR OWN ECHO IS NOT A TURN (operator 2026-09-20). E's ⏳ placeholders, posted through the
     // mouth account and re-entering on the ear, filled PALMA's cap in five seconds. Bookkeeping
-    // neither counts nor resets — ANOTHER node's being still counts, because that is real chatter.
-    if (kindOf(ev) === 'echo') return;
+    // neither counts nor resets. EXCEPT a same-node CROSS-BEING wake (E→E+): it IS real chatter and
+    // must count exactly as a cross-node one does, or a runaway E↔E+ never auto-STOPs (2026-10-13).
+    if (kindOf(ev) === 'echo' && !crossBeingWake) return;
     const override = guardOverride ? await Promise.resolve(guardOverride(ev.surface, ev.chatId)).catch(() => null) : null;
     const action = guard.noteBeing(channel, override, { body: ev.body, author: ev.senderId ?? ev.senderName ?? '' });
     if (action === 'stop') {
@@ -970,6 +971,11 @@ export function createSpine({
     // DISPLAY as the operator — the 2026-06-19 loop), so it counts toward the loop cap;
     // a STOPPED channel suppresses the responder turn entirely.
     if (mesh?.isEnvelope?.(ev)) {
+      // OUR OWN ENVELOPE ECHO (operator 2026-10-13): the bridge no longer drops own output
+      // wholesale (per-being echo), so our just-posted envelope now reaches here. mesh.handle has
+      // no self-guard (it relied on that drop), so skip it — dropped exactly as before. A PEER's
+      // envelope is kindOf 'being', not 'echo', and is still handled.
+      if (kindOf(ev) === 'echo') return null;
       if (guard) {
         if (guard.blocked(channel)) return () => { note(`guard: ${channel} stopped — mesh turn suppressed`); };
         await guardCountNonHuman(ev, channel);
@@ -1003,6 +1009,21 @@ export function createSpine({
     // fan out beside it (fanOutExtras). A bare-string or single `{ being, mention }` return
     // (older/other fakes) normalizes to a one-target list, so those callers are unchanged.
     let targets = await targetsOf(ev);
+
+    // OUR OWN OUTPUT, PER-BEING (operator 2026-10-13). An own-frame line (fromThisNode) NEVER wakes
+    // its AUTHOR being, but DOES wake a DIFFERENT being it EXPLICITLY addresses (@mention/reply —
+    // the persona fall-through is not an address, so it is skipped). Unsigned own-output (no author
+    // in the frame) wakes nobody. Record-only means the frame IS on the record (the ingestion point
+    // above wrote it) — it just prompts no one. A cross-being wake rides on as a normal dispatch AND
+    // counts toward the loop guard (crossBeingWake below), exactly as a peer node's frame does.
+    let crossBeingWake = false;
+    if (kindOf(ev) === 'echo') {
+      const author = fromThisNode(ev) && ev.fromBeing ? String(ev.fromBeing).toLowerCase() : null;
+      const woke = author ? targets.filter((t) => !t.fallthrough && String(gateAs(t, defaultBeing)).toLowerCase() !== author) : [];
+      if (!woke.length) return () => { note(`echo: ${guardChannel(ev)} — this node's own output re-entered; recorded, prompts nobody`); };
+      targets = woke;
+      crossBeingWake = true;
+    }
 
     // META ENGINEERS ARE BEYOND THE GUARD (operator 2026-09-16; isMetaEngineer above). The routed
     // targets ARE the addressees, known here and nowhere earlier, so this is where it is decided —
@@ -1046,30 +1067,13 @@ export function createSpine({
     if (guard) {
       if (guard.blocked(channel) && !beyondGuard) return () => { note(`guard: ${channel} stopped — prompt suppressed`); };
       if (humanTurn(ev)) guard.noteHuman(channel);
-      else if (!beyondGuard) await guardCountNonHuman(ev, channel);
+      else if (!beyondGuard) await guardCountNonHuman(ev, channel, crossBeingWake);
     }
 
-    // OUR OWN ECHO NEVER TRIGGERS A TURN — IN ANY MODE, 'on'/'auto' INCLUDED (operator 2026-10-08,
-    // the PALMA loop's REPLY face). THIS node's own output re-entering — the ⏳ placeholder posted
-    // eagerly as the streaming target (sender.mjs), or a finished reply — carries this node's own
-    // frame (so fromThisNode), or re-enters as one of our own id'd sends (wasSentByUs). stop-guard
-    // turnKind already calls that 'echo' and guardCountNonHuman already refuses to COUNT it — but
-    // counting was the ONLY thing that ever looked at it. The reply gate never did, and 'on'/'auto'
-    // answer EVERY message (replyAllowed → true, no @mention needed), so a being answered its own
-    // placeholder, which posted another, unstoppably. mention/mention-direct/accum escaped only
-    // because a placeholder @-mentions nobody — nothing was stopping the echo, their gate simply
-    // never fired on it.
-    //
-    // The invariant is mode-INDEPENDENT (a being must never reply to its own message), so it is
-    // enforced at the ONE dispatch chokepoint below: the primary turn, fanOutExtras' other agents,
-    // the mesh forward, the auto dwell and roomRelay.fanOut all hang off this single return, so one
-    // guard covers every wake this message could produce. A no-op ACTION, not null: the frame IS
-    // received — it stays on the record (handleFast wrote it above) and the being reads it as
-    // back-context like any other line — it simply prompts nobody. 'echo' is OUR OWN alone
-    // (wasSentByUs / fromThisNode); ANOTHER node's being is turnKind 'being' and STILL wakes,
-    // because cross-node and same-node inter-agent addressing is wanted — which is exactly what the
-    // 'A BEING DOES NOT WAKE…' note just below is about (that note is the COUNTER, not this gate).
-    if (kindOf(ev) === 'echo') return () => { note(`echo: ${guardChannel(ev)} — this node's own output re-entered; recorded, prompts nobody`); };
+    // OUR OWN ECHO: classified PER-BEING above (right after targetsOf), before the gate — a
+    // same-being/unsigned own-frame is already returned record-only there, and a cross-being wake
+    // rides on from here as a normal dispatch. The old wholesale `kindOf==='echo'` return lived
+    // here; it is gone because it suppressed a DIFFERENT being's wake too (the same-node sibling).
 
     // A BEING DOES NOT WAKE ON A FRAME ANOTHER NODE'S SPINE COMMITTED (operator 2026-08-31, on a
     // room message fanned into a group that the other node then sees). The node signature already
