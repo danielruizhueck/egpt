@@ -104,11 +104,12 @@ export function createTranscription({
     // Same value semantics as the entity rung, for the same reason: a NEGATIVE delay is a hard
     // mute, carried out as postsBack:false (a raw -1 would post IMMEDIATELY downstream, since
     // transcribeVoiceNote debounces only while postsBackDelayMs > 0) and clamped to 0.
-    const { enabled: nodeEnabled, postsBack: nodePostsBack } = parseTranscriptionConfig(cfg);
+    const { enabled: nodeEnabled, postsBack: nodePostsBack, listeningReaction: nodeListening } = parseTranscriptionConfig(cfg);
     const nodeRung = {
       enabled: nodeEnabled,
       postsBack: nodeEnabled && nodePostsBack && globalDelayMs >= 0,
       postsBackDelayMs: Math.max(0, globalDelayMs),
+      listeningReaction: nodeListening,   // the 🎧 while this node decodes — opt-OUT, like enabled
     };
     if (!chatId) return nodeRung;
     let hit = null, surface = null;
@@ -128,11 +129,11 @@ export function createTranscription({
     // resolves against the conversation's own rungs.
     if (!hit) return nodeRung;
 
-    const { enabled, postsBack, postsBackDelayMs: entityDelay } = parseTranscriptionConfig(resolveConfig(slugDir(surface, hit.slug)));
+    const { enabled, postsBack, postsBackDelayMs: entityDelay, listeningReaction } = parseTranscriptionConfig(resolveConfig(slugDir(surface, hit.slug)));
     const effectiveDelay = entityDelay ?? globalDelayMs;
     // A negative delay is a hard mute: still HEARD (model + transcript.md get it), never
     // SPOKEN. Mapped to 0 on the way out — postsBack:false already prevents any post.
-    return { enabled, postsBack: enabled && postsBack && effectiveDelay >= 0, postsBackDelayMs: Math.max(0, effectiveDelay) };
+    return { enabled, postsBack: enabled && postsBack && effectiveDelay >= 0, postsBackDelayMs: Math.max(0, effectiveDelay), listeningReaction };
   }
 
   return {
