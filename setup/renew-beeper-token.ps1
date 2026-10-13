@@ -81,22 +81,25 @@ Start-Process -FilePath $exe -ArgumentList "--user-data-dir=`"$profileDir`""
 Write-Host ''
 Say 'In the Beeper window: Settings > Integrations (Developers) > Desktop API.'
 Say 'Keep "Allow connections" on, approve a NEW connection, set it to NEVER expire,'
-Say 'and copy its token.'
+Say 'and copy its token (its Copy button).'
 Write-Host ''
 
+# Read from the clipboard: a masked Read-Host in Windows PowerShell does not take a paste.
 $token = $null
 while (-not $token) {
-  $secure = Read-Host -AsSecureString '  Paste the new token (hidden), then Enter'
-  $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-  try { $token = ([Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)).Trim() } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
-  if (-not $token) { continue }
-  $port = Find-ApiPort $token
-  if ($port) { Say "the open Beeper accepts it (port $port)" }
-  else {
-    $again = (Read-Host '  No running Beeper accepts that token. Paste again? [Y/n]').Trim()
-    if ($again -notmatch '^[nN]') { $token = $null }
+  Read-Host '  Copy the token in Beeper, then press Enter here' | Out-Null
+  $token = ([string](Get-Clipboard -Raw)).Trim()
+  if ($token -notmatch '^\S{16,}$') {
+    Say 'the clipboard does not hold a token (16+ characters, no spaces).'
+    $token = (Read-Host '  Paste it here instead (Enter alone to retry the clipboard)').Trim()
+    if ($token -notmatch '^\S{16,}$') { $token = $null }
   }
 }
+Set-Clipboard -Value ' '
+Say ("got a token: " + $token.Length + " characters")
+$port = Find-ApiPort $token
+if ($port) { Say "the open Beeper accepts it (port $port)" }
+else { Say 'the open Beeper does not answer to it yet; writing it anyway - the service is checked after it starts' }
 
 $token | & node (Join-Path $repo 'setup\set-beeper-token.mjs') $Connection --config (Join-Path $egptHome 'config\config.yaml')
 if ($LASTEXITCODE -ne 0) { throw 'config.yaml was NOT changed (see the line above)' }

@@ -16,13 +16,14 @@ const cfgPath = flag === '--config' && cfgArg
   : join(process.env.EGPT_HOME || join(homedir(), '.egpt'), 'config', 'config.yaml');
 
 const token = readFileSync(0, 'utf8').trim();
-if (!/^[A-Za-z0-9._~+/=-]{16,}$/.test(token)) fail('that does not look like a token (16+ characters, no spaces)');
+if (!/^\S{16,}$/.test(token)) fail('that does not look like a token (16+ characters, no spaces)');
 
 const src = readFileSync(cfgPath, 'utf8');
 const current = YAML.parse(src)?.beeper?.[connection]?.token;
 if (current === undefined) fail(`${cfgPath} has no beeper.${connection}.token`);
 
-const out = spliceYamlScalar(src, ['beeper', connection, 'token'], { expect: current, to: token });
+let out = spliceYamlScalar(src, ['beeper', connection, 'token'], { expect: current, to: token });
+if (src.includes('\r\n')) out = out.replace(/\r?\n/g, '\r\n');
 const tag = `${token.length} chars, sha256 ${createHash('sha256').update(token).digest('hex').slice(0, 12)}`;
 if (out === src) { console.log(`beeper.${connection}.token already is that token (${tag})`); process.exit(0); }
 
