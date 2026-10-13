@@ -2180,8 +2180,11 @@ export async function startBeeperBridge(opts = {}) {
         // placement (outboundFor → src/spine/sender.mjs makeOutbound `react`): the mouth on its own
         // copy, named by the note's cross-account key; no mouth → this connection's own bridge. A
         // mark the mouth cannot place is no mark anywhere, and says why there. A chat with
-        // transcription off never reaches the transcriber, so it gets no mark either.
+        // transcription off never reaches the transcriber, so it gets no mark either. A chat whose
+        // resolved transcription_service says `listening_reaction: false` is decoded with no mark at
+        // all — none placed, so none removed (operator An 2026-10-13: its contacts are clients).
         const listening = async () => {
+          if (svc.listeningReaction === false) return null;
           const out = outboundFor?.(chatID);
           if (!out) return null;
           let key = null;
