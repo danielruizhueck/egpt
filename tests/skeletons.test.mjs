@@ -291,7 +291,7 @@ describe('config/skeletons/room/config.yaml (the per-conversation folder config)
     expect(parseWarmBlock(doc)).toEqual({ idleTtlMs: null });
     // HEARD but SILENT: the all-commented skeleton opts nobody into the 👂 echo
     // (posts_back is opt-IN, operator 2026-09-13).
-    expect(parseTranscriptionConfig(doc)).toEqual({ enabled: true, postsBack: false, postsBackDelayMs: null });
+    expect(parseTranscriptionConfig(doc)).toEqual({ enabled: true, postsBack: false, postsBackDelayMs: null, listeningReaction: true });
     expect(doc.heartbeats).toBeUndefined();
   });
 

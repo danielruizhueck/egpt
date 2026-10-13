@@ -35,7 +35,7 @@ describe('createTranscription', () => {
   // DEFAULT_SERVICE + the global delay, so an unconfigured chat transcribes and never posts.
   it('defaults the per-chat verdict to transcribe but NOT echo back (with the global delay)', async () => {
     const tx = createTranscription({ getConfig: () => config });
-    expect(await tx.resolveTranscriptionService()).toEqual({ enabled: true, postsBack: false, postsBackDelayMs: 12345 });
+    expect(await tx.resolveTranscriptionService()).toEqual({ enabled: true, postsBack: false, postsBackDelayMs: 12345, listeningReaction: true });
   });
 
   // Per-conversation policy: resolve chatId → contact slug (loadState) → folder
@@ -52,7 +52,7 @@ describe('createTranscription', () => {
         return { transcription_service: { posts_back: false } };
       },
     });
-    expect(await tx.resolveTranscriptionService('!room:beeper.local')).toEqual({ enabled: true, postsBack: false, postsBackDelayMs: 12345 });
+    expect(await tx.resolveTranscriptionService('!room:beeper.local')).toEqual({ enabled: true, postsBack: false, postsBackDelayMs: 12345, listeningReaction: true });
   });
 
   it('honors enabled:false (never transcribe) — scanning past empty surfaces to the hit', async () => {
@@ -63,7 +63,7 @@ describe('createTranscription', () => {
     });
     // postsBack now folds enabled (postsBack = enabled && …) — behaviorally inert since
     // enabled:false already short-circuits transcription (the note is never even HEARD).
-    expect(await tx.resolveTranscriptionService('tg:user:9')).toEqual({ enabled: false, postsBack: false, postsBackDelayMs: 12345 });
+    expect(await tx.resolveTranscriptionService('tg:user:9')).toEqual({ enabled: false, postsBack: false, postsBackDelayMs: 12345, listeningReaction: true });
   });
 
   it('falls back to the default service for an unregistered chat (registration is on the text pipe)', async () => {
@@ -73,7 +73,7 @@ describe('createTranscription', () => {
       loadState: async () => ({ contacts: {} }),
       resolveConfig: () => { readCalled = true; return { transcription_service: { enabled: false, posts_back: false } }; },
     });
-    expect(await tx.resolveTranscriptionService('!unknown:beeper.local')).toEqual({ enabled: true, postsBack: false, postsBackDelayMs: 12345 });
+    expect(await tx.resolveTranscriptionService('!unknown:beeper.local')).toEqual({ enabled: true, postsBack: false, postsBackDelayMs: 12345, listeningReaction: true });
     expect(readCalled).toBe(false);   // no contact → no entity lookup
   });
 
@@ -89,12 +89,12 @@ describe('createTranscription', () => {
 
   it('the node rung honors the node\'s own enabled:false for a chat with NO registry row', async () => {
     expect(await nodeSaying({ enabled: false }).resolveTranscriptionService('!unknown:beeper.local'))
-      .toEqual({ enabled: false, postsBack: false, postsBackDelayMs: 12345 });
+      .toEqual({ enabled: false, postsBack: false, postsBackDelayMs: 12345, listeningReaction: true });
   });
 
   it('…and its own posts_back:true — the fallback reads the node in both directions', async () => {
     expect(await nodeSaying({ posts_back: true }).resolveTranscriptionService('!unknown:beeper.local'))
-      .toEqual({ enabled: true, postsBack: true, postsBackDelayMs: 12345 });
+      .toEqual({ enabled: true, postsBack: true, postsBackDelayMs: 12345, listeningReaction: true });
   });
 
   // The node rung carries the same VALUE SEMANTICS the entity rung always had: a NEGATIVE
@@ -104,7 +104,21 @@ describe('createTranscription', () => {
   // into the verdict would echo at once — the exact opposite of never-echo. ~/.egpt sets -1.
   it('a NEGATIVE node delay stays never-echo for a registry-less chat (not an immediate one)', async () => {
     expect(await nodeSaying({ posts_back: true, posts_back_delay_ms: -1 }).resolveTranscriptionService('!unknown:beeper.local'))
-      .toEqual({ enabled: true, postsBack: false, postsBackDelayMs: 0 });
+      .toEqual({ enabled: true, postsBack: false, postsBackDelayMs: 0, listeningReaction: true });
+  });
+
+  // THE 🎧 rides the SAME verdict, at both rungs, exactly like `enabled` (operator An 2026-10-13):
+  // the node's own listening_reaction:false for a chat with no registry row, and an entity rung's.
+  it('listening_reaction:false reaches the verdict from the node rung and from the entity rung', async () => {
+    expect(await nodeSaying({ listening_reaction: false }).resolveTranscriptionService('!unknown:beeper.local'))
+      .toEqual({ enabled: true, postsBack: false, postsBackDelayMs: 12345, listeningReaction: false });
+    const tx = createTranscription({
+      getConfig: () => config,
+      loadState: async () => stateWith('whatsapp', '!room:beeper.local', 'client-chat-2610130101'),
+      resolveConfig: () => ({ transcription_service: { listening_reaction: false } }),
+    });
+    expect(await tx.resolveTranscriptionService('!room:beeper.local'))
+      .toEqual({ enabled: true, postsBack: false, postsBackDelayMs: 12345, listeningReaction: false });
   });
 
   // The converse lock: DEFAULT_SERVICE is still the FLOOR — a node that declares no
@@ -112,7 +126,7 @@ describe('createTranscription', () => {
   it('node declaring nothing → the DEFAULT_SERVICE floor + the shared delay', async () => {
     const tx = createTranscription({ getConfig: () => ({}), loadState: async () => ({ contacts: {} }) });
     expect(await tx.resolveTranscriptionService('!unknown:beeper.local'))
-      .toEqual({ enabled: true, postsBack: false, postsBackDelayMs: POSTS_BACK_DELAY_MS });
+      .toEqual({ enabled: true, postsBack: false, postsBackDelayMs: POSTS_BACK_DELAY_MS, listeningReaction: true });
   });
 
   it('ONE key: the post-back delay is read from transcription_service ONLY — the legacy transcription.posts_back_delay_ms is not a name any more', () => {
@@ -163,28 +177,28 @@ describe('resolveTranscriptionService — posts_back_delay_ms, one key across th
   // posts_back: false.
   it('-1 → NEVER echo (postsBack:false) but still HEARD (enabled:true); delay clamps to 0', async () => {
     expect(await mk({ posts_back: true, posts_back_delay_ms: -1 }).resolveTranscriptionService('!r:beeper.local'))
-      .toEqual({ enabled: true, postsBack: false, postsBackDelayMs: 0 });
+      .toEqual({ enabled: true, postsBack: false, postsBackDelayMs: 0, listeningReaction: true });
   });
 
   it('0 → echo immediately (postsBack:true, postsBackDelayMs:0)', async () => {
     expect(await mk({ posts_back: true, posts_back_delay_ms: 0 }).resolveTranscriptionService('!r:beeper.local'))
-      .toEqual({ enabled: true, postsBack: true, postsBackDelayMs: 0 });
+      .toEqual({ enabled: true, postsBack: true, postsBackDelayMs: 0, listeningReaction: true });
   });
 
   it('N (8000) → echo after N ms trailing-debounce', async () => {
     expect(await mk({ posts_back: true, posts_back_delay_ms: 8000 }).resolveTranscriptionService('!r:beeper.local'))
-      .toEqual({ enabled: true, postsBack: true, postsBackDelayMs: 8000 });
+      .toEqual({ enabled: true, postsBack: true, postsBackDelayMs: 8000, listeningReaction: true });
   });
 
   it('unset → the node rung delay stands', async () => {
     expect(await mk({ posts_back: true }).resolveTranscriptionService('!r:beeper.local'))
-      .toEqual({ enabled: true, postsBack: true, postsBackDelayMs: 12345 });
+      .toEqual({ enabled: true, postsBack: true, postsBackDelayMs: 12345, listeningReaction: true });
   });
 
   // A delay does not opt a chat IN either — the two are independent in both directions.
   it('a delay alone does NOT enable posts_back: an opted-out chat stays silent at N ms', async () => {
     expect(await mk({ posts_back_delay_ms: 8000 }).resolveTranscriptionService('!r:beeper.local'))
-      .toEqual({ enabled: true, postsBack: false, postsBackDelayMs: 8000 });
+      .toEqual({ enabled: true, postsBack: false, postsBackDelayMs: 8000, listeningReaction: true });
   });
 
   // THE PRECEDENCE DISSOLVED (operator ruling 2026-07-26, "do not keep maintaining legacy
@@ -195,12 +209,12 @@ describe('resolveTranscriptionService — posts_back_delay_ms, one key across th
   // are two independent values that no longer imply each other.
   it('a delay does NOT resurrect posts_back:false — the two are independent values now', async () => {
     expect(await mk({ posts_back: false, posts_back_delay_ms: 8000 }).resolveTranscriptionService('!r:beeper.local'))
-      .toEqual({ enabled: true, postsBack: false, postsBackDelayMs: 8000 });
+      .toEqual({ enabled: true, postsBack: false, postsBackDelayMs: 8000, listeningReaction: true });
   });
 
   it('posts_back:false with no delay stays quiet at the node-rung delay', async () => {
     expect(await mk({ posts_back: false }).resolveTranscriptionService('!r:beeper.local'))
-      .toEqual({ enabled: true, postsBack: false, postsBackDelayMs: 12345 });
+      .toEqual({ enabled: true, postsBack: false, postsBackDelayMs: 12345, listeningReaction: true });
   });
 });
 
