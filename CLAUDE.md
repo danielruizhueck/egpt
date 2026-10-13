@@ -175,6 +175,10 @@ Per chunk of work:
 3. [This] → verify: [check]
 ```
 
+7. **Send it upstream**: push the branch and open a draft PR, per
+   [CONTRIBUTING.md](CONTRIBUTING.md). Do it without being asked — in this repo
+   that IS the end of a chunk. Never merge, never push to `main`.
+
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer
