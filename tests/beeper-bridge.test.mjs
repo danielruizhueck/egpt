@@ -35,6 +35,7 @@ import { _resetPromotions, ECHO_MARKER } from '../src/incoming-media.mjs';
 import { echoRank } from '../src/spine/echo-priority.mjs';
 import { addressed, createRouter } from '../src/spine/router.mjs';
 import { buildTranscriptionPipeline } from '../src/transcription-pipeline.mjs';
+import { createTranscription } from '../src/spine/transcription.mjs';
 import { makeOutbound } from '../src/spine/sender.mjs';
 import { boot, makePeerMouth } from '../src/spine/boot.mjs';
 import { emptyState } from '../src/conversations-state.mjs';
@@ -4273,6 +4274,44 @@ describe('beeper bridge — 🎧 listening mark: placed where the decode runs, t
     expect(fake.reactions).toHaveLength(0);
     expect(fake.unreactions).toHaveLength(0);
   });
+
+  // THE MARK IS THE NODE'S CHOICE (operator An 2026-10-13: on this node the contacts are a business's
+  // clients, and the 🎧 is visible to them). `transcription_service.listening_reaction: false`, resolved
+  // for the chat by the REAL resolver from the node's config: the decode still runs HERE and the note is
+  // transcribed, but no 🎧 is placed — so none is removed — on either account.
+  const verdictFrom = (svc) => createTranscription({ getConfig: () => ({ transcription_service: svc }), loadState: async () => ({ contacts: {} }) }).resolveTranscriptionService;
+  it('listening_reaction:false for the chat: transcribed on this node, and NO 🎧 placed or removed anywhere', async () => {
+    const mouth = mouthBridge();
+    let decodes = 0;
+    const tx = chain({ profile: DO, own: DO_OWN, remote: async () => { decodes += 1; return 'fake transcript'; } });
+    const { incoming } = await ear({ tx, mouth, extra: { resolveTranscriptionService: verdictFrom({ listening_reaction: false }) } });
+    emitNote('note-quiet');
+    await waitFor(() => incoming.length === 1, 3000);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(decodes).toBe(1);                                                     // decoded HERE — the mark's own trigger
+    expect(incoming[0].text).toBe('(voice transcription) fake transcript');
+    expect(mouth.reactions).toEqual([]);
+    expect(mouth.unreactions).toEqual([]);
+    expect(fake.reactions).toEqual([]);
+    expect(fake.unreactions).toEqual([]);
+  });
+
+  // REGRESSION LOCK: the leaf absent — from the node's config through the real resolver, or a verdict
+  // that does not carry the field at all — places and removes the 🎧 exactly as before.
+  for (const [label, resolveTranscriptionService] of [
+    ['no listening_reaction in the config', verdictFrom({ enabled: true })],
+    ['a verdict without the field', async () => ({ enabled: true, postsBack: false })],
+  ]) {
+    it(`listening_reaction absent (${label}): the 🎧 is placed once and removed once`, async () => {
+      const { incoming } = await ear({ tx: chain({ profile: DO, own: DO_OWN }), extra: { resolveTranscriptionService } });
+      emitNote('note-default');
+      await waitFor(() => incoming.length === 1, 3000);
+      await waitFor(() => fake.unreactions.length === 1, 3000);
+      expect(fake.reactions).toHaveLength(1);
+      expect(fake.reactions[0]).toMatchObject({ chatID: CHAT('chat-1'), messageID: 'note-default', reactionKey: LISTENING_REACTION });
+      expect(fake.unreactions[0]).toMatchObject({ chatID: CHAT('chat-1'), messageID: 'note-default', reactionKey: LISTENING_REACTION });
+    });
+  }
 });
 
 // ═══ REPLYING `e` READS A MESSAGE BACK — THROUGH THE WHOLE NODE (operator 2026-09-17) ═══════════

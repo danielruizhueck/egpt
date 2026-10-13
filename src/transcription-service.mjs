@@ -59,13 +59,19 @@
 // The two asymmetric comparisons below are each the FAIL-CLOSED reading of their own flag,
 // and both are strict about the type: a non-boolean (`posts_back: yes` parses as the STRING
 // "yes" under YAML 1.2) neither enables the echo nor disables hearing.
+//
+// `listening_reaction` (operator An 2026-10-13) is the 🎧 the bridge puts on a note while THIS
+// node decodes it — visible to the sender, and on a node whose contacts are a business's
+// clients they must not see it. Opt-OUT and strict exactly like `enabled`: only an explicit
+// `false` turns the mark off, and the note is still transcribed.
 
-export const DEFAULT_SERVICE = { enabled: true, postsBack: false };
+export const DEFAULT_SERVICE = { enabled: true, postsBack: false, listeningReaction: true };
 
 // Pure: a RESOLVED config doc (the resolver's merge of all three rungs) →
-// { enabled, postsBack, postsBackDelayMs }. `enabled` is opt-OUT (an explicit `false` turns
-// it off); `postsBack` is opt-IN (an explicit `true` turns it on). postsBackDelayMs is null
-// when no rung set one (the caller applies the floor).
+// { enabled, postsBack, postsBackDelayMs, listeningReaction }. `enabled` and
+// `listeningReaction` are opt-OUT (an explicit `false` turns them off); `postsBack` is opt-IN
+// (an explicit `true` turns it on). postsBackDelayMs is null when no rung set one (the caller
+// applies the floor).
 export function parseTranscriptionConfig(doc) {
   const t = (doc && typeof doc === 'object' && doc.transcription_service && typeof doc.transcription_service === 'object')
     ? doc.transcription_service : {};
@@ -73,5 +79,6 @@ export function parseTranscriptionConfig(doc) {
     enabled: t.enabled !== false,
     postsBack: t.posts_back === true,
     postsBackDelayMs: Number.isFinite(t.posts_back_delay_ms) ? t.posts_back_delay_ms : null,
+    listeningReaction: t.listening_reaction !== false,
   };
 }
