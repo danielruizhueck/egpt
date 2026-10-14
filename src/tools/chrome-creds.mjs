@@ -17,15 +17,21 @@
 //   4. For a row whose origin shares the target's REGISTRABLE DOMAIN, AES-256-GCM-decrypt
 //      password_value (v10/v11 blob: nonce=bytes[3:15], ct=bytes[15:-16], tag=bytes[-16:]).
 //
-// SEAMS: the PowerShell call, the Local State read, and the sqlite read are injected (defaults do
-// the real thing) so the parsing/branching unit-tests with no live profile, Chrome, or DPAPI. The
-// AES-GCM decrypt runs for real on whatever bytes a seam supplies (node:crypto, always available).
+// macOS replaces steps 1, 2 and the cipher of step 4 (Chromium os_crypt_mac): Local State holds no
+// key. The secret is the login Keychain's generic password "Chrome Safe Storage" (account "Chrome"),
+// read with `security`; PBKDF2-HMAC-SHA1(secret, 'saltysalt', 1003 iterations) → the 16-byte key;
+// password_value = 'v10' + AES-128-CBC ciphertext, IV = 16 spaces, PKCS#7. Step 3 is the same.
+//
+// SEAMS: the PowerShell call, the Keychain read, the Local State read, the sqlite read and the
+// platform are injected (defaults do the real thing) so the parsing/branching unit-tests with no
+// live profile, Chrome, DPAPI or Keychain. The AES-GCM and AES-CBC decrypts run for real on
+// whatever bytes a seam supplies (node:crypto, always available).
 
 import { readFileSync, copyFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { createDecipheriv } from 'node:crypto';
+import { createDecipheriv, pbkdf2Sync } from 'node:crypto';
 
 // Hostname of a URL or a bare host string, lowercased; null if there's nothing usable.
 function hostnameOf(urlOrHost) {
@@ -73,6 +79,17 @@ function decryptPassword(value, aesKey) {
   } catch { return null; }
 }
 
+// Decrypt a macOS Chrome `password_value`: 'v10' + AES-128-CBC, IV = 16 spaces, PKCS#7. A wrong key
+// fails the padding check; anything else that is not a v10 blob → null. Never throws.
+function decryptMacPassword(value, aesKey) {
+  const buf = toBuf(value);
+  if (!buf || buf.length < 3 + 16 || buf.subarray(0, 3).toString('latin1') !== 'v10') return null;
+  try {
+    const decipher = createDecipheriv('aes-128-cbc', aesKey, Buffer.alloc(16, 0x20));
+    return Buffer.concat([decipher.update(buf.subarray(3)), decipher.final()]).toString('utf8');
+  } catch { return null; }
+}
+
 // The DPAPI-unprotect PowerShell one-liner. Embeds ONLY the encrypted key blob (base64) — no
 // secret of ours, and never a password. Add-Type loads System.Security on Windows PowerShell 5.1.
 function dpapiUnprotectScript(encKeyBlobB64) {
@@ -91,6 +108,16 @@ function defaultRunPowerShell(script) {
   const r = spawnSync('powershell.exe', ['-NoProfile', '-Command', script], { encoding: 'utf8', windowsHide: true, maxBuffer: 1 << 20 });
   if (r.error) throw r.error;
   if (r.status !== 0) throw new Error(`DPAPI unprotect failed (powershell exit ${r.status})`);
+  return r.stdout;
+}
+
+// Default seam (macOS): the Keychain's "Chrome Safe Storage" secret on stdout. Nothing secret is on
+// the command line and the error carries only the exit code. BOUNDED: the first read by a new
+// caller can raise macOS's "allow access" dialog, and an unanswered dialog must not hold the spine.
+function defaultReadKeychain() {
+  const r = spawnSync('security', ['find-generic-password', '-w', '-s', 'Chrome Safe Storage', '-a', 'Chrome'], { encoding: 'utf8', timeout: 15_000, maxBuffer: 1 << 20 });
+  if (r.error) throw r.error;
+  if (r.status !== 0) throw new Error(`Keychain read failed (security exit ${r.status})`);
   return r.stdout;
 }
 
@@ -122,14 +149,18 @@ async function defaultReadLogins(loginDataPath) {
  * @param {string} o.profilePath  the Chrome user-data-dir (the brain profile root)
  * @param {string} o.domain       the site to sign in to (host or URL)
  * @param {object} [seams]
+ * @param {string}   [seams.platform]      default process.platform; 'darwin' takes the Keychain path
  * @param {function} [seams.readFile]      (path) => utf8 string; default node:fs readFileSync
  * @param {function} [seams.runPowerShell] (script) => stdout string; default spawnSync powershell
+ * @param {function} [seams.readKeychain]  () => stdout string; default spawnSync security (macOS)
  * @param {function} [seams.readLogins]    (loginDataPath) => Promise<rows>; default node:sqlite
  * @returns {Promise<{username:string,password:string}|null>}
  */
 export async function readChromeCredential({ profilePath, domain } = {}, {
+  platform = process.platform,
   readFile = (p) => readFileSync(p, 'utf8'),
   runPowerShell = defaultRunPowerShell,
+  readKeychain = defaultReadKeychain,
   readLogins = defaultReadLogins,
 } = {}) {
   try {
@@ -137,17 +168,27 @@ export async function readChromeCredential({ profilePath, domain } = {}, {
     const target = registrableDomain(domain);
     if (!target) return null;
 
-    // 1. the encrypted master-key blob from Local State (strip the "DPAPI" ascii prefix).
-    let localState;
-    try { localState = JSON.parse(readFile(join(profilePath, 'Local State'))); } catch { return null; }
-    const encKeyB64 = localState?.os_crypt?.encrypted_key;
-    if (!encKeyB64) return null;
-    let keyBlob = Buffer.from(String(encKeyB64), 'base64');
-    if (keyBlob.length >= 5 && keyBlob.subarray(0, 5).toString('latin1') === 'DPAPI') keyBlob = keyBlob.subarray(5);
+    let aesKey, decrypt;
+    if (platform === 'darwin') {
+      // 1–2 (macOS). The Keychain secret, stretched → the 16-byte AES-128-CBC key.
+      const secret = String(readKeychain() ?? '').replace(/\r?\n$/, '');
+      if (!secret) return null;
+      aesKey = pbkdf2Sync(secret, 'saltysalt', 1003, 16, 'sha1');
+      decrypt = decryptMacPassword;
+    } else {
+      // 1. the encrypted master-key blob from Local State (strip the "DPAPI" ascii prefix).
+      let localState;
+      try { localState = JSON.parse(readFile(join(profilePath, 'Local State'))); } catch { return null; }
+      const encKeyB64 = localState?.os_crypt?.encrypted_key;
+      if (!encKeyB64) return null;
+      let keyBlob = Buffer.from(String(encKeyB64), 'base64');
+      if (keyBlob.length >= 5 && keyBlob.subarray(0, 5).toString('latin1') === 'DPAPI') keyBlob = keyBlob.subarray(5);
 
-    // 2. DPAPI-unprotect it → the 32-byte AES-256-GCM key.
-    const aesKey = Buffer.from(String(runPowerShell(dpapiUnprotectScript(keyBlob.toString('base64')))).trim(), 'base64');
-    if (aesKey.length !== 32) return null;
+      // 2. DPAPI-unprotect it → the 32-byte AES-256-GCM key.
+      aesKey = Buffer.from(String(runPowerShell(dpapiUnprotectScript(keyBlob.toString('base64')))).trim(), 'base64');
+      if (aesKey.length !== 32) return null;
+      decrypt = decryptPassword;
+    }
 
     // 3. the saved logins.
     const rows = await readLogins(join(profilePath, 'Default', 'Login Data'));
@@ -155,7 +196,7 @@ export async function readChromeCredential({ profilePath, domain } = {}, {
     // 4. the first row whose origin shares the target's registrable domain, decrypted.
     for (const row of rows || []) {
       if (registrableDomain(row?.origin_url) !== target) continue;
-      const password = decryptPassword(row?.password_value, aesKey);
+      const password = decrypt(row?.password_value, aesKey);
       if (password == null) continue;
       const username = typeof row?.username_value === 'string' ? row.username_value : String(row?.username_value ?? '');
       return { username, password };
