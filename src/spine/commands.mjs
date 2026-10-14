@@ -3595,34 +3595,45 @@ export function createCommands({
   }
 
   // superMemberGate(ev) (SI PART D, 2026-10-13) — the ACCESS GATE. When an SI channel EXISTS for ev's
-  // conversation, a being wakes ONLY if the sender is a CURRENT member of that SI group (a LIVE
+  // BASE conversation, a being wakes ONLY if the sender is a CURRENT member of that SI group (a LIVE
   // participants read). A non-member (e.g. someone who left) is NOT let in: returns true to BLOCK the
   // wake and replies to their triggering message, in the chat they triggered from, with the fixed line
-  // (rate-limited per non-member per chat). Applies to EVERYONE incl. the operator. Returns false (no
-  // block) when SI is off, there is no channel (nothing to check), or the roster can't be read
-  // DEFINITELY (fail-open, like superChannelAlive's unknown). On first creation members = the base
-  // chat's members, so the gate only bites afterward.
+  // (rate-limited per non-member per chat). Returns false (no block) when SI is off, there is no channel,
+  // or the roster can't be read DEFINITELY (fail-open, like superChannelAlive's unknown).
+  //   · FIX A (prod bug, 2026-10-13): a message that ARRIVED IN the SI group is NEVER gated — the sender
+  //     is by definition a member of the group they posted in. superChannelFor is SELF-REFERENTIAL there
+  //     (getContact follows the alias to the base, then finds the super again → "channel X for X"), which
+  //     is exactly what wrongly gated Diego + the operator posting inside the -super group.
+  //   · FIX B: the account OWNER (operator) is always a member — ev.isSender is our own account, and the
+  //     operator's roster entry is the isSelf one, whose id a plain match must still accept. So the sender
+  //     is matched against EVERY participant INCLUDING isSelf (isSelf is only excluded when COUNTING other
+  //     members, which the gate does not do — presence of the sender is the whole test).
   async function superMemberGate(ev) {
     if (!cfg().super_chats?.enabled) return false;
     if (!loadState) return false;
     const surface = surfaceOf(ev);
+    const chatId = shortChatId(ev.chatId);
+    let state = null;
+    try { state = await loadState(); } catch { return false; }
+    if (isSuperChannel(state, surface, chatId)) return false;   // FIX A: posting IN the SI group → member, never gate
+    if (ev?.isSender) return false;                             // FIX B: the account owner (operator) is always a member
     let superId = null;
-    try { superId = superChannelFor(await loadState(), surface, ev.chatId); } catch { superId = null; }
-    if (!superId) return false;                              // no channel → no gate
+    try { superId = superChannelFor(state, surface, chatId); } catch { superId = null; }
+    if (!superId || superId === chatId) return false;           // no channel, or the self-referential in-group case → no gate
     let raw = null;
     try { raw = await forkBridge.chatRaw?.(superId); } catch { raw = null; }
     const items = raw && raw.participants && Array.isArray(raw.participants.items) ? raw.participants.items : null;
     if (!items) return false;                               // roster gone/unreadable → fail-open (don't block)
     const sender = ev?.senderId ?? null;
     const senderDigits = phoneDigitsOf(sender);
-    const isMember = items.some((p) => !p?.isSelf && (p?.id === sender || (senderDigits && phoneDigitsOf(p?.phoneNumber) === senderDigits)));
-    if (isMember) return false;                             // a current member → woken normally
-    const key = `${surface}:${shortChatId(ev.chatId)}:${sender ?? '?'}`;
+    const isMember = items.some((p) => p?.id === sender || (senderDigits && phoneDigitsOf(p?.phoneNumber) === senderDigits));
+    if (isMember) return false;                             // a current member (incl. the own-account/isSelf entry) → woken normally
+    const key = `${surface}:${chatId}:${sender ?? '?'}`;
     if (_onceWithin(_memberWarned, key)) {
       try { await send?.(ev.chatId, 'User must be member of SI group to interact with it.'); }
       catch (e) { onLog(`super-gate: reply post failed — ${e?.message ?? e}`); }
     }
-    onLog(`super-gate: ${sender ?? '?'} is not a member of SI channel ${superId} for ${shortChatId(ev.chatId)} — wake blocked.`);
+    onLog(`super-gate: ${sender ?? '?'} is not a member of SI channel ${superId} for ${chatId} — wake blocked.`);
     return true;                                            // BLOCK the wake
   }
 

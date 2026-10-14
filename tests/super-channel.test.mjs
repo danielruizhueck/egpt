@@ -767,7 +767,9 @@ describe('SI PART D — superMemberGate (membership of an existing SI channel)',
   const OUTSIDER = '@whatsapp_lid-leftuser:beeper.local';   // NOT in LIVE_ROSTER
   // A conversation that already HAS a super channel (SUPER_CHAT), whose live roster is LIVE_ROSTER.
   const withChannel = () => aliasContact(seedState(), 'whatsapp', SUPER_CHAT, getContact(seedState(), 'whatsapp', C_CHAT).jid, { transcript: sanitizeSlug(SUPER_TITLE), super: true });
-  const at = (senderId) => ({ chatId: C_CHAT, surface: 'whatsapp', chatName: CHAT_TITLE, senderId });
+  const at = (senderId, extra = {}) => ({ chatId: C_CHAT, surface: 'whatsapp', chatName: CHAT_TITLE, senderId, ...extra });
+  const inSuper = (senderId, extra = {}) => ({ chatId: SUPER_CHAT, surface: 'whatsapp', chatName: SUPER_TITLE, senderId, ...extra });
+  const OPERATOR = '@anrodriguez:beeper.com';               // the own account — the isSelf entry in LIVE_ROSTER
 
   it('a NON-member trigger → BLOCKED (returns true) + the fixed reply to the chat they triggered from', async () => {
     const { cmds, sent } = harness({ config: cfg(), state: withChannel() });
@@ -806,10 +808,44 @@ describe('SI PART D — superMemberGate (membership of an existing SI channel)',
     expect(sent).toHaveLength(0);
   });
 
-  it('the gate bites EVERYONE incl. the operator (a matrix id not in the roster)', async () => {
+  // ── PROD BUG FIXES (2026-10-13) ───────────────────────────────────────────────────────────────────
+  // FIX A — a message that ARRIVED IN the SI group is NEVER gated (the sender posts there ⇒ a member).
+  // RED before the fix: superChannelFor is self-referential in-group, and an outsider id fails the
+  // roster match, so the old gate BLOCKED Diego + the operator posting inside the -super group.
+  it('FIX A — ANY sender posting INSIDE the SI group is NOT blocked, no warning (even an id not in the roster)', async () => {
     const { cmds, sent } = harness({ config: cfg(), state: withChannel() });
-    expect(await cmds.superMemberGate(at('@anrodriguez:beeper.com'))).toBe(true);
-    expect(sent).toHaveLength(1);
+    expect(await cmds.superMemberGate(inSuper(OUTSIDER))).toBe(false);   // posting in the group ⇒ a member
+    expect(await cmds.superMemberGate(inSuper(MEMBER))).toBe(false);
+    expect(sent).toHaveLength(0);
+  });
+
+  // FIX B — the OPERATOR (own account) is always a member: its roster entry is isSelf, and its
+  // @…:beeper.com id must match it. RED before the fix: the old `!p?.isSelf` filter excluded that entry,
+  // so the operator could never pass — blocked from a BASE chat.
+  it('FIX B — the operator (a :beeper.com id matching the isSelf roster entry) is NOT blocked from the base chat', async () => {
+    const { cmds, sent } = harness({ config: cfg(), state: withChannel() });
+    expect(await cmds.superMemberGate(at(OPERATOR))).toBe(false);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('FIX B — the operator is NOT blocked in the SI group either (fix A covers it, fix B is the base-chat half)', async () => {
+    const { cmds, sent } = harness({ config: cfg(), state: withChannel() });
+    expect(await cmds.superMemberGate(inSuper(OPERATOR))).toBe(false);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('FIX B — the account owner by provenance (ev.isSender) is NOT blocked, whatever id form it arrives as', async () => {
+    const { cmds, sent } = harness({ config: cfg(), state: withChannel() });
+    expect(await cmds.superMemberGate(at(OUTSIDER, { isSender: true }))).toBe(false);
+    expect(sent).toHaveLength(0);
+  });
+
+  // REGRESSION LOCK — the gate STILL works for its real purpose: a genuine non-member @mentioning from
+  // the BASE chat (not in the SI roster, not isSelf, not isSender) is still blocked.
+  it('REGRESSION — a genuine non-member triggering from the BASE chat is STILL blocked', async () => {
+    const { cmds, sent } = harness({ config: cfg(), state: withChannel() });
+    expect(await cmds.superMemberGate(at(OUTSIDER))).toBe(true);
+    expect(sent).toEqual([{ chatId: C_CHAT, text: 'User must be member of SI group to interact with it.' }]);
   });
 });
 
@@ -825,6 +861,13 @@ describe('SI — the ✓/❌ state reaction decision (gating.decide → d.siReac
 
   it('enabled + NO channel → ❌', async () => {
     expect((await gate(seedState(), { enabled: true }).decide('e', replyEv)).siReaction).toBe('❌');
+  });
+
+  // PROD FIX (2026-10-13): a message arriving IN the SI channel gets NO auto-reaction — not ✅, not ❌.
+  // Everyone in the group is already a member; there is nothing to signal. The ✅/❌ is a BASE-chat signal.
+  it('a message arriving IN the SI channel → NO reaction (null), neither ✅ nor ❌', async () => {
+    const inSuperEv = { chatId: SUPER_CHAT, surface: 'whatsapp', chatName: SUPER_TITLE, kind: 'message', mention: { atEAnywhere: true } };
+    expect((await gate(withChannel(), { enabled: true }).decide('e', inSuperEv)).siReaction).toBe(null);
   });
 
   it('a channel AUTO-CREATED this turn (automatic on) → ✅ (superId is set after the create)', async () => {

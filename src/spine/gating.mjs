@@ -78,11 +78,14 @@ export function createGating({ getConfig = () => ({}), loadState = null, default
     let bv = null;
     if (state) { try { bv = getBeing(state, ev.surface, ev.chatId, being); } catch { bv = null; } }
     let { mode, source } = resolveMode(bv, being, c);
+    // Did this message ARRIVE IN a super channel? (an SI group is an alias carrying super:true.) Read
+    // once — it drives both the per-surface mode gate AND the ✅ reaction (we ARE in an SI channel).
+    const inSuper = !!(state && isSuperChannel(state, ev.surface, ev.chatId));
     // PER-SURFACE SUPER GATE (operator 2026-10-08, CHUNK 2): a message that ARRIVED in a super
     // channel is gated by config.super_chats.mode, NOT the origin's stored mode — unless `/agents mode`
     // was set IN that channel (stored on its alias entry, getBeing's room mode; operator
     // 2026-10-11). /end drops the alias, so it reverts for free.
-    if (source !== 'conversation' && state && isSuperChannel(state, ev.surface, ev.chatId)) mode = superModeOf(c.super_chats?.mode);
+    if (source !== 'conversation' && inSuper) mode = superModeOf(c.super_chats?.mode);
     const paused = !!(c.dispatch?.auto_paused ?? c.whatsapp?.auto_e_paused);
     const allowed = replyAllowed(mode, mention ?? {});
     const mayReply = mayEmitChat({ paused, mode, replyAllowed: allowed, isReaction: ev.kind === 'reaction' });
@@ -120,12 +123,12 @@ export function createGating({ getConfig = () => ({}), loadState = null, default
       }
     }
     if (replyChatId == null) replyChatId = (superId && (await superChannelAlive(superId, { chatRaw, config: c })) !== false) ? superId : ev.chatId;
-    // SI-STATE REACTION (2026-10-13): what to react with on the TRIGGERING message when a being is about
-    // to reply and SI is enabled — ✅ this conversation HAS an SI channel (superChannelFor set, INCLUDING
-    // one just auto-created above), ❌ it has none (the reply went to the base chat or was siphoned to
-    // admin). null = no reaction (SI off, or the being isn't replying). The spine places it (it holds ev
-    // + the react seam); decide only resolves the fact, off the same superId the routing used.
-    const siReaction = (mayReply && c.super_chats?.enabled) ? (superId ? '✅' : '❌') : null;
+    // SI-STATE REACTION (2026-10-13): a BASE-CHAT signal only — ✅ this conversation HAS an SI channel
+    // (superChannelFor set, incl. one auto-created above → the reply routed to SI), ❌ none (reply went
+    // to the base chat / was siphoned to admin). INSIDE an SI group there is nothing to signal — everyone
+    // is already a member — so NO auto-reaction (inSuper → null); the being may place its own if it wishes.
+    // null also when SI is off or the being isn't replying.
+    const siReaction = (mayReply && c.super_chats?.enabled && !inSuper) ? (superId ? '✅' : '❌') : null;
     return { mode, receives: receives(mode), mayReply, sendToEgpt, replyChatId, siReaction };
   }
 
