@@ -588,6 +588,16 @@ describe('SI core — auto-create on reply, gated on super_chats.automatic (PART
     expect(d.replyChatId).toBe(C_CHAT);
   });
 
+  it('REGRESSION: an EXISTING super alias but enabled:false → reply reverts to the base group (the IF gate)', async () => {
+    const h = harness({ config: cfg({ superBlock: AUTO }) });
+    const dOn = await mkGate(h, AUTO).decide('e', replyEv);          // SI on: auto-create + route to the side-room
+    expect(dOn.replyChatId).toBe(SUPER_CHAT);
+    expect(superChannelFor(h.getState(), 'whatsapp', C_CHAT)).toBe(SUPER_CHAT);   // alias now stored
+    const dOff = await mkGate(h, { enabled: false }).decide('e', replyEv);        // SI off: alias still stored
+    expect(dOff.replyChatId).toBe(C_CHAT);                           // reply goes to the group, NOT the side-room
+    expect(dOff.siReaction).toBe(null);
+  });
+
   it('REGRESSION: ensureSuperChannel UNWIRED (standalone gating) is a no-op', async () => {
     const h = harness({ config: cfg({ superBlock: AUTO }) });
     const g = createGating({ getConfig: () => cfg({ superBlock: AUTO }), loadState: async () => h.getState(), defaultKey: 'e', chatRaw: async () => LIVE_ROSTER });  // no seam

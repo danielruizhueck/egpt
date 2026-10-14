@@ -100,7 +100,7 @@ export function createGating({ getConfig = () => ({}), loadState = null, default
     // super channel). LIVE lookup off the same state read — /end drops the alias, so this reverts
     // to the arrival chat automatically with no un-pin to undo. No super channel, or a DEFINITELY dead
     // one (superChannelAlive → false) → ev.chatId.
-    let superId = state && superChannelFor(state, ev.surface, ev.chatId);
+    let superId = state && c.super_chats?.enabled && superChannelFor(state, ev.surface, ev.chatId);
     let replyChatId = null;   // resolved below (siphon may set it first)
     // SI ON-REPLY, NO CHANNEL YET (super_chats.enabled + a being ABOUT TO REPLY + !backlog):
     //   · automatic ON  → AUTO-CREATE through the EXISTING ensureSuperChannel (node-role gate,
