@@ -812,3 +812,32 @@ describe('SI PART D — superMemberGate (membership of an existing SI channel)',
     expect(sent).toHaveLength(1);
   });
 });
+
+// ── (7) THE ✓/❌ SI-STATE REACTION — decide resolves which emoji; the spine places it (end-to-end below) ──
+describe('SI — the ✓/❌ state reaction decision (gating.decide → d.siReaction)', () => {
+  const withChannel = () => aliasContact(seedState(), 'whatsapp', SUPER_CHAT, getContact(seedState(), 'whatsapp', C_CHAT).jid, { transcript: 'x', super: true });
+  const gate = (st, superBlock) => createGating({ getConfig: () => cfg({ superBlock }), loadState: async () => st, defaultKey: 'e', chatRaw: async () => LIVE_ROSTER });
+  const replyEv = { chatId: C_CHAT, surface: 'whatsapp', chatName: CHAT_TITLE, kind: 'message', mention: { atEAnywhere: true } };
+
+  it('a channel EXISTS (superChannelFor set) → ✅', async () => {
+    expect((await gate(withChannel(), { enabled: true }).decide('e', replyEv)).siReaction).toBe('✅');
+  });
+
+  it('enabled + NO channel → ❌', async () => {
+    expect((await gate(seedState(), { enabled: true }).decide('e', replyEv)).siReaction).toBe('❌');
+  });
+
+  it('a channel AUTO-CREATED this turn (automatic on) → ✅ (superId is set after the create)', async () => {
+    const h = harness({ config: cfg({ superBlock: { enabled: true, automatic: true } }) });
+    const g = createGating({ getConfig: () => cfg({ superBlock: { enabled: true, automatic: true } }), loadState: async () => h.getState(), defaultKey: 'e', chatRaw: async () => LIVE_ROSTER, ensureSuperChannel: (ev) => h.cmds.ensureSuperChannel(ev) });
+    expect((await g.decide('e', replyEv)).siReaction).toBe('✅');
+  });
+
+  it('SI DISABLED → no reaction (null)', async () => {
+    expect((await gate(withChannel(), { enabled: false }).decide('e', replyEv)).siReaction).toBe(null);
+  });
+
+  it('a being that is NOT about to reply (unmentioned in a mention chat) → no reaction (null)', async () => {
+    expect((await gate(withChannel(), { enabled: true }).decide('e', { ...replyEv, mention: {} })).siReaction).toBe(null);
+  });
+});

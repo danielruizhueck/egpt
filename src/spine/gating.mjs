@@ -120,7 +120,13 @@ export function createGating({ getConfig = () => ({}), loadState = null, default
       }
     }
     if (replyChatId == null) replyChatId = (superId && (await superChannelAlive(superId, { chatRaw, config: c })) !== false) ? superId : ev.chatId;
-    return { mode, receives: receives(mode), mayReply, sendToEgpt, replyChatId };
+    // SI-STATE REACTION (2026-10-13): what to react with on the TRIGGERING message when a being is about
+    // to reply and SI is enabled — ✅ this conversation HAS an SI channel (superChannelFor set, INCLUDING
+    // one just auto-created above), ❌ it has none (the reply went to the base chat or was siphoned to
+    // admin). null = no reaction (SI off, or the being isn't replying). The spine places it (it holds ev
+    // + the react seam); decide only resolves the fact, off the same superId the routing used.
+    const siReaction = (mayReply && c.super_chats?.enabled) ? (superId ? '✅' : '❌') : null;
+    return { mode, receives: receives(mode), mayReply, sendToEgpt, replyChatId, siReaction };
   }
 
   // POST-brain surfacing: the reply surfaces when mayReply held AND it isn't an

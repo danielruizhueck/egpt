@@ -213,6 +213,13 @@ export function createSpine({
   // have ev.chatId's room at all and the send was DROPPED. Its one caller holds `ev`.
   // …and the MOUTH is asked too (2026-09-16): the attach is said through makeOutbound `say`.
   const outbound = makeOutbound({ bridge, bridgeOf, peerMouth, onLog: note });
+  // SI-STATE REACTION (2026-10-13): place ✅/❌ on the TRIGGERING message through the SAME outbound.react
+  // seam the steer 📩/👀 ack uses (turns.mjs placeReaction) — whichever mouth answers places it, keyed by
+  // the inbound's cross-account key. Best-effort: never throws, so a reaction fault cannot undo the reply.
+  async function placeSiReaction(to, ev, emoji) {
+    try { await outbound(to, ev.chatId).react(ev.msgId, emoji, () => ({ msgKey: ev.msgHash, timestamp: ev.msgTs }), 'si-state'); }
+    catch (e) { note(`si-state ${to}/${ev.chatId}: ${e?.message ?? e}`); }
+  }
   // The shared turn machinery, or our own private one (see the option's note above). Built with
   // the SAME bridge/bridgeOf pair `outbound` uses, because the steer-ack react it owns is one of
   // the spine's own direct bridge sends and must ride the acked being's connection.
@@ -1113,6 +1120,12 @@ export function createSpine({
     // / SI off / unreadable roster → superMemberGate returns false (no gate). The record is already
     // written (handleFast's ingestion), so a blocked message stays on the transcript; it just runs no turn.
     if (d.mayReply && commands?.superMemberGate && await commands.superMemberGate(ev)) return;
+    // SI-STATE REACTION (2026-10-13): signal the SI state to the base chat — ✅ this conversation has an
+    // SI channel (incl. one auto-created this turn), ❌ none (reply siphoned to admin / base chat). It is
+    // a REACTION on the TRIGGERING message via the SAME seam the steer 📩/👀 ack uses (outbound.react →
+    // whichever mouth answers); gated + resolved by decide (d.siReaction, null when SI off / not replying).
+    // Fire-and-forget: best-effort, a reaction fault never touches the reply. ONE per message (here only).
+    if (d.siReaction) void placeSiReaction(to, ev, d.siReaction);
     // PHASE 4 — brain-member fan-out (design B: re-entry). Kicked off HERE, concurrently with
     // E's own dispatch below (never blocking E's turn). It delivers this received room message
     // to each brain member whose mode admits it; each member's finalized reply is streamed into

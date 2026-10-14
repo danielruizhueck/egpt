@@ -46,10 +46,10 @@ import { createSender } from '../src/spine/sender.mjs';
 import { crossAccountChatKey } from '../src/bridges/beeper.mjs';
 import { encodeNodeSignature } from '../src/node-signature.mjs';
 
-let boot, emptyState;
+let boot, emptyState, ensureContact, aliasContact, getContact;
 beforeAll(async () => {
   ({ boot } = await import('../src/spine/boot.mjs'));
-  ({ emptyState } = await import('../src/conversations-state.mjs'));
+  ({ emptyState, ensureContact, aliasContact, getContact } = await import('../src/conversations-state.mjs'));
 });
 afterAll(async () => {
   delete process.env.EGPT_HOME;
@@ -229,7 +229,7 @@ function fakeTransport() {
       // THE 🎧 LISTENING MARK's reads and writes (2026-09-16): this account's own copies of a chat's
       // recent messages, and a reaction placed on / taken off one of them.
       async listMessagesRaw(chat) { return LISTED[chat] ?? []; },
-      async sendReaction(chat, id, key) { spy.reactions.push({ chatId: chat, id, key }); return true; },
+      async sendReaction(chat, id, key) { if (spy.reactThrows) throw new Error('reaction bridge boom'); spy.reactions.push({ chatId: chat, id, key }); return true; },   // `reactThrows` (off by default) lets a test prove a react fault never breaks the reply
       async removeReaction(chat, id, key) { spy.unreactions.push({ chatId: chat, id, key }); return true; },
       async chatRaw(chat) { return world[chat] ? rawChat(chat, world[chat]) : null; },
       async listChatsRaw() { return Object.entries(world).map(([id, roster]) => rawChat(id, roster)); },
@@ -1170,6 +1170,58 @@ describe('the 🎧 listening mark: boot hands each connection the one placement'
     expect(await place(byConnection.primary, AN_GROUP, 'solo-note')).toEqual({ up: true, down: true });
     expect(byConnection.primary.reactions).toEqual([{ chatId: AN_GROUP, id: 'solo-note', key: '🎧' }]);
     expect(byConnection.primary.unreactions).toEqual([{ chatId: AN_GROUP, id: 'solo-note', key: '🎧' }]);
+    app.stop();
+  });
+});
+
+// ── THE ✓/❌ SI-STATE REACTION (operator 2026-10-13) ──────────────────────────────────────────────
+// When super_chats.enabled and a being is about to REPLY, a reaction lands on the TRIGGERING message
+// in the base chat signalling the SI state: ✅ this conversation HAS an SI channel, ❌ it has none. It
+// rides the SAME outbound.react seam the steer 📩/👀 ack uses, is placed ONCE per message, and is
+// best-effort — a react fault never breaks the reply. Driven end-to-end through a one-connection node
+// (SINGLE) so the reaction lands on the ear with no mouth-translation in the way.
+describe('the ✓/❌ SI-state reaction lands on the triggering message', () => {
+  const SI = () => { const c = SINGLE(); c.super_chats = { enabled: true }; return c; };
+  const SI_CHAN = '!an-group-super';   // the SI channel aliased to AN_GROUP
+  // AN_GROUP known + (optionally) its SI channel aliased to it, super:true.
+  const seed = ({ withChannel } = {}) => {
+    let st = ensureContact(emptyState(), 'whatsapp', AN_GROUP, { pushedName: 'an-group' }).state;
+    if (withChannel) st = aliasContact(st, 'whatsapp', SI_CHAN, getContact(st, 'whatsapp', AN_GROUP).jid, { transcript: 'x', super: true });
+    return st;
+  };
+  const reactionKeys = (spy, chatId) => spy.reactions.filter((r) => r.chatId === chatId).map((r) => r.key);
+
+  it('a channel EXISTS → ✅ on the triggering message in the base chat', async () => {
+    const { app, byConnection } = await bootWith(SI(), { state: seed({ withChannel: true }) });
+    deliver(byConnection.primary, AN_GROUP, 'hola', { atE: true });
+    await waitFor(() => reactionKeys(byConnection.primary, AN_GROUP).includes('✅'));
+    expect(reactionKeys(byConnection.primary, AN_GROUP)).toEqual(['✅']);   // exactly ONE, and it is the checkmark
+    app.stop();
+  });
+
+  it('NO channel (enabled) → ❌ on the triggering message', async () => {
+    const { app, byConnection } = await bootWith(SI(), { state: seed() });
+    deliver(byConnection.primary, AN_GROUP, 'hola', { atE: true });
+    await waitFor(() => reactionKeys(byConnection.primary, AN_GROUP).includes('❌'));
+    expect(reactionKeys(byConnection.primary, AN_GROUP)).toEqual(['❌']);
+    app.stop();
+  });
+
+  it('SI disabled → NO SI reaction at all', async () => {
+    const { app, byConnection } = await bootWith(SINGLE(), { state: seed({ withChannel: true }) });   // no super_chats
+    deliver(byConnection.primary, AN_GROUP, 'hola', { atE: true });
+    await waitFor(() => byConnection.primary.streams.length || byConnection.primary.sent.length);   // the reply landed
+    expect(reactionKeys(byConnection.primary, AN_GROUP).filter((k) => k === '✅' || k === '❌')).toEqual([]);
+    app.stop();
+  });
+
+  it('a reaction-place FAILURE never breaks the reply (best-effort, swallowed)', async () => {
+    const { app, byConnection, replies } = await bootWith(SI(), { state: seed({ withChannel: true }) });
+    byConnection.primary.reactThrows = true;                 // every sendReaction now throws
+    deliver(byConnection.primary, AN_GROUP, 'hola', { atE: true });
+    await waitFor(() => replies().length > 0);               // the reply STILL goes out
+    expect(replies().length).toBeGreaterThan(0);
+    expect(reactionKeys(byConnection.primary, AN_GROUP)).toEqual([]);   // the reaction itself never landed
     app.stop();
   });
 });
