@@ -36,7 +36,7 @@ import { applyLayers } from './signature-layers.mjs';
 // invisible tag-encoded node id is what actually IDENTIFIES the node; the bridge_signature_*
 // strings above it are decoration a human reads. ONE codec, shared with the inbound decode
 // (spine/identity.mjs) and the bridge's compare key (beeper.mjs normEchoText).
-import { encodeNodeSignature, stripNodeSignature } from '../node-signature.mjs';
+import { encodeNodeSignature, stripNodeSignature, encodeChatCanary } from '../node-signature.mjs';
 // parseMesh — the SAME envelope test the spine applies inbound (mesh.isEnvelope), reused here so
 // there is one definition of "this is relay traffic, not chat". See isMeshEnvelope below.
 import { parseMesh } from '../mesh/relay.mjs';
@@ -101,6 +101,10 @@ export function makeWrapPersona({ bridgeSignatureOpen = '', bridgeSignatureClose
     // quote-reply to this message names its author structurally (bridges/beeper.mjs
     // replyToBeing). `o.persona` is the being key the reply train already hands the stream
     // (src/spine/sender.mjs `tag`); a send with none keeps the node-only frame.
-    return stripNodeSignature(wrapped) + encodeNodeSignature(nodeName, o.persona);
+    // `o.canary` (super-channel intro, 2026-10-13) — a SECOND structural frame after the node one,
+    // carrying the base chat's shared-account id so a co-account peer links the same side-group. Only
+    // the super intro sets it; every other send omits it → byte-identical. decodeNodeSignature reads
+    // the FIRST (node) frame, so this never disturbs node/being attribution.
+    return stripNodeSignature(wrapped) + encodeNodeSignature(nodeName, o.persona) + (o.canary ? encodeChatCanary(o.canary) : '');
   };
 }

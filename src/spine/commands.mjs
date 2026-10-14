@@ -712,6 +712,11 @@ export function createCommands({
   // default so a standalone/test createCommands audits nowhere; a failed/absent post never affects a
   // command (the chokepoint swallows it).
   logToGroup = async () => false,
+  // SI (2026-10-13) — the admin-channel poster + resolver, boot's EXISTING ones (noticeToChannel on
+  // config.admin_channel, and resolveAdminChat → chatId). siphonReplyToAdmin uses them to route an
+  // automatic-OFF reply there + post the rate-limited warning. Safe no-op/null defaults (standalone).
+  noticeToAdmin = async () => false,     // (text) -> post one line to admin_channel (fail-closed in boot)
+  resolveAdminChatId = async () => null, // () -> the admin_channel's resolved chat id | null
   onLog = () => {},
 } = {}) {
   const cfg = () => getConfig() ?? {};
@@ -3298,16 +3303,16 @@ export function createCommands({
   const defaultNameOf = (block, dflt) => (block && typeof block.default_name === 'string' && block.default_name.trim()) ? block.default_name : dflt;
   // config.super.suffix — the super channel's title is <chat title> + suffix. Same non-empty-string
   // guard shape as placeholderOf; unset → the built-in '-super'.
-  const superSuffix = () => { const s = cfg().super?.suffix; return (typeof s === 'string' && s.trim()) ? s : SUPER_SUFFIX_DEFAULT; };
+  const superSuffix = () => { const s = cfg().super_chats?.suffix; return (typeof s === 'string' && s.trim()) ? s : SUPER_SUFFIX_DEFAULT; };
   // config.super.mode — the auto-mode the super channel runs under. The coercion (quoted string vs
   // YAML boolean, invalid → default+log) is the SHARED auto-mode.superModeOf (operator 2026-10-08,
   // CHUNK 2): ONE definition, reused by the per-surface gate in gating.mjs so the gate and the
   // channel agree. Summoning stores NO mode; /agents reads this to report a super channel's mode.
-  const superMode = () => superModeOf(cfg().super?.mode, { onInvalid: (raw) => onLog(`super: invalid mode ${JSON.stringify(raw)} — using '${SUPER_MODE_DEFAULT}'`), fallback: SUPER_MODE_DEFAULT });
+  const superMode = () => superModeOf(cfg().super_chats?.mode, { onInvalid: (raw) => onLog(`super: invalid mode ${JSON.stringify(raw)} — using '${SUPER_MODE_DEFAULT}'`), fallback: SUPER_MODE_DEFAULT });
   // config.super.opener ({chat}/{group} both = the parent chat's title) — the bridge-voice intro
   // posted FROM RODZ once on creation (same postOpener path /join uses), with the built-in fallback.
   const superOpenerText = (chatTitle) =>
-    ((typeof cfg().super?.opener === 'string' && cfg().super.opener.trim()) ? cfg().super.opener : SUPER_OPENER_DEFAULT)
+    ((typeof cfg().super_chats?.opener === 'string' && cfg().super_chats.opener.trim()) ? cfg().super_chats.opener : SUPER_OPENER_DEFAULT)
       .replaceAll('{chat}', String(chatTitle ?? '')).replaceAll('{group}', String(chatTitle ?? ''));
   // RODZ's Beeper user id (@whatsapp_lid-…) — the one member the group must carry besides the creating
   // account. WhatsApp's create REFUSES a `+phone` member; the bridge resolves the id from
@@ -3353,7 +3358,10 @@ export function createCommands({
   // FALLBACK — the opener must ALWAYS appear: if the secondary never surfaces the group (or the post
   // there fails), post from the PRIMARY account to the new chatId. A failed opener NEVER fails the
   // command (the group + alias/copy already succeeded): log the path used and move on.
-  const postOpener = async ({ verb, newChatId, title, openerText, accountID }) => {
+  // `canary` (super intro, 2026-10-13) — the base chat's shared-account id, stamped as an invisible
+  // frame BESIDE the node signature by persona-wrap (rides postReply's opts). Only the super channel
+  // passes it; /join passes null → a plain opener. It never touches the VISIBLE openerText.
+  const postOpener = async ({ verb, newChatId, title, openerText, accountID, canary = null }) => {
     try {
       let secondaryRoomId = null;
       for (let i = 1; i <= OPENER_POLL_ATTEMPTS; i++) {
@@ -3361,12 +3369,12 @@ export function createCommands({
         if (secondaryRoomId) break;
         if (i < OPENER_POLL_ATTEMPTS) await sleep(OPENER_POLL_MS);
       }
-      if (secondaryRoomId && await forkBridge.postReply(secondaryRoomId, openerText, null, { via: 'secondary' })) {
+      if (secondaryRoomId && await forkBridge.postReply(secondaryRoomId, openerText, null, { via: 'secondary', canary })) {
         onLog(`${verb}: opener posted FROM RODZ into ${secondaryRoomId} (secondary's room for "${title}")`);
         return;
       }
       const why = secondaryRoomId ? 'secondary post failed' : `secondary never surfaced "${title}" after ${OPENER_POLL_ATTEMPTS} polls`;
-      await forkBridge.postReply(newChatId, openerText, null, { via: 'primary' });
+      await forkBridge.postReply(newChatId, openerText, null, { via: 'primary', canary });
       onLog(`${verb}: ${why} — opener posted via the PRIMARY into ${newChatId}`);
     } catch (e) {
       onLog(`${verb}: opener post failed — ${e?.message ?? e} (group + alias/copy already succeeded; moving on)`);
@@ -3490,17 +3498,29 @@ export function createCommands({
       await writeState(dropContact(await loadState(), surface, existing));
       onLog(`super: channel ${existing} is gone or has no human member — alias dropped, creating a new one`);
     }
-    const rodz = await resolveRodz(ev.chatId, 'super');
-    if (!rodz) return;
-    const title = await uniqueTitle('super', `${cTitle}${superSuffix()}`, rodz.accountID);
+    // CREATE ON THE EAR (SI, 2026-10-13): the side-group is created on the account the base chat lives
+    // on — the EAR/primary — read directly (chatAccountId), NOT via resolveRodz, so SI works with NO
+    // secondary/mouth (the one-account baseline). The MOUTH is now an OPTIONAL invitee: resolved only
+    // when config.beeper.secondary.phone is set; if set but unresolvable, refuse (a configured mouth
+    // must resolve — the pre-SI safety). Delivery to the mouth's own room still self-heals through
+    // mouth_chat as today (boot.routeLocally) when a mouth exists; in baseline the ear both creates and posts.
+    const accountID = await forkBridge.chatAccountId(ev.chatId);
+    if (!accountID) { onLog(`super: could not resolve the ear account for ${ev.chatId} — refusing, nothing created.`); return; }
+    const rodzDigits = phoneDigitsOf(cfg().beeper?.secondary?.phone);
+    let rodzUserId = null;
+    if (rodzDigits) {
+      rodzUserId = await forkBridge.resolveUserIdByPhone(rodzDigits, { accountID });
+      if (!rodzUserId) { onLog('super: config.beeper.secondary.phone is set but its Beeper user id would not resolve — refusing (a configured mouth must resolve), nothing created.'); return; }
+    }
+    const title = await uniqueTitle('super', `${cTitle}${superSuffix()}`, accountID);
     // ── mutations begin ──
     // CREATE + ALIAS (the SAME core /join uses), carrying `{ super: true }` so the gate + reply
     // routing can find this channel from the reply path. NO mode is stored — the channel's mode is
-    // intrinsic (read live at the gate, see the header). operator + Rodz + the invitees below (a plain
-    // create-time invite — chunk 3 owns respect-exit / re-invite). null → createGroup gave no chatId.
-    // In a 1:1 the OTHER party is the invitee (whoever summoned), so they can read the reply here;
-    // in a GROUP its members are — the primary's roster minus every config.beeper account (members
-    // can only be set at create, operator 2026-10-11). Neither → the summoner. Optional (harness/bridge may lack it).
+    // intrinsic (read live at the gate, see the header). ear + Rodz (when a mouth exists) + the
+    // invitees below (a plain create-time invite — chunk 3 owns respect-exit / re-invite). null →
+    // createGroup gave no chatId. In a 1:1 the OTHER party is the invitee (whoever summoned), so they
+    // can read the reply here; in a GROUP its members are — the primary's roster minus every
+    // config.beeper account (members can only be set at create, operator 2026-10-11). Neither → the summoner.
     const other = (await forkBridge.chatOtherPartyId?.(ev.chatId)) ?? null;
     const raw = other ? null : await forkBridge.chatRaw?.(ev.chatId);
     const ours = new Set(Object.values(cfg().beeper ?? {}).map((a) => phoneDigitsOf(a?.phone)).filter(Boolean));
@@ -3511,15 +3531,99 @@ export function createCommands({
     // invitable id only: a bridged @…:beeper.local id is surface-valid; a @…:beeper.com (owner / cross-account matrix id) is NOT — DROP it so createGroup never 400s and the channel still creates.
     const invitee = String(toInvite ?? '').endsWith(':beeper.local') ? toInvite : null;
     if (!members && toInvite && !invitee) onLog(`super: ${toInvite} is not an invitable ${surface} participant id — creating the channel without inviting them`);
-    const invited = [...new Set((members ?? [invitee]).filter((id) => String(id ?? '').endsWith(':beeper.local') && id !== rodz.rodzUserId))];
-    const participantIDs = [rodz.rodzUserId, ...invited];
-    const aliased = await createAliasedSideGroup(ev, surface, title, rodz.accountID, participantIDs, 'super', { super: true });
+    const invited = [...new Set((members ?? [invitee]).filter((id) => String(id ?? '').endsWith(':beeper.local') && id !== rodzUserId))];
+    const participantIDs = [...(rodzUserId ? [rodzUserId] : []), ...invited];
+    const aliased = await createAliasedSideGroup(ev, surface, title, accountID, participantIDs, 'super', { super: true });
     if (!aliased) return;
     const { chatId: superChatId } = aliased;
     onLog(`super: ${cTitle} -> channel ${superChatId} aliased to ${primaryJid}, invited ${invited.join(', ') || '(none)'}`);
-    // POST THE OPENER (bridge voice, FROM RODZ) so the new group surfaces in Beeper — same postOpener
-    // path /join uses; a failure here never undoes the alias above.
-    await postOpener({ verb: 'super', newChatId: superChatId, title, openerText: superOpenerText(cTitle), accountID: rodz.accountID });
+    // POST THE OPENER as the INTRO (bridge voice; FROM RODZ when a mouth exists, else the ear): the
+    // same postOpener path /join uses, now CANARY-STAMPED with the base chat's shared-account id
+    // (primaryJid) so a co-account peer links the SAME channel with no RPC. A failure never undoes the alias.
+    await postOpener({ verb: 'super', newChatId: superChatId, title, openerText: superOpenerText(cTitle), accountID, canary: primaryJid });
+  }
+
+  // linkSuperChannel(ev) (SI, 2026-10-13) — the PEER side of auto-create, symmetric to it. A co-account
+  // node sees the canary-stamped intro in a side-group it has NO alias for yet; it decodes the base
+  // chat's SHARED-account id the creator stamped (ev.canary), resolves its OWN base conversation, and
+  // writes the SAME `super: true` alias the creator wrote (the /join alias kind + the marker). Both
+  // nodes' superChannelFor then return this group → both beings reply here. Idempotent: once linked
+  // (incl. on the creating node, whose alias already exists) isSuperChannel short-circuits. mouth_chat
+  // is NOT derived here — it self-heals on first delivery exactly as on the creator (boot.routeLocally).
+  async function linkSuperChannel(ev) {
+    if (!cfg().super_chats?.enabled) return;                 // SI off → ordinary message
+    const base = ev?.canary;
+    if (!base) return;                                       // no intro canary → nothing to link
+    if (!loadState || !writeState) return;                   // state not wired → silent
+    const surface = surfaceOf(ev);
+    const chatId = shortChatId(ev.chatId);
+    const state = await loadState();
+    if (isSuperChannel(state, surface, chatId)) return;      // already linked (creator's own, or a re-sight) → idempotent
+    const baseContact = getContact(state, surface, base);
+    if (!baseContact) { onLog(`super-link: ${chatId} carries a canary for ${base}, but this node has no such base conversation — not linked.`); return; }
+    const title = ev.chatName || chatId;
+    await writeState(aliasContact(state, surface, chatId, baseContact.jid, { transcript: sanitizeSlug(title), super: true }));
+    onLog(`super-link: ${chatId} linked to ${baseContact.jid} as its super channel (from the intro canary).`);
+  }
+
+  // SI rate-limit (stop-guard style): fire at most once per key per SI_COOLDOWN_MS off the injected
+  // clock. Shared by the siphon warning (PART C) and the access-gate reply (PART D), each with its own
+  // map so they never share a bucket. Returns true the first time (and marks it), false while cooling.
+  const SI_COOLDOWN_MS = 6 * 60 * 60 * 1000;   // 6h — a recovery nudge, not a per-message notice
+  const _onceWithin = (map, key) => { const t = now(); const last = map.get(key); if (last != null && (t - last) < SI_COOLDOWN_MS) return false; map.set(key, t); return true; };
+  const _siphonWarned = new Map();
+  const _memberWarned = new Map();
+
+  // siphonReplyToAdmin(ev) (SI PART C, 2026-10-13) — super_chats.enabled + automatic OFF + NO channel +
+  // a being about to reply: the reply is DELIVERED to admin_channel (eGPT Admin), never the base chat,
+  // so the base stays clean (the SI principle). Returns the admin chat id so gating routes the reply
+  // there; posts a WARNING + recovery phrase ONCE per chat per cooldown (the reply itself rides every
+  // time, this blurb does not). null when admin_channel is unresolvable → gating falls back to the base
+  // chat (the reply is never lost). Lives here beside the rest of the SI machinery; gating calls it as a seam.
+  async function siphonReplyToAdmin(ev) {
+    let adminId = null;
+    try { adminId = await resolveAdminChatId(); } catch { adminId = null; }
+    if (!adminId) { onLog(`super-siphon: automatic is off and ${shortChatId(ev?.chatId)} has no SI channel, but admin_channel is unresolvable — reply falls back to the base chat.`); return null; }
+    const key = `${surfaceOf(ev)}:${shortChatId(ev?.chatId)}`;
+    if (_onceWithin(_siphonWarned, key)) {
+      const trig = (cfg().super_chats?.triggers ?? []).find((t) => typeof t === 'string' && t.trim()) || '…';
+      const where = ev?.chatName || shortChatId(ev?.chatId);
+      try { await noticeToAdmin(`⚠ SI (super_chats) is enabled for "${where}" but it has no SI channel and automatic is off — this reply was siphoned here, the base chat got nothing. To give it its own channel, send "${trig}" in that chat.`); }
+      catch (e) { onLog(`super-siphon: warning post failed — ${e?.message ?? e}`); }
+    }
+    return adminId;
+  }
+
+  // superMemberGate(ev) (SI PART D, 2026-10-13) — the ACCESS GATE. When an SI channel EXISTS for ev's
+  // conversation, a being wakes ONLY if the sender is a CURRENT member of that SI group (a LIVE
+  // participants read). A non-member (e.g. someone who left) is NOT let in: returns true to BLOCK the
+  // wake and replies to their triggering message, in the chat they triggered from, with the fixed line
+  // (rate-limited per non-member per chat). Applies to EVERYONE incl. the operator. Returns false (no
+  // block) when SI is off, there is no channel (nothing to check), or the roster can't be read
+  // DEFINITELY (fail-open, like superChannelAlive's unknown). On first creation members = the base
+  // chat's members, so the gate only bites afterward.
+  async function superMemberGate(ev) {
+    if (!cfg().super_chats?.enabled) return false;
+    if (!loadState) return false;
+    const surface = surfaceOf(ev);
+    let superId = null;
+    try { superId = superChannelFor(await loadState(), surface, ev.chatId); } catch { superId = null; }
+    if (!superId) return false;                              // no channel → no gate
+    let raw = null;
+    try { raw = await forkBridge.chatRaw?.(superId); } catch { raw = null; }
+    const items = raw && raw.participants && Array.isArray(raw.participants.items) ? raw.participants.items : null;
+    if (!items) return false;                               // roster gone/unreadable → fail-open (don't block)
+    const sender = ev?.senderId ?? null;
+    const senderDigits = phoneDigitsOf(sender);
+    const isMember = items.some((p) => !p?.isSelf && (p?.id === sender || (senderDigits && phoneDigitsOf(p?.phoneNumber) === senderDigits)));
+    if (isMember) return false;                             // a current member → woken normally
+    const key = `${surface}:${shortChatId(ev.chatId)}:${sender ?? '?'}`;
+    if (_onceWithin(_memberWarned, key)) {
+      try { await send?.(ev.chatId, 'User must be member of SI group to interact with it.'); }
+      catch (e) { onLog(`super-gate: reply post failed — ${e?.message ?? e}`); }
+    }
+    onLog(`super-gate: ${sender ?? '?'} is not a member of SI channel ${superId} for ${shortChatId(ev.chatId)} — wake blocked.`);
+    return true;                                            // BLOCK the wake
   }
 
   // /split (operator types /split [<name>|<node>] in chat C): create a side-group backed by a NEW
@@ -3703,7 +3807,7 @@ export function createCommands({
     // the deliberate-silence shape ("…"/"...") via isDeliberateSilence (auto-mode.mjs, the ONE
     // ellipsis-shape predicate), preserving today's default behavior exactly. INBOUND ONLY: the
     // model's reply-"…" is OUTBOUND, echo-deduped before classify, so it cannot self-summon.
-    const superCfg = cfg()?.super;
+    const superCfg = cfg()?.super_chats;
     if (superCfg?.enabled) {
       const triggers = superCfg.triggers;
       const summoned = Array.isArray(triggers) && triggers.length
@@ -4267,5 +4371,5 @@ export function createCommands({
   // above). `/e`/`/egpt` now carry no special meaning at all and fall through to the generic
   // catch-all like any other unrecognized token.
 
-  return { isCommand, phraseCommand, runPhrase, run, runCaptured, remoteNode, nodeCommandForMe, makeNodeExplicit, currentRoomOf, startBrowser, chromeClientFor: ensureChrome, browserConversationOf, chatChromeOf };
+  return { isCommand, phraseCommand, runPhrase, run, runCaptured, remoteNode, nodeCommandForMe, makeNodeExplicit, currentRoomOf, startBrowser, chromeClientFor: ensureChrome, browserConversationOf, chatChromeOf, ensureSuperChannel, linkSuperChannel, siphonReplyToAdmin, superMemberGate };
 }

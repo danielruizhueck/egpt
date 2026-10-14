@@ -63,7 +63,7 @@ export async function superChannelAlive(chatId, { chatRaw, config = {} }) {
   return items.some((p) => !mouths.has(digits(p?.phoneNumber)));
 }
 
-export function createGating({ getConfig = () => ({}), loadState = null, defaultKey = 'e', chatRaw = async () => null } = {}) {
+export function createGating({ getConfig = () => ({}), loadState = null, defaultKey = 'e', chatRaw = async () => null, ensureSuperChannel = null, siphonReplyToAdmin = null } = {}) {
   const cfg = () => getConfig() ?? {};
 
   // The single per-message decision. ONE conversations.yaml read resolves the conversation's
@@ -79,10 +79,10 @@ export function createGating({ getConfig = () => ({}), loadState = null, default
     if (state) { try { bv = getBeing(state, ev.surface, ev.chatId, being); } catch { bv = null; } }
     let { mode, source } = resolveMode(bv, being, c);
     // PER-SURFACE SUPER GATE (operator 2026-10-08, CHUNK 2): a message that ARRIVED in a super
-    // channel is gated by config.super.mode, NOT the origin's stored mode — unless `/agents mode`
+    // channel is gated by config.super_chats.mode, NOT the origin's stored mode — unless `/agents mode`
     // was set IN that channel (stored on its alias entry, getBeing's room mode; operator
     // 2026-10-11). /end drops the alias, so it reverts for free.
-    if (source !== 'conversation' && state && isSuperChannel(state, ev.surface, ev.chatId)) mode = superModeOf(c.super?.mode);
+    if (source !== 'conversation' && state && isSuperChannel(state, ev.surface, ev.chatId)) mode = superModeOf(c.super_chats?.mode);
     const paused = !!(c.dispatch?.auto_paused ?? c.whatsapp?.auto_e_paused);
     const allowed = replyAllowed(mode, mention ?? {});
     const mayReply = mayEmitChat({ paused, mode, replyAllowed: allowed, isReaction: ev.kind === 'reaction' });
@@ -97,8 +97,29 @@ export function createGating({ getConfig = () => ({}), loadState = null, default
     // super channel). LIVE lookup off the same state read — /end drops the alias, so this reverts
     // to the arrival chat automatically with no un-pin to undo. No super channel, or a DEFINITELY dead
     // one (superChannelAlive → false) → ev.chatId.
-    const superId = state && superChannelFor(state, ev.surface, ev.chatId);
-    const replyChatId = (superId && (await superChannelAlive(superId, { chatRaw, config: c })) !== false) ? superId : ev.chatId;
+    let superId = state && superChannelFor(state, ev.surface, ev.chatId);
+    let replyChatId = null;   // resolved below (siphon may set it first)
+    // SI ON-REPLY, NO CHANNEL YET (super_chats.enabled + a being ABOUT TO REPLY + !backlog):
+    //   · automatic ON  → AUTO-CREATE through the EXISTING ensureSuperChannel (node-role gate,
+    //     idempotency, invite-the-members, AND the canary intro the peer links from), then re-resolve
+    //     off a FRESH read → the reply routes to the just-created channel (the chunk-2 line below).
+    //   · automatic OFF → SIPHON the reply to admin_channel (eGPT Admin) so the base chat stays clean
+    //     (the SI principle); siphonReplyToAdmin returns that chat id (and posts a rate-limited warning
+    //     + recovery blurb), or null when admin is unresolvable → fall through to the base chat.
+    // Skipped for a backlog wake (wouldReachABeing reuses decide but dispatches nothing). A create
+    // failure NEVER blocks the reply. Both seams unwired (standalone gating/tests) → inert.
+    if (!superId && mayReply && !ev.backlog && c.super_chats?.enabled) {
+      if (c.super_chats?.automatic && ensureSuperChannel) {
+        try {
+          await ensureSuperChannel(ev);
+          const s2 = loadState ? await loadState() : null;
+          if (s2) { state = s2; superId = superChannelFor(s2, ev.surface, ev.chatId); }
+        } catch { /* create failed — fall through to the arrival chat, same as no channel */ }
+      } else if (!c.super_chats?.automatic && siphonReplyToAdmin) {
+        try { replyChatId = (await siphonReplyToAdmin(ev)) ?? null; } catch { replyChatId = null; }
+      }
+    }
+    if (replyChatId == null) replyChatId = (superId && (await superChannelAlive(superId, { chatRaw, config: c })) !== false) ? superId : ev.chatId;
     return { mode, receives: receives(mode), mayReply, sendToEgpt, replyChatId };
   }
 

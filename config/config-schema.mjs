@@ -3005,20 +3005,30 @@ export const CONFIG_SCHEMA = {
                       Pick phrases you won't say by accident. Unset → only the '/'-word triggers.
   `,
 
-  super: `
-    The SUPER CHANNEL (operator 2026-10-08) — a per-conversation side channel where the bot speaks so
-    its replies stop polluting the main chat. Like /join it is an ALIAS of the original conversation
-    (one shared on-disk thread/transcript, two chat surfaces), NOT a diverging /split copy. Summoned by
-    an inbound "…" / "..." (a whole-message deliberate-silence) from ANY participant — NOT operator-only,
-    because the point is a counterparty summoning it so they can read the reply there. Close it with
-    /end (a super channel is an alias, so /end already archives it + drops the mapping). The two
-    accounts come from beeper.primary.phone / beeper.secondary.phone, as for /join.
+  super_chats: `
+    SI / the SUPER CHANNEL (operator 2026-10-08; renamed from \`super\` 2026-10-13) — a per-conversation
+    side channel (SI group) where the bot speaks so its replies stop polluting the main chat. Like /join
+    it is an ALIAS of the original conversation (one shared on-disk thread/transcript, two chat surfaces),
+    NOT a diverging /split copy. Summoned by an inbound "…" / "..." (a whole-message deliberate-silence)
+    from ANY participant — NOT operator-only, because the point is a counterparty summoning it so they can
+    read the reply there. Close it with /end (an SI group is an alias, so /end already archives it + drops
+    the mapping). The two accounts come from beeper.primary.phone / beeper.secondary.phone, as for /join;
+    SI also works with NO secondary (the ear creates + posts, one-account baseline). Two co-account nodes
+    CONVERGE on the SAME SI group with no RPC: whoever creates first stamps the intro with the base chat's
+    shared-account id (an invisible node-signature frame); the other links from it.
 
     KEYS:
       enabled
         DEFAULT: false (unset ⇒ off). The master switch. Off ⇒ an inbound "…" does NOTHING special
-        (it falls through exactly as today). On ⇒ an inbound "…" summons / reuses this chat's super
-        channel. Created only by the node whose node_role is 'primary' (like a nameless /join).
+        (it falls through exactly as today). On ⇒ an inbound "…" summons / reuses this chat's SI group,
+        AND the access gate applies (a sender who is not a current member of an existing SI group does
+        not wake the bot). Created only by the node whose node_role is 'primary' (like a nameless /join).
+      automatic
+        DEFAULT: false. When ON (and enabled), the bot AUTO-CREATES this chat's SI group the first time
+        it would reply there (no "…" needed) and replies in it. When OFF (the default) with no SI group
+        yet, the bot does NOT reply in the base chat: its answer is SIPHONED to admin_channel (eGPT
+        Admin), visible to the operator only, carrying a one-time warning + the recovery phrase — so the
+        base chat stays clean. Create a channel explicitly with the \`triggers\` phrase.
       triggers
         DEFAULT: unset ⇒ the "…"/"..." deliberate-silence shape summons (today's behavior). Set a LIST
         of exact whole-message phrases to summon on those instead: the whole trimmed body must EQUAL
@@ -3039,10 +3049,11 @@ export const CONFIG_SCHEMA = {
         A boolean that slips through is COERCED (true → "on", false → "off"); an unrecognized value
         falls back to the default and is logged.
       opener
-        The bridge-voice intro posted once (FROM the secondary) when the channel is created, so the
-        otherwise-empty group surfaces in Beeper (Beeper hides chats with no messages). A {chat}/{group}
-        template (both = this chat's title); it should name /send and /end. Unset → a small built-in
-        default.
+        The bridge-voice INTRO posted once (FROM the secondary when a mouth exists, else the ear) when
+        the channel is created, so the otherwise-empty group surfaces in Beeper (Beeper hides chats with
+        no messages). It also carries the invisible canary that lets the peer node link the SAME group. A
+        {chat}/{group} template (both = this chat's title); it should name /send and /end. Unset → a small
+        built-in default.
   `,
 
   aliases: `

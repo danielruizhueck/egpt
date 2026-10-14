@@ -142,7 +142,7 @@ describe('gating — the super channel (CHUNK 2): per-surface mode + reply routi
     st = aliasContact(st, 'whatsapp', SUPER, primaryJid, { transcript: 'main-super', super: true });
     return st;
   };
-  const gatingFor = (st, config = { super: { enabled: true, mode: 'on' } }) =>
+  const gatingFor = (st, config = { super_chats: { enabled: true, mode: 'on' } }) =>
     createGating({ getConfig: () => config, loadState: async () => st, defaultKey: 'e' });
 
   it('GATE (group-independent): the SAME being uses super.mode in the super surface and its own stored mode in main', async () => {
@@ -158,9 +158,9 @@ describe('gating — the super channel (CHUNK 2): per-surface mode + reply routi
   });
 
   it('GATE honours config.super.mode (string + YAML-boolean coercion) on the super surface only', async () => {
-    expect((await gatingFor(withSuper(), { super: { mode: 'mute' } }).decide('e', evIn(SUPER))).mode).toBe('mute');
-    expect((await gatingFor(withSuper(), { super: { mode: true } }).decide('e', evIn(SUPER))).mode).toBe('on');
-    expect((await gatingFor(withSuper(), { super: {} }).decide('e', evIn(SUPER))).mode).toBe('on');   // unset → default
+    expect((await gatingFor(withSuper(), { super_chats: { mode: 'mute' } }).decide('e', evIn(SUPER))).mode).toBe('mute');
+    expect((await gatingFor(withSuper(), { super_chats: { mode: true } }).decide('e', evIn(SUPER))).mode).toBe('on');
+    expect((await gatingFor(withSuper(), { super_chats: {} }).decide('e', evIn(SUPER))).mode).toBe('on');   // unset → default
   });
 
   it('ROUTING: a conversation that HAS a super channel replies THERE (from either surface), not main', async () => {
@@ -181,7 +181,7 @@ describe('gating — the super channel (CHUNK 2): per-surface mode + reply routi
   it('/end REVERTS for free: once the super alias is dropped, the lookup returns null → reply goes to main again (nothing to restore)', async () => {
     let st = withSuper();
     // loadState closes over THIS `st` (not gatingFor's param), so a later reassignment is seen live.
-    const g = createGating({ getConfig: () => ({ super: { enabled: true, mode: 'on' } }), loadState: async () => st, defaultKey: 'e' });
+    const g = createGating({ getConfig: () => ({ super_chats: { enabled: true, mode: 'on' } }), loadState: async () => st, defaultKey: 'e' });
     expect((await g.decide('e', evIn(MAIN))).replyChatId).toBe(SUPER);   // while the channel exists
     st = dropContact(st, 'whatsapp', SUPER);              // what /end does to the alias
     const after = await g.decide('e', evIn(MAIN));
@@ -192,7 +192,7 @@ describe('gating — the super channel (CHUNK 2): per-surface mode + reply routi
   // LIVENESS (reve 2026-10-10, Reencuentro pjcOWW…): the operator left the -super room, the primary's
   // GET 404s, yet every E reply kept routing there. Routing honours a DEFINITE death only.
   describe('ROUTING follows the channel only while it is alive (superChannelAlive)', () => {
-    const config = { beeper: { primary: { phone: '16468217865' }, secondary: { phone: '13472576794' } }, super: { enabled: true, mode: 'on' } };
+    const config = { beeper: { primary: { phone: '16468217865' }, secondary: { phone: '13472576794' } }, super_chats: { enabled: true, mode: 'on' } };
     const SELF = { id: '@anrodriguez:beeper.com', isSelf: true };
     const RODZ = { id: '@whatsapp_lid-1:beeper.local', phoneNumber: '+13472576794' };
     const decideWith = (chatRaw) => createGating({ getConfig: () => config, loadState: async () => withSuper(), defaultKey: 'e', chatRaw }).decide('e', evIn(MAIN));

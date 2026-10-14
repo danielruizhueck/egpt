@@ -2808,7 +2808,12 @@ export async function boot({
   const services = {
     identity: createIdentity({ now, timeZone: transcriptTimeZone }),
     // chatRaw: the super-channel liveness read off the ear (earBridge, declared below — decide only runs once the spine exists).
-    gating: createGating({ getConfig, loadState: _loadState, defaultKey, chatRaw: (id) => earBridge.chatRaw?.(id) }),
+    // ensureSuperChannel (SI auto-create, 2026-10-13): a being about to reply in a super-enabled chat
+    // with no channel yet creates it HERE (commands.ensureSuperChannel, defined below — decide only runs
+    // once the spine exists), then the reply routes to it. The node-role gate + idempotency live inside.
+    // siphonReplyToAdmin (SI PART C): automatic OFF + no channel + a being about to reply → the reply
+    // is routed to admin_channel instead of the base chat (commands owns the resolve + rate-limited warning).
+    gating: createGating({ getConfig, loadState: _loadState, defaultKey, chatRaw: (id) => earBridge.chatRaw?.(id), ensureSuperChannel: (ev) => commands.ensureSuperChannel?.(ev), siphonReplyToAdmin: (ev) => commands.siphonReplyToAdmin?.(ev) }),
     // Router resolves an @token against the unified `agents:` block (operator 2026-07-02) —
     // the ONE registry, and since 2026-07-25 the ONLY source of off-node reach (a relay agent's
     // relay_channel). defaultBeing = defaultKey: the persona-route + the un-@mentioned
@@ -3171,8 +3176,8 @@ export async function boot({
       // `unsigned` (operator 2026-10-04, /send) threads straight into the SAME send as skipSignature:
       // the relay posts back AS THE OPERATOR with no node signature (no visible 🏰, no invisible tag),
       // while still flowing through .send so its sent id is tracked for echo-dedup like any other post.
-      postReply:     (chatId, text, replyToMessageID, { via = null, unsigned = false } = {}) =>
-        postBridgeFor(via).send(chatId, text, { replyTo: replyToMessageID, skipSignature: unsigned }),
+      postReply:     (chatId, text, replyToMessageID, { via = null, unsigned = false, canary = null } = {}) =>
+        postBridgeFor(via).send(chatId, text, { replyTo: replyToMessageID, skipSignature: unsigned, canary }),
       archiveChat:   (chatId)                         => earBridge.archiveChat(chatId),
       chatAccountId: async (chatId) => { try { return (await earBridge.chatRaw(chatId))?.accountID ?? null; } catch { return null; } },
       chatRaw:       (chatId)                         => earBridge.chatRaw(chatId),   // the super-channel liveness check
@@ -3197,6 +3202,8 @@ export async function boot({
       resolvePrimaryChatIdByTitle: (title, opts) => postBridgeFor('primary').resolveChatIdByTitle(title, opts),
     },
     logToGroup,                                          // per-command audit → config.log_to_group (fail-closed, see above); the dispatch chokepoint emits ONE metadata-only line per command
+    noticeToAdmin,                                       // SI siphon (PART C): post one line to config.admin_channel (the EXISTING resolver+poster)
+    resolveAdminChatId: async () => { const r = await resolveAdminChat(); return r?.chatId ?? null; },   // SI siphon: admin_channel → chat id (reuses resolveAdminChat), null when unset/unresolvable
     requestLogin,                                        // /login <site> → the auto-login limb (src/spine/login.mjs); returns an outcome token, never a credential
     onChromeLog: (m) => log.line?.(`[chrome] ${m}`),    // group Chrome launches / refusals ("no browser for …")
     onLog: (m) => log.line?.(`[command] ${m}`),

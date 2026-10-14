@@ -675,6 +675,11 @@ export function createSpine({
     // read for this message (gating, brainpool, transcription) sees the freshest scan.
     await refreshConfig?.();
     const ev = identity.build(msg);
+    // SI PEER-LINK (2026-10-13): a canary-stamped super-channel intro arriving in a side-group this
+    // node has no alias for yet links the SAME channel (commands.linkSuperChannel decodes ev.canary →
+    // its own base conversation → writes the super alias). BEFORE classify so this message's own routing
+    // already sees it; idempotent and a no-op on every message without an intro canary (ev.canary null).
+    await commands?.linkSuperChannel?.(ev);
     // GUARD (C7.7): the channel is the CONVERSATION (surface + chatId). Resolved once here
     // for the safe-word + the loop counter inside classify; null when no guard is wired.
     //
@@ -1101,6 +1106,13 @@ export function createSpine({
   // and take its own branch. Runs strictly AFTER the ingestion append, so every reply line it
   // can produce lands below the inbound line it answers.
   async function dispatchChat({ ev, d, to, mention, meshTarget, targets, channel }) {
+    // SI ACCESS GATE (PART D, 2026-10-13): when an SI channel EXISTS for this conversation, a sender
+    // who is NOT a current member of it does not wake the bot — their triggering message gets the fixed
+    // "member of SI group" reply (rate-limited) and nothing dispatches. Only a message that WOULD wake
+    // (d.mayReply) is gated; non-members' non-triggering chatter flows as context, unchanged. No channel
+    // / SI off / unreadable roster → superMemberGate returns false (no gate). The record is already
+    // written (handleFast's ingestion), so a blocked message stays on the transcript; it just runs no turn.
+    if (d.mayReply && commands?.superMemberGate && await commands.superMemberGate(ev)) return;
     // PHASE 4 — brain-member fan-out (design B: re-entry). Kicked off HERE, concurrently with
     // E's own dispatch below (never blocking E's turn). It delivers this received room message
     // to each brain member whose mode admits it; each member's finalized reply is streamed into

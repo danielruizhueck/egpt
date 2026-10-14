@@ -31,6 +31,8 @@ import { createGating } from '../src/spine/gating.mjs';
 import { ensureContact, recordThread, getContact, getBeing, aliasTargetOf, aliasContact, superChannelFor, patchBeing } from '../src/conversations-state.mjs';
 import { sanitizeSlug } from '../src/sanitize.mjs';
 import { shortChatId } from '../src/bridges/chat-id.mjs';
+import { encodeChatCanary, decodeChatCanary, stripNodeSignature, renderNodeSignature, decodeNodeSignature } from '../src/node-signature.mjs';
+import { makeWrapPersona } from '../src/bridges/persona-wrap.mjs';
 
 const C_CHAT = '!chatC';
 // createGroup returns the FULL matrix id; the spine keys every conversation by the SHORT id. The
@@ -46,13 +48,14 @@ const RODZ_USER_ID = '@whatsapp_lid-69433129173200:beeper.local';
 // The summoner — a plain participant (NOT the operator): their inbound "…" is what summons.
 const SUMMONER = '@whatsapp_lid-summoner42:beeper.local';
 const CHAT_TITLE = 'Proyecto X';
+const ADMIN_CHAT = '!egptAdmin';   // the resolved admin_channel (eGPT Admin) the siphon routes to (PART C)
 const SUPER_TITLE = `${CHAT_TITLE}${SUPER_SUFFIX_DEFAULT}`;   // 'Proyecto X-super'
 
 function cfg({ superBlock = { enabled: true }, node_role = 'primary', node_name = 'kg' } = {}) {
   return {
     beeper: { primary: { phone: AN }, secondary: { phone: RODZ } },
     node_name, node_role,
-    ...(superBlock === null ? {} : { super: superBlock }),
+    ...(superBlock === null ? {} : { super_chats: superBlock }),   // renamed from `super` (migration 0040)
   };
 }
 
@@ -71,10 +74,11 @@ const LIVE_ROSTER = { participants: { items: [
   { id: SUMMONER, phoneNumber: '+34667928959', isSelf: false },
 ] } };
 
-function harness({ config, state, resolveSecondaryChatIdByTitle = () => SEC_SUPER_ROOM, rodzUserId = RODZ_USER_ID, chatOtherPartyId = async () => null, chatRaw = async () => LIVE_ROSTER, resolvePrimaryChatIdByTitle = null, createdChatIds = null, now = null, defaultKey = 'e' } = {}) {
+function harness({ config, state, resolveSecondaryChatIdByTitle = () => SEC_SUPER_ROOM, rodzUserId = RODZ_USER_ID, chatOtherPartyId = async () => null, chatRaw = async () => LIVE_ROSTER, resolvePrimaryChatIdByTitle = null, createdChatIds = null, now = null, defaultKey = 'e', adminChatId = ADMIN_CHAT } = {}) {
   let st = state ?? seedState();
   const sent = [];
   const logs = [];
+  const adminPosts = [];
   const calls = { create: [], post: [], resolve: [], resolveTitle: [], archive: [], chatRaw: [] };
   const forkBridge = {
     editMessage: async () => true,
@@ -98,9 +102,11 @@ function harness({ config, state, resolveSecondaryChatIdByTitle = () => SEC_SUPE
     forkBridge,
     sleep: async () => {},   // instant opener poll
     ...(now ? { now } : {}),
+    noticeToAdmin: async (text) => { adminPosts.push(text); return true; },   // SI siphon warning sink (PART C)
+    resolveAdminChatId: async () => adminChatId,                             // admin_channel → chat id (PART C)
     onLog: (m) => logs.push(m),
   });
-  return { cmds, sent, logs, calls, getState: () => st };
+  return { cmds, sent, logs, adminPosts, calls, getState: () => st };
 }
 
 // An INBOUND message (no `authorized`/`isSender`, chat is not a configured Self-DM ⇒ NOT operator).
@@ -515,5 +521,294 @@ describe('/agents mode in an alias room — stored on the alias, read by the gat
     expect(await gateMode(getState(), JOIN_LIVE)).toBe('on');
     expect(await gateMode(getState(), ORIGIN)).toBe('mention-direct');
     expect(getState().contacts.whatsapp[ORIGIN].agents.egpt.mode).toBe('mention-direct');
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// SI CORE (operator 2026-10-13): auto-create-on-reply, create-on-the-EAR, the canary intro, peer-link.
+// This EXTENDS the chunk-1/2 machinery — the SAME ensureSuperChannel/createAliasedSideGroup/postOpener/
+// superChannelFor/aliasContact and the SAME node-signature TAGS encoder. No parallel path.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+// ── (1) AUTO-CREATE ON REPLY: gating.decide creates + routes when automatic is ON (PART B) ──────────
+describe('SI core — auto-create on reply, gated on super_chats.automatic (PART B)', () => {
+  const AUTO = { enabled: true, automatic: true };
+  // Gating wired WITH the create seam, reading/writing the SAME harness state. chatRaw → LIVE_ROSTER so
+  // the just-created channel reads ALIVE and routing honours it (superChannelAlive).
+  const mkGate = (h, superBlock = AUTO) => createGating({
+    getConfig: () => cfg({ superBlock }),
+    loadState: async () => h.getState(),
+    defaultKey: 'e',
+    chatRaw: async () => LIVE_ROSTER,
+    ensureSuperChannel: (ev) => h.cmds.ensureSuperChannel(ev),
+  });
+  // A being ABOUT TO REPLY: an @mention (mode 'mention' ⇒ atEAnywhere wakes it) in the BASE chat.
+  const replyEv = { chatId: C_CHAT, surface: 'whatsapp', chatName: CHAT_TITLE, kind: 'message', mention: { atEStart: true, atEAnywhere: true } };
+
+  it('automatic ON: a being replies with NO channel → ensureSuperChannel CREATES it and the reply ROUTES there; a 2nd reply REUSES', async () => {
+    const h = harness({ config: cfg({ superBlock: AUTO }) });
+    const g = mkGate(h);
+    const d1 = await g.decide('e', replyEv);
+    expect(h.calls.create).toHaveLength(1);                  // auto-created through the EXISTING path
+    expect(d1.replyChatId).toBe(SUPER_CHAT);                 // the reply routes to the just-created channel
+    expect(superChannelFor(h.getState(), 'whatsapp', C_CHAT)).toBe(SUPER_CHAT);
+    const d2 = await g.decide('e', replyEv);
+    expect(h.calls.create).toHaveLength(1);                  // reused, not re-created
+    expect(d2.replyChatId).toBe(SUPER_CHAT);
+  });
+
+  it('automatic OFF (default): enabled + reply + no channel → NO auto-create (siphon handles it, PART C)', async () => {
+    const h = harness({ config: cfg({ superBlock: { enabled: true } }) });   // automatic unset ⇒ false
+    const g = mkGate(h, { enabled: true });
+    await g.decide('e', replyEv);
+    expect(h.calls.create).toHaveLength(0);                  // the automatic gate held
+  });
+
+  it('automatic ON but NOT about to reply (unmentioned in a mention chat) → no create, reply stays in base', async () => {
+    const h = harness({ config: cfg({ superBlock: AUTO }) });
+    const g = mkGate(h);
+    const d = await g.decide('e', { chatId: C_CHAT, surface: 'whatsapp', chatName: CHAT_TITLE, kind: 'message', mention: {} });
+    expect(d.mayReply).toBe(false);
+    expect(h.calls.create).toHaveLength(0);
+    expect(d.replyChatId).toBe(C_CHAT);
+  });
+
+  it('automatic ON + a backlog wake (would-reach-a-being check) never creates', async () => {
+    const h = harness({ config: cfg({ superBlock: AUTO }) });
+    const g = mkGate(h);
+    await g.decide('e', { ...replyEv, backlog: true });
+    expect(h.calls.create).toHaveLength(0);
+  });
+
+  it('SI DISABLED → decide never creates (even automatic:true), reply stays in base', async () => {
+    const h = harness({ config: cfg({ superBlock: { enabled: false, automatic: true } }) });
+    const g = mkGate(h, { enabled: false, automatic: true });
+    const d = await g.decide('e', replyEv);
+    expect(h.calls.create).toHaveLength(0);
+    expect(d.replyChatId).toBe(C_CHAT);
+  });
+
+  it('REGRESSION: ensureSuperChannel UNWIRED (standalone gating) is a no-op', async () => {
+    const h = harness({ config: cfg({ superBlock: AUTO }) });
+    const g = createGating({ getConfig: () => cfg({ superBlock: AUTO }), loadState: async () => h.getState(), defaultKey: 'e', chatRaw: async () => LIVE_ROSTER });  // no seam
+    const d = await g.decide('e', replyEv);
+    expect(h.calls.create).toHaveLength(0);
+    expect(d.replyChatId).toBe(C_CHAT);
+  });
+});
+
+// ── (2) CREATE ON THE EAR: works with NO secondary/mouth (the one-account baseline) ─────────────────
+describe('SI core — create on the EAR (one-account baseline: no secondary/mouth)', () => {
+  const baseCfg = (over = {}) => ({ beeper: { primary: { phone: AN } }, node_name: 'kg', node_role: 'primary', super_chats: { enabled: true }, ...over });
+
+  it('the create targets the EAR account (chatAccountId), NOT a resolveRodz-gated secondary', async () => {
+    const { cmds, calls } = harness({ config: baseCfg() });
+    await cmds.runPhrase(inbound('…'), 'super');
+    expect(calls.create).toHaveLength(1);
+    expect(calls.create[0].accountID).toBe('whatsapp');       // the ear
+  });
+
+  it('no secondary configured → Rodz is NOT invited (only the summoner), and the opener still posts', async () => {
+    const { cmds, calls } = harness({ config: baseCfg() });
+    await cmds.runPhrase(inbound('…'), 'super');
+    expect(calls.create[0].participantIDs).toEqual([SUMMONER]);   // baseline: no mouth member
+    expect(calls.resolve).toHaveLength(0);                       // secondary phone unset → never resolved
+    expect(calls.post).toHaveLength(1);                          // the ear posts the opener
+  });
+
+  it('WITH a secondary, the EAR still creates AND Rodz is invited (chunk-1 behavior preserved)', async () => {
+    const { cmds, calls } = harness({ config: cfg() });          // cfg() carries secondary
+    await cmds.runPhrase(inbound('…'), 'super');
+    expect(calls.create[0].accountID).toBe('whatsapp');
+    expect(calls.create[0].participantIDs).toEqual([RODZ_USER_ID, SUMMONER]);
+  });
+});
+
+// ── (3) THE CANARY INTRO: the base id rides an invisible frame; visible opener unchanged ────────────
+describe('SI core — the intro carries the base id in a node-signature canary frame', () => {
+  it('encode → decode round-trips the shared-account base id', () => {
+    for (const base of [SUPER_CHAT, 'Abc123_xyz', 'a/b:weird', '26087681749235@lid']) {
+      expect(decodeChatCanary(encodeChatCanary(base))).toBe(base);
+    }
+  });
+
+  it('persona-wrap appends the canary BESIDE the node frame: peer decodes it, node attribution intact, VISIBLE TEXT UNCHANGED', () => {
+    const wrap = makeWrapPersona({ nodeName: 'kg' });
+    const opener = SUPER_OPENER_DEFAULT.replaceAll('{chat}', CHAT_TITLE).replaceAll('{group}', CHAT_TITLE);
+    const out = wrap({ canary: C_CHAT }, opener);
+    expect(decodeChatCanary(out)).toBe(C_CHAT);                 // the peer reads the base id
+    expect(decodeNodeSignature(out)).toBe('kg');                // the FIRST frame is still the NODE — attribution intact
+    expect(stripNodeSignature(out)).toBe(opener);               // every invisible frame strips → the plain opener
+    expect(renderNodeSignature(out)).toBe(`${opener}<kg>`);     // the canary renders to NOTHING; only <kg> shows
+  });
+
+  it('a send with NO canary is unchanged (no extra frame, decode → null)', () => {
+    const wrap = makeWrapPersona({ nodeName: 'kg' });
+    const out = wrap({}, 'hola');
+    expect(decodeChatCanary(out)).toBe(null);
+    expect(renderNodeSignature(out)).toBe('hola<kg>');
+  });
+});
+
+// ── (4) PEER-LINK: a canary intro links the SAME channel with no RPC (symmetric to auto-create) ─────
+describe('SI core — peer-link from the intro canary', () => {
+  // The intro as THIS (co-account) node receives it: in the side-group (full matrix id), carrying the
+  // base chat's shared-account id in ev.canary, decoded by identity.build on the real path.
+  const intro = (canary, extra = {}) => ({ chatId: SUPER_CHAT_FULL, surface: 'whatsapp', chatName: SUPER_TITLE, canary, body: '🌟 …', ...extra });
+
+  it('an inbound SI-group message carrying the canary, with NO local alias, WRITES the super alias; superChannelFor then returns it', async () => {
+    const { cmds, getState } = harness({ config: cfg() });
+    const primaryJid = getContact(getState(), 'whatsapp', C_CHAT).jid;
+    await cmds.linkSuperChannel(intro(primaryJid));
+    const st = getState();
+    // SAME alias shape the creating node writes ({ aliasOf, transcript, super:true }).
+    expect(st.contacts.whatsapp[SUPER_CHAT]).toEqual({ aliasOf: primaryJid, transcript: sanitizeSlug(SUPER_TITLE), super: true });
+    expect(superChannelFor(st, 'whatsapp', C_CHAT)).toBe(SUPER_CHAT);
+  });
+
+  it('idempotent: a re-sight of an already-linked channel writes nothing new', async () => {
+    const { cmds, getState } = harness({ config: cfg() });
+    const primaryJid = getContact(getState(), 'whatsapp', C_CHAT).jid;
+    await cmds.linkSuperChannel(intro(primaryJid));
+    const before = getState().contacts.whatsapp[SUPER_CHAT];
+    await cmds.linkSuperChannel(intro(primaryJid));
+    expect(getState().contacts.whatsapp[SUPER_CHAT]).toEqual(before);
+  });
+
+  it('no canary → nothing linked', async () => {
+    const { cmds, getState } = harness({ config: cfg() });
+    await cmds.linkSuperChannel(intro(null));
+    expect(getState().contacts.whatsapp[SUPER_CHAT]).toBeUndefined();
+  });
+
+  it('SI disabled → nothing linked even with a canary', async () => {
+    const { cmds, getState } = harness({ config: cfg({ superBlock: { enabled: false } }) });
+    const primaryJid = getContact(getState(), 'whatsapp', C_CHAT).jid;
+    await cmds.linkSuperChannel(intro(primaryJid));
+    expect(getState().contacts.whatsapp[SUPER_CHAT]).toBeUndefined();
+  });
+
+  it('a canary for a base conversation this node does NOT know → not linked (logged, no throw)', async () => {
+    const { cmds, getState } = harness({ config: cfg() });
+    await cmds.linkSuperChannel(intro('!unknownBase'));
+    expect(getState().contacts.whatsapp[SUPER_CHAT]).toBeUndefined();
+  });
+});
+
+// ── (5) PART C — SIPHON to admin: automatic OFF + no channel ⇒ the reply goes to eGPT Admin ──────────
+describe('SI PART C — siphonReplyToAdmin (automatic off, no channel): reply to admin, base chat clean', () => {
+  const OFF = { enabled: true };                            // automatic unset ⇒ false
+
+  it('returns the admin chat id (so gating routes the reply THERE) and posts the warning once per chat', async () => {
+    const { cmds, adminPosts } = harness({ config: cfg({ superBlock: OFF }) });
+    const ev = { chatId: C_CHAT, surface: 'whatsapp', chatName: CHAT_TITLE };
+    expect(await cmds.siphonReplyToAdmin(ev)).toBe(ADMIN_CHAT);   // the reply is routed to eGPT Admin
+    expect(adminPosts).toHaveLength(1);                           // warning posted once
+    expect(adminPosts[0]).toMatch(/super_chats.*enabled.*no SI channel.*automatic is off/i);
+    expect(adminPosts[0]).toContain(CHAT_TITLE);                  // names the chat
+    // RATE-LIMIT: a second reply still routes to admin, but the blurb is NOT repeated.
+    expect(await cmds.siphonReplyToAdmin(ev)).toBe(ADMIN_CHAT);
+    expect(adminPosts).toHaveLength(1);
+  });
+
+  it('the warning names the recovery phrase (super_chats.triggers[0], else "…")', async () => {
+    const { cmds, adminPosts } = harness({ config: cfg({ superBlock: { enabled: true, triggers: ['SI chat'] } }) });
+    await cmds.siphonReplyToAdmin({ chatId: C_CHAT, surface: 'whatsapp', chatName: CHAT_TITLE });
+    expect(adminPosts[0]).toContain('SI chat');
+    const h2 = harness({ config: cfg({ superBlock: OFF }) });     // no triggers → the "…" default
+    await h2.cmds.siphonReplyToAdmin({ chatId: C_CHAT, surface: 'whatsapp', chatName: CHAT_TITLE });
+    expect(h2.adminPosts[0]).toContain('…');
+  });
+
+  it('admin_channel UNRESOLVABLE → returns null (gating falls back to the base chat), nothing posted', async () => {
+    const { cmds, adminPosts } = harness({ config: cfg({ superBlock: OFF }), adminChatId: null });
+    expect(await cmds.siphonReplyToAdmin({ chatId: C_CHAT, surface: 'whatsapp', chatName: CHAT_TITLE })).toBe(null);
+    expect(adminPosts).toHaveLength(0);
+  });
+
+  // THE WIRED ROUTING through gating.decide: automatic off + no channel + reply ⇒ replyChatId = admin,
+  // never the base chat; the siphon seam is what gating calls.
+  it('gating routes the reply to admin (not the base chat) when automatic is off and there is no channel', async () => {
+    const h = harness({ config: cfg({ superBlock: OFF }) });
+    const g = createGating({
+      getConfig: () => cfg({ superBlock: OFF }),
+      loadState: async () => h.getState(),
+      defaultKey: 'e',
+      chatRaw: async () => LIVE_ROSTER,
+      ensureSuperChannel: (ev) => h.cmds.ensureSuperChannel(ev),
+      siphonReplyToAdmin: (ev) => h.cmds.siphonReplyToAdmin(ev),
+    });
+    const d = await g.decide('e', { chatId: C_CHAT, surface: 'whatsapp', chatName: CHAT_TITLE, kind: 'message', mention: { atEAnywhere: true } });
+    expect(d.replyChatId).toBe(ADMIN_CHAT);                  // reply siphoned to admin
+    expect(h.calls.create).toHaveLength(0);                  // NOT auto-created (automatic off)
+    expect(h.adminPosts).toHaveLength(1);                    // warning posted
+  });
+
+  it('automatic ON ⇒ NO siphon (it auto-creates instead); a channel that EXISTS ⇒ NO siphon', async () => {
+    // automatic ON: the create branch runs, siphon never called.
+    const h1 = harness({ config: cfg({ superBlock: { enabled: true, automatic: true } }) });
+    const g1 = createGating({ getConfig: () => cfg({ superBlock: { enabled: true, automatic: true } }), loadState: async () => h1.getState(), defaultKey: 'e', chatRaw: async () => LIVE_ROSTER, ensureSuperChannel: (ev) => h1.cmds.ensureSuperChannel(ev), siphonReplyToAdmin: (ev) => h1.cmds.siphonReplyToAdmin(ev) });
+    const d1 = await g1.decide('e', { chatId: C_CHAT, surface: 'whatsapp', chatName: CHAT_TITLE, kind: 'message', mention: { atEAnywhere: true } });
+    expect(d1.replyChatId).toBe(SUPER_CHAT);
+    expect(h1.adminPosts).toHaveLength(0);
+    // a channel already exists: routing goes to it (chunk 2), siphon never called.
+    const withChan = aliasContact(seedState(), 'whatsapp', SUPER_CHAT, getContact(seedState(), 'whatsapp', C_CHAT).jid, { transcript: 'x', super: true });
+    const h2 = harness({ config: cfg({ superBlock: OFF }), state: withChan });
+    const g2 = createGating({ getConfig: () => cfg({ superBlock: OFF }), loadState: async () => h2.getState(), defaultKey: 'e', chatRaw: async () => LIVE_ROSTER, siphonReplyToAdmin: (ev) => h2.cmds.siphonReplyToAdmin(ev) });
+    const d2 = await g2.decide('e', { chatId: C_CHAT, surface: 'whatsapp', chatName: CHAT_TITLE, kind: 'message', mention: { atEAnywhere: true } });
+    expect(d2.replyChatId).toBe(SUPER_CHAT);
+    expect(h2.adminPosts).toHaveLength(0);
+  });
+});
+
+// ── (6) PART D — the ACCESS GATE: a non-member of an existing SI group does not wake the bot ─────────
+describe('SI PART D — superMemberGate (membership of an existing SI channel)', () => {
+  const MEMBER = SUMMONER;                                  // in LIVE_ROSTER (phone +34667928959)
+  const OUTSIDER = '@whatsapp_lid-leftuser:beeper.local';   // NOT in LIVE_ROSTER
+  // A conversation that already HAS a super channel (SUPER_CHAT), whose live roster is LIVE_ROSTER.
+  const withChannel = () => aliasContact(seedState(), 'whatsapp', SUPER_CHAT, getContact(seedState(), 'whatsapp', C_CHAT).jid, { transcript: sanitizeSlug(SUPER_TITLE), super: true });
+  const at = (senderId) => ({ chatId: C_CHAT, surface: 'whatsapp', chatName: CHAT_TITLE, senderId });
+
+  it('a NON-member trigger → BLOCKED (returns true) + the fixed reply to the chat they triggered from', async () => {
+    const { cmds, sent } = harness({ config: cfg(), state: withChannel() });
+    expect(await cmds.superMemberGate(at(OUTSIDER))).toBe(true);
+    expect(sent).toEqual([{ chatId: C_CHAT, text: 'User must be member of SI group to interact with it.' }]);
+  });
+
+  it('rate-limit: a second non-member trigger is still blocked but does NOT repeat the reply', async () => {
+    const { cmds, sent } = harness({ config: cfg(), state: withChannel() });
+    await cmds.superMemberGate(at(OUTSIDER));
+    expect(await cmds.superMemberGate(at(OUTSIDER))).toBe(true);
+    expect(sent).toHaveLength(1);
+  });
+
+  it('a CURRENT member → NOT blocked (returns false), nothing posted', async () => {
+    const { cmds, sent } = harness({ config: cfg(), state: withChannel() });
+    expect(await cmds.superMemberGate(at(MEMBER))).toBe(false);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('NO channel → no gate (returns false), nothing posted', async () => {
+    const { cmds, sent } = harness({ config: cfg() });        // seedState has no super alias
+    expect(await cmds.superMemberGate(at(OUTSIDER))).toBe(false);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('SI disabled → no gate even with a channel', async () => {
+    const { cmds, sent } = harness({ config: cfg({ superBlock: { enabled: false } }), state: withChannel() });
+    expect(await cmds.superMemberGate(at(OUTSIDER))).toBe(false);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('roster unreadable (chatRaw → false) → fail-open (returns false), nothing posted', async () => {
+    const { cmds, sent } = harness({ config: cfg(), state: withChannel(), chatRaw: async () => false });
+    expect(await cmds.superMemberGate(at(OUTSIDER))).toBe(false);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('the gate bites EVERYONE incl. the operator (a matrix id not in the roster)', async () => {
+    const { cmds, sent } = harness({ config: cfg(), state: withChannel() });
+    expect(await cmds.superMemberGate(at('@anrodriguez:beeper.com'))).toBe(true);
+    expect(sent).toHaveLength(1);
   });
 });
