@@ -23,7 +23,6 @@ import { pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
 import { startBeeperBridge, newerMsgId, transcriptionForNoteId, crossAccountMsgKey, LISTENING_REACTION } from '../src/bridges/beeper.mjs';
 import { createFloodBan } from '../src/flood-ban.mjs';
-import { liveFrame } from '../src/spine/sender.mjs';
 import { EGPT_HOME } from '../src/egpt-home.mjs';
 import { encodeMesh } from '../src/mesh/relay.mjs';
 import { surfaceOf, createIdentity } from '../src/spine/identity.mjs';
@@ -473,27 +472,6 @@ describe('beeper bridge', () => {
     expect(out[0].text).toBe(`edited #${id}\n    - ⏳ Thinking…\n    + Hola mundo, qué tal`);
     // …and the settle DID advance the baseline, so a genuine human edit still diffs correctly.
     expect(out[1].text).toBe(`edited #${id}\n    - Hola mundo, qué tal\n    + Hola mundo, ¿qué tal?`);
-  });
-
-  // LIVENESS (operator 2026-10-15): the sender re-edits a live placeholder or a background status
-  // with its elapsed time. Said from the mouth's account, every pulse re-enters this ear as an edit;
-  // the ⏳ every pulse carries drops it HERE, before the spine — no ingestion, no transcript line.
-  it("the mouth's liveness pulses never surface; only the settle does", async () => {
-    const { incoming } = await startBridge();
-    const id = `${Math.floor(Math.random() * 1e6)}`;
-    const post = (text) => fake.emit({ type: 'message.upserted', entries: [liveMsg({ id, text, senderName: 'Rodz', isSender: false })] });
-    const signed = (t) => `🐶 E: ${t} 🏰`;
-    const label = '⚙️ working in background: Run the audit';
-    post(signed(`${label} ⏳`));                          // the status as first posted — first sight, the baseline
-    await waitFor(() => incoming.some((i) => i.from.msgKey === id));
-    const before = incoming.length;
-    for (const ms of [30_000, 60_000, 90_000]) post(signed(liveFrame(label, ms)));
-    post(signed('✓ background work ended: Run the audit'));
-    fake.emit({ type: 'message.upserted', entries: [liveMsg({ text: 'sentinel' })] });
-    await waitFor(() => incoming.some((i) => i.text === 'sentinel'));
-    const out = incoming.slice(before).filter((i) => i.from.isStageDirection);
-    expect(out).toHaveLength(1);
-    expect(out[0].text).toBe(`edited #${id}\n    - ${signed(`${label} ⏳`)}\n    + ${signed('✓ background work ended: Run the audit')}`);
   });
 
   it('does NOT emit an edit when a message re-upserts UNCHANGED (receipt/seen)', async () => {

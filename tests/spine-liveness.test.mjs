@@ -49,16 +49,19 @@ function heldBrain() {
   return brain;
 }
 
-function build({ stop = { present: false } } = {}) {
+// `mouth`: the chat is said by a second connection on this node (boot's local mouth): every reply,
+// placeholder and status goes out from ITS bridge in ITS room — never from the ear (`bridge`).
+function build({ stop = { present: false }, mouth = null } = {}) {
   const bridge = fakeBridge();
   const brain = heldBrain();
+  const peerMouth = mouth ? { route: async () => ({ bridge: mouth, chatId: 'mouth-room', connection: 'rodz' }) } : null;
   const logged = [], streamed = [], notes = [], group = [];
   const spine = createSpine({
     bridge, brain,
     identity: { build: (m) => ({ ...m, line: m.body }) },
     router: { resolve: () => ({ being: 'egpt', mention: { atEStart: true, atEAnywhere: true } }) },
     gating: { async decide() { return { mode: 'mention', receives: true, mayReply: true, sendToEgpt: 'mode' }; }, surfaces: (d) => d.mayReply },
-    sender: createSender({ bridge, bodyEmojiOf: () => '🐶', labelOf: () => 'E' }),
+    sender: createSender({ bridge, peerMouth, bodyEmojiOf: () => '🐶', labelOf: () => 'E' }),
     transcript: { async log(ev, reply) { logged.push(reply ? reply.text : ev.body); }, logStream(ev, before, after) { streamed.push(after); } },
     heartbeats: { runDue() {} },
     stopSwitch: { present: () => stop.present, pull: async () => {} },
@@ -122,7 +125,9 @@ describe('liveness — a running turn', () => {
     b.brain.calls[0].release('done');
     await done;
     expect(ph.finals).toEqual([]);                                    // the 20-min-old placeholder is not touched
-    expect(b.bridge.sent).toEqual([{ chat: CHAT, text: 'done', opts: expect.objectContaining({ replyTo: 'm1', persona: 'egpt' }) }]);
+    expect(b.bridge.streams[2]).toMatchObject({ chat: CHAT, init: 'done', finals: ['done'] });   // a fresh message, same path
+    expect(b.bridge.streams[2].opts).toMatchObject({ replyTo: 'm1', persona: 'egpt' });
+    expect(b.bridge.sent).toEqual([]);
     expect(st.finals).toEqual(['✓ 20m00s']);
   });
 
@@ -137,7 +142,42 @@ describe('liveness — a running turn', () => {
     await done;
     expect(ph.frames).toEqual([]);
     expect(ph.finals).toEqual([]);
-    expect(b.bridge.sent.map((s) => s.text)).toEqual(['the answer']);
+    expect(b.bridge.streams[1]).toMatchObject({ init: 'the answer', finals: ['the answer'] });
+  });
+
+  it('(d) in a MOUTH chat the 14-min reply is a fresh message from the mouth, in its room — never from the ear', async () => {
+    const mouth = fakeBridge();
+    const b = build({ mouth });
+    const done = b.bridge.emit(mention('@e slow job'));
+    await flush();
+    expect(mouth.streams.map((s) => [s.chat, s.init])).toEqual([['mouth-room', THINKING]]);
+    at(14 * min);
+    b.brain.calls[0].release('the answer');
+    await done;
+    expect(mouth.streams[0].finals).toEqual([]);                      // the 14-min-old placeholder is not touched
+    expect(mouth.streams[1]).toMatchObject({ chat: 'mouth-room', init: 'the answer', finals: ['the answer'] });
+    expect(mouth.streams[1].opts).toMatchObject({ persona: 'egpt', bodyEmoji: '🐶' });
+    expect(b.bridge.streams).toEqual([]);
+    expect(b.bridge.sent).toEqual([]);
+    expect(mouth.sent).toEqual([]);
+  });
+
+  it('(d) in a MOUTH chat a background status and its replacement come from the mouth too', async () => {
+    const mouth = fakeBridge();
+    const b = build({ mouth });
+    const done = b.bridge.emit(mention('@e run the audit in the background'));
+    await flush();
+    b.brain.tasks = [{ description: 'Run the audit', since: T0 }];
+    b.brain.calls[0].release('started it');
+    await done;
+    await flush();
+    for (let t = 30 * sec; t <= 14 * min; t += 30 * sec) { at(t); b.spine.tick(); }
+    await flush();
+    const statuses = mouth.streams.filter((s) => s.init.startsWith('⚙️'));
+    expect(statuses).toHaveLength(2);
+    expect(statuses.map((s) => s.chat)).toEqual(['mouth-room', 'mouth-room']);
+    expect(b.bridge.streams).toEqual([]);
+    expect(b.bridge.sent).toEqual([]);
   });
 
   it('(d) a turn that ends at 5 min still edits its placeholder in place (unchanged)', async () => {
@@ -174,7 +214,7 @@ describe('liveness — a running turn', () => {
     b.brain.tasks = [{ description: 'Run the audit', since: T0 }];
     b.brain.calls[0].release('started');
     await done;
-    expect(b.bridge.streams).toHaveLength(1);
+    expect(b.bridge.streams.filter((s) => s.init.startsWith('⚙️'))).toEqual([]);
   });
 });
 

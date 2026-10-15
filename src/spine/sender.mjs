@@ -477,6 +477,8 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
       let streamMouth = null;                          // the LOCAL mouth's route answer, when the stream was opened in its room (confirmedIn)
       let openedAt = 0, ended = false, lastFrame = null;   // liveness: the post time (edit window), done, last frame shown
       const editable = () => now() - openedAt < LIVE_EDIT_MS;
+      // Past the edit window: `text` as a fresh message from the mouth that posted the placeholder.
+      const postFresh = async (text) => { const h = mint(streamVia, text); await h?.finish?.(text); return h; };
       const push = (f) => { if (!stream || !editable()) return; lastFrame = f; stream.update?.(f); };
       // The text the placeholder opens with. A QUEUED one differs from THINKING and, via `ahead`,
       // from every other queued one, which is what keeps two coexisting placeholders resolvable to
@@ -495,18 +497,22 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
       // it; src/spine/boot.mjs makePeerMouth). Same factory, same tag, same wrap one layer down in
       // beeper-port: there is no second sender and no second definition of what a reply looks
       // like, only a different bridge and a different room.
-      const openLocalStream = (on = bridgeForThisBeing, room = chatId) => on.startStream?.(room, placeholderText(), tag);
+      const openLocalStream = (on = bridgeForThisBeing, room = chatId, init = placeholderText()) => on.startStream?.(room, init, tag);
       // THE ONE DECISION (header): which factory mints the stream. All three hand back the same
       // surface, so nothing below this line knows or cares which mouth it is driving. A LOCAL
       // mouth is told apart from a PEER one by `.bridge`, which only the local answer carries.
+      // `text`: a fresh message from that same mouth (a late reply); absent = the placeholder.
+      const mint = (via, text) => (via?.bridge
+        ? openLocalStream(via.bridge, via.chatId, text)
+        : via ? peerMouth.startStream(via, text ?? placeholderText(), { fallback: () => openLocalStream(undefined, undefined, text), render: renderForPeer }) : openLocalStream(undefined, undefined, text));
+      let streamVia = null;                            // the route answer the placeholder was opened through
       const openStream = (mouthChat = null) => {
         if (streamOpened) return stream;
         streamOpened = true;
         openedAt = now();
+        streamVia = mouthChat;
         if (mouthChat?.bridge) streamMouth = mouthChat;
-        stream = mouthChat?.bridge
-          ? openLocalStream(mouthChat.bridge, mouthChat.chatId)
-          : mouthChat ? peerMouth.startStream(mouthChat, placeholderText(), { fallback: openLocalStream, render: renderForPeer }) : openLocalStream();
+        stream = mint(mouthChat);
         const already = shown();
         if (already) stream?.update?.(`${already} ${LIVE_FRAME_MARK}`);
         return stream;
@@ -609,8 +615,13 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
           // read is a RESTATEMENT, not a divergence (see alreadyRead): settle on the stream so
           // the answer is not doubled; anything new still absorbs (seam, both kept).
           const settled = t.trim() ? t : noReplyMark();
-          // Past the edit window the placeholder stays on its last frame and the reply goes out fresh.
-          if (stream && !editable()) { fallbackResult = await deliverHere(settled, tag); return; }
+          // Past the edit window the placeholder stays on its last frame; the reply is a fresh message
+          // from the same mouth, and the §7 fallback only if that did not deliver.
+          if (stream && !editable()) {
+            const fresh = await postFresh(settled);
+            if (fresh?.delivered) stream = fresh; else fallbackResult = await deliverHere(settled, tag);
+            return;
+          }
           const body = alreadyRead(settled) ? shown() : absorb(settled);
           // AND THAT IS THE WHOLE MOUTH DECISION, spent. A peer stream settles the message the peer
           // has been editing; a local one settles this account's. Either way `delivered` says
@@ -635,6 +646,7 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
             // must not be left thinking forever. Only a turn that never opened a stream at all
             // (no streaming bridge) posts the ❌ fresh, which is the branch this always had.
             if (stream && editable()) await stream.finish?.(`${shown() ? `${shown()} ` : ''}${FAIL_SUFFIX}`);
+            else if (stream) await postFresh(FAIL_SUFFIX);
             else await bridgeForThisBeing.send(chatId, FAIL_SUFFIX, tag);
           } catch { /* best effort */ }
         },
