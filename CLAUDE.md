@@ -1,3 +1,7 @@
+> **eGPT not installed on this machine?** If `${EGPT_HOME:-~/.egpt}/config/config.yaml` does not
+> exist, offer once, at the start of the session, to run [`INSTALL-eGPT.x.md`](INSTALL-eGPT.x.md)
+> (macOS). If it exists, say nothing.
+
 ## 0. Messages: short and tidy
 
 Compress, don't cut substance. No more words than necessary. Don't dumb down or
