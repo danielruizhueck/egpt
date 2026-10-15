@@ -75,6 +75,21 @@ export const THINKING = `${LIVE_FRAME_MARK} Thinking…`;   // NOT a lone emoji 
 // and — via `ahead` — from every other queued one, so each resolves to its own id.
 export const QUEUED = (ahead) => `${LIVE_FRAME_MARK} Queued (${ahead} ahead)…`;
 
+// LIVENESS (operator 2026-10-15: "perhaps the bridge can maintain an animation"). A live message is
+// re-edited with its elapsed time (src/spine/liveness.mjs). WhatsApp refuses an edit ~15 min after
+// the post, so a message is pulsed only for LIVE_EDIT_MS of its life — 2 min short, for clock skew.
+export const LIVE_EDIT_MS = 13 * 60_000;
+export function elapsed(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m${String(s % 60).padStart(2, '0')}s`;
+  return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}m`;
+}
+// The ⏳ is what keeps a pulse off the record and out of the spine (dispatch-line.isLiveStreamFrame).
+const withMark = (s) => (String(s).includes(LIVE_FRAME_MARK) ? String(s) : `${s} ${LIVE_FRAME_MARK}`);
+export const liveFrame = (base, ms) => `${withMark(base)} ${elapsed(ms)}`;
+
 // THE MESSAGE IS APPEND-ONLY (operator 2026-08-28: "the message is replaced for a 'final'
 // message, and the in-transit thinking is deleted … sometimes it is writing something and
 // then boom, it changes … the messages should also be stable").
@@ -337,12 +352,14 @@ export function makeOutbound({ bridge, bridgeOf = null, peerMouth = null, onLog 
   };
 }
 
-export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null, labelOf = () => null, agentSignatureOpenOf = () => '', agentSignatureCloseOf = () => '', defaultKey = 'e', peerMouth = null, onUndeliverable = () => {}, onLog = () => {} } = {}) {
+export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null, labelOf = () => null, agentSignatureOpenOf = () => '', agentSignatureCloseOf = () => '', defaultKey = 'e', peerMouth = null, onUndeliverable = () => {}, onLog = () => {}, now = () => Date.now() } = {}) {
   if (!bridge) throw new Error('createSender: bridge is required');
   const textOf = (v) => (typeof v === 'string' ? v : v?.text ?? '');
   const outbound = makeOutbound({ bridge, bridgeOf, peerMouth, onLog });
   return {
-    open(chatId, { being = defaultKey, replyTo = null, queued = false, queuedAhead = 0, auto = false, origin = null } = {}) {
+    // `status`: a liveness status message (src/spine/liveness.mjs) — opens on that line instead of
+    // THINKING; a turn that takes it over (activate) flips it to THINKING like a queued one.
+    open(chatId, { being = defaultKey, replyTo = null, queued = false, queuedAhead = 0, auto = false, origin = null, status = null } = {}) {
       const { bridge: bridgeForThisBeing, route: peerRoute } = outbound(being, chatId);
       // ROUTED-TARGET FALLBACK (never a silent drop): a send the sending account can't place on the
       // routed room (a super/alias room it isn't a member of → resolveChatId null → DROPPED) re-sends
@@ -458,10 +475,12 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
       let stream = null;
       let streamOpened = false;
       let streamMouth = null;                          // the LOCAL mouth's route answer, when the stream was opened in its room (confirmedIn)
+      let openedAt = 0, ended = false, lastFrame = null;   // liveness: the post time (edit window), done, last frame shown
+      const push = (f) => { lastFrame = f; stream?.update?.(f); };
       // The text the placeholder opens with. A QUEUED one differs from THINKING and, via `ahead`,
       // from every other queued one, which is what keeps two coexisting placeholders resolvable to
       // their own message ids (see QUEUED).
-      const placeholderText = () => ((queued && !activated) ? QUEUED(queuedAhead) : THINKING);
+      const placeholderText = () => ((queued && !activated) ? QUEUED(queuedAhead) : (status && !activated) ? withMark(status) : THINKING);
       // A STREAM ON A CONNECTION THIS NODE HOLDS — this being's own by default, and also the LAST
       // RESORT the peer stream falls back to when it can neither stream nor speak through the peer
       // (peer-mouth.startPeerStream, tier 3), which is why it is a factory rather than an inline
@@ -482,6 +501,7 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
       const openStream = (mouthChat = null) => {
         if (streamOpened) return stream;
         streamOpened = true;
+        openedAt = now();
         if (mouthChat?.bridge) streamMouth = mouthChat;
         stream = mouthChat?.bridge
           ? openLocalStream(mouthChat.bridge, mouthChat.chatId)
@@ -504,18 +524,35 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
         // A queued placeholder flips from the queue into the live train the instant
         // its turn starts (before the first token), so the user sees it move. No-op
         // for a placeholder that was never queued.
-        activate() { activated = true; if (queued) stream?.update?.(THINKING); },
+        activate() { activated = true; if (queued || status) push(THINKING); },
         // absorb() runs UNCONDITIONALLY, before the push. `stream?.update?.(`${absorb(t)} …`)`
         // reads as if it did, but optional chaining short-circuits the WHOLE call expression —
         // arguments included — so with no stream yet (a peer route being resolved, or a peer
         // route outright) the running text was silently never accumulated, and a fallback post
         // would have carried only the settled value with the narration above it lost.
-        update(partial) { const t = textOf(partial); if (!t) return; const frame = `${absorb(t)} ${LIVE_FRAME_MARK}`; stream?.update?.(frame); },
+        update(partial) { const t = textOf(partial); if (!t) return; const frame = `${absorb(t)} ${LIVE_FRAME_MARK}`; push(frame); },
+        // LIVENESS: the live frame again with the time since `ms` ago, never absorbed into what was
+        // read. `label` relabels a status not yet taken over. false = past the edit window.
+        pulse(ms, label = null) {
+          if (ended || !stream) return true;
+          if (now() - openedAt >= LIVE_EDIT_MS) return false;
+          if (label && status && !activated) status = label;
+          push(liveFrame(shown() || placeholderText(), ms));
+          return true;
+        },
+        // Settle a status no turn took over, on `text` or its last frame. Never a fallback send.
+        async end(text = null) {
+          if (ended) return;
+          ended = true;
+          if (route) await route;
+          if (stream) await stream.finish?.(text ?? lastFrame ?? placeholderText());
+        },
         // `commands` (operator 2026-09-01): the verbs of a LIMB-ONLY reply — the turn's whole
         // answer was action commands, so there is no prose to deliver but plenty happened. Null
         // for every other turn, which is why a reply with no action and a genuinely empty reply
         // both resolve byte-identically to before.
         async finish(reply, { surface = true, commands = null, verbose = false } = {}) {
+          ended = true;
           // Settle the mouth decision before anything is written anywhere. With no peer this is
           // null and costs nothing; with one, the `route.then` above has already opened the stream
           // by the time this resolves (microtask order), so every branch below sees the same
@@ -587,6 +624,7 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
           }
         },
         async fail() {                                 // visible failure: the message ends with ❌
+          ended = true;
           try {
             if (route) await route;                    // …after the mouth decision, so the placeholder that was opened is the one this EDITS rather than posting a fresh ❌ beside it
             // The failure ends the placeholder wherever it lives — the peer's account on a peer

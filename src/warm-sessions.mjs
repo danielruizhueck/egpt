@@ -23,8 +23,9 @@
 //   - One turn at a time per key (the warm primitive requires it); turns on the
 //     same key are serialized via a per-entry promise chain.
 //   - BACKGROUND WORK (2026-10-15): a session whose background tasks are still running
-//     (session.background > 0) is not idle- or LRU-evicted — closing it kills them — up to
-//     maxBackgroundHoldMs. Its completion report goes up through onBackgroundDone(key, info).
+//     (session.background > 0) is NEVER idle- or LRU-evicted — closing it kills them, and that is
+//     not the bridge's to decide (operator 2026-10-15); the spine asks the being instead (liveness).
+//     Its completion report goes up through onBackgroundDone(key, info).
 //
 // Brain-agnostic over the warm primitive: the session factory is INJECTED. egpt
 // wires `createWarmCliSession` — a resident `claude` CLI background agent (no
@@ -40,7 +41,6 @@ export function createWarmPool({
   dispatchTimeoutMs = 600_000,
   injectWhileBusy = true,            // master switch for steer() — weave a mid-turn message into the live turn
   onBackgroundDone = null,           // (key, { summaries }) — a session's background task finished with no turn in flight
-  maxBackgroundHoldMs = 7_200_000,   // idle past its TTL, kept at most this long for running background work
   onLog = () => {},
   makeSession,                       // REQUIRED: the warm-session factory (injected)
 } = {}) {
@@ -80,20 +80,14 @@ export function createWarmPool({
     return msg ? `turn failed: ${msg}` : 'turn failed';
   }
 
-  // Idle, but background work is still running: held and re-checked, up to maxBackgroundHoldMs.
+  // Idle, but background work is still running: held and re-checked, for as long as it runs.
   function _idleOut(key, ttl) {
     const e = _s.get(key);
     if (!e) return;
     const n = e.session.background ?? 0;
     if (n > 0) {
-      e.heldSince ??= Date.now();
-      const held = Date.now() - e.heldSince;
-      if (held < maxBackgroundHoldMs) {
-        onLog(`warm: kept ${key} past idle — ${n} background task(s) still running`);
-        e.idleTimer = setTimeout(() => _idleOut(key, ttl), ttl || BACKGROUND_RECHECK_MS); e.idleTimer.unref?.();
-        return;
-      }
-      _evict(key, `idle, held ${held}ms for ${n} background task(s) — the cap; they end with it`);
+      onLog(`warm: kept ${key} past idle — ${n} background task(s) still running`);
+      e.idleTimer = setTimeout(() => _idleOut(key, ttl), ttl || BACKGROUND_RECHECK_MS); e.idleTimer.unref?.();
       return;
     }
     _evict(key, ttl === 0 ? 'idle ttl 0' : `idle ${ttl}ms`);
@@ -139,7 +133,6 @@ export function createWarmPool({
     // timer now; _armIdle re-arms it in finally once this turn completes. (LRU
     // already skips busy; the per-turn timeout was removed.)
     if (e.idleTimer) { clearTimeout(e.idleTimer); e.idleTimer = null; }
-    e.heldSince = null;
     try {
       // NO turn timeout. A warm claude session stays open INDEFINITELY (like the
       // CLI) — a turn runs as long as it needs: thinking, long answers, slow
@@ -316,10 +309,11 @@ export function createWarmPool({
   }
 
   function has(key) { return _s.has(key); }
+  function background(key) { return _s.get(key)?.session.backgroundTasks ?? []; }
   function busy(key) { return _s.get(key)?.busy === true; }
   function evict(key) { _evict(key, 'manual'); }
   function close() { for (const k of [..._s.keys()]) _evict(k, 'pool close'); }
   function stats() { return { size: _s.size, max, keys: [..._s.keys()] }; }
 
-  return { run, steer, interrupt, has, busy, evict, close, stats };
+  return { run, steer, interrupt, has, busy, background, evict, close, stats };
 }

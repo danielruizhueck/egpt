@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { createWarmPool } from '../src/warm-sessions.mjs';
 
 // Fake warm session: records turns, can hang, tracks close().
@@ -641,15 +641,32 @@ describe('warm-session pool — background work', () => {
     expect(pool.has('k')).toBe(false);
   });
 
-  it('…bounded: past maxBackgroundHoldMs it is evicted anyway, and says so', async () => {
+  // Operator 2026-10-15: "bridge must not evict background agents on its own. they are not for the
+  // bridge to decide." The 2 h cap is gone: the being is asked instead (spine liveness).
+  it('…NEVER evicted while its background work runs, however long — no cap', async () => {
+    vi.useFakeTimers();
+    try {
+      const { makeSession, made } = fakeFactory();
+      const pool = createWarmPool({ makeSession, idleTtlByClass: { conversation: 900_000 } });
+      await pool.run('k', 'a', () => {}, { klass: 'conversation' });
+      made[0].background = 2;
+      await vi.advanceTimersByTimeAsync(10 * 3_600_000);
+      expect(pool.has('k')).toBe(true);
+      expect(made[0].closed).toBe(false);
+      made[0].background = 0;
+      await vi.advanceTimersByTimeAsync(900_000);
+      expect(pool.has('k')).toBe(false);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('reports the running background tasks of a key (empty for an unknown key or a session without any)', async () => {
     const { makeSession, made } = fakeFactory();
-    const logs = [];
-    const pool = createWarmPool({ makeSession, idleTtlByClass: { conversation: 10 }, maxBackgroundHoldMs: 30, onLog: (m) => logs.push(m) });
-    await pool.run('k', 'a', () => {}, { klass: 'conversation' });
-    made[0].background = 2;
-    await sleep(120);
-    expect(pool.has('k')).toBe(false);
-    expect(logs.some((m) => /evicted k .*background/.test(m))).toBe(true);
+    const pool = createWarmPool({ makeSession });
+    await pool.run('k', 'a');
+    expect(pool.background('k')).toEqual([]);
+    made[0].backgroundTasks = [{ description: 'Run the audit', since: 5 }];
+    expect(pool.background('k')).toEqual([{ description: 'Run the audit', since: 5 }]);
+    expect(pool.background('nope')).toEqual([]);
   });
 
   it('LRU passes over a session with background work in flight', async () => {

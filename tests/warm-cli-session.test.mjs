@@ -836,7 +836,7 @@ describe('warm-cli-session — a background task finishes', () => {
         endSelf({ type: 'result', subtype: 'success', result: 'self report', origin: ORIGIN, session_id: 'sess-1' });
       };
     };
-    return { spawn, lines, written, finishBg, finishBgUnseen };
+    return { spawn, lines, written, finishBg, finishBgUnseen, tasks };
   }
   const settle = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); };
 
@@ -852,6 +852,22 @@ describe('warm-cli-session — a background task finishes', () => {
     expect(f.lines.at(-1)).toMatchObject({ type: 'control_request', request: { subtype: 'interrupt' } });
     expect(s.background).toBe(0);
     expect(await s.turn('next')).toEqual({ text: 'echo:next', sessionId: 'sess-1' });
+    s.close();
+  });
+
+  it('names the running background tasks with the time each started (kept across list changes)', async () => {
+    const f = backgroundClaude();
+    const s = createWarmCliSession({ spawn: f.spawn });
+    const t0 = Date.now();
+    await s.turn('START BG');
+    expect(s.backgroundTasks).toEqual([{ description: 'Run delayed echo', since: expect.any(Number) }]);
+    const since = s.backgroundTasks[0].since;
+    expect(since).toBeGreaterThanOrEqual(t0);
+    await new Promise((r) => setTimeout(r, 5));
+    f.tasks([{ task_id: 'b1', description: 'Run delayed echo' }, { task_id: 'b2', description: 'Crawl' }]);
+    expect(s.backgroundTasks.map((t) => t.description)).toEqual(['Run delayed echo', 'Crawl']);
+    expect(s.backgroundTasks[0].since).toBe(since);
+    expect(s.backgroundTasks[1].since).toBeGreaterThan(since);
     s.close();
   });
 

@@ -8,7 +8,7 @@
 // the process is kept RESIDENT instead of re-spawned per turn.
 //
 // Interface = what `src/warm-sessions.mjs` (createWarmPool) expects of a session:
-//   turn(message, onUpdate) -> { text, sessionId }  ·  inject(message) -> bool  ·  interrupt()  ·  close()  ·  background
+//   turn(message, onUpdate) -> { text, sessionId }  ·  inject(message) -> bool  ·  interrupt()  ·  close()  ·  background  ·  backgroundTasks
 // The pool owns lazy-warm, idle-evict (the residency/reap policy), LRU, and
 // per-key serialization, so this primitive only manages ONE process running ONE
 // turn at a time.
@@ -267,7 +267,7 @@ export function createWarmCliSession(options = {}) {
   // background tasks; each ends with a task_notification. A turn in flight absorbs it (replayed with
   // origin.kind 'task-notification'); with none, the CLI starts a turn of its own. That turn is
   // stopped and reported up (onBackgroundDone) so the spine decides whether to wake the being.
-  let background = new Map();       // task_id -> description, still running
+  let background = new Map();       // task_id -> { description, since }, still running
   let finished = [];                // completions no turn has taken yet
   let selfTurn = null;              // the CLI's own turn on `finished`: { done, end, timer, started }
   // THE BEING LINK for an UNBOXED session (src/spine/being-link.mjs): its credential rides the spawn
@@ -382,8 +382,8 @@ export function createWarmCliSession(options = {}) {
       // Capture the (possibly freshly-minted) session id, first-wins.
       if (typeof ev.session_id === 'string' && !sessionId) sessionId = ev.session_id;
       if (ev.type === 'system') {
-        if (ev.subtype === 'background_tasks_changed') background = new Map((Array.isArray(ev.tasks) ? ev.tasks : []).map((t) => [t.task_id, t.description || t.task_id]));
-        else if (ev.subtype === 'task_notification' && background.has(ev.task_id)) finished.push(`${background.get(ev.task_id)} — ${ev.status ?? 'done'}`);
+        if (ev.subtype === 'background_tasks_changed') background = new Map((Array.isArray(ev.tasks) ? ev.tasks : []).map((t) => [t.task_id, background.get(t.task_id) ?? { description: t.description || t.task_id, since: Date.now() }]));
+        else if (ev.subtype === 'task_notification' && background.has(ev.task_id)) finished.push(`${background.get(ev.task_id).description} — ${ev.status ?? 'done'}`);
         else if (ev.subtype === 'init' && !pending && finished.length) startSelfTurn();
       }
       if (ev.type === 'user' && ev.isReplay === true && ev.origin?.kind === 'task-notification') finished.shift();
@@ -604,5 +604,7 @@ export function createWarmCliSession(options = {}) {
     get sessionId() { return sessionId; },
     // Background tasks still running — the pool will not idle-evict while this is > 0.
     get background() { return background.size; },
+    // …and what they are, with when each started (the spine's liveness status and its ask).
+    get backgroundTasks() { return [...background.values()].map((t) => ({ ...t })); },
   };
 }

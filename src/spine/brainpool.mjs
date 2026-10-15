@@ -765,6 +765,8 @@ export function createBrainPool({
   // hung turn is wedged on without re-deriving the engine/slug — a hung CLI must not
   // poison the next turn.
   const lastKeyByConv = new Map();
+  // The conversation a warm key last ran for — the map read backwards (the arrival address is moved to the end).
+  const newestConvOf = (key) => [...lastKeyByConv].reverse().find(([, k]) => k === key)?.[0] ?? null;
 
   // `mode: auto` operator-role layer delivery, tracked per (conversation, thread). A
   // FRESH thread gets the layer inside its identity kickoff (wrapFresh); a RESUMED
@@ -1599,10 +1601,19 @@ export function createBrainPool({
     // The being + conversation a warm key last ran for — lastKeyByConv read backwards. A background
     // task finished on that key with no turn in flight: this is where it is woken.
     convOfKey(key) {
-      const conv = [...lastKeyByConv].reverse().find(([, k]) => k === key)?.[0];
+      const conv = newestConvOf(key);
       if (!conv) return null;
       const [being, surface, ...chat] = conv.split(':');
       return { being, surface, chatId: chat.join(':') };
+    },
+
+    // The background tasks still running on this conversation's warm session ([{ description, since }]),
+    // and only where a finished one would wake (convOfKey) — so one being's work shows in one chat.
+    background(being, ev) {
+      const conv = `${being}:${ev?.surface}:${ev?.chatId}`;
+      const k = lastKeyByConv.get(conv);
+      if (!k || newestConvOf(k) !== conv) return [];
+      return pool.background?.(k) ?? [];
     },
 
     // /agents compact|stop — the same lookup evict() uses. warmKey: null when it never ran here.

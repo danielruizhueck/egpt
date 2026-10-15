@@ -2874,7 +2874,7 @@ export async function boot({
     // all there is — no crash, no second channel.
     sender: createSender({ bridge: shellAwareBridge, bridgeOf: shellAwareBridgeOf, bodyEmojiOf, labelOf, agentSignatureOpenOf, agentSignatureCloseOf, defaultKey, peerMouth,
       onUndeliverable: async ({ being, chatId, origin, reason }) => { try { await logToGroup(`⚠ reply to ${chatId} (${being}) undeliverable: ${reason}`); } catch { /* best-effort: a failed notice never affects the reply */ } },
-      onLog: mouthLog }),
+      onLog: mouthLog, now }),
     // The real cadence registry the spine's tick() drives. The heartbeat LOADER
     // (below) collects every declarative heartbeat and registers it here, so each
     // beat rides the loop's own tick instead of a side timer (operator 2026-07-01).
@@ -3520,7 +3520,7 @@ export async function boot({
   // seam = announceAndExit(43), the SAME exit-43 drain the ingest /restart runs (not duplicated).
   const autoRestartOnConfigChange = cfg.auto_restart_on_config_change === true;
   const configBootHash = configContentHashSync();
-  const spine = createSpine({ bridge, bridgeOf: rawBridgeOf, peerMouth, brain, turns, ...services, commands, mesh, actions, advice, guard, guardOverride, fromThisNode, say: sayOnce, stopSwitch, isSelfChat, isTransit: (ev) => isRelayChannelChat(getConfig(), ev), roomRelay, readTranscript, refreshConfig: heartbeatLoader.reload, autoRestartOnConfigChange, configBootHash, readConfigHash: configContentHashSync, requestRestart: () => announceAndExit(43), radioRelay: radioRelay.relay, synthesize: vx.synthesize, voice: vx.voice, defaultBeing: defaultKey, labelOf, timeZone: transcriptTimeZone, clock: { now }, log, turnTimeoutMs, tickMs: effectiveTickMs, setInterval: setIntervalFn, clearInterval: clearIntervalFn });
+  const spine = createSpine({ bridge, bridgeOf: rawBridgeOf, peerMouth, brain, turns, ...services, commands, mesh, actions, advice, guard, guardOverride, fromThisNode, say: sayOnce, logToGroup: (text) => logToGroup(`${getConfig()?.node_name ?? '?'} · ${text}`), stopSwitch, isSelfChat, isTransit: (ev) => isRelayChannelChat(getConfig(), ev), roomRelay, readTranscript, refreshConfig: heartbeatLoader.reload, autoRestartOnConfigChange, configBootHash, readConfigHash: configContentHashSync, requestRestart: () => announceAndExit(43), radioRelay: radioRelay.relay, synthesize: vx.synthesize, voice: vx.voice, defaultBeing: defaultKey, labelOf, timeZone: transcriptTimeZone, clock: { now }, log, turnTimeoutMs, tickMs: effectiveTickMs, setInterval: setIntervalFn, clearInterval: clearIntervalFn });
   // Bind the advice service's answer-routing dispatch now that the spine exists: an
   // operator answer in the advice channel re-enters the pipe as a turn in the origin chat.
   advice.useDispatch(spine.handleInbound);
