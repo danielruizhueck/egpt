@@ -8,7 +8,7 @@
 // the process is kept RESIDENT instead of re-spawned per turn.
 //
 // Interface = what `src/warm-sessions.mjs` (createWarmPool) expects of a session:
-//   turn(message, onUpdate) -> { text, sessionId }  ·  inject(message) -> bool  ·  close()
+//   turn(message, onUpdate) -> { text, sessionId }  ·  inject(message) -> bool  ·  interrupt()  ·  close()
 // The pool owns lazy-warm, idle-evict (the residency/reap policy), LRU, and
 // per-key serialization, so this primitive only manages ONE process running ONE
 // turn at a time.
@@ -77,6 +77,12 @@ import { isDeadSessionError } from './brain-errors.mjs';
 // difference being that nobody is waiting on a `result` of its own.
 function userLine(text) {
   return JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: String(text ?? '') }] } }) + '\n';
+}
+// The CLI's own stop (/agents stop). Measured 2026-10-15 on claude 2.1.301: a control_response,
+// then the turn's `result` as error_during_execution; process and session id survive.
+let interruptSeq = 0;
+function interruptLine() {
+  return JSON.stringify({ type: 'control_request', request_id: `egpt-interrupt-${++interruptSeq}`, request: { subtype: 'interrupt' } }) + '\n';
 }
 
 // MSYS2/Cygwin "/c/Users/.." → "C:/Users/.." for Node spawn cwd on Windows.
@@ -426,7 +432,9 @@ export function createWarmCliSession(options = {}) {
           // empty this must fall through to exactly today's stderr-only detail.
           const echoed = errs && tail && (errs.includes(tail) || tail.includes(errs));
           const detail = [errs, echoed ? '' : tail].filter(Boolean).join(' — ');
-          const err = new Error(`claude: ${ev.subtype}${detail ? ` — ${detail}` : ''}`);
+          const err = pending?.interrupted
+            ? Object.assign(new Error('claude: interrupted (/agents stop)'), { interrupted: true })
+            : new Error(`claude: ${ev.subtype}${detail ? ` — ${detail}` : ''}`);
           // …AND SAY IT STRUCTURALLY, not only in prose. warm-sessions.mjs has to report WHY it
           // evicted, and "the resume target is gone" is not "the turn failed" — no turn ran. A
           // flag keeps that pool brain-agnostic: it never has to sniff a vendor sentence, and a
@@ -455,6 +463,7 @@ export function createWarmCliSession(options = {}) {
     const p = pending; pending = null;
     settleInjections(p, 'the turn ended before the CLI ingested it');
     p.resolve({ text, sessionId });
+    p.onEnd?.();
   }
   function failPending(err) {
     if (pending && !pending.settled) {
@@ -462,6 +471,7 @@ export function createWarmCliSession(options = {}) {
       const p = pending; pending = null;
       settleInjections(p, `the turn failed before the CLI ingested it: ${err?.message ?? err}`);
       p.reject(err);
+      p.onEnd?.();
     }
   }
   function onClose(code) {
@@ -510,6 +520,16 @@ export function createWarmCliSession(options = {}) {
       try { proc.stdin.write(userLine(text)); }
       catch { rec.done = true; return false; }        // nobody holds `ack` — nothing to settle
       return { ack };
+    },
+    // STOP the turn in flight (/agents stop). `false` = nothing to stop; else a promise that
+    // settles once the turn has ended. The turn rejects with `interrupted: true`.
+    interrupt() {
+      if (closed || !proc || !pending) return false;
+      const p = pending;
+      p.interrupted = true;
+      const ended = new Promise((r) => { p.onEnd = r; });
+      try { proc.stdin.write(interruptLine()); } catch { p.interrupted = false; return false; }
+      return ended;
     },
     close() {
       link?.revoke();

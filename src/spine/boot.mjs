@@ -3145,6 +3145,13 @@ export async function boot({
     // last key that being+conversation actually ran, never by rebuilding a key string here.
     scopeOf: (being, ev) => brain.scopeOf(being, ev),
     evictWarm: (being, ev) => brain.evict(being, ev),
+    // /agents compact|stop: the compaction service's own fire() and the pool's interrupt, both on
+    // the warm key this being last ran here (brain's lookup, never a rebuilt key).
+    compactBeing: (being, ev, opts) => {
+      const key = brain.warmKey(being, ev);
+      return key ? compaction.compactNow(key, opts) : { ok: false, reason: 'no turn has run here since this node started' };
+    },
+    stopBeing: (being, ev) => brain.stop(being, ev),
     warmStats: () => pool.stats(),                    // /status `warm:` field — { size, max, keys }
     shellConnected: () => shellPort.isConnected,       // /status `shell:` field — is the operator's editor dialed in
     gate: lasso.gate,                                  // /radio say's upload — the SAME node-wide lasso instance the beeper bridge, echo and shell port already spend from (never a second one)

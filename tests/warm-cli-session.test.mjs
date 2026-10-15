@@ -679,3 +679,68 @@ describe('warm-cli-session — a --resume the CLI cannot honour', () => {
     expect(err.resumeTargetMissing).toBeFalsy();
   });
 });
+
+// /agents stop (operator 2026-10-15). Measured against claude 2.1.301: a stream-json
+// `control_request` {subtype:'interrupt'} gets a control_response, the turn then ends with a
+// `result` error_during_execution, and the SAME process + session id answer the next turn.
+describe('warm-cli-session — interrupt (the CLI own stop)', () => {
+  function interruptibleClaude() {
+    const lines = [];
+    let proc = null;
+    const spawn = () => {
+      proc = new EventEmitter();
+      proc.stdout = new EventEmitter(); proc.stdout.setEncoding = () => {};
+      proc.stderr = new EventEmitter(); proc.stderr.setEncoding = () => {};
+      proc.killed = false;
+      proc.kill = () => { proc.killed = true; };
+      const out = (o) => setImmediate(() => proc.stdout.emit('data', JSON.stringify(o) + '\n'));
+      proc.stdin = {
+        write: (line) => {
+          const o = JSON.parse(line);
+          lines.push(o);
+          if (o.type === 'control_request') {
+            out({ type: 'control_response', response: { subtype: 'success', request_id: o.request_id, response: { still_queued: [] } } });
+            out({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: '[Request interrupted by user]' }] } });
+            out({ type: 'result', subtype: 'error_during_execution', is_error: true, result: '', session_id: 'sess-1' });
+            return;
+          }
+          const text = o.message.content.map((c) => c.text).join('');
+          out({ type: 'system', subtype: 'init', session_id: 'sess-1' });
+          if (text === 'LONG') return;   // streams forever until interrupted
+          out({ type: 'result', subtype: 'success', result: `echo:${text}`, session_id: 'sess-1' });
+        },
+        end: () => {},
+      };
+      return proc;
+    };
+    return { spawn, lines, getProc: () => proc };
+  }
+
+  it('writes a control_request interrupt; the turn rejects as INTERRUPTED and the process survives for the next turn', async () => {
+    const f = interruptibleClaude();
+    const s = createWarmCliSession({ spawn: f.spawn });
+    const turn = s.turn('LONG').then(() => null, (e) => e);
+    await new Promise((r) => setImmediate(r));
+    const ended = s.interrupt();
+    expect(ended).toBeTruthy();
+    const err = await turn;
+    await ended;
+    expect(f.lines.at(-1)).toMatchObject({ type: 'control_request', request: { subtype: 'interrupt' } });
+    expect(err.interrupted).toBe(true);
+    expect(f.getProc().killed).toBe(false);
+    const next = await s.turn('again');
+    expect(next).toEqual({ text: 'echo:again', sessionId: 'sess-1' });
+    s.close();
+  });
+
+  it('nothing in flight → false, and nothing is written', async () => {
+    const f = interruptibleClaude();
+    const s = createWarmCliSession({ spawn: f.spawn });
+    expect(s.interrupt()).toBe(false);
+    await s.turn('one');
+    const before = f.lines.length;
+    expect(s.interrupt()).toBe(false);
+    expect(f.lines.length).toBe(before);
+    s.close();
+  });
+});

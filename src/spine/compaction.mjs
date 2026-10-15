@@ -87,6 +87,8 @@ export function createCompaction({
   // behaviour, byte-for-byte. A blank/whitespace string is treated as unset for the same reason.
   const resolveAgent = (tpl, agent) => (typeof tpl === 'string' && tpl.trim()) ? tpl.replaceAll('{agent}', agent) : '';
   const pending = new Map();          // warm key -> timer handle
+  const targets = new Map();          // warm key -> the target its last turn froze (/agents compact)
+  const running = new Set();          // warm keys with a fire() in progress
   // THE WARN ONCE-GUARD (operator 2026-10-08): warm keys that have already fired their WARN step
   // (handoff + pre-compaction notice) and are waiting to cross the compact ratio. Cleared on the
   // /compact, and whenever the session reads back below the warn threshold (a fresh/compacted
@@ -157,13 +159,18 @@ export function createCompaction({
   // back ON for one being while the node has it off, which is why this is `??` and not an AND.
   const enabledFor = (o) => (o?.enabled ?? cfg().enabled) !== false;
 
-  async function fire(key, target) {
+  // `force` (/agents compact): compact whatever the size, with a fresh handoff first. Returns
+  // what happened for that caller; the scheduler ignores it.
+  async function fire(key, target, { force = false } = {}) {
     pending.delete(key);
+    if (running.has(key)) return { compacted: false, reason: 'a compaction is already running' };
+    running.add(key);
     try {
       const compactRatio = target.ratio ?? ratio();
-      const { due, tokens, threshold } = dueFor(target, { ratio: compactRatio });
+      const { due: over, tokens, threshold } = dueFor(target, { ratio: compactRatio });
+      const due = force || over;
       // No readable session (no file): nothing to measure, exactly the old `!due` return.
-      if (!Number.isFinite(tokens)) return;
+      if (!Number.isFinite(tokens)) return { compacted: false, reason: 'no session file to measure' };
       // THE BEING'S HANDLE for {agent}: the first segment of the warm key
       // (`<being>:<engine>:<surface>:<slug>`, brainpool.mjs). The being being warned/compacted is
       // the one that writes the handoff and gets the welcome.
@@ -180,11 +187,12 @@ export function createCompaction({
       // Below the warn threshold → nothing due. Re-arm the once-guard: the session reads this small
       // on a fresh thread AND right after any compaction (latestContextTokens ~0 past the boundary),
       // so clearing here is how "naturally on a fresh thread" and the post-compact reset both land.
-      if (!warnDue) { warned.delete(key); return; }
+      if (!warnDue) { warned.delete(key); return { compacted: false, tokens }; }
       // ① WARN — FIRE ONCE PER THREAD (operator 2026-10-08). The handoff turn (MOVED here from the
       // compact step) + the pre-compaction admin notice. The `warned` guard stops a second tick
       // between warn and compact from repeating either; it is cleared on the /compact below.
-      if (!warned.has(key)) {
+      let handoff = null;   // null = none configured; true/false = the handoff turn ran / failed
+      if (force || !warned.has(key)) {
         warned.add(key);
         // THE HANDOFF (operator 2026-10-04): ONE turn on the SAME warm session — still holding its
         // full pre-compact context — to write handoffs/{agent}.handoff.md in its own cwd, so it can
@@ -193,8 +201,8 @@ export function createCompaction({
         // Unset handoff_prompt → '' → skipped, today's behaviour exactly.
         const handoffPrompt = resolveAgent(cfg().handoff_prompt, agent);
         if (handoffPrompt) {
-          try { await pool.run(key, handoffPrompt, () => {}, { brainOptions: target.brainOptions, klass: 'conversation' }); }
-          catch (e) { onLog(`compact ${key}: handoff turn failed (compacting anyway): ${e?.message ?? e}`); }
+          try { await pool.run(key, handoffPrompt, () => {}, { brainOptions: target.brainOptions, klass: 'conversation' }); handoff = true; }
+          catch (e) { handoff = false; onLog(`compact ${key}: handoff turn failed (compacting anyway): ${e?.message ?? e}`); }
         }
         // THE PRE-COMPACTION NOTICE to the admin channel (operator 2026-10-08) — the PRIMARY
         // compaction notice: "the conversation is at {percent}%, handoff being written, compaction
@@ -207,9 +215,9 @@ export function createCompaction({
         }
       }
       // Still short of the compact ratio → warned, and waiting for the session to cross it.
-      if (!due) return;
+      if (!due) return { compacted: false, tokens };
       // ② COMPACT — at `ratio`, unchanged. The handoff already ran at WARN, so it is NOT re-run here.
-      onLog(`compacting ${key} (${tokens} tok >= ${threshold})`);
+      onLog(`compacting ${key} (${tokens} tok ${force ? '— on demand' : `>= ${threshold}`})`);
       // native /compact through the SAME warm session (in place, same id). brainOptions
       // match the turn's so a live entry is reused (never a second session on the jsonl).
       await pool.run(key, '/compact', () => {}, { brainOptions: target.brainOptions, klass: 'conversation' });
@@ -243,7 +251,11 @@ export function createCompaction({
       // compact that SUCCEEDED, own catch: a notice that could not be said is logged, never a failed compact.
       try { await target.noticeCompacted?.({ tokens }); }
       catch (e) { onLog(`compact ${key}: compacted, but the admin-channel notice failed: ${e?.message ?? e}`); }
-    } catch (e) { onLog(`compact ${key}: ${e?.message ?? e}`); }
+      return { compacted: true, tokens, window, handoff };
+    } catch (e) {
+      onLog(`compact ${key}: ${e?.message ?? e}`);
+      return { compacted: false, reason: String(e?.message ?? e) };
+    } finally { running.delete(key); }
   }
 
   return {
@@ -251,9 +263,7 @@ export function createCompaction({
     // the check + /compact run only once it goes quiet for the cooling period.
     afterTurn({ key, sessionId, model, cwd, allowedTools, compaction, armIdentityRefresh, noticeCompacted, noticeWarn } = {}) {
       const over = _obj(compaction);
-      if (!enabledFor(over) || !pool || !key || !sessionId) return;
-      const prev = pending.get(key);
-      if (prev !== undefined) scheduler.clear(prev);
+      if (!pool || !key || !sessionId) return;
       // The resolved ratio is FROZEN ONTO THE TARGET, not re-read when the timer fires: the
       // policy that armed this compaction is the one that should run it, and the alternative is
       // a conversation compacted under whichever config happened to be loaded a cooling period
@@ -266,6 +276,10 @@ export function createCompaction({
       // and the conversation of the turn that armed this compaction, which is what the line names.
       const { window, ratio: frozenRatio } = compactionPolicy(getConfig(), model, over);
       const target = { sessionId, model, window, ratio: frozenRatio, warnGap: warnGapFor(over), armIdentityRefresh, noticeCompacted, noticeWarn, brainOptions: { sessionId, cwd, model, allowedTools } };
+      targets.set(key, target);   // kept even with compaction off: /agents compact is asked for
+      if (!enabledFor(over)) return;
+      const prev = pending.get(key);
+      if (prev !== undefined) scheduler.clear(prev);
       // ALREADY CRITICAL? Then do not wait for a quiet that may never come. The probe reads a
       // BOUNDED TAIL of the session jsonl rather than the whole file (compact-being's
       // criticallyOver): this runs after every single turn, and the ordinary check's
@@ -286,6 +300,19 @@ export function createCompaction({
       h?.unref?.();
       pending.set(key, h);
     },
-    stop() { for (const h of pending.values()) scheduler.clear(h); pending.clear(); warned.clear(); },
+    // /agents compact: fire() NOW, forced, over the target this key's last turn froze. `sessionId`
+    // is the being's current thread — a target frozen under another thread is refused, never run.
+    // { ok:false, reason } | { ok:true, inFlight, done: Promise<fire's result> }.
+    compactNow(key, { sessionId = null } = {}) {
+      const target = targets.get(key);
+      if (!pool || !target) return { ok: false, reason: 'no turn has completed here since this node started' };
+      if (sessionId && target.sessionId !== sessionId) return { ok: false, reason: 'its thread changed since its last turn' };
+      if (running.has(key)) return { ok: false, reason: 'a compaction is already running' };
+      const h = pending.get(key);
+      if (h !== undefined) { scheduler.clear(h); pending.delete(key); }
+      const inFlight = pool.busy?.(key) === true;
+      return { ok: true, inFlight, done: fire(key, target, { force: true }) };
+    },
+    stop() { for (const h of pending.values()) scheduler.clear(h); pending.clear(); warned.clear(); targets.clear(); },
   };
 }

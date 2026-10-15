@@ -324,7 +324,7 @@ const NODE_ADDRESSABLE = /^\/(chrome|status|tabs|tab|open|close|members?|config|
 // payable because every verb's arity is FIXED and its value comes from a closed set.
 //
 //   /agents <handle>|force all [<conv>]                       status
-//   /agents refresh|rethread|reset <handle>|force all [<conv>]
+//   /agents refresh|rethread|reset|compact|stop <handle>|force all [<conv>]
 //   /agents mode <mode> <handle>|force all [<conv>]           (`auto` is a deprecated alias of `mode`)
 //   /agents access_level <level> <handle>|force all [<conv>]  (level: see ACCESS_LEVELS)
 //
@@ -347,7 +347,7 @@ const NODE_ADDRESSABLE = /^\/(chrome|status|tabs|tab|open|close|members?|config|
 // both "restart this node" and "give this conversation a new thread". Keeping the token
 // parseable is what lets it be REFUSED BY NAME instead of falling through to be misread as a
 // handle; it is the same treatment the retired object-first order gets, for the same reason.
-export const AGENT_SUB_ARITY = { refresh: 0, rethread: 0, reset: 0, mode: 1, access_level: 1, restart: 0 };
+export const AGENT_SUB_ARITY = { refresh: 0, rethread: 0, reset: 0, compact: 0, stop: 0, mode: 1, access_level: 1, restart: 0 };
 // Parsed, named, and refused — never executed. verb -> the verb that replaced it.
 export const RETIRED_AGENT_SUBS = { restart: 'rethread' };
 // DEPRECATED-BUT-STILL-WORKING verb aliases: the old spelling keeps ACTING (unlike a RETIRED sub,
@@ -365,7 +365,7 @@ const LIVE_AGENT_SUBS = Object.keys(AGENT_SUB_ARITY).filter((v) => !Object.hasOw
 // Every level name in the operator-facing text comes from ACCESS_LEVELS (permission-levels.mjs),
 // never a literal: the tier list is spelled out in ONE place, and a new tier updates this line,
 // the refusals below and /help together or not at all. Same rule now holds for the verb list.
-export const AGENTS_USAGE = `usage: /agents [<verb>] [<value>] <handle>|force all [<conversation>] — verbs: refresh | rethread | reset | mode <${AUTO_MODES.join('|')}> | access_level <${ACCESS_LEVELS.join('|')}>. Bare \`/agents <handle>|force all\` shows status; bare \`all\` is refused. <conversation> is the rest of the line, spaces and all: \`/agents refresh e eGPT Rodz Lulu An\`.`;
+export const AGENTS_USAGE = `usage: /agents [<verb>] [<value>] <handle>|force all [<conversation>] — verbs: refresh | rethread | reset | compact | stop | mode <${AUTO_MODES.join('|')}> | access_level <${ACCESS_LEVELS.join('|')}>. Bare \`/agents <handle>|force all\` shows status; bare \`all\` is refused. <conversation> is the rest of the line, spaces and all: \`/agents refresh e eGPT Rodz Lulu An\`.`;
 
 // args (already whitespace-split) -> what agentsCmd wants: { args: [handle, verb, value],
 // slug }, or { retired } for the old order. Pure; exported for tests.
@@ -567,6 +567,9 @@ export function createCommands({
   // is its own scope and nothing is evicted, byte-identical to an unscoped node.
   scopeOf = null,                        // (being, ev) -> { surface, chatId } — WHERE this being's instance lives; a chat invited into a room as a `wa-group` member resolves to THAT ROOM
   evictWarm = () => {},                  // (being, ev) -> drop that being+conversation's warm session so /agents access_level's re-point respawns fresh. brain.evict: a lastKeyByConv LOOKUP of the last warm key this pair actually ran — never a key string rebuilt here
+  // /agents compact|stop (boot: compaction.compactNow over brain.warmKey; brain.stop).
+  compactBeing = () => ({ ok: false, reason: 'compaction is not wired on this node' }),   // (being, ev, { sessionId }) -> { ok, reason } | { ok, inFlight, done }
+  stopBeing = async () => ({ stopped: false, reason: 'not wired on this node' }),         // (being, ev) -> { stopped: false|'interrupt'|'evict' }
   configPath = CONFIG_YAML_PATH,         // where /config <key>=<value> writes — the real profile config.yaml by default (injected in tests, so no test ever touches the real profile)
   io = {},                               // { stat, readFile, writeFile, mkdir, readdir, rm } — real fs by default; /status probes files + the custom branch authors through here
   // /login <site> → the auto-login limb (src/spine/login.mjs), injected by boot. Returns an
@@ -1038,6 +1041,8 @@ export function createCommands({
     //   /agents refresh <handle>|force all [<conv>]               → re-feed identity + directives into the RUNNING thread
     //   /agents rethread <handle>|force all [<conv>]              → clear threadId + roll transcript.md; everything else survives
     //   /agents reset <handle>|force all [<conv>]                 → archive + wipe + reseed
+    //   /agents compact <handle>|force all [<conv>]               → handoff + native /compact now, same thread
+    //   /agents stop <handle>|force all [<conv>]                  → abort the turn in flight, same thread
     //   /agents mode <mode> <handle>|force all [<conv>]           → was /agents auto <mode> (alias kept), and /e auto <mode>
     //   /agents access_level <level> <handle>|force all [<conv>]  → was /e access all|regular
     //
@@ -1694,6 +1699,8 @@ export function createCommands({
     if (sub === 'refresh') { await agentsRefresh(ev, surface, jid, where, handles, state, named); return; }
     if (sub === 'reset') { await agentsReset(ev, surface, jid, where, handles, state, named); return; }
     if (sub === 'rethread') { await agentsRethread(ev, surface, jid, where, handles, state, named); return; }
+    if (sub === 'compact') { await agentsCompact(ev, surface, jid, where, handles, state, named); return; }
+    if (sub === 'stop') { await agentsStop(ev, surface, jid, where, handles, named); return; }
     if (sub === 'mode') { await agentsMode(ev, surface, jid, where, handles, valueRaw.toLowerCase(), state, named); return; }
     if (sub === 'access_level') { await agentsAccessLevel(ev, surface, jid, where, handles, valueRaw.toLowerCase(), state, named); return; }
     await send?.(ev.chatId, await agentsStatus(ev, surface, jid, handles, state, named));
@@ -2114,6 +2121,66 @@ export function createCommands({
     }
   }
 
+  // /agents compact <handle>|force all (operator 2026-10-15) — the compaction service's own
+  // sequence (handoff, warn notice, native /compact, identity re-feed + welcome) NOW, at the
+  // being's scope, same thread. It can wait minutes behind a live turn, and a command holds the
+  // inbound pump while it runs, so this answers at once and reports again when it is done.
+  async function agentsCompact(ev, surface, jid, where, handles, state, named = handles.join(', ')) {
+    const scopes = [], parts = [], started = [];
+    for (const h of handles) {
+      const sc = await scopeAt(h, ev, surface, jid);
+      scopes.push(sc);
+      const sessionId = getBeing(state, sc.surface, sc.chatId, h)?.threadId ?? null;
+      let r = null;
+      if (sessionId) {
+        try { r = await compactBeing(h, { ...ev, surface: sc.surface, chatId: sc.chatId }, { sessionId }); }
+        catch (e) { r = { ok: false, reason: e?.message ?? String(e) }; }
+      }
+      const said = !sessionId ? 'no thread, nothing to compact'
+        : !r?.ok ? `nothing to compact — ${r?.reason ?? 'no answer'}`
+        : `${r.inFlight ? 'queued behind the turn in flight' : 'started'}: handoff, then /compact (same thread)`;
+      parts.push(handles.length > 1 ? `${h}: ${said}` : said);
+      if (r?.ok) started.push([handles.length > 1 ? h : named, r.done]);
+    }
+    where = whereWrote(scopes, where);
+    await send?.(ev.chatId, `${started.length ? '🗜️ ' : ''}${named} compact ${where} — ${parts.join('; ')}.`);
+    for (const [who, done] of started) {
+      Promise.resolve(done)
+        .then((r) => send?.(ev.chatId, compactedLine(who, where, r)), (e) => send?.(ev.chatId, `⚠️ ${who} compact ${where} failed: ${e?.message ?? e}`))
+        .catch((e) => onLog(`/agents compact ${ev.chatId}: ${e?.message ?? e}`));
+    }
+  }
+  const kTok = (n) => `${Math.round(n / 1000)}k`;
+  function compactedLine(who, where, r) {
+    if (!r?.compacted) return `⚠️ ${who} compact ${where} failed: ${r?.reason ?? 'nothing was compacted'}`;
+    const size = Number.isFinite(r.tokens) && r.window > 0
+      ? `was ${kTok(r.tokens)} tokens (${Math.round((r.tokens / r.window) * 100)}% of ${kTok(r.window)})` : 'done';
+    const handoff = r.handoff === true ? '; handoff written first' : r.handoff === false ? '; ⚠️ the handoff turn FAILED (compacted anyway)' : '';
+    return `✅ ${who} compacted ${where} — ${size}${handoff}; same thread, identity re-feeds on its next turn.`;
+  }
+
+  // /agents stop <handle>|force all (operator 2026-10-15) — abort the being's turn in flight: the
+  // CLI's own interrupt, else its process is ended. Thread, record and transcript untouched; the
+  // conversation's queued messages run next.
+  async function agentsStop(ev, surface, jid, where, handles, named = handles.join(', ')) {
+    const scopes = [], parts = [];
+    let any = false;
+    for (const h of handles) {
+      const sc = await scopeAt(h, ev, surface, jid);
+      scopes.push(sc);
+      let r;
+      try { r = await stopBeing(h, { ...ev, surface: sc.surface, chatId: sc.chatId }); }
+      catch (e) { r = { stopped: false, reason: e?.message ?? String(e) }; }
+      if (r?.stopped) any = true;
+      const said = r?.stopped === 'interrupt' ? 'interrupted the turn in flight'
+        : r?.stopped === 'evict' ? 'ended its process mid-turn (no interrupt took)'
+        : `nothing in flight${r?.reason ? ` (${r.reason})` : ''}`;
+      parts.push(handles.length > 1 ? `${h}: ${said}` : said);
+    }
+    const tail = any ? ' — same thread, transcript untouched; queued messages run next' : '';
+    await send?.(ev.chatId, `${any ? '⏹️ ' : ''}${named} stop ${whereWrote(scopes, where)} — ${parts.join('; ')}${tail}.`);
+  }
+
   // /agents mode <mode> <handle>|all — was `/agents auto <mode>` (renamed 2026-10-08; `auto` is
   // still accepted as a deprecated alias) and before that /e auto <mode> [<target>], generalized:
   // sets EACH target being's own conversation mode (modes live in conversations.yaml,
@@ -2301,6 +2368,15 @@ export function createCommands({
       const confVal = b?.configuration != null
         ? `${confOf(b.configuration)} (this conversation)`
         : `${confOf(((cfg() ?? {}).agents ?? {})[handle]?.configuration ?? 'none')} (config.yaml)`;
+      // Live context size: the probe /status reads (compact-being's dueForCompaction), same window.
+      let contextVal = 'no thread';
+      if (b?.threadId) {
+        try {
+          const p = compactionPolicy(cfg(), modelVal, compactionOverrideOf(b, cfg(), handle));
+          const { tokens } = dueFor({ sessionId: b.threadId, model: modelVal, window: p.window }, { ratio: p.ratio });
+          contextVal = Number.isFinite(tokens) ? `${tokens} tok (${Math.round((tokens / p.window) * 100)}% of ${p.window})` : 'no session file';
+        } catch { contextVal = '?'; }
+      }
 
       return [
         `being: ${handle}`,
@@ -2317,6 +2393,7 @@ export function createCommands({
         `effort: ${effortVal ?? 'inherit (CLI default)'}`,
         `allowed_tools: ${toolsVal}`,
         `thread_id: ${b?.threadId ?? 'not started'}`,
+        `context: ${contextVal}`,
         `conversation_dir: ${convDir ?? '?'}`,
         `home_dir: ${homeDir}`,
       ].join('\n');

@@ -22,7 +22,7 @@ import { fakePipeChrome } from './fake-pipe-chrome.mjs';
 // a real node always declares its beings. `e` and `d` declare no `handles:`, so each answers to its
 // own key, exactly as wakeTokens says. A test that passes its own `config` merges into this.
 const AGENTS = { agents: { e: {}, d: {} } };
-function harness({ config = AGENTS, state = null, brains, io = {}, cdp = {}, profileHolder = () => null, clock, resolveConvRoom, onRoomChange, logTranscript, scopeOf, backlogOf, timeZone } = {}) {
+function harness({ config = AGENTS, state = null, brains, io = {}, cdp = {}, profileHolder = () => null, clock, resolveConvRoom, onRoomChange, logTranscript, scopeOf, backlogOf, timeZone, compactBeing, stopBeing, dueFor } = {}) {
   const sent = [], exits = [], rewinds = [], writes = [], evicts = [], roomChanges = [], logged = [];
   const files = {};   // any command-authored files (e.g. /rooms create's config.yaml)
   let st = state;
@@ -53,6 +53,9 @@ function harness({ config = AGENTS, state = null, brains, io = {}, cdp = {}, pro
     ...(resolveConvRoom ? { resolveConvRoom } : {}),
     ...(backlogOf ? { backlogOf } : {}),
     ...(timeZone ? { timeZone } : {}),
+    ...(compactBeing ? { compactBeing } : {}),
+    ...(stopBeing ? { stopBeing } : {}),
+    dueFor: dueFor ?? (() => ({ due: false })),   // never reads ~/.claude/projects
     // The transcript service's reply writer (boot injects services.transcript.log) — captured
     // by default so a test can assert WHAT was written where, or overridden with a real
     // createTranscript when the BYTES are the claim.
@@ -3012,5 +3015,154 @@ describe('singular command forms ask for the plural', () => {
     expect(PLURAL_OF[SINGULAR_CMD.exec('/agent restart p')[1]]).toBe('agents');
     expect(PLURAL_OF[SINGULAR_CMD.exec('/room join x')[1]]).toBe('rooms');
     expect(PLURAL_OF[SINGULAR_CMD.exec('/member remove z')[1]]).toBe('members');
+  });
+});
+
+// /agents compact|stop (operator 2026-10-15, after E ran its thread to ~964k of 1M and the CLI
+// auto-compacted MID-TURN: two minutes of silence). Two recovery verbs that keep the thread:
+// compact = the compaction service's own graceful sequence, now; stop = abort the turn in flight.
+describe('/agents compact|stop — recover a being without minting a new thread', () => {
+  const SURFACE = 'whatsapp', JID = '1234@s.whatsapp.net';
+  function seed(e = { mode: 'mention', threadId: 'thread-abc' }) {
+    const state = ensureContact(emptyState(), SURFACE, JID, { pushedName: 'diego', slugHint: 'diego' }).state;
+    return patchContact(state, SURFACE, JID, { agents: { e, d: { mode: 'on', threadId: 'thread-d' } } });
+  }
+  const tick = () => new Promise((r) => setImmediate(r));
+  const compactor = (result, { inFlight = false } = {}) => {
+    const calls = [];
+    const compactBeing = (being, at, opts) => {
+      calls.push({ being, surface: at.surface, chatId: at.chatId, ...opts });
+      return { ok: true, inFlight, done: Promise.resolve(result) };
+    };
+    return { calls, compactBeing };
+  };
+
+  it('compact: asks the compaction service for THAT being with its thread, writes nothing, then reports the size it compacted from', async () => {
+    const c = compactor({ compacted: true, tokens: 964_000, window: 1_000_000, handoff: true });
+    const { cmds, sent, writes, logged, getState } = harness({ state: seed(), compactBeing: c.compactBeing });
+    await cmds.run({ chatId: JID, surface: SURFACE, body: '/agents compact e' });
+    await tick();
+    expect(c.calls).toEqual([{ being: 'e', surface: SURFACE, chatId: JID, sessionId: 'thread-abc' }]);
+    expect(writes).toHaveLength(0);
+    expect(logged).toHaveLength(0);                                   // no transcript boundary
+    expect(getBeing(getState(), SURFACE, JID, 'e').threadId).toBe('thread-abc');
+    expect(sent[0].text).toMatch(/^🗜️ e compact here — /);
+    expect(sent[0].text).toMatch(/handoff, then \/compact/);
+    expect(sent[1].text).toMatch(/^✅ e compacted here — was 964k tokens \(96% of 1000k\)/);
+    expect(sent[1].text).toMatch(/handoff written first/);
+    expect(sent[1].text).toMatch(/same thread/);
+  });
+
+  it('compact: a turn in flight is SAID — the compaction queues behind it', async () => {
+    const { cmds, sent } = harness({ state: seed(), compactBeing: () => ({ ok: true, inFlight: true, done: new Promise(() => {}) }) });
+    await cmds.run({ chatId: JID, surface: SURFACE, body: '/agents compact e' });
+    await tick();
+    expect(sent).toHaveLength(1);
+    expect(sent[0].text).toMatch(/queued behind the turn in flight/);
+  });
+
+  it('compact: a failed compaction is reported with its reason', async () => {
+    const c = compactor({ compacted: false, reason: 'session is gone' });
+    const { cmds, sent } = harness({ state: seed(), compactBeing: c.compactBeing });
+    await cmds.run({ chatId: JID, surface: SURFACE, body: '/agents compact e' });
+    await tick();
+    expect(sent[1].text).toMatch(/^⚠️ e compact here failed: session is gone/);
+  });
+
+  it('compact: no thread → nothing to compact, and the service is not asked', async () => {
+    const c = compactor({ compacted: true });
+    const { cmds, sent } = harness({ state: seed({ mode: 'on' }), compactBeing: c.compactBeing });
+    await cmds.run({ chatId: JID, surface: SURFACE, body: '/agents compact e' });
+    expect(c.calls).toEqual([]);
+    expect(sent.map((s) => s.text)).toEqual([expect.stringMatching(/e compact here — no thread, nothing to compact/)]);
+  });
+
+  it('compact: the service has nothing for it → says why', async () => {
+    const { cmds, sent } = harness({ state: seed(), compactBeing: () => ({ ok: false, reason: 'no turn has completed here since this node started' }) });
+    await cmds.run({ chatId: JID, surface: SURFACE, body: '/agents compact e' });
+    expect(sent.map((s) => s.text)).toEqual([expect.stringMatching(/nothing to compact — no turn has completed here since this node started/)]);
+  });
+
+  it('compact force all: every resident, each named', async () => {
+    const c = compactor({ compacted: true, tokens: 10_000, window: 200_000 });
+    const { cmds, sent } = harness({ state: seed(), compactBeing: c.compactBeing });
+    await cmds.run({ chatId: JID, surface: SURFACE, body: '/agents compact force all' });
+    await tick();
+    expect(c.calls.map((x) => [x.being, x.sessionId])).toEqual([['e', 'thread-abc'], ['d', 'thread-d']]);
+    expect(sent[0].text).toMatch(/e: .*d: /);
+    expect(sent.slice(1).map((s) => s.text)).toEqual([expect.stringMatching(/^✅ e compacted/), expect.stringMatching(/^✅ d compacted/)]);
+  });
+
+  it('stop: interrupts THAT being at its address — thread, state and transcript untouched', async () => {
+    const stops = [];
+    const { cmds, sent, writes, logged, getState } = harness({ state: seed(), stopBeing: async (being, at) => { stops.push({ being, surface: at.surface, chatId: at.chatId }); return { stopped: 'interrupt' }; } });
+    await cmds.run({ chatId: JID, surface: SURFACE, body: '/agents stop e' });
+    expect(stops).toEqual([{ being: 'e', surface: SURFACE, chatId: JID }]);
+    expect(writes).toHaveLength(0);
+    expect(logged).toHaveLength(0);
+    expect(getBeing(getState(), SURFACE, JID, 'e').threadId).toBe('thread-abc');
+    expect(sent[0].text).toMatch(/^⏹️ e stop here — interrupted the turn in flight/);
+    expect(sent[0].text).toMatch(/queued messages run next/);
+  });
+
+  it('stop: nothing in flight is said as such', async () => {
+    const { cmds, sent } = harness({ state: seed(), stopBeing: async () => ({ stopped: false }) });
+    await cmds.run({ chatId: JID, surface: SURFACE, body: '/agents stop e' });
+    expect(sent.map((s) => s.text)).toEqual(['e stop here — nothing in flight.']);
+  });
+
+  it('stop: a turn that could not be interrupted is ended — the next turn resumes the same thread', async () => {
+    const { cmds, sent } = harness({ state: seed(), stopBeing: async () => ({ stopped: 'evict' }) });
+    await cmds.run({ chatId: JID, surface: SURFACE, body: '/agents stop e' });
+    expect(sent[0].text).toMatch(/ended its process mid-turn/);
+    expect(sent[0].text).toMatch(/same thread/);
+  });
+
+  it("stop + compact act where an invited group's being LIVES (the room), not the typed chat", async () => {
+    const GROUP = '0MP97ovrD6XvVovMVx6v';
+    let state = ensureContact(emptyState(), 'room', 'acim', {}).state;
+    state = ensureContact(state, 'whatsapp', GROUP, { pushedName: 'perrito', slugHint: 'perrito' }).state;
+    state = patchContact(state, 'room', 'acim', { agents: { e: { threadId: 'thread-acim' } } });
+    const at = [];
+    const c = compactor({ compacted: true, tokens: 1, window: 200_000 });
+    const { cmds, sent } = harness({
+      state,
+      scopeOf: (being, ev) => ((ev.chatId === GROUP) ? { surface: 'room', chatId: 'acim' } : null),
+      stopBeing: async (being, a) => { at.push([a.surface, a.chatId]); return { stopped: 'interrupt' }; },
+      compactBeing: c.compactBeing,
+    });
+    await cmds.run({ chatId: GROUP, surface: 'whatsapp', body: '/agents stop e' });
+    await cmds.run({ chatId: GROUP, surface: 'whatsapp', body: '/agents compact e' });
+    expect(at).toEqual([['room', 'acim']]);
+    expect(c.calls).toEqual([{ being: 'e', surface: 'room', chatId: 'acim', sessionId: 'thread-acim' }]);
+    expect(sent[0].text).toMatch(/stop on room\/acim/);
+  });
+
+  it('a being this node does not host: silent, nothing asked', async () => {
+    let asked = 0;
+    const { cmds, sent } = harness({ state: seed(), stopBeing: async () => { asked++; return { stopped: 'interrupt' }; }, compactBeing: () => { asked++; return { ok: false }; } });
+    await cmds.run({ chatId: JID, surface: SURFACE, body: '/agents stop zed' });
+    await cmds.run({ chatId: JID, surface: SURFACE, body: '/agents compact zed' });
+    expect(asked).toBe(0);
+    expect(sent).toEqual([]);
+  });
+
+  it('grammar: verb first, conversation is the rest of the line; usage names both verbs', () => {
+    expect(normalizeAgentsArgs(['compact', 'e', 'eGPT', 'Rodz'])).toEqual({ args: ['e', 'compact', undefined], slug: 'eGPT Rodz' });
+    expect(normalizeAgentsArgs(['stop', 'force', 'all'])).toEqual({ args: ['force all', 'stop', undefined], slug: null });
+    expect(AGENTS_USAGE).toMatch(/compact/);
+    expect(AGENTS_USAGE).toMatch(/stop/);
+  });
+
+  it('bare status shows the live context size: tokens and % of the window', async () => {
+    const { cmds, sent } = harness({ state: seed(), dueFor: () => ({ due: false, tokens: 482_000, threshold: 200_000 }) });
+    await cmds.run({ chatId: JID, surface: SURFACE, body: '/agents e' });
+    expect(sent[0].text).toMatch(/^context: 482000 tok \(48% of 1000000\)$/m);
+  });
+
+  it('bare status: no thread → no context to measure', async () => {
+    const { cmds, sent } = harness({ state: seed({ mode: 'on' }) });
+    await cmds.run({ chatId: JID, surface: SURFACE, body: '/agents e' });
+    expect(sent[0].text).toMatch(/^context: no thread$/m);
   });
 });

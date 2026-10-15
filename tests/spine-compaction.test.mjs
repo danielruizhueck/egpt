@@ -299,3 +299,77 @@ describe('compaction service: two thresholds (warn, then compact)', () => {
     await expect(sched2.fire()).resolves.toBeUndefined();
   });
 });
+
+// /agents compact (operator 2026-10-15): the SAME graceful sequence the scheduled compaction
+// runs — handoff turn, warn notice, native /compact, identity re-feed armed with the welcome —
+// on demand, over the target the being's last turn froze. No second compactor.
+describe('compaction: compactNow (on demand, /agents compact)', () => {
+  const CFG = { compaction: { handoff_prompt: 'HANDOFF {agent}', welcome: 'WELCOME {agent}' } };
+  const big = () => ({ due: true, tokens: 964_000, threshold: 200_000 });
+
+  it('runs the handoff turn BEFORE /compact, then arms the re-feed with the welcome and says so on the admin channel', async () => {
+    const pool = fakePool(), sched = makeScheduler();
+    const order = [], armed = [];
+    const c = createCompaction({ pool, getConfig: () => CFG, scheduler: sched, dueFor: big });
+    c.afterTurn({ ...TARGET, armIdentityRefresh: async (w) => { armed.push(w); order.push('arm'); }, noticeWarn: async () => { order.push('warn'); }, noticeCompacted: async () => { order.push('compacted'); } });
+    const r = c.compactNow(TARGET.key, { sessionId: 'sid-1' });
+    expect(r.ok).toBe(true);
+    expect(await r.done).toMatchObject({ compacted: true, tokens: 964_000 });
+    expect(pool.runs.map((x) => x.msg)).toEqual(['HANDOFF e', '/compact']);
+    expect(pool.runs.every((x) => x.key === TARGET.key)).toBe(true);
+    expect(order).toEqual(['warn', 'arm', 'compacted']);
+    expect(armed).toEqual(['WELCOME e']);
+  });
+
+  it('compacts even when auto-compaction is OFF and the session is under ratio — it was asked for', async () => {
+    const pool = fakePool(), sched = makeScheduler();
+    const c = createCompaction({ pool, getConfig: () => ({ compaction: { enabled: false } }), scheduler: sched, dueFor: () => ({ due: false, tokens: 1000, threshold: 40_000 }) });
+    c.afterTurn(TARGET);
+    expect(sched.setCount).toBe(0);                      // the scheduled path is still off
+    const r = c.compactNow(TARGET.key);
+    expect((await r.done).compacted).toBe(true);
+    expect(pool.runs.map((x) => x.msg)).toEqual(['/compact']);   // no handoff_prompt → skipped, as the service does
+  });
+
+  it('clears a pending cooling timer so the scheduled fire does not run a second compaction', async () => {
+    const pool = fakePool(), sched = makeScheduler();
+    const c = createCompaction({ pool, getConfig: () => ({}), scheduler: sched, dueFor: big });
+    c.afterTurn(TARGET);
+    await c.compactNow(TARGET.key).done;
+    expect(sched.clearCount).toBe(1);
+    expect(sched.fn).toBe(null);
+  });
+
+  it('refuses plainly: no turn yet, a changed thread, or one already running', async () => {
+    let release;
+    const pool = { runs: [], run(key, msg) { this.runs.push(msg); return new Promise((r) => { release = r; }); } };
+    const c = createCompaction({ pool, getConfig: () => ({}), scheduler: makeScheduler(), dueFor: big });
+    expect(c.compactNow(TARGET.key)).toMatchObject({ ok: false });
+    c.afterTurn(TARGET);
+    expect(c.compactNow(TARGET.key, { sessionId: 'sid-OTHER' })).toMatchObject({ ok: false });
+    const first = c.compactNow(TARGET.key, { sessionId: 'sid-1' });
+    expect(first.ok).toBe(true);
+    expect(c.compactNow(TARGET.key)).toMatchObject({ ok: false, reason: expect.stringMatching(/already/) });
+    await new Promise((r) => setImmediate(r));
+    release({ text: '' });
+    expect((await first.done).compacted).toBe(true);
+  });
+
+  it('a /compact that throws is reported, not swallowed — and nothing is armed', async () => {
+    let armed = 0;
+    const pool = { run: async () => { throw new Error('session is gone'); } };
+    const c = createCompaction({ pool, getConfig: () => ({}), scheduler: makeScheduler(), dueFor: big });
+    c.afterTurn({ ...TARGET, armIdentityRefresh: async () => { armed++; } });
+    expect(await c.compactNow(TARGET.key).done).toMatchObject({ compacted: false, reason: expect.stringMatching(/session is gone/) });
+    expect(armed).toBe(0);
+  });
+
+  it('says whether a turn is in flight (the compaction queues behind it)', async () => {
+    const pool = { ...fakePool(), busy: (k) => k === TARGET.key };
+    const c = createCompaction({ pool, getConfig: () => ({}), scheduler: makeScheduler(), dueFor: big });
+    c.afterTurn(TARGET);
+    const r = c.compactNow(TARGET.key);
+    expect(r.inFlight).toBe(true);
+    await r.done;
+  });
+});
