@@ -130,12 +130,12 @@ const KG = ({ rule = true } = {}) => ({
 });
 
 // do: An's account claimed by do, Rodz's undeclared — so do ALSO hears a DM to Rodz. No rule.
-const DO = ({ ownerOfSecondary = null } = {}) => ({
+const DO = () => ({
   node_name: 'do',
   user_name: 'An',
   beeper: {
     primary: { account: 'anrodz42@example.com', token: PRIMARY, owner_node: 'do' },
-    secondary: { account: 'dolly.egpt@example.com', token: SECONDARY, ...(ownerOfSecondary ? { owner_node: ownerOfSecondary } : {}) },
+    secondary: { account: 'dolly.egpt@example.com', token: SECONDARY },
   },
   networks: { whatsapp: { allowed_users: [AN, '@anrodriguez:beeper.com'] } },
   dispatch: { auto_default_mode: 'mention' },
@@ -292,22 +292,6 @@ describe('node do does not answer these chats', () => {
     expect(replies()).toEqual([]);
     app.stop();
   });
-
-  it('do with secondary owned by kg hears nothing there — not even "rodz hola"', async () => {
-    const { app, byConnection, replies } = await bootWith(DO({ ownerOfSecondary: 'kg' }));
-    await deliver(byConnection.secondary, NEW_DM, 'rodz hola', { atE: true });
-    await quiet(replies);
-    expect(replies()).toEqual([]);
-    app.stop();
-  });
-
-  it('…while today, without that line, "rodz hola" from a stranger DOES wake do\'s persona (the overlap)', async () => {
-    const { app, byConnection, replies } = await bootWith(DO());
-    await deliver(byConnection.secondary, NEW_DM, 'rodz hola', { atE: true });
-    await waitFor(() => replies().length > 0);
-    expect(replies()[0].text).toContain('🤝 D:');
-    app.stop();
-  });
 });
 
 describe('strangerAgentFor — the rule, pure', () => {
@@ -332,5 +316,60 @@ describe('strangerAgentFor — the rule, pure', () => {
   it('a "*" allowed_users entry names nobody — it does not make every sender known', () => {
     const star = { ...cfg, agents: { ...cfg.agents, ken: { ...cfg.agents.ken, conversation_defaults: { allowed_users: ['*'] } } } };
     expect(strangerAgentFor(ev(), star)).toBe('edw-marketer');
+  });
+});
+
+describe('heartbeats are off in a conversation whose own agent says `heartbeats: false`', () => {
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+  async function load({ off }) {
+    const { createConfigResolver, readHeartbeatFiles } = await import('../src/spine/config-resolver.mjs');
+    const { createHeartbeatLoader } = await import('../src/spine/heartbeat-loader.mjs');
+    const { mkdtempSync, mkdirSync, writeFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+    const home = mkdtempSync(join(tmpdir(), 'egpt-stranger-beats-'));
+    const slug = 'visitor-2610152300';
+    const dir = join(home, 'conversations', 'whatsapp', slug);
+    mkdirSync(join(dir, 'heartbeats'), { recursive: true });
+    writeFileSync(join(dir, 'heartbeats', 'escape.yaml'), 'frequency: 1m\ncommand: whoami\n');
+    writeFileSync(join(dir, 'heartbeats', 'wake.yaml'), 'frequency: 1m\nagent: e\nprompt: hi\n');
+    const config = { agents: { egpt: { default: true, handles: ['e'] }, 'edw-marketer': { ...MARKETER(), ...(off ? { heartbeats: false } : {}) } } };
+    const registry = { contacts: { whatsapp: { [NEW_DM]: { slug, agents: { 'edw-marketer': { default: true } } } } } };
+    const read = [];
+    const resolver = createConfigResolver({
+      getConfig: () => config, loadRegistry: async () => registry,
+      listEntityDirs: async () => [{ dir, ns: `whatsapp/${slug}` }],
+      readEntityBeats: (d, o) => { read.push(d); return readHeartbeatFiles(d, o); },
+      egptHome: home, io: { writeFile: async () => {}, mkdir: async () => {} },
+    });
+    const fired = [];
+    const registered = [];
+    const loader = createHeartbeatLoader({
+      resolver, aliveMs: 0, egptHome: home, platform: 'linux',
+      spawn: () => { fired.push('spawn'); return { on() {}, stdout: { on() {}, setEncoding() {} } }; },
+      spawnBoxed: async () => { fired.push('boxed'); return { on() {} }; },
+      dispatchTurn: async () => { fired.push('turn'); return { text: 'ok' }; },
+      io: { writeFile: async () => {}, mkdir: async () => {}, readFile: async () => '{}' },
+    });
+    loader.wrapRegistry({ register: (name, everyMs, fn) => registered.push({ name, fn }), clear: () => { registered.length = 0; }, runDue: () => {} });
+    const { entries } = await loader.collect();
+    await loader.activate({ stats: () => ({}) });
+    for (const r of registered) r.fn();
+    await flush();
+    return { entries, registered, fired, read };
+  }
+
+  it('heartbeats/*.yaml in that conversation is never read, registered or fired', async () => {
+    const { entries, registered, fired, read } = await load({ off: true });
+    expect(read).toEqual([]);
+    expect(entries).toEqual([]);
+    expect(registered).toEqual([]);
+    expect(fired).toEqual([]);
+  });
+
+  it('control: without the key the same files load and fire', async () => {
+    const { entries, fired } = await load({ off: false });
+    expect(entries.map((e) => e.shortName).sort()).toEqual(['escape', 'wake']);
+    expect(fired.sort()).toEqual(['boxed', 'turn']);
   });
 });

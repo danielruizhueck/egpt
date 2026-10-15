@@ -33,7 +33,7 @@ import { mentionHits } from '../auto-mode.mjs';
 // WRITES it (incoming-media.voiceTranscriptBody), never re-spelled here. addressed() takes it off
 // before the spoken-wake scan so "the start" means the start of the TRANSCRIPT, not of the marker.
 import { VOICE_MARK } from '../incoming-media.mjs';
-import { getBeing, getContact, allowedUsersPermits, conversationDefaultOf } from '../conversations-state.mjs';
+import { getBeing, getContact, allowedUsersPermits, defaultBeingOf } from '../conversations-state.mjs';
 import { surfaceOf, SHELL_SURFACE } from './identity.mjs';
 
 // A local (non-relay) agent's map key, matched case-insensitively; null when there is none.
@@ -503,7 +503,7 @@ export function createRouter({ getAgents = () => ({}), getConfig = () => ({}), d
       // stranger in its conversation reaches it and nobody else. No state read → none (unchanged).
       const cfg = { ...(getConfig() ?? {}), agents };
       const owner = !state ? null
-        : (localAgentKey(agents, conversationDefaultOf(state, ev?.surface, ev?.chatId))
+        : (localAgentKey(agents, defaultBeingOf(getContact(state, ev?.surface, ev?.chatId)?.entry))
           ?? (getContact(state, ev?.surface, ev?.chatId) ? null : strangerAgentFor(ev, cfg)));
       const ownerOnly = !!owner && !ev?.isSender && !isKnownSender(ev?.senderId, cfg);
       // ONE membership answer per identity per resolve() call (never per hit) — same discipline as

@@ -1082,10 +1082,10 @@ export function getBeing(state, surface, jid, being) {
   };
 }
 
-// The conversation's OWN default being: the first `agents.<being>` block carrying `default: true`
+// A conversation entry's OWN default being: the first `agents.<being>` block carrying `default: true`
 // (the config registry's persona marker, one tier more specific). null = the node persona.
-export function conversationDefaultOf(state, surface, jid) {
-  const agents = _obj(getContact(state, surface, jid)?.entry?.agents) ?? {};
+export function defaultBeingOf(entry) {
+  const agents = _obj(_obj(entry)?.agents) ?? {};
   return Object.keys(agents).find((b) => _obj(agents[b])?.default === true) ?? null;
 }
 

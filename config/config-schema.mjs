@@ -1712,6 +1712,12 @@ export const CONFIG_SCHEMA = {
         answers un-@mentioned messages and terminates relay chains resolving to
         it. Its MAP KEY is the persona being-id that keys warm sessions /
         threads / transcripts.
+      heartbeats
+        OPTIONAL Boolean (operator 2026-10-15). false = a conversation whose
+        own default agent this is (conversations.yaml agents.<name>.default:
+        true, e.g. one dispatch.stranger_agent seeded) loads NO heartbeats —
+        neither its rungs' blocks nor its heartbeats/*.yaml files are read.
+        See src/spine/config-resolver.mjs.
       mode
         OPTIONAL (operator 2026-07-25) — THIS agent's own default reply-mode.
         ENUM: on | auto | mute | mention-direct | mention | accum | off

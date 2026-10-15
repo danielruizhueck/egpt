@@ -67,7 +67,7 @@ import { writeFile as fsWriteFile, mkdir as fsMkdir, readdir as fsReaddir, readF
 import { join, dirname, relative, sep } from 'node:path';
 import * as YAML from 'yaml';
 import { EGPT_HOME } from '../egpt-home.mjs';
-import { CONTACT_BOOKKEEPING_KEYS, residentsOf } from '../conversations-state.mjs';
+import { CONTACT_BOOKKEEPING_KEYS, residentsOf, defaultBeingOf } from '../conversations-state.mjs';
 import { HEARTBEATS_DIR } from '../room-core.mjs';
 
 // The two top rungs, named the way they are written into `source:` — profile-relative.
@@ -267,7 +267,11 @@ export function createConfigResolver({
       // folder entry wins WITHIN this entity. The node's block is a separate contributor
       // and is never merged in here.
       const heartbeats = {}, heartbeatSource = {};
-      for (const [rung, file] of [[entryRung, REGISTRY_FILE], [folder, folderFile]]) {
+      // NO BEATS where the conversation's own agent says `heartbeats: false` (operator 2026-10-15):
+      // neither the rungs nor the folder's heartbeats/ files are read.
+      const owner = defaultBeingOf(index.get(ns));
+      const beatsOff = !!owner && node.config.agents?.[owner]?.heartbeats === false;
+      for (const [rung, file] of beatsOff ? [] : [[entryRung, REGISTRY_FILE], [folder, folderFile]]) {
         for (const [name, raw] of Object.entries(isPlainObject(rung.heartbeats) ? rung.heartbeats : {})) {
           heartbeats[name] = raw;
           heartbeatSource[name] = file;
@@ -283,7 +287,7 @@ export function createConfigResolver({
       // so the daily ledger row is shared: a beat moved into a file cannot fire twice in a day.
       const beingWritten = new Set();
       let files = {};
-      try { files = (await readEntityBeats(dir, { onLog })) ?? {}; }
+      try { files = beatsOff ? {} : ((await readEntityBeats(dir, { onLog })) ?? {}); }
       catch (e) { onLog(`${ns}: ${e?.message ?? e}`); }
       for (const [name, raw] of Object.entries(files)) {
         const file = _rel(egptHome, join(dir, HEARTBEATS_DIR, `${name}.yaml`));
