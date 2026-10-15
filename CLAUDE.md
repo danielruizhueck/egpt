@@ -168,16 +168,13 @@ Per chunk of work:
 6. **Close the loop**: update HANDOFF.ddmm.disposable.md/ROADMAP.md in a
    checklist easy-to-read way:
 
-
-```
-1. [This] → verify: [check]
-2. [That] → verify: [check]
-3. [This] → verify: [check]
-```
-
-7. **Send it upstream**: push the branch and open a draft PR, per
-   [CONTRIBUTING.md](CONTRIBUTING.md). Do it without being asked — in this repo
-   that IS the end of a chunk. Never merge, never push to `main`.
+   ```
+   1. [This] → verify: [check]
+   2. [That] → verify: [check]
+   3. [This] → verify: [check]
+   ```
+7. **Send it upstream, when asked**: push the branch and open a draft PR, per
+   [CONTRIBUTING.md](CONTRIBUTING.md). Never merge, never push to `main`.
 
 ---
 

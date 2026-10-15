@@ -1,13 +1,13 @@
 # Contributing to eGPT
 
-Every clone is a node, and every code change a node makes flows back upstream as
-a pull request. That is the default, not an extra step: an agent working in a
-clone opens the PR itself once a chunk is verified. Nobody has to ask for it.
+Every clone is a node, and the code changes a node makes flow back upstream as
+pull requests. An agent working in a clone opens the PR when asked, once the
+chunk is verified.
 
-Upstream: <https://github.com/danielruizhueck/egpt>
+Upstream: <https://github.com/siran/egpt>
 
 
-## The flow (agents do this without being asked)
+## The flow
 
 1. **Branch.** Never commit on `main`. One branch per concern, named
    `<node_name>/<topic>` (e.g. `em/listening-reaction`).
@@ -15,8 +15,8 @@ Upstream: <https://github.com/danielruizhueck/egpt>
    suite, commit per chunk with specific `git add` (never `add -A`).
 3. **Fork once** if you can't push upstream: `gh repo fork --remote` (your fork
    becomes `origin`, this repo becomes `upstream`).
-4. **Push and open a DRAFT PR** against upstream `main`:
-   `gh pr create --draft --repo danielruizhueck/egpt --base main`.
+4. **When asked, push and open a DRAFT PR** against upstream `main`:
+   `gh pr create --draft --repo siran/egpt --base main`.
    - Title: the chunk's commit summary.
    - Body: what / why, the reproduce-first test, suite totals before and after.
      Name every pre-existing failure so a reviewer can tell it from a new one.
