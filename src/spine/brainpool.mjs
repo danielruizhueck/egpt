@@ -1593,6 +1593,17 @@ export function createBrainPool({
       if (k) pool.evict?.(k);
     },
 
+    // /agents compact|stop — the same lookup evict() uses. warmKey: null when it never ran here.
+    warmKey(being, ev) {
+      return lastKeyByConv.get(`${being}:${ev?.surface}:${ev?.chatId}`) ?? null;
+    },
+    // Stop the turn in flight; the thread, its record and the queue are untouched.
+    async stop(being, ev) {
+      const k = lastKeyByConv.get(`${being}:${ev?.surface}:${ev?.chatId}`);
+      if (!k) return { stopped: false };
+      return (await pool.interrupt?.(k)) ?? { stopped: false };
+    },
+
     // This conversation's resolved allow_new_input (operator 2026-08-30). The spine holds
     // the OTHER half of the steer decision — WHO triggered the turn currently streaming —
     // and cannot resolve config itself, so it asks here: resolution stays in resolveConv

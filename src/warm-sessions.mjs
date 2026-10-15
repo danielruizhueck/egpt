@@ -117,8 +117,11 @@ export function createWarmPool({
       e.lastUsed = Date.now();
       return res;
     } catch (err) {
-      e.errored = true;
-      e.failure = err;   // kept only so the eviction below can say WHAT went wrong
+      // An operator stop (/agents stop) ends the turn, not the session: it stays warm.
+      if (!err?.interrupted) {
+        e.errored = true;
+        e.failure = err;   // kept only so the eviction below can say WHAT went wrong
+      }
       throw err;
     } finally {
       e.busy = false;
@@ -256,10 +259,32 @@ export function createWarmPool({
     return { ack };
   }
 
+  // STOP the turn in flight on `key` (/agents stop). The session's own interrupt when it has one
+  // (process, session id and the queued runs behind it all kept); a session without one, or one
+  // that has not ended the turn within `graceMs`, is ended instead — the next run reopens on the
+  // same session id. Never touches another key.
+  async function interrupt(key, { graceMs = 5_000 } = {}) {
+    const e = _s.get(key);
+    if (!e || !e.busy) return { stopped: false };
+    if (typeof e.session.interrupt !== 'function') { _evict(key, 'operator stop'); return { stopped: 'evict' }; }
+    const ended = e.session.interrupt();
+    if (!ended) return { stopped: false };            // the turn ended between busy and here
+    let timer;
+    const inTime = await Promise.race([
+      Promise.resolve(ended).then(() => true),
+      new Promise((r) => { timer = setTimeout(() => r(false), graceMs); timer.unref?.(); }),
+    ]);
+    clearTimeout(timer);
+    if (inTime) { onLog(`warm: interrupted ${key} (operator stop)`); return { stopped: 'interrupt' }; }
+    if (_s.get(key) === e) _evict(key, `operator stop: interrupt not honoured in ${graceMs}ms`);
+    return { stopped: 'evict' };
+  }
+
   function has(key) { return _s.has(key); }
+  function busy(key) { return _s.get(key)?.busy === true; }
   function evict(key) { _evict(key, 'manual'); }
   function close() { for (const k of [..._s.keys()]) _evict(k, 'pool close'); }
   function stats() { return { size: _s.size, max, keys: [..._s.keys()] }; }
 
-  return { run, steer, has, evict, close, stats };
+  return { run, steer, interrupt, has, busy, evict, close, stats };
 }

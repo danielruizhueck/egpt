@@ -151,6 +151,25 @@ describe('brainpool.turn', () => {
     expect(pool.evicted).toEqual([key]);
   });
 
+  // /agents compact|stop (operator 2026-10-15): the same lastKeyByConv lookup evict uses.
+  it('warmKey(being, ev) answers the key the conversation last ran; null when it never ran', async () => {
+    const { brain, pool } = harness([{ text: 'hi', sessionId: 'sid-1' }]);
+    expect(brain.warmKey('e', ev)).toBe(null);
+    await brain.turn('e', ev);
+    expect(brain.warmKey('e', ev)).toBe(pool.calls[0].key);
+  });
+
+  it('stop(being, ev) interrupts EXACTLY that key through the pool; a conversation that never ran stops nothing', async () => {
+    const { brain, pool } = harness([{ text: 'hi', sessionId: 'sid-1' }]);
+    const interrupted = [];
+    pool.interrupt = async (k) => { interrupted.push(k); return { stopped: 'interrupt' }; };
+    expect(await brain.stop('e', ev)).toEqual({ stopped: false });
+    await brain.turn('e', ev);
+    expect(await brain.stop('e', ev)).toEqual({ stopped: 'interrupt' });
+    expect(interrupted).toEqual([pool.calls[0].key]);
+    expect(pool.evicted).toEqual([]);
+  });
+
   it('resumes the stored session: 2nd turn passes sessionId from the 1st', async () => {
     const { brain, pool } = harness([{ text: 'a', sessionId: 'sid-1' }, { text: 'b', sessionId: 'sid-1' }]);
     await brain.turn('e', ev);

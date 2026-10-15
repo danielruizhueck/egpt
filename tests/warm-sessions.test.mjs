@@ -537,3 +537,78 @@ describe('warm pool — an eviction says what actually went wrong', () => {
     expect(evictions()[0]).toContain('session boom');
   });
 });
+
+// /agents stop (operator 2026-10-15): stop the turn in flight on ONE key, keep the session.
+describe('warm-session pool — interrupt', () => {
+  // A session whose turn hangs until interrupt() ends it the way the CLI does (rejects INTERRUPTED).
+  function stoppableFactory({ honours = true, hasInterrupt = true } = {}) {
+    const made = [];
+    const makeSession = () => {
+      const s = {
+        closed: false, turns: [], interrupts: 0, end: null,
+        close() { this.closed = true; },
+        turn(msg) {
+          this.turns.push(msg);
+          if (msg !== 'LONG') return Promise.resolve({ text: `echo:${msg}`, sessionId: 'sid' });
+          return new Promise((_, reject) => { this.end = () => reject(Object.assign(new Error('claude: interrupted'), { interrupted: true })); });
+        },
+      };
+      if (hasInterrupt) {
+        s.interrupt = () => {
+          s.interrupts++;
+          if (!s.end) return false;
+          const done = new Promise((r) => { const end = s.end; s.end = () => { end(); r(); }; });
+          if (honours) setImmediate(() => s.end());
+          return done;
+        };
+      }
+      made.push(s);
+      return s;
+    };
+    return { makeSession, made };
+  }
+
+  it('no entry, or an idle one → nothing stopped', async () => {
+    const { makeSession } = stoppableFactory();
+    const pool = createWarmPool({ makeSession });
+    expect(await pool.interrupt('k')).toEqual({ stopped: false });
+    await pool.run('k', 'a');
+    expect(await pool.interrupt('k')).toEqual({ stopped: false });
+    expect(pool.busy('k')).toBe(false);
+  });
+
+  it('a busy key is interrupted IN PLACE: the turn rejects, the session stays warm and runs what is queued next', async () => {
+    const { makeSession, made } = stoppableFactory();
+    const pool = createWarmPool({ makeSession });
+    const live = pool.run('k', 'LONG').then(() => null, (e) => e);
+    const queued = pool.run('k', 'next');
+    await new Promise((r) => setImmediate(r));
+    expect(pool.busy('k')).toBe(true);
+    expect(await pool.interrupt('k')).toEqual({ stopped: 'interrupt' });
+    expect((await live).interrupted).toBe(true);
+    expect((await queued).text).toBe('echo:next');
+    expect(made).toHaveLength(1);
+    expect(made[0].closed).toBe(false);
+    expect(made[0].turns).toEqual(['LONG', 'next']);
+  });
+
+  it('a session with no interrupt is ended instead (the next turn reopens on the same id)', async () => {
+    const { makeSession, made } = stoppableFactory({ hasInterrupt: false });
+    const pool = createWarmPool({ makeSession });
+    pool.run('k', 'LONG').catch(() => {});
+    await new Promise((r) => setImmediate(r));
+    expect(await pool.interrupt('k')).toEqual({ stopped: 'evict' });
+    expect(made[0].closed).toBe(true);
+    expect(pool.has('k')).toBe(false);
+  });
+
+  it('an interrupt the session does not honour within the grace is ended instead', async () => {
+    const { makeSession, made } = stoppableFactory({ honours: false });
+    const pool = createWarmPool({ makeSession });
+    pool.run('k', 'LONG').catch(() => {});
+    await new Promise((r) => setImmediate(r));
+    expect(await pool.interrupt('k', { graceMs: 5 })).toEqual({ stopped: 'evict' });
+    expect(made[0].interrupts).toBe(1);
+    expect(made[0].closed).toBe(true);
+  });
+});
