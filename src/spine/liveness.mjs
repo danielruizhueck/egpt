@@ -8,7 +8,7 @@
 //   · a running turn: its placeholder shows the elapsed time; once the placeholder is past its edit
 //     window a status message takes over, rolled to a fresh one each window, ended ✓ with the turn.
 //   · background work: ONE status message per being per chat, opened when the dispatching turn ends,
-//     taken over by the wake turn (adopt), ended ✓ when the work is gone without one.
+//     ended ✓ when a finished task's wake starts (the wake posts its own placeholder) or the work is gone.
 //   · background running ASK_AFTER_MS: the being is asked through the wake path whether it is still
 //     needed; no answer → one line to the logging group. Nothing is evicted or killed here.
 import { LIVE_FRAME_MARK } from '../dispatch-line.mjs';
@@ -70,7 +70,7 @@ export function createLiveness({ sender, brain, now, stopped = () => false, labe
     for (const [k, s] of bg) {
       const tasks = brain.background?.(s.being, s.ev) ?? [];
       if (!tasks.length) {
-        if (!s.quiet) { s.quiet = true; continue; }   // one quiet tick: a wake may be taking it over
+        if (!s.quiet) { s.quiet = true; continue; }   // one quiet tick: a wake may be on its way
         bg.delete(k); asks.delete(k);
         end(s.out, `✓ background work ended: ${s.what}`);
         continue;
@@ -106,13 +106,13 @@ export function createLiveness({ sender, brain, now, stopped = () => false, labe
       bg.set(k, s);
       note(`liveness: ${x.being}/${x.ev.chatId} — background task(s) ${s.what} still running, status opened`);
     },
-    // The wake turn takes the being's status message over as its placeholder. null = none open.
-    adopt(being, chatId) {
+    // A finished task's wake is starting: the being's status message ends on `text`.
+    endStatus(being, chatId, text) {
       const k = keyOf(being, chatId);
       const s = bg.get(k);
-      if (!s) return null;
+      if (!s) return;
       bg.delete(k);
-      return s.out;
+      end(s.out, text);
     },
   };
 }

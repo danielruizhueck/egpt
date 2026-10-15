@@ -1433,14 +1433,13 @@ export function createSpine({
   // exist. Quoting from the START is also what removes the delete+repost churn for the common
   // case: E's /reply at the message it is answering is now GENUINELY redundant, so it strips
   // instead of tearing the placeholder down and posting a fresh quote in its place.
-  // `adopted`: a placeholder already open in the chat (the being's liveness status) that this turn takes over.
-  function openAndRunReply({ to, ev, d, turnKey, pinned = false, trigger = null, adopted = null }) {
+  function openAndRunReply({ to, ev, d, turnKey, pinned = false, trigger = null }) {
     const replyTo = ev.msgId ?? null;
     const ahead = bumpTrain(turnKey);
     // CHUNK 2 super-channel routing: post to the conversation's super channel when it has one right
     // now (gating.decide's live lookup), else the arrival chat — unchanged otherwise. The transcript/
     // limbs below stay keyed to ev.chatId (the alias shares that one on-disk conversation).
-    const out = adopted ?? sender.open(d.replyChatId ?? ev.chatId, { being: to, replyTo, queued: ahead > 0, queuedAhead: ahead, auto: d.mode === 'auto', origin: ev.chatId });
+    const out = sender.open(d.replyChatId ?? ev.chatId, { being: to, replyTo, queued: ahead > 0, queuedAhead: ahead, auto: d.mode === 'auto', origin: ev.chatId });
     return turnBy(turnKey, () => runReplyTurn({ to, ev, d, out, replyTo, turnKey, queued: ahead > 0, pinned, trigger }));
   }
 
@@ -1449,10 +1448,11 @@ export function createSpine({
   // the CLI's own turn on it and reported up (boot: warm onBackgroundDone → brain.convOfKey → here).
   // Woken as a turn like any other: STOP, the loop guard (where it counts) and the gate, then the
   // conversation's FIFO and the reply path. false = not woken; else the turn, true when it answered.
-  // `line`: liveness's "are they still necessary?" ask rides this same path. The being's status
-  // message, when one is open in the chat, becomes the turn's placeholder.
+  // `line`: liveness's "are they still necessary?" ask rides this same path. A finished task's wake
+  // ends the being's status message ✓ and posts its own placeholder at the bottom.
   async function wakeOnBackground({ being, surface, chatId, summaries = [], line = null }) {
     const what = summaries.length ? summaries.join('; ') : 'a background task';
+    const finished = line == null;
     line ??= `[egpt] A background task you started has finished: ${what}. Verify its result and report to the chat.`;
     const ev = { surface, chatId, body: line, line };
     const where = `${being}/${chatId}`;
@@ -1465,8 +1465,9 @@ export function createSpine({
     if (guard) await guardCountNonHuman(ev, channel, true);
     const { key: turnKey, pinned } = await turns.keyOf(being, ev);
     note(`wake ${where}: ${what}`);
+    if (finished) liveness.endStatus(being, chatId, `✓ background work done: ${what}`);
     inFlight++;
-    const turn = openAndRunReply({ to: being, ev, d, turnKey, pinned, adopted: liveness.adopt(being, chatId) });
+    const turn = openAndRunReply({ to: being, ev, d, turnKey, pinned });
     Promise.resolve(turn).then(releaseTurn, releaseTurn);
     return turn;
   }

@@ -77,7 +77,8 @@ export const QUEUED = (ahead) => `${LIVE_FRAME_MARK} Queued (${ahead} ahead)…`
 
 // LIVENESS (operator 2026-10-15: "perhaps the bridge can maintain an animation"). A live message is
 // re-edited with its elapsed time (src/spine/liveness.mjs). WhatsApp refuses an edit ~15 min after
-// the post, so a message is pulsed only for LIVE_EDIT_MS of its life — 2 min short, for clock skew.
+// the post, so NOTHING here edits a message older than LIVE_EDIT_MS — 2 min short, for clock skew:
+// past it a reply goes out fresh and the old message stays on its last frame.
 export const LIVE_EDIT_MS = 13 * 60_000;
 export function elapsed(ms) {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -357,8 +358,7 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
   const textOf = (v) => (typeof v === 'string' ? v : v?.text ?? '');
   const outbound = makeOutbound({ bridge, bridgeOf, peerMouth, onLog });
   return {
-    // `status`: a liveness status message (src/spine/liveness.mjs) — opens on that line instead of
-    // THINKING; a turn that takes it over (activate) flips it to THINKING like a queued one.
+    // `status`: a liveness status message (src/spine/liveness.mjs) — opens on that line instead of THINKING.
     open(chatId, { being = defaultKey, replyTo = null, queued = false, queuedAhead = 0, auto = false, origin = null, status = null } = {}) {
       const { bridge: bridgeForThisBeing, route: peerRoute } = outbound(being, chatId);
       // ROUTED-TARGET FALLBACK (never a silent drop): a send the sending account can't place on the
@@ -476,11 +476,12 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
       let streamOpened = false;
       let streamMouth = null;                          // the LOCAL mouth's route answer, when the stream was opened in its room (confirmedIn)
       let openedAt = 0, ended = false, lastFrame = null;   // liveness: the post time (edit window), done, last frame shown
-      const push = (f) => { lastFrame = f; stream?.update?.(f); };
+      const editable = () => now() - openedAt < LIVE_EDIT_MS;
+      const push = (f) => { if (!stream || !editable()) return; lastFrame = f; stream.update?.(f); };
       // The text the placeholder opens with. A QUEUED one differs from THINKING and, via `ahead`,
       // from every other queued one, which is what keeps two coexisting placeholders resolvable to
       // their own message ids (see QUEUED).
-      const placeholderText = () => ((queued && !activated) ? QUEUED(queuedAhead) : (status && !activated) ? withMark(status) : THINKING);
+      const placeholderText = () => ((queued && !activated) ? QUEUED(queuedAhead) : status ? withMark(status) : THINKING);
       // A STREAM ON A CONNECTION THIS NODE HOLDS — this being's own by default, and also the LAST
       // RESORT the peer stream falls back to when it can neither stream nor speak through the peer
       // (peer-mouth.startPeerStream, tier 3), which is why it is a factory rather than an inline
@@ -524,7 +525,7 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
         // A queued placeholder flips from the queue into the live train the instant
         // its turn starts (before the first token), so the user sees it move. No-op
         // for a placeholder that was never queued.
-        activate() { activated = true; if (queued || status) push(THINKING); },
+        activate() { activated = true; if (queued) push(THINKING); },
         // absorb() runs UNCONDITIONALLY, before the push. `stream?.update?.(`${absorb(t)} …`)`
         // reads as if it did, but optional chaining short-circuits the WHOLE call expression —
         // arguments included — so with no stream yet (a peer route being resolved, or a peer
@@ -532,20 +533,20 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
         // would have carried only the settled value with the narration above it lost.
         update(partial) { const t = textOf(partial); if (!t) return; const frame = `${absorb(t)} ${LIVE_FRAME_MARK}`; push(frame); },
         // LIVENESS: the live frame again with the time since `ms` ago, never absorbed into what was
-        // read. `label` relabels a status not yet taken over. false = past the edit window.
+        // read. `label` relabels a status. false = past the edit window.
         pulse(ms, label = null) {
           if (ended || !stream) return true;
-          if (now() - openedAt >= LIVE_EDIT_MS) return false;
-          if (label && status && !activated) status = label;
+          if (!editable()) return false;
+          if (label && status) status = label;
           push(liveFrame(shown() || placeholderText(), ms));
           return true;
         },
-        // Settle a status no turn took over, on `text` or its last frame. Never a fallback send.
+        // Settle a status, on `text` or its last frame. Never a fallback send.
         async end(text = null) {
           if (ended) return;
           ended = true;
           if (route) await route;
-          if (stream) await stream.finish?.(text ?? lastFrame ?? placeholderText());
+          if (stream && editable()) await stream.finish?.(text ?? lastFrame ?? placeholderText());
         },
         // `commands` (operator 2026-09-01): the verbs of a LIMB-ONLY reply — the turn's whole
         // answer was action commands, so there is no prose to deliver but plenty happened. Null
@@ -579,7 +580,7 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
             // (see commandMark/quietLimbMark notes for why the ⏳-only placeholder can't be blanked).
             if (commands?.length) {
               const settled = verbose ? commandMark(commands) : (shown() ? '' : quietLimbMark());
-              if (stream) await stream.finish?.(absorb(settled));
+              if (stream && editable()) await stream.finish?.(absorb(settled));
               return;
             }
             // A DELIBERATE '…' hidden here (on/auto) never held content, so its eager ⏳ placeholder
@@ -599,7 +600,7 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
             const settled = isDeliberateSilence(t) ? (shown() ? '' : quietLimbMark())
               : t.trim() ? t
               : (shown() ? '' : BRIDGE_SILENCE);
-            if (stream) await stream.finish?.(absorb(settled));
+            if (stream && editable()) await stream.finish?.(absorb(settled));
             return;
           }
           // Surfaced: deliver the reply, OR — when it came back empty — the no-reply
@@ -608,6 +609,8 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
           // read is a RESTATEMENT, not a divergence (see alreadyRead): settle on the stream so
           // the answer is not doubled; anything new still absorbs (seam, both kept).
           const settled = t.trim() ? t : noReplyMark();
+          // Past the edit window the placeholder stays on its last frame and the reply goes out fresh.
+          if (stream && !editable()) { fallbackResult = await deliverHere(settled, tag); return; }
           const body = alreadyRead(settled) ? shown() : absorb(settled);
           // AND THAT IS THE WHOLE MOUTH DECISION, spent. A peer stream settles the message the peer
           // has been editing; a local one settles this account's. Either way `delivered` says
@@ -631,7 +634,7 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
             // route, this one otherwise — because that is where a human is watching a "⏳" that
             // must not be left thinking forever. Only a turn that never opened a stream at all
             // (no streaming bridge) posts the ❌ fresh, which is the branch this always had.
-            if (stream) await stream.finish?.(`${shown() ? `${shown()} ` : ''}${FAIL_SUFFIX}`);
+            if (stream && editable()) await stream.finish?.(`${shown() ? `${shown()} ` : ''}${FAIL_SUFFIX}`);
             else await bridgeForThisBeing.send(chatId, FAIL_SUFFIX, tag);
           } catch { /* best effort */ }
         },

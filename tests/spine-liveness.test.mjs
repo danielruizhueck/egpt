@@ -4,9 +4,10 @@
 //
 // The chat shows a being is alive: its running turn's ⏳ placeholder is re-edited with the elapsed
 // time; while background work runs with no turn in flight ONE status message per being per chat
-// does the same and the wake turn takes it over. WhatsApp refuses edits ~15 min after the post, so
-// no message is edited past LIVE_EDIT_MS — a fresh status takes over. All of it rides the spine's
-// tick (STOP-first) and THE reply path (sender.open), with the real sender over a fake bridge here.
+// does the same, ended ✓ when the wake starts (the wake posts its own placeholder). WhatsApp refuses
+// edits ~15 min after the post, so nothing is edited past LIVE_EDIT_MS: a fresh status takes over
+// the animation and a late reply is sent fresh. All of it rides the spine's tick (STOP-first) and
+// THE reply path (sender.open), with the real sender over a fake bridge here.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createSpine } from '../src/spine/spine.mjs';
 import { createSender, THINKING, LIVE_EDIT_MS } from '../src/spine/sender.mjs';
@@ -19,11 +20,11 @@ const flush = async () => { for (let i = 0; i < 10; i++) await new Promise((r) =
 
 function fakeBridge() {
   let cb = null;
-  const streams = [];
+  const streams = [], sent = [];
   return {
-    streams,
+    streams, sent,
     onMessage(fn) { cb = fn; }, emit(msg) { return cb(msg); }, stop() {},
-    send() { return { ok: true }; },
+    send(chat, text, opts) { sent.push({ chat, text, opts }); return { ok: true, confirmedId: null }; },
     startStream(chat, init, opts) {
       const h = { chat, init, opts, frames: [], finals: [], delivered: false, update(t) { h.frames.push(t); }, async finish(t) { h.finals.push(t); h.delivered = true; } };
       streams.push(h);
@@ -104,7 +105,7 @@ describe('liveness — a running turn', () => {
     expect(ph.frames).toHaveLength(4);                               // nothing after the turn ended
   });
 
-  it('(d) no edit past the edit window: the placeholder freezes and a status message takes over, ended ✓ with the turn', async () => {
+  it('(d) no edit past the edit window: the placeholder freezes, a status message takes over, the late reply goes out fresh', async () => {
     const b = build();
     const done = b.bridge.emit(mention('@e very long job'));
     await flush();
@@ -120,8 +121,34 @@ describe('liveness — a running turn', () => {
 
     b.brain.calls[0].release('done');
     await done;
-    expect(ph.finals).toEqual(['done']);                              // the reply still settles where it always did
+    expect(ph.finals).toEqual([]);                                    // the 20-min-old placeholder is not touched
+    expect(b.bridge.sent).toEqual([{ chat: CHAT, text: 'done', opts: expect.objectContaining({ replyTo: 'm1', persona: 'egpt' }) }]);
     expect(st.finals).toEqual(['✓ 20m00s']);
+  });
+
+  it('(d) a turn that ends at 14 min sends the reply FRESH and never edits its 14-min-old placeholder', async () => {
+    const b = build();
+    const done = b.bridge.emit(mention('@e slow job'));
+    await flush();
+    const ph = b.bridge.streams[0];
+    at(14 * min);
+    b.brain.calls[0].onPartial('half way');                          // a late token is not edited in either
+    b.brain.calls[0].release('the answer');
+    await done;
+    expect(ph.frames).toEqual([]);
+    expect(ph.finals).toEqual([]);
+    expect(b.bridge.sent.map((s) => s.text)).toEqual(['the answer']);
+  });
+
+  it('(d) a turn that ends at 5 min still edits its placeholder in place (unchanged)', async () => {
+    const b = build();
+    const done = b.bridge.emit(mention('@e quick job'));
+    await flush();
+    at(5 * min);
+    b.brain.calls[0].release('the answer');
+    await done;
+    expect(b.bridge.streams[0].finals).toEqual(['the answer']);
+    expect(b.bridge.sent).toEqual([]);
   });
 
   it('(d) a status message is rolled to a fresh one before its own window closes', async () => {
@@ -131,7 +158,8 @@ describe('liveness — a running turn', () => {
     for (let t = 30 * sec; t <= 13 * min + LIVE_EDIT_MS + min; t += 30 * sec) { at(t); b.spine.tick(); }
     const [, first, second] = b.bridge.streams;
     expect(second).toBeTruthy();
-    expect(first.finals).toEqual([first.frames.at(-1)]);             // frozen on its own last frame
+    expect(first.frames.at(-1)).toBe('⏳ still thinking… 25m30s');   // its last edit, 12m30s after its post
+    expect(first.finals).toEqual([]);                                 // frozen there, never edited again
     expect(b.bridge.streams).toHaveLength(3);
   });
 
@@ -159,7 +187,7 @@ describe('liveness — background work with no turn in flight', () => {
     await done;
   }
 
-  it('(b) ONE status message opens when the dispatching turn ends, animates, and the wake turn ADOPTS it', async () => {
+  it('(b) ONE status message opens when the dispatching turn ends and animates; the wake ends it ✓ and posts its own placeholder', async () => {
     const b = build();
     await dispatchBackground(b);
     expect(b.bridge.streams).toHaveLength(2);
@@ -174,14 +202,17 @@ describe('liveness — background work with no turn in flight', () => {
     b.brain.tasks = [];
     const woke = b.spine.wakeOnBackground({ being: 'egpt', surface: 'whatsapp', chatId: CHAT, summaries: ['Run the audit — completed'] });
     await flush();
-    expect(b.bridge.streams).toHaveLength(2);                         // no second placeholder: the status IS it
-    expect(st.frames.at(-1)).toBe(THINKING);
+    expect(st.finals).toEqual(['✓ background work done: Run the audit — completed']);
+    expect(b.bridge.streams).toHaveLength(3);                         // the wake's own fresh placeholder, at the bottom
+    const wake = b.bridge.streams[2];
+    expect(wake.init).toBe(THINKING);
     b.brain.calls[1].release('the audit is clean');
     await woke;
-    expect(st.finals).toEqual(['the audit is clean']);
+    expect(wake.finals).toEqual(['the audit is clean']);
+    expect(st.finals).toHaveLength(1);
   });
 
-  it('(b) background work gone with no wake: the status is ended ✓ (after one quiet tick), never adopted later', async () => {
+  it('(b) background work gone with no wake: the status is ended ✓ (after one quiet tick); a later wake posts its own placeholder', async () => {
     const b = build();
     await dispatchBackground(b);
     const st = b.bridge.streams[1];
@@ -241,8 +272,9 @@ describe('liveness — long background work is ASKED about, never evicted', () =
     expect(b.brain.calls).toHaveLength(2);
     const ask = b.brain.calls[1].ev.line;
     expect(ask).toBe('[egpt] Your background task(s) Crawl the site have been running for 2h00m. Are they still necessary? Stop any that aren\'t, and report.');
-    const adopted = b.bridge.streams.filter((s) => s.init.startsWith('⚙️')).at(-1);
-    expect(adopted.frames.at(-1)).toBe(THINKING);                    // the status message is the ask's placeholder
+    expect(b.bridge.streams.at(-1).init).toBe(THINKING);            // the ask has its own placeholder…
+    const status = b.bridge.streams.filter((s) => s.init.startsWith('⚙️')).at(-1);
+    expect(status.finals).toEqual([]);                                // …and the work's status runs on: it is not done
     b.brain.calls[1].release('still needed: 40% done');
     await flush();
     ticks(b, ASK_AFTER_MS + 30 * sec, 2 * ASK_AFTER_MS - 30 * sec);
