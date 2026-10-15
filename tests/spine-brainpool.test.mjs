@@ -159,6 +159,15 @@ describe('brainpool.turn', () => {
     expect(brain.warmKey('e', ev)).toBe(pool.calls[0].key);
   });
 
+  // A background task finished on a warm key (2026-10-15): the same map read backwards names the
+  // being and conversation to wake.
+  it('convOfKey(key) answers the being + conversation that key last ran for; null for a key never run', async () => {
+    const { brain, pool } = harness([{ text: 'hi', sessionId: 'sid-1' }]);
+    expect(brain.convOfKey('nope')).toBe(null);
+    await brain.turn('e', ev);
+    expect(brain.convOfKey(pool.calls[0].key)).toEqual({ being: 'e', surface: 'whatsapp', chatId: '!room:beeper.com' });
+  });
+
   it('stop(being, ev) interrupts EXACTLY that key through the pool; a conversation that never ran stops nothing', async () => {
     const { brain, pool } = harness([{ text: 'hi', sessionId: 'sid-1' }]);
     const interrupted = [];

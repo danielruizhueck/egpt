@@ -8,7 +8,7 @@
 // the process is kept RESIDENT instead of re-spawned per turn.
 //
 // Interface = what `src/warm-sessions.mjs` (createWarmPool) expects of a session:
-//   turn(message, onUpdate) -> { text, sessionId }  ·  inject(message) -> bool  ·  interrupt()  ·  close()
+//   turn(message, onUpdate) -> { text, sessionId }  ·  inject(message) -> bool  ·  interrupt()  ·  close()  ·  background
 // The pool owns lazy-warm, idle-evict (the residency/reap policy), LRU, and
 // per-key serialization, so this primitive only manages ONE process running ONE
 // turn at a time.
@@ -131,6 +131,10 @@ const UNKNOWN_FIELD_MAX = 200;
 // How many unreadable stdout lines one session reports before it stops (see onStdout). Small:
 // these should never happen, and if they start happening the first few say everything.
 const UNREADABLE_LOG_CAP = 5;
+
+// A background completion's own turn starts 50-110ms after its notification (measured); past this
+// none is coming and a waiting turn goes ahead.
+const SELF_TURN_START_MS = 5_000;
 
 // 60 chars. The rendered text is a WhatsApp reply, and an agentic turn emits DOZENS of
 // tool calls — the budget is paid once per call, so it is a signpost ("which file? which
@@ -258,6 +262,13 @@ export function createWarmCliSession(options = {}) {
   let sessionId = options.sessionId ?? null;
   let pending = null;   // { resolve, reject, onUpdate, acc, settled }
   let closed = false;
+  // BACKGROUND WORK (measured 2026-10-15, claude 2.1.301). background_tasks_changed lists the CLI's
+  // background tasks; each ends with a task_notification. A turn in flight absorbs it (replayed with
+  // origin.kind 'task-notification'); with none, the CLI starts a turn of its own. That turn is
+  // stopped and reported up (onBackgroundDone) so the spine decides whether to wake the being.
+  let background = new Map();       // task_id -> description, still running
+  let finished = [];                // completions no turn has taken yet
+  let selfTurn = null;              // the CLI's own turn on `finished`: { done, end, timer, started }
   // THE BEING LINK for an UNBOXED session (src/spine/being-link.mjs): its credential rides the spawn
   // env, revoked at close. A boxed session's rides the launcher's -SetEnv and hands none in here.
   const link = typeof options.beingLink?.mint === 'function' ? options.beingLink.mint() : null;
@@ -309,6 +320,36 @@ export function createWarmCliSession(options = {}) {
     proc.on('error', (err) => failPending(err));
   }
 
+  // The CLI's own turn, expected or running. turn() waits behind it: the CLI runs it first.
+  function expectSelfTurn() {
+    if (selfTurn) return selfTurn;
+    let end;
+    const done = new Promise((r) => { end = r; });
+    const timer = setTimeout(() => {
+      onLog(`warm-cli: ${finished.length} background completion(s) and no turn followed in ${SELF_TURN_START_MS}ms`);
+      finished = [];
+      endSelfTurn();
+    }, SELF_TURN_START_MS);
+    timer.unref?.();
+    selfTurn = { done, end, timer, started: false };
+    return selfTurn;
+  }
+  function endSelfTurn() {
+    const t = selfTurn;
+    selfTurn = null;
+    if (t) { clearTimeout(t.timer); t.end(); }
+  }
+  function startSelfTurn() {
+    const t = expectSelfTurn();
+    clearTimeout(t.timer);
+    t.started = true;
+    const summaries = finished.splice(0);
+    if (typeof options.onBackgroundDone !== 'function') { onLog(`warm-cli: the CLI answers ${summaries.length} finished background task(s) on its own — nobody is listening`); return; }
+    try { proc.stdin.write(interruptLine()); } catch { /* exiting — onClose ends the turn */ }
+    onLog(`warm-cli: background task(s) finished with no turn in flight (${summaries.join('; ')}) — stopped the CLI's own turn, reporting up`);
+    try { options.onBackgroundDone({ summaries }); } catch (e) { onLog(`warm-cli: onBackgroundDone threw: ${e?.message ?? e}`); }
+  }
+
   function onStdout(chunk) {
     stdoutBuf += chunk;
     const lines = stdoutBuf.split('\n');
@@ -338,6 +379,13 @@ export function createWarmCliSession(options = {}) {
       }
       // Capture the (possibly freshly-minted) session id, first-wins.
       if (typeof ev.session_id === 'string' && !sessionId) sessionId = ev.session_id;
+      if (ev.type === 'system') {
+        if (ev.subtype === 'background_tasks_changed') background = new Map((Array.isArray(ev.tasks) ? ev.tasks : []).map((t) => [t.task_id, t.description || t.task_id]));
+        else if (ev.subtype === 'task_notification' && background.has(ev.task_id)) finished.push(`${background.get(ev.task_id)} — ${ev.status ?? 'done'}`);
+        else if (ev.subtype === 'init' && !pending && finished.length) startSelfTurn();
+      }
+      if (ev.type === 'user' && ev.isReplay === true && ev.origin?.kind === 'task-notification') finished.shift();
+      if (selfTurn?.started && !pending) { if (ev.type === 'result') endSelfTurn(); continue; }
       // THE INJECTION ACK (operator 2026-09-09 — see the header measurement). `isReplay` marks
       // the CLI echoing back a user line it has just TAKEN, which is the only thing in this
       // stream that says the model got a steered message; the write itself says nothing.
@@ -404,6 +452,14 @@ export function createWarmCliSession(options = {}) {
         const text = ev.message.content.filter((c) => c.type === 'text').map((c) => c.text).join('');
         if (text) { pending.acc = text; if (!verboseThinking) { try { pending.onUpdate?.(pending.acc); } catch { /* */ } } }
       } else if (ev.type === 'result') {
+        // The CLI's own turn on a finished background task, run ahead of this turn's line (it
+        // started before its notification reached us). Not this turn's answer: start over.
+        if (ev.origin?.kind === 'task-notification' && pending) {
+          onLog('warm-cli: the CLI ran its own turn on a finished background task ahead of this one — discarded, waiting for this turn’s own result');
+          finished = [];
+          Object.assign(pending, { acc: '', msgBreak: false, verboseBlocks: [] });
+          continue;
+        }
         if (ev.subtype === 'success') {
           // verboseThinking ON: the accumulated verbose buffer wins over ev.result. OFF
           // (default): exactly today's precedence — ev.result, else the streamed pending.acc.
@@ -474,6 +530,9 @@ export function createWarmCliSession(options = {}) {
   }
   function onClose(code) {
     proc = null;
+    background = new Map();
+    finished = [];
+    endSelfTurn();
     if (pending && !pending.settled) {
       const detail = stderrBuf.trim() ? `: ${stderrBuf.trim().slice(-300)}` : '';
       failPending(new Error(`claude exited ${code} mid-turn${detail}`));
@@ -484,6 +543,8 @@ export function createWarmCliSession(options = {}) {
     async turn(message, onUpdate = () => {}) {
       if (closed) throw new Error('warm-cli: session closed');
       if (pending) throw new Error('warm-cli: a turn is already in flight (the pool must serialize per key)');
+      while (selfTurn || (finished.length && proc)) await expectSelfTurn().done;
+      if (closed) throw new Error('warm-cli: session closed');
       if (!proc) spawnProc();
       return new Promise((resolve, reject) => {
         pending = { resolve, reject, onUpdate, acc: '', msgBreak: false, verboseBlocks: [], settled: false, openerText: String(message ?? ''), openerReplayed: false, injections: [] };
@@ -533,10 +594,13 @@ export function createWarmCliSession(options = {}) {
       link?.revoke();
       closed = true;
       settleInjections(pending, 'the session was closed before the CLI ingested it');
+      endSelfTurn();
       try { proc?.stdin?.end(); } catch { /* already closing */ }
       try { proc?.kill?.(); } catch { /* */ }
       proc = null;
     },
     get sessionId() { return sessionId; },
+    // Background tasks still running — the pool will not idle-evict while this is > 0.
+    get background() { return background.size; },
   };
 }

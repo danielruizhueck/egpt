@@ -612,3 +612,56 @@ describe('warm-session pool — interrupt', () => {
     expect(made[0].closed).toBe(true);
   });
 });
+
+// A background task a being started (live 2026-10-15). The session reports its completion up
+// through ONE seam, and eviction never kills a session whose background work is still running —
+// closing the process kills the background agent with it.
+describe('warm-session pool — background work', () => {
+  it('forwards the session\'s completion report up, keyed', async () => {
+    const { makeSession, made } = fakeFactory();
+    const seen = [];
+    const pool = createWarmPool({ makeSession, onBackgroundDone: (key, info) => seen.push({ key, info }) });
+    await pool.run('egpt:ccode:whatsapp:fam', 'a');
+    made[0].opts.onBackgroundDone?.({ summaries: ['job — completed'] });
+    expect(seen).toEqual([{ key: 'egpt:ccode:whatsapp:fam', info: { summaries: ['job — completed'] } }]);
+  });
+
+  it('idle eviction skips a session with background work in flight, and evicts once it is done', async () => {
+    const { makeSession, made } = fakeFactory();
+    const logs = [];
+    const pool = createWarmPool({ makeSession, idleTtlByClass: { conversation: 20 }, onLog: (m) => logs.push(m) });
+    await pool.run('k', 'a', () => {}, { klass: 'conversation' });
+    made[0].background = 1;
+    await sleep(60);
+    expect(pool.has('k')).toBe(true);
+    expect(made[0].closed).toBe(false);
+    expect(logs.some((m) => /background/.test(m))).toBe(true);
+    made[0].background = 0;
+    await sleep(60);
+    expect(pool.has('k')).toBe(false);
+  });
+
+  it('…bounded: past maxBackgroundHoldMs it is evicted anyway, and says so', async () => {
+    const { makeSession, made } = fakeFactory();
+    const logs = [];
+    const pool = createWarmPool({ makeSession, idleTtlByClass: { conversation: 10 }, maxBackgroundHoldMs: 30, onLog: (m) => logs.push(m) });
+    await pool.run('k', 'a', () => {}, { klass: 'conversation' });
+    made[0].background = 2;
+    await sleep(120);
+    expect(pool.has('k')).toBe(false);
+    expect(logs.some((m) => /evicted k .*background/.test(m))).toBe(true);
+  });
+
+  it('LRU passes over a session with background work in flight', async () => {
+    const { makeSession, made } = fakeFactory();
+    const pool = createWarmPool({ makeSession, max: 2 });
+    await pool.run('k1', 'a');
+    made[0].background = 1;
+    await sleep(2);
+    await pool.run('k2', 'b');
+    await sleep(2);
+    await pool.run('k3', 'c');
+    expect(pool.has('k1')).toBe(true);
+    expect(pool.has('k2')).toBe(false);
+  });
+});
