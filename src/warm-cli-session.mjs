@@ -66,6 +66,7 @@ import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { buildClaudeArgs } from './claude-args.mjs';
+import { lowerChild } from './process-priority.mjs';
 // ONE definition of "the CLI no longer has that session", shared with brainpool.mjs's retry
 // so the two can never drift apart on the sentence they are both keyed to.
 import { isDeadSessionError } from './brain-errors.mjs';
@@ -295,6 +296,7 @@ export function createWarmCliSession(options = {}) {
     const bin = resolveClaudeBin(options.bin);
     onLog(`warm-cli: spawn ${bin} ${args.join(' ')}`);
     proc = _spawn(bin, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, ...(cwd ? { cwd } : {}), ...(env ? { env } : {}) });
+    lowerChild(proc.pid, { onLog, setPriority: options.setPriority });
     proc.stdout?.setEncoding?.('utf8');
     proc.stdout?.on('data', onStdout);
     proc.stderr?.setEncoding?.('utf8');

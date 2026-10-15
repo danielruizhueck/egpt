@@ -29,6 +29,7 @@ import { mergeAudit } from './audit-merge.mjs';
 import { createWarmPool } from '../warm-sessions.mjs';
 import { createBrainSession } from '../brain-session.mjs';
 import { createSandboxCliSession, spawnBoxedCommand } from '../sandbox-cli-session.mjs';
+import { raiseSelfToNormal } from '../process-priority.mjs';
 import { readConfigSync, configContentHashSync } from '../tools/config-io.mjs';
 import { reapPort } from '../tools/reap-port.mjs';
 // THE liveness question for a Beeper install, already written and already tested
@@ -979,6 +980,7 @@ export async function boot({
   // beat be honored (a 5-min tick never could).
   tickMs = 30_000,
   aliveMs = 0,                        // >0: register the alive-file writer as a heartbeat so the daemon's wedge check sees liveness
+  setPriority,                        // os.setPriority seam for the boot-time raise to NORMAL; tests inject a fake
   spawn: spawnFn = spawn,             // child_process.spawn seam — heartbeat command beats (incl. the alive script) spawn through here; tests inject a fake to observe the beat WITHOUT a real process
   reapPort: reapPortFn = reapPort,    // port-killer seam — the boot-time stray-whisper reap goes through here; tests inject a fake so the real netstat/taskkill NEVER runs against a live server
   // Beeper endpoint-liveness seam — the ONLY network call boot makes before the bridge exists.
@@ -1025,6 +1027,7 @@ export async function boot({
     exit(CLEAN_EXIT_CODE);
     return null;
   }
+  raiseSelfToNormal({ setPriority, onLog: (m) => log.line?.(`[boot] ${m}`) });   // being processes run BELOW_NORMAL
   // The switch itself, handed to the spine: ONE object, two call sites (its tick, for an
   // operator `touch`ing the file from a terminal, and the chat safe word in classify).
   // Writing is best-effort — a write we cannot do must never PREVENT the stop — but it is

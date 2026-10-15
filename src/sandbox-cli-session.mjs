@@ -38,6 +38,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { createWarmCliSession } from './warm-cli-session.mjs';
 import { createCodexCliSession } from './codex-cli-session.mjs';
 import { createPiCliSession } from './pi-cli-session.mjs';
+import { lowerChild } from './process-priority.mjs';
 
 const LAUNCHER_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'setup', 'sandbox-logon-launcher.ps1');
 
@@ -538,7 +539,7 @@ function readMountEntriesOf(list) {
 // THROWS, before any spawn, off win32 (there is no box) and with no POSIX bash — the caller's run
 // then FAILS, loudly, and nothing runs anywhere else.
 const LOGON_CMDLINE_MAX = 1024;
-export function spawnBoxedCommand({ targetFolder, command, commandFile, readMounts, sandboxOauthToken, beingLink = null, spawn = nodeSpawn, platform = process.platform, gitBashCandidates, writeFile = writeFileSync, onLog = null } = {}) {
+export function spawnBoxedCommand({ targetFolder, command, commandFile, readMounts, sandboxOauthToken, beingLink = null, spawn = nodeSpawn, setPriority, platform = process.platform, gitBashCandidates, writeFile = writeFileSync, onLog = null } = {}) {
   if (platform !== 'win32') throw new Error(`refused — a command a being wrote runs in its box, and the box is Windows-only on this build (platform=${platform})`);
   const bash = resolveSandboxGitBash(gitBashCandidates);
   if (!bash) throw new Error(`refused — no POSIX bash for the box: none of ${GIT_BASH_CANDIDATES.join(', ')} exists`);
@@ -556,6 +557,7 @@ export function spawnBoxedCommand({ targetFolder, command, commandFile, readMoun
   ];
   const argv = launcherArgv({ targetFolder, setEnv, readMounts: readMountEntriesOf(readMounts), bin: bash, args });
   const proc = spawn('powershell.exe', argv, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, cwd: targetFolder });
+  lowerChild(proc?.pid, { onLog, setPriority });
   if (link) { proc?.once?.('close', link.revoke); proc?.once?.('error', link.revoke); }
   proc?.stdin?.end?.();   // a beat has no input: a command that reads stdin gets EOF, not a wait
   if (onLog) tapLaunchLine(proc?.stderr, onLog);

@@ -29,6 +29,7 @@ import { readFileSync } from 'node:fs';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { lowerChild } from './process-priority.mjs';
 
 // The Windows npm launcher for pi is pi.cmd — a SHIM, not a PE image. Two
 // independent reasons a bare 'pi' cannot work under the sandbox: the launcher
@@ -215,6 +216,7 @@ export function createPiCliSession(options = {}) {
     }
     onLog(`pi-cli: spawn ${bin} ${args.join(' ')}`);
     const p = _spawn(bin, args, { cwd: options.cwd, stdio: ['pipe', 'pipe', 'pipe'] });
+    lowerChild(p.pid, { onLog, setPriority: options.setPriority });
     p.stdout?.on('data', onStdout);
     p.stderr?.on('data', (c) => { stderrBuf = (stderrBuf + c.toString('utf8')).slice(-4000); });
     p.on('exit', (code) => {

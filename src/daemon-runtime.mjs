@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as YAML from 'yaml';
 import { liveDaemonPid as defaultLiveDaemonPid } from './daemon-singleton.mjs';
 import { createPeerLiveness, tcpProbe, DEFAULT_EVERY_MS as PEER_PROBE_EVERY_MS } from './spine/peer-liveness.mjs';
+import { raiseSelfToNormal } from './process-priority.mjs';
 
 export const RESTART_MIN_MS = 2_000;
 export const RESTART_MAX_MS = 60_000;
@@ -1114,7 +1115,7 @@ export function createDaemonRuntime(opts = {}) {
 // operator's /exit lands or when the singleton refuses, and with several profiles in one
 // process that must retire ONE profile, not take the others down with it. Each runtime is
 // therefore handed its own exit seam and the real process exits when the last one is gone.
-export function startProfileDaemons({ profiles, createRuntime = createDaemonRuntime, ...opts } = {}) {
+export function startProfileDaemons({ profiles, createRuntime = createDaemonRuntime, setPriority, ...opts } = {}) {
   const processObj = opts.processObj ?? process;
   const stdout = opts.stdout ?? process.stdout;
   const now = opts.now ?? Date.now;
@@ -1146,6 +1147,7 @@ export function startProfileDaemons({ profiles, createRuntime = createDaemonRunt
   });
 
   say(`supervising ${homes.length} profile(s): ${homes.join(', ')}`);
+  raiseSelfToNormal({ setPriority, onLog: say });   // before any spawn, so every spine starts at NORMAL
   const runtimes = [];
   const failed = [];
   for (const home of homes) {

@@ -6,6 +6,7 @@ import { spawn as nodeSpawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { lowerChild } from './process-priority.mjs';
 
 function normalizeCwd(p) {
   if (!p) return p;
@@ -162,6 +163,7 @@ export function createCodexCliSession(options = {}) {
       if (options.appendSystemPrompt) args.push('-c', `developer_instructions=${JSON.stringify(String(options.appendSystemPrompt))}`);
       onLog(`codex-cli: spawn resident ${command.bin} ${args.join(' ')}`);
       proc = _spawn(command.bin, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, ...(cwd ? { cwd } : {}) });
+      lowerChild(proc.pid, { onLog, setPriority: options.setPriority });
       proc.stdout?.setEncoding?.('utf8');
       proc.stdout?.on('data', onStdout);
       proc.stderr?.setEncoding?.('utf8');
