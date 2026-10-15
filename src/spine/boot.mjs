@@ -1571,30 +1571,15 @@ export async function boot({
   // The operator's own command channel: networks.whatsapp.chat_ids[0] (the live config
   // annotates that entry "Self-DM = operator command channel"). It was already THE Self
   // notion in two places — announceAndExit's restart-announce target and the mesh's
-  // fallback transport — spelled out inline in both. The KILL SWITCH now needs the same
-  // answer (below), so it is named ONCE here rather than copied a third time: three
-  // copies of "which chat is Self" is three chances to drift. (Since 2026-10-15 the kill
-  // switch no longer reads it — it reads EVERY admin chat, isAdminChat below.)
+  // fallback transport — spelled out inline in both. It is named ONCE here so "which chat
+  // is Self" cannot drift between its readers.
   const selfChatId = () => surfaceCfg('whatsapp').chat_ids[0] ?? null;
-  // Is THIS message in an ADMIN CHAT? The ONLY place the "stop" safe word is honoured.
-  // 2026-07-26 scoped it to Self ("is must be a single word message in Self"); 2026-10-15
-  // the operator kept that decision but widened Self to every admin channel (WhatsApp #8203:
-  // «estoy de acuerdo con la decisión de otrora: pero en lugar de solo en canal Self, usa el
-  // canal de admin (o cualquier de los canales admin)»). Two conditions:
-  //   - the SURFACE is whatsapp — the surface the channels are declared on. Ids are per-surface
-  //     namespaces, and without this a SHELL frame (which sets its own chatId, and is
-  //     hardcoded authorized:true) could name an admin room and pull the switch.
-  //   - the CHAT is a COMMAND CHANNEL — ANY entry of networks.whatsapp.chat_ids, not just [0] —
-  //     answered by commands.inCommandChat, the SAME test the operator gate (isOperator) runs,
-  //     in SHORT space, so the kill switch and the command gate cannot drift apart.
-  // `admin_channel` (eGPT Admin) is NOT in the set: it is a notice SINK that may be a NAME,
-  // known only after an async bridge lookup (resolveAdminChat, below), and the command gate
-  // does not read it either. A chat meant to take STOP belongs in chat_ids.
-  // `commands` is declared far below but only READ here at call time (from the spine, post-boot)
-  // — the same call-time-safe forward reference stopSwitch makes to sayOnce.
-  // No command channel configured → false: the chat safe word is simply unavailable, and
-  // `touch EGPT_HOME/STOP` (or setup/stop-egpt.cmd) is the way out. Fail-closed is the
-  // right direction for a word that takes the service down.
+  // Is THIS message in an ADMIN CHAT (any networks.whatsapp.chat_ids entry)? The ONLY place the
+  // "stop" safe word is honoured. whatsapp only: ids are per-surface namespaces, and a SHELL frame
+  // (its own chatId, hardcoded authorized:true) could otherwise name an admin room. The chat test
+  // is the operator gate's own (commands.inCommandChat), so the two cannot drift; `commands` is
+  // declared below but only read at call time. admin_channel is not included: it may be a name,
+  // resolved async. None configured → false (fail-closed): `touch EGPT_HOME/STOP` is the way out.
   const isAdminChat = (ev) => ev?.surface === 'whatsapp' && commands.inCommandChat(ev);
   // Beeper token resolution — GENERALIZED (operator 2026-08-30) from the old single-connection
   // lookup (operator 2026-07-09, `beeper[beeper.use].token`) into a per-CONNECTION-NAME one, so

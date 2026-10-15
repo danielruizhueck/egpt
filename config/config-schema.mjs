@@ -2718,18 +2718,16 @@ export const CONFIG_SCHEMA = {
     setup\\stop-egpt.cmd. Recovery is  rm ~/.egpt/STOP  (or setup\\start-egpt.cmd)
     and nothing else: the file is the whole state.
 
-    WHERE IT WORKS: **THE ADMIN CHATS ONLY** — EVERY entry of
-    networks.whatsapp.chat_ids, the command channels (Self, chat_ids[0], among
-    them). Operator 2026-07-26: "is must be a single word message in Self, 'stop',
-    case insensitive"; refined 2026-10-15 (WhatsApp #8203): «estoy de acuerdo con
-    la decisión de otrora: pero en lugar de solo en canal Self, usa el canal de
-    admin (o cualquier de los canales admin)». It used to fire from ANY chat on ANY
-    surface, which made one stray "stop" in a group — or anyone at the operator
-    console, which is unconditionally authorized — enough to take the node down.
-    In every OTHER chat, group, and on the shell surface, "stop" is ordinary text.
-    admin_channel is NOT one of them unless it is also listed in chat_ids. No
-    command channel configured → the chat safe word is simply unavailable
-    (fail-closed); the STOP file is still the way out.
+    WHERE IT WORKS: **THE ADMIN CHATS ONLY** — every entry of
+    networks.whatsapp.chat_ids, Self (chat_ids[0]) among them (operator
+    2026-07-26: "is must be a single word message in Self, 'stop', case
+    insensitive"; widened to every admin chat 2026-10-15). It used to fire from
+    ANY chat on ANY surface, which made one stray "stop" in a group — or anyone at
+    the operator console, which is unconditionally authorized — enough to take the
+    node down. In every OTHER chat, group, and on the shell surface, "stop" is
+    ordinary text; admin_channel counts only if it is also in chat_ids. No command
+    channel configured → the chat safe word is simply unavailable (fail-closed);
+    the STOP file is still the way out.
 
     WHAT COUNTS AS THE WORD: the WHOLE trimmed message, case-insensitive, trailing
     '.'/'!' tolerated. "stop it", "please stop", "stopping" are ordinary text.

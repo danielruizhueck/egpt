@@ -19,15 +19,12 @@
 //      the ambiguity a safe word cannot have.
 //      SCOPE — IT IS AN **ADMIN-CHAT** WORD (operator 2026-07-26: "the 'stop' safeword is
 //      super fragile. i don't really like it. is must be a single word message in Self,
-//      'stop', case insensitive"; refined 2026-10-15, WhatsApp #8203: «estoy de acuerdo con
-//      la decisión de otrora: pero en lugar de solo en canal Self, usa el canal de admin (o
-//      cualquier de los canales admin)»). parseStopWord below only says WHAT was typed;
-//      WHERE it counts is the spine's gate (src/spine/spine.mjs classify → isAdminChat,
-//      wired in boot to EVERY entry of networks.whatsapp.chat_ids — the command channels,
-//      Self among them — through the same commands.inCommandChat the operator gate reads).
-//      In any other chat, group, or on the shell console the same word is ordinary text.
-//      RESUME / RESUME ALL are NOT scoped that way — they only clear a loop-counter pause,
-//      so they stay usable in the channel that got paused.
+//      'stop', case insensitive"; widened from Self to every admin chat 2026-10-15).
+//      parseStopWord below only says WHAT was typed; WHERE it counts is the spine's gate
+//      (src/spine/spine.mjs classify → isAdminChat, wired in boot to every entry of
+//      networks.whatsapp.chat_ids). In any other chat, group, or on the shell console the
+//      same word is ordinary text. RESUME / RESUME ALL are NOT scoped that way — they only
+//      clear a loop-counter pause, so they stay usable in the channel that got paused.
 //      "STOP ALL" IS UNWIRED (operator 2026-07-26: "unwire 'STOP ALL' i didn't even know
 //      it existed"). Not an alias, not a hidden synonym for the kill switch — a phrase the
 //      operator does not know cannot be a second name for the most destructive word on the

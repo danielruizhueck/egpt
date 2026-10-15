@@ -312,12 +312,10 @@ describe('(D) "stop" is honoured ONLY in an admin chat (CONFIG: Self alone), and
   });
 });
 
-// === (E) …IN EVERY ADMIN CHAT, NOT ONLY SELF (operator 2026-10-15, WhatsApp #8203, verbatim:
-//     «estoy de acuerdo con la decisión de otrora: pero en lugar de solo en canal Self, usa el
-//     canal de admin (o cualquier de los canales admin)»). The 07-26 decision stands — bare word,
-//     human, authorized, whatsapp only, fail-closed — but WHERE widens from chat_ids[0] to EVERY
-//     entry of networks.whatsapp.chat_ids: the command channels, the same set the operator gate
-//     accepts (commands.mjs inCommandChat). The live node lists three groups there. ============
+// === (E) …IN EVERY ADMIN CHAT, NOT ONLY SELF (operator 2026-10-15). The 07-26 decision stands —
+//     bare word, human, authorized, whatsapp only, fail-closed — but WHERE widens from chat_ids[0]
+//     to EVERY entry of networks.whatsapp.chat_ids, the set the operator gate accepts
+//     (commands.mjs inCommandChat). =========================================================
 const ADMIN_2 = '!ops:beeper.com';
 const ADMIN_3 = 'mgmtXYZmgmtXYZmgmtXY';   // listed FULL-form below, delivered SHORT by the bridge
 const MULTI = { ...CONFIG, networks: { whatsapp: { chat_ids: [SELF_CHAT, ADMIN_2, `!${ADMIN_3}:beeper.local`], allowed_users: ['u-1'] } } };

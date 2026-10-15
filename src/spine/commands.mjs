@@ -823,10 +823,8 @@ export function createCommands({
               : (c[surface] && typeof c[surface] === 'object') ? c[surface] : {};
     return Array.isArray(raw.chat_ids) ? raw.chat_ids : (raw.chat_id != null ? [raw.chat_id] : []);
   }
-  // Is this message IN one of its origin surface's command channels (ids are per-surface
-  // namespaces)? THE ONE answer to "is this an admin chat": isOperator below reads it, and so does
-  // the STOP kill switch (boot.mjs isAdminChat → spine classify; operator 2026-10-15: «usa el canal
-  // de admin (o cualquier de los canales admin)»), so the two cannot drift on which chats count.
+  // Is this message in one of its origin surface's command channels? Shared by isOperator and the
+  // STOP kill switch (boot isAdminChat), so the two cannot disagree on which chats count.
   function inCommandChat(ev) {
     // Compare in short space (shortChatId is a no-op on an id that's already short) so a config
     // chat_id in either form still matches the bridge's now-always-short ev.chatId.
