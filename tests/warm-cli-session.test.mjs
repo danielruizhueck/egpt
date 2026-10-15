@@ -744,3 +744,165 @@ describe('warm-cli-session — interrupt (the CLI own stop)', () => {
     s.close();
   });
 });
+
+// A background task finishing after the turn ended (live 2026-10-15: E handed a job to a
+// background agent, ended its turn, and the result never reached the chat). Measured on claude
+// 2.1.301: background_tasks_changed lists the task while it runs; on completion task_updated,
+// task_notification, background_tasks_changed [] — then the CLI STARTS A TURN OF ITS OWN (init …
+// result with origin.kind 'task-notification'). With a turn in flight the notification is instead
+// absorbed at a tool boundary, replayed as a user line carrying that origin.
+describe('warm-cli-session — a background task finishes', () => {
+  const ORIGIN = { kind: 'task-notification', producer: 'session-task', runId: 'r1' };
+  function backgroundClaude() {
+    const lines = [];
+    const written = [];
+    let proc = null;
+    let inSelf = false;          // the CLI's own turn is running…
+    let owed = false;            // …or queued ahead of any line written now (the CLI keeps FIFO order)
+    const queued = [];
+    const out = (o) => proc.stdout.emit('data', JSON.stringify(o) + '\n');
+    const tasks = (list) => out({ type: 'system', subtype: 'background_tasks_changed', tasks: list });
+    const completed = () => {
+      out({ type: 'system', subtype: 'task_updated', task_id: 'b1', patch: { status: 'completed' } });
+      out({ type: 'system', subtype: 'task_notification', task_id: 'b1', tool_use_id: 't1', status: 'completed', output_file: 'b1.output', summary: 'Background command "Run delayed echo" completed (exit code 0)' });
+      tasks([]);
+    };
+    const answer = (text) => {
+      out({ type: 'system', subtype: 'init', session_id: 'sess-1' });
+      out({ type: 'user', isReplay: true, message: { role: 'user', content: [{ type: 'text', text }] } });
+      if (text === 'START BG') tasks([{ task_id: 'b1', task_type: 'local_bash', description: 'Run delayed echo' }]);
+      if (text === 'ABSORB') {
+        completed();
+        out({ type: 'user', isReplay: true, origin: ORIGIN, message: { role: 'user', content: '<task-notification>…</task-notification>' } });
+      }
+      out({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: `echo:${text}` } } });
+      out({ type: 'result', subtype: 'success', result: `echo:${text}`, session_id: 'sess-1' });
+    };
+    const endSelf = (result) => { inSelf = false; out(result); for (const t of queued.splice(0)) answer(t); };
+    const spawn = () => {
+      proc = new EventEmitter();
+      proc.stdout = new EventEmitter(); proc.stdout.setEncoding = () => {};
+      proc.stderr = new EventEmitter(); proc.stderr.setEncoding = () => {};
+      proc.killed = false;
+      proc.kill = () => { proc.killed = true; };
+      proc.stdin = {
+        write: (line) => {
+          const o = JSON.parse(line);
+          lines.push(o);
+          if (o.type === 'control_request') {
+            setImmediate(() => {
+              out({ type: 'control_response', response: { subtype: 'success', request_id: o.request_id, response: { still_queued: queued } } });
+              if (!inSelf) return;
+              out({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: '[Request interrupted by user]' }] } });
+              endSelf({ type: 'result', subtype: 'error_during_execution', is_error: true, origin: ORIGIN, session_id: 'sess-1' });
+            });
+            return;
+          }
+          const text = o.message.content.map((c) => c.text).join('');
+          written.push(text);
+          if (inSelf || owed) queued.push(text); else setImmediate(() => answer(text));
+        },
+        end: () => {},
+      };
+      return proc;
+    };
+    // The task completes with no turn in flight. `initLater`: the CLI's own turn starts a tick
+    // after the notification, leaving the gap a new message can land in (measured ~50-100ms).
+    const finishBg = ({ initLater = false } = {}) => {
+      completed();
+      owed = true;
+      const start = () => {
+        owed = false;
+        inSelf = true;
+        out({ type: 'system', subtype: 'init', session_id: 'sess-1' });
+        setImmediate(() => {
+          if (!inSelf) return;
+          out({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'self report' } } });
+          endSelf({ type: 'result', subtype: 'success', result: 'self report', origin: ORIGIN, session_id: 'sess-1' });
+        });
+      };
+      if (initLater) setImmediate(start); else start();
+    };
+    // The task completes inside the CLI (its own turn now queued ahead of any new line), but the
+    // notification reaches stdout only after the next line is written.
+    const finishBgUnseen = () => {
+      owed = true;
+      return () => {
+        completed();
+        owed = false;
+        inSelf = true;
+        out({ type: 'system', subtype: 'init', session_id: 'sess-1' });
+        out({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'self report' } } });
+        endSelf({ type: 'result', subtype: 'success', result: 'self report', origin: ORIGIN, session_id: 'sess-1' });
+      };
+    };
+    return { spawn, lines, written, finishBg, finishBgUnseen };
+  }
+  const settle = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); };
+
+  it('THE LIVE FAILURE: no turn in flight — the CLI\'s own turn is stopped and the completion is reported up (not dropped)', async () => {
+    const f = backgroundClaude();
+    const done = [];
+    const s = createWarmCliSession({ spawn: f.spawn, onBackgroundDone: (i) => done.push(i) });
+    expect((await s.turn('START BG')).text).toBe('echo:START BG');
+    expect(s.background).toBe(1);
+    f.finishBg();
+    await settle();
+    expect(done).toEqual([{ summaries: ['Run delayed echo — completed'] }]);
+    expect(f.lines.at(-1)).toMatchObject({ type: 'control_request', request: { subtype: 'interrupt' } });
+    expect(s.background).toBe(0);
+    expect(await s.turn('next')).toEqual({ text: 'echo:next', sessionId: 'sess-1' });
+    s.close();
+  });
+
+  it('a turn in flight ABSORBS the completion — no report, no stop, the turn answers as usual', async () => {
+    const f = backgroundClaude();
+    const done = [];
+    const s = createWarmCliSession({ spawn: f.spawn, onBackgroundDone: (i) => done.push(i) });
+    await s.turn('START BG');
+    expect((await s.turn('ABSORB')).text).toBe('echo:ABSORB');
+    await settle();
+    expect(done).toEqual([]);
+    expect(f.lines.some((o) => o.type === 'control_request')).toBe(false);
+    s.close();
+  });
+
+  it('a turn asked for in the gap before the CLI\'s own turn waits behind it, and gets its OWN answer', async () => {
+    const f = backgroundClaude();
+    const done = [];
+    const s = createWarmCliSession({ spawn: f.spawn, onBackgroundDone: (i) => done.push(i) });
+    await s.turn('START BG');
+    f.finishBg({ initLater: true });
+    const r = await s.turn('Q');
+    expect(r.text).toBe('echo:Q');
+    expect(done).toHaveLength(1);
+    const types = f.lines.map((o) => (o.type === 'control_request' ? 'interrupt' : o.message.content[0].text));
+    expect(types).toEqual(['START BG', 'interrupt', 'Q']);
+    s.close();
+  });
+
+  it('the CLI\'s own turn running ahead of a line already written is never taken as that line\'s answer', async () => {
+    const f = backgroundClaude();
+    const s = createWarmCliSession({ spawn: f.spawn, onBackgroundDone: () => {} });
+    await s.turn('START BG');
+    const run = f.finishBgUnseen();
+    const updates = [];
+    const q = s.turn('Q', (t) => updates.push(t));
+    await new Promise((r) => setImmediate(r));
+    run();
+    expect((await q).text).toBe('echo:Q');
+    expect(updates.at(-1)).toBe('echo:Q');
+    expect((await s.turn('R')).text).toBe('echo:R');
+    s.close();
+  });
+
+  it('with nobody listening the CLI\'s own turn is left alone — and a turn still waits behind it', async () => {
+    const f = backgroundClaude();
+    const s = createWarmCliSession({ spawn: f.spawn });
+    await s.turn('START BG');
+    f.finishBg({ initLater: true });
+    expect((await s.turn('Q')).text).toBe('echo:Q');
+    expect(f.lines.some((o) => o.type === 'control_request')).toBe(false);
+    s.close();
+  });
+});

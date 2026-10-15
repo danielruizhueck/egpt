@@ -1232,6 +1232,9 @@ export function createBrainPool({
       // Registering both addresses is what lets a wedged entry be evicted, and a live turn be
       // steered, from EITHER end of a joined pair: both names now point at the one warm entry.
       if (scope.scoped) lastKeyByConv.set(`${being}:${scope.surface}:${scope.chatId}`, key);
+      // The arrival address moves to the end, newest last: convOfKey reads the map backwards.
+      lastKeyByConv.delete(`${being}:${ev.surface}:${ev.chatId}`);
+      lastKeyByConv.set(`${being}:${ev.surface}:${ev.chatId}`, key);
       // The def's OWN system_prompt and nothing else (operator 2026-08-29): WHO an agent is comes
       // from its identity feed (config/identities/<personality>.md in the 00-identity slot), never
       // from a sentence boot assembles about the node's DEFAULT persona — that addendum told every
@@ -1591,6 +1594,15 @@ export function createBrainPool({
     evict(being, ev) {
       const k = lastKeyByConv.get(`${being}:${ev?.surface}:${ev?.chatId}`);
       if (k) pool.evict?.(k);
+    },
+
+    // The being + conversation a warm key last ran for — lastKeyByConv read backwards. A background
+    // task finished on that key with no turn in flight: this is where it is woken.
+    convOfKey(key) {
+      const conv = [...lastKeyByConv].reverse().find(([, k]) => k === key)?.[0];
+      if (!conv) return null;
+      const [being, surface, ...chat] = conv.split(':');
+      return { being, surface, chatId: chat.join(':') };
     },
 
     // /agents compact|stop — the same lookup evict() uses. warmKey: null when it never ran here.

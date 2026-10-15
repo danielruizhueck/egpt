@@ -1438,6 +1438,33 @@ export function createSpine({
     return turnBy(turnKey, () => runReplyTurn({ to, ev, d, out, replyTo, turnKey, queued: ahead > 0, pinned, trigger }));
   }
 
+  // A BACKGROUND TASK THE BEING STARTED HAS FINISHED with no turn in flight (operator 2026-10-15:
+  // "the result of the bg agent must wake up E rather than being dropped"). Its warm session stopped
+  // the CLI's own turn on it and reported up (boot: warm onBackgroundDone → brain.convOfKey → here).
+  // Woken as a turn like any other: STOP, the loop guard (where it counts) and the gate, then the
+  // conversation's FIFO and the reply path. false = not woken.
+  async function wakeOnBackground({ being, surface, chatId, summaries = [] }) {
+    const what = summaries.length ? summaries.join('; ') : 'a background task';
+    const line = `[egpt] A background task you started has finished: ${what}. Verify its result and report to the chat.`;
+    const ev = { surface, chatId, body: line, line };
+    const where = `${being}/${chatId}`;
+    if (stopSwitch?.present()) { note(`wake ${where}: STOP file present — not woken`); return false; }
+    if (standingDown) { note(`wake ${where}: standing down — not woken`); return false; }
+    const channel = guard ? guardChannel(ev) : null;
+    if (guard?.blocked(channel)) { note(`guard: ${channel} stopped — background wake suppressed`); return false; }
+    const d = await gating.decide(being, ev, WAKE_MENTION);
+    if (!d.mayReply) { note(`wake ${where}: mode ${d.mode} — not woken`); return false; }
+    if (guard) await guardCountNonHuman(ev, channel, true);
+    const { key: turnKey, pinned } = await turns.keyOf(being, ev);
+    note(`wake ${where}: ${what}`);
+    inFlight++;
+    const turn = openAndRunReply({ to: being, ev, d, turnKey, pinned });
+    Promise.resolve(turn).then(releaseTurn, releaseTurn);
+    return turn;
+  }
+  // The being's own thread continuing — gated as a reply to it, so mute/off/paused still hold.
+  const WAKE_MENTION = { replyToBot: true };
+
   // The spine's FAN-OUT (operator 2026-07-25): dispatch the agents addressed BESIDE the one
   // whose pipe this message is running. Each resolves ITSELF against its own gate — the mention
   // the router minted for it (its real atStart/anywhere) decides its mode, so an agent named
@@ -1884,5 +1911,5 @@ export function createSpine({
     note('spine: stopped');
   }
 
-  return { start, stop, tick, handleInbound, stats, standdown, drainForRestart, resumedAt, backlogOf };
+  return { start, stop, tick, handleInbound, stats, standdown, drainForRestart, resumedAt, backlogOf, wakeOnBackground };
 }
