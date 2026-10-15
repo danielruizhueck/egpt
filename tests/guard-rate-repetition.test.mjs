@@ -49,7 +49,7 @@ function buildSpine({ guard, now = () => 1000 } = {}) {
     // boot: (ev) => ev.fromNode != null && !fromOtherNode(getConfig(), ev) — THIS node is kg.
     fromThisNode: (ev) => ev.fromNode != null && String(ev.fromNode).toLowerCase() === 'kg',
     say: async (o) => { said.push(o); return true; },
-    isSelfChat: () => false,
+    isAdminChat: () => false,
     clock: { now },
   });
   return { spine, said, brain };
@@ -293,7 +293,7 @@ describe('4 — a pause is ANNOUNCED in the channel, once, with the way out', ()
       heartbeats: { runDue() {} },
       sender: { open() { return { activate() {}, update() {}, async finish() {}, fail() {} }; } },
       mesh: { isEnvelope: () => false, async handle() {} },
-      isSelfChat: () => false,
+      isAdminChat: () => false,
       clock: { now: () => 1000 },
       log: { line: (m) => lines.push(m) },
     });

@@ -91,7 +91,8 @@ function memIo() {
 
 // THE SELF CHAT — `networks.whatsapp.chat_ids[0]`, the same one entry the live config
 // annotates "Self-DM = operator command channel" and the same one announceAndExit posts
-// the restart line to. Since 2026-07-26 it is ALSO the only chat the safe word works in.
+// the restart line to. Since 2026-07-26 the safe word works in it — and since 2026-10-15 in
+// EVERY chat_ids entry ((E) below). This CONFIG lists Self alone, so here it is the only one.
 const SELF_CHAT = '!self:beeper.com';
 const CONFIG = {
   node_name: 'kg',   // MANDATORY since 2026-07-26 — it IS the structural node signature (boot throws without one)
@@ -125,12 +126,12 @@ async function bootNode({ hangSend = false, setTimeoutFn = globalThis.setTimeout
 }
 
 // A beeper-surface inbound from the ONE allowed_user (CONFIG above), as beeper.mjs builds it.
-// This one lands in an ORDINARY chat — authorized, but NOT the Self chat.
+// This one lands in an ORDINARY chat — authorized, but NOT an admin chat (not in chat_ids).
 const BEEPER_FROM = {
   chatId: '!room:beeper.com', chatName: 'fam', network: 'whatsapp',
   userId: 'u-1', senderName: 'An', authorized: true, msgKey: 'm1',
 };
-// …and this one lands in SELF — the operator's own command channel, the only chat the
+// …and this one lands in SELF — the operator's own command channel, an admin chat the
 // safe word is honoured in.
 const SELF_FROM = { ...BEEPER_FROM, chatId: SELF_CHAT, chatName: 'Self' };
 
@@ -235,8 +236,9 @@ describe('(c) the chat safe word writes the file, then stops the service', () =>
 //     case insensitive"). Until today an authorized "stop" ANYWHERE — any Beeper chat, any
 //     group, the operator console — took the whole service down. The word is now scoped to ONE
 //     chat: networks.whatsapp.chat_ids[0], the Self-DM the restart announce already posts to.
-//     Everywhere else "stop" is ORDINARY TEXT. ================================================
-describe('(D) "stop" is honoured ONLY in the Self chat, and only as the bare word', () => {
+//     Everywhere else "stop" is ORDINARY TEXT. (2026-10-15 widened Self to every admin chat —
+//     (E) below; this file's CONFIG lists Self alone, so every case here still holds.) ========
+describe('(D) "stop" is honoured ONLY in an admin chat (CONFIG: Self alone), and only as the bare word', () => {
   it('case-insensitive in Self: "STOP" and "Stop" both pull it', async () => {
     for (const word of ['STOP', 'Stop']) {
       await fs.rm(STOP_PATH, { force: true });
@@ -300,12 +302,69 @@ describe('(D) "stop" is honoured ONLY in the Self chat, and only as the bare wor
     app.stop();
   });
 
-  it('NO Self chat configured → the chat safe word is unavailable (fail-closed)', async () => {
+  it('NO admin chat configured → the chat safe word is unavailable (fail-closed)', async () => {
     const config = { ...CONFIG, networks: { whatsapp: { chat_ids: [], allowed_users: ['u-1'] } } };
     const { app, spy, exits } = await bootNode({ config });
     await spy.onIncoming('stop', { ...SELF_FROM });
     expect(existsSync(STOP_PATH)).toBe(false);      // `touch EGPT_HOME/STOP` is still the way out
     expect(exits).toEqual([]);
+    app.stop();
+  });
+});
+
+// === (E) …IN EVERY ADMIN CHAT, NOT ONLY SELF (operator 2026-10-15, WhatsApp #8203, verbatim:
+//     «estoy de acuerdo con la decisión de otrora: pero en lugar de solo en canal Self, usa el
+//     canal de admin (o cualquier de los canales admin)»). The 07-26 decision stands — bare word,
+//     human, authorized, whatsapp only, fail-closed — but WHERE widens from chat_ids[0] to EVERY
+//     entry of networks.whatsapp.chat_ids: the command channels, the same set the operator gate
+//     accepts (commands.mjs inCommandChat). The live node lists three groups there. ============
+const ADMIN_2 = '!ops:beeper.com';
+const ADMIN_3 = 'mgmtXYZmgmtXYZmgmtXY';   // listed FULL-form below, delivered SHORT by the bridge
+const MULTI = { ...CONFIG, networks: { whatsapp: { chat_ids: [SELF_CHAT, ADMIN_2, `!${ADMIN_3}:beeper.local`], allowed_users: ['u-1'] } } };
+describe('(E) "stop" is honoured in EVERY admin chat — any networks.whatsapp.chat_ids entry', () => {
+  it('"stop" in the SECOND command channel (chat_ids[1]) pulls it, and warns THERE', async () => {
+    const { app, spy, exits } = await bootNode({ config: MULTI });
+    await spy.onIncoming('stop', { ...BEEPER_FROM, chatId: ADMIN_2, chatName: 'ops' });
+    expect(existsSync(STOP_PATH)).toBe(true);
+    expect(await fs.readFile(STOP_PATH, 'utf8')).toContain(ADMIN_2);    // provenance names that chat
+    expect(exits).toEqual([0]);
+    expect(spy.sent.find((s) => s.text.includes('egpt is stopping'))?.chatId).toBe(ADMIN_2);
+    app.stop();
+  });
+
+  it('…and in the third, listed full-form, matched against the short id the bridge delivers', async () => {
+    const { app, spy, exits } = await bootNode({ config: MULTI });
+    await spy.onIncoming('STOP', { ...BEEPER_FROM, chatId: ADMIN_3, chatName: 'mgmt' });
+    expect(existsSync(STOP_PATH)).toBe(true);
+    expect(exits).toEqual([0]);
+    app.stop();
+  });
+
+  it('"stop" in a NON-admin group stays ordinary text, however many admin chats there are', async () => {
+    const { app, spy, exits } = await bootNode({ config: MULTI });
+    await spy.onIncoming('stop', { ...BEEPER_FROM, chatName: 'a group' });   // '!room…' is in no chat_ids
+    expect(existsSync(STOP_PATH)).toBe(false);
+    expect(exits).toEqual([]);
+    expect(spy.sent.filter((s) => s.text.includes('egpt is stopping'))).toHaveLength(0);
+    app.stop();
+  });
+
+  it('a NON-human "stop" in an admin chat does not pull it — a brain member\'s re-entered reply, a peer node\'s line', async () => {
+    const { app, spy, exits } = await bootNode({ config: MULTI });
+    await spy.onIncoming('stop', { ...BEEPER_FROM, chatId: ADMIN_2, isSender: true, fromMember: { id: 'chatgpt', kind: 'brain' }, msgKey: 'mn1' });
+    await spy.onIncoming('stop', { ...BEEPER_FROM, chatId: ADMIN_2, isSender: true, fromNode: 'do', msgKey: 'mn2' });
+    expect(existsSync(STOP_PATH)).toBe(false);
+    expect(exits).toEqual([]);
+    app.stop();
+  });
+
+  it('the shell console still cannot pull it — not even naming an admin chat other than Self', async () => {
+    const { app, spy, exits } = await bootNode({ config: MULTI });
+    await app.spine.handleInbound(shellMsg('stop', { chatId: ADMIN_2 }));
+    await app.spine.handleInbound(shellMsg('STOP', { chatId: ADMIN_3 }));
+    expect(existsSync(STOP_PATH)).toBe(false);
+    expect(exits).toEqual([]);
+    expect(spy.sent.filter((s) => s.text.includes('egpt is stopping'))).toHaveLength(0);
     app.stop();
   });
 });
@@ -336,7 +395,7 @@ describe('(A) "STOP ALL" is not a safe word', () => {
 //     emits warning in the chat that action was taken"). The operator must SEE that it landed —
 //     but the stop must never be hangable by that post, so the send is capped exactly like
 //     boot's announceAndExit going-down line (Promise.race against a 3s timer). Since the
-//     narrowing the "chat it came from" is NECESSARILY Self — there is nowhere else to warn. ==
+//     narrowing the "chat it came from" is NECESSARILY an admin chat — nowhere else to warn. ==
 describe('(B) STOP warns in the chat it came from, and the post can never wedge the stop', () => {
   it('warns in THAT chat, then writes the file, then exits — in that order', async () => {
     const { app, spy, exits } = await bootNode();
@@ -386,9 +445,9 @@ describe('(B) STOP warns in the chat it came from, and the post can never wedge 
 });
 
 // --- the wiring, in isolation: a fake switch proves the two spine call sites -------------
-// `isSelfChat` defaults to TRUE here so each case below isolates the ONE gate it is about
-// (provenance, authorization, vocabulary); the Self gate itself is locked explicitly.
-function buildSpine({ guard = null, stopSwitch = null, wasSentByUs = () => false, mesh = null, isSelfChat = () => true } = {}) {
+// `isAdminChat` defaults to TRUE here so each case below isolates the ONE gate it is about
+// (provenance, authorization, vocabulary); the admin-chat gate itself is locked explicitly.
+function buildSpine({ guard = null, stopSwitch = null, wasSentByUs = () => false, mesh = null, isAdminChat = () => true } = {}) {
   const bridge = { onMessage() {}, send() {}, stop() {}, wasSentByUs };
   const brain = { calls: [], async turn(b, ev) { this.calls.push({ b, ev }); return { text: 'x' }; } };
   const identity = { build: (msg) => ({ ...msg }) };
@@ -402,7 +461,7 @@ function buildSpine({ guard = null, stopSwitch = null, wasSentByUs = () => false
   const sender = { open() { return { activate() {}, update() {}, async finish() {}, fail() {} }; } };
   const spine = createSpine({
     bridge, brain, identity, router, gating, sender, transcript, heartbeats,
-    mesh, guard, stopSwitch, isSelfChat, clock: { now: () => 1000 },
+    mesh, guard, stopSwitch, isAdminChat, clock: { now: () => 1000 },
   });
   return { spine, heartbeats, brain, transcript };
 }
@@ -472,19 +531,19 @@ describe('spine wiring — one switch, two call sites', () => {
     expect(sw.pulls).toHaveLength(0);
   });
 
-  it('a STOP OUTSIDE the Self chat never reaches the switch — it is recorded as ordinary text', async () => {
+  it('a STOP OUTSIDE an admin chat never reaches the switch — it is recorded as ordinary text', async () => {
     const sw = fakeSwitch();
-    const { spine, transcript } = buildSpine({ guard: createStopGuard(), stopSwitch: sw, isSelfChat: () => false });
+    const { spine, transcript } = buildSpine({ guard: createStopGuard(), stopSwitch: sw, isAdminChat: () => false });
     await spine.handleInbound({ surface: 'wa', chatId: 'elsewhere', chatName: 'fam', senderName: 'An', authorized: true, msgId: 'm', body: 'stop', kind: 'text', raw: {} });
     expect(sw.pulls).toHaveLength(0);
     expect(transcript.logged).toHaveLength(1);          // not swallowed — it flowed on like any message
     expect(transcript.logged[0].body).toBe('stop');
   });
 
-  it('the Self predicate is asked about THIS message (surface + chatId)', async () => {
+  it('the admin-chat predicate is asked about THIS message (surface + chatId)', async () => {
     const sw = fakeSwitch();
     const seen = [];
-    const { spine } = buildSpine({ guard: createStopGuard(), stopSwitch: sw, isSelfChat: (ev) => { seen.push({ surface: ev.surface, chatId: ev.chatId }); return true; } });
+    const { spine } = buildSpine({ guard: createStopGuard(), stopSwitch: sw, isAdminChat: (ev) => { seen.push({ surface: ev.surface, chatId: ev.chatId }); return true; } });
     await spine.handleInbound({ surface: 'wa', chatId: 'c', chatName: 'fam', senderName: 'An', authorized: true, msgId: 'm', body: 'stop', kind: 'text', raw: {} });
     expect(seen).toContainEqual({ surface: 'wa', chatId: 'c' });
     expect(sw.pulls).toHaveLength(1);

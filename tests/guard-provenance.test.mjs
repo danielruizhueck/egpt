@@ -186,10 +186,11 @@ function buildSpine({ guard, guardOverride, stopSwitch = null } = {}) {
   const mesh = { isEnvelope: (ev) => parseMesh(ev?.body ?? '') != null, async handle(ev) { meshCalls.push(ev); } };
   const spine = createSpine({
     bridge, brain, identity, router, gating, sender, transcript, heartbeats,
-    // isSelfChat: TRUE for every chat in this file. These cases are about the loop counter
+    // isAdminChat: TRUE for every chat in this file. These cases are about the loop counter
     // and the kill-switch-vs-channel-pause split, not about WHERE the safe word is honoured
-    // — that scoping (Self only, since 2026-07-26) is locked in tests/stop-file.test.mjs (D).
-    mesh, guard, guardOverride, stopSwitch, isSelfChat: () => true, clock: { now: () => 1000 },
+    // — that scoping (admin chats only: Self since 2026-07-26, every chat_ids entry since
+    // 2026-10-15) is locked in tests/stop-file.test.mjs (D)/(E).
+    mesh, guard, guardOverride, stopSwitch, isAdminChat: () => true, clock: { now: () => 1000 },
   });
   return { spine, meshCalls, transcript, brain };
 }
@@ -296,7 +297,7 @@ function buildRealSpine({ guard = null, stopSwitch = null, wasSentByUs = () => f
   const mesh = { isEnvelope: (ev) => parseMesh(ev?.body ?? '') != null, async handle() {} };
   const spine = createSpine({
     bridge, brain, identity, router, gating, sender, transcript, heartbeats,
-    mesh, guard, stopSwitch, isSelfChat: () => true, clock: { now: () => 1000 },
+    mesh, guard, stopSwitch, isAdminChat: () => true, clock: { now: () => 1000 },
   });
   return { spine, transcript, brain };
 }
@@ -428,7 +429,7 @@ function buildReplySpine({ mode = 'on', fromThisNode = () => false, wasSentByUs 
   const timers = fakeTimers();
   const spine = createSpine({
     bridge, brain, identity, router, gating, sender, transcript, heartbeats,
-    mesh, fromThisNode, isSelfChat: () => false, clock: { now: () => 1000 }, defaultBeing: 'e',
+    mesh, fromThisNode, isAdminChat: () => false, clock: { now: () => 1000 }, defaultBeing: 'e',
     rng: () => 0.5, setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout,
   });
   return { spine, brain, transcript, sender, timers };

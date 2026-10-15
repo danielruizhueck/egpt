@@ -56,14 +56,14 @@ const fakeRouter = { resolve: () => ({ being: 'e', mention: { atEStart: true, at
 const fakeGating = { async decide() { return { mode: 'mention', receives: true, mayReply: true, sendToEgpt: 'mode' }; }, surfaces: () => true };
 const fakeHeartbeats = { runDue() {} };
 
-function build({ commands = null, stopSwitch = null, isSelfChat = () => false } = {}) {
+function build({ commands = null, stopSwitch = null, isAdminChat = () => false } = {}) {
   const bridge = fakeBridge();
   const sender = recordingSender();
   const brain = gatedBrain();
   const logged = [];
   const transcript = { async log(ev) { logged.push(ev.body); } };
   const spine = createSpine({
-    bridge, brain, commands, stopSwitch, isSelfChat,
+    bridge, brain, commands, stopSwitch, isAdminChat,
     identity: fakeIdentity, router: fakeRouter, gating: fakeGating,
     sender, transcript, heartbeats: fakeHeartbeats,
     clock: { now: () => 1000 },
@@ -153,7 +153,7 @@ describe('spine — the deferred stand-down', () => {
     const pulled = [];
     const { spine, bridge, brain } = build({
       stopSwitch: { pull: async (reason) => pulled.push(reason) },
-      isSelfChat: () => true,
+      isAdminChat: () => true,
     });
     const first = bridge.emit(mention('one', 'm1'));
     await flush();

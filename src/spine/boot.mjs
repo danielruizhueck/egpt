@@ -1573,24 +1573,29 @@ export async function boot({
   // notion in two places — announceAndExit's restart-announce target and the mesh's
   // fallback transport — spelled out inline in both. The KILL SWITCH now needs the same
   // answer (below), so it is named ONCE here rather than copied a third time: three
-  // copies of "which chat is Self" is three chances to drift.
+  // copies of "which chat is Self" is three chances to drift. (Since 2026-10-15 the kill
+  // switch no longer reads it — it reads EVERY admin chat, isAdminChat below.)
   const selfChatId = () => surfaceCfg('whatsapp').chat_ids[0] ?? null;
-  // Is THIS message in Self? The ONLY place the "stop" safe word is honoured since
-  // 2026-07-26 ("is must be a single word message in Self"). Two conditions:
-  //   - the SURFACE is whatsapp — the surface Self is defined on. Ids are per-surface
+  // Is THIS message in an ADMIN CHAT? The ONLY place the "stop" safe word is honoured.
+  // 2026-07-26 scoped it to Self ("is must be a single word message in Self"); 2026-10-15
+  // the operator kept that decision but widened Self to every admin channel (WhatsApp #8203:
+  // «estoy de acuerdo con la decisión de otrora: pero en lugar de solo en canal Self, usa el
+  // canal de admin (o cualquier de los canales admin)»). Two conditions:
+  //   - the SURFACE is whatsapp — the surface the channels are declared on. Ids are per-surface
   //     namespaces, and without this a SHELL frame (which sets its own chatId, and is
-  //     hardcoded authorized:true) could name the Self room and pull the switch.
-  //   - the CHAT ID matches, compared in SHORT space (shortChatId is a no-op on an id
-  //     that is already short) so a full-form config entry matches the short id the
-  //     bridge delivers — the same normalization isAllowedUser and commands.mjs use.
-  // No Self chat configured → false: the chat safe word is simply unavailable, and
+  //     hardcoded authorized:true) could name an admin room and pull the switch.
+  //   - the CHAT is a COMMAND CHANNEL — ANY entry of networks.whatsapp.chat_ids, not just [0] —
+  //     answered by commands.inCommandChat, the SAME test the operator gate (isOperator) runs,
+  //     in SHORT space, so the kill switch and the command gate cannot drift apart.
+  // `admin_channel` (eGPT Admin) is NOT in the set: it is a notice SINK that may be a NAME,
+  // known only after an async bridge lookup (resolveAdminChat, below), and the command gate
+  // does not read it either. A chat meant to take STOP belongs in chat_ids.
+  // `commands` is declared far below but only READ here at call time (from the spine, post-boot)
+  // — the same call-time-safe forward reference stopSwitch makes to sayOnce.
+  // No command channel configured → false: the chat safe word is simply unavailable, and
   // `touch EGPT_HOME/STOP` (or setup/stop-egpt.cmd) is the way out. Fail-closed is the
   // right direction for a word that takes the service down.
-  const isSelfChat = (ev) => {
-    const self = selfChatId();
-    if (!self || ev?.surface !== 'whatsapp') return false;
-    return shortChatId(ev?.chatId) === shortChatId(self);
-  };
+  const isAdminChat = (ev) => ev?.surface === 'whatsapp' && commands.inCommandChat(ev);
   // Beeper token resolution — GENERALIZED (operator 2026-08-30) from the old single-connection
   // lookup (operator 2026-07-09, `beeper[beeper.use].token`) into a per-CONNECTION-NAME one, so
   // more than one Beeper account can be wired into this node — outboundOf (above) picks the name
@@ -3504,7 +3509,7 @@ export async function boot({
   // seam = announceAndExit(43), the SAME exit-43 drain the ingest /restart runs (not duplicated).
   const autoRestartOnConfigChange = cfg.auto_restart_on_config_change === true;
   const configBootHash = configContentHashSync();
-  const spine = createSpine({ bridge, bridgeOf: rawBridgeOf, peerMouth, brain, turns, ...services, commands, mesh, actions, advice, guard, guardOverride, fromThisNode, say: sayOnce, stopSwitch, isSelfChat, isTransit: (ev) => isRelayChannelChat(getConfig(), ev), roomRelay, readTranscript, refreshConfig: heartbeatLoader.reload, autoRestartOnConfigChange, configBootHash, readConfigHash: configContentHashSync, requestRestart: () => announceAndExit(43), radioRelay: radioRelay.relay, synthesize: vx.synthesize, voice: vx.voice, defaultBeing: defaultKey, labelOf, timeZone: transcriptTimeZone, clock: { now }, log, turnTimeoutMs, tickMs: effectiveTickMs, setInterval: setIntervalFn, clearInterval: clearIntervalFn });
+  const spine = createSpine({ bridge, bridgeOf: rawBridgeOf, peerMouth, brain, turns, ...services, commands, mesh, actions, advice, guard, guardOverride, fromThisNode, say: sayOnce, stopSwitch, isAdminChat, isTransit: (ev) => isRelayChannelChat(getConfig(), ev), roomRelay, readTranscript, refreshConfig: heartbeatLoader.reload, autoRestartOnConfigChange, configBootHash, readConfigHash: configContentHashSync, requestRestart: () => announceAndExit(43), radioRelay: radioRelay.relay, synthesize: vx.synthesize, voice: vx.voice, defaultBeing: defaultKey, labelOf, timeZone: transcriptTimeZone, clock: { now }, log, turnTimeoutMs, tickMs: effectiveTickMs, setInterval: setIntervalFn, clearInterval: clearIntervalFn });
   // Bind the advice service's answer-routing dispatch now that the spine exists: an
   // operator answer in the advice channel re-enters the pipe as a turn in the origin chat.
   advice.useDispatch(spine.handleInbound);

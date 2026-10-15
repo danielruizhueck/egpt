@@ -2176,7 +2176,7 @@ describe('beeper bridge — a reaction placed by an account this node speaks thr
       sender: { open(chatId, o) { opens.push(o); return { activate() {}, update() {}, async finish() {}, fail() {} }; } },
       transcript: { async log() {} }, heartbeats: { runDue() {} },
       mesh: { isEnvelope: () => false, async handle() {} },
-      fromThisNode, isSelfChat: () => false, clock: { now: () => 1000 }, defaultBeing: 'e', log: { line: (s) => notes.push(s) },
+      fromThisNode, isAdminChat: () => false, clock: { now: () => 1000 }, defaultBeing: 'e', log: { line: (s) => notes.push(s) },
     });
     const feed = (body, from) => { pending.push(spine.handleInbound({ body, from })); };
     return { brain, opens, notes, feed, release, settled: () => Promise.all(pending) };

@@ -49,7 +49,7 @@ function buildSpine({ mode = 'mention', guard = null } = {}) {
     bridge: { onMessage() {}, send() {}, stop() {}, wasSentByUs: () => false },
     brain, identity, router, gating, sender, transcript,
     heartbeats: { runDue() {} }, mesh: { isEnvelope: () => false, async handle() {} },
-    fromThisNode, guard, isSelfChat: () => false, clock: { now: () => 1000 }, defaultBeing: 'egpt',
+    fromThisNode, guard, isAdminChat: () => false, clock: { now: () => 1000 }, defaultBeing: 'egpt',
   });
   return { spine, brain, transcript };
 }

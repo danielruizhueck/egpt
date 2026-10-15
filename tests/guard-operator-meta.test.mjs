@@ -43,7 +43,7 @@ const member = (body, over = {}) => ({ ...base(ADMIN), senderId: 'u-bob', sender
 // A PEER NODE's post (do's spine committed it — the structural signature, already decoded by identity).
 const peer = (body, over = {}) => ({ ...base(ADMIN), senderId: 'u-rodz', senderName: 'Rodz', msgId: `peer-${++seq}`, isSender: false, authorized: false, fromNode: 'do', body, ...over });
 
-function build({ levels = {}, turns = 3, stopSwitch = null, isSelfChat = () => false } = {}) {
+function build({ levels = {}, turns = 3, stopSwitch = null, isAdminChat = () => false } = {}) {
   const guard = createStopGuard({ turns });
   const bridge = { onMessage() {}, send() {}, stop() {}, wasSentByUs: () => false };
   const asked = [];
@@ -71,7 +71,7 @@ function build({ levels = {}, turns = 3, stopSwitch = null, isSelfChat = () => f
   };
   const heartbeats = { beats: 0, runDue() { this.beats += 1; } };
   const spine = createSpine({
-    bridge, brain, commands, mesh, guard, stopSwitch, isSelfChat, heartbeats,
+    bridge, brain, commands, mesh, guard, stopSwitch, isAdminChat, heartbeats,
     identity: { build: (m) => ({ ...m }) },
     router: createRouter({ getAgents: () => AGENTS, defaultBeing: 'egpt' }),
     gating: { async decide() { return { mode: 'on', receives: true, mayReply: true, sendToEgpt: 'mode' }; }, surfaces: (d) => d.mayReply },
@@ -204,7 +204,7 @@ describe('ACCEPTED (operator\'s decision) — two meta engineers exchanging turn
     const { spine, guard, brain } = build({
       levels: { wren: 'all' },
       stopSwitch: { present: () => false, pull: (why) => pulls.push(why) },
-      isSelfChat: (e) => e.chatId === 'SELF',
+      isAdminChat: (e) => e.chatId === 'SELF',
     });
     for (let i = 0; i < 20; i++) await spine.handleInbound(peer(`@wren ${i}`));
     expect(brain.calls).toHaveLength(20);
@@ -243,7 +243,7 @@ describe('regression locks — what does not change', () => {
     const { spine, brain, heartbeats } = build({
       levels: { wren: 'all', egpt: 'all' },           // even with every being a meta engineer
       stopSwitch: { present: () => present, pull: (why) => pulls.push(why) },
-      isSelfChat: (e) => e.chatId === 'SELF',
+      isAdminChat: (e) => e.chatId === 'SELF',
     });
     await spine.handleInbound(op('stop', { chatId: 'SELF' }));
     expect(pulls).toHaveLength(1);

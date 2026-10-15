@@ -823,15 +823,21 @@ export function createCommands({
               : (c[surface] && typeof c[surface] === 'object') ? c[surface] : {};
     return Array.isArray(raw.chat_ids) ? raw.chat_ids : (raw.chat_id != null ? [raw.chat_id] : []);
   }
+  // Is this message IN one of its origin surface's command channels (ids are per-surface
+  // namespaces)? THE ONE answer to "is this an admin chat": isOperator below reads it, and so does
+  // the STOP kill switch (boot.mjs isAdminChat → spine classify; operator 2026-10-15: «usa el canal
+  // de admin (o cualquier de los canales admin)»), so the two cannot drift on which chats count.
+  function inCommandChat(ev) {
+    // Compare in short space (shortChatId is a no-op on an id that's already short) so a config
+    // chat_id in either form still matches the bridge's now-always-short ev.chatId.
+    const here = shortChatId(ev?.chatId);
+    return commandChatIds(ev?.surface ?? 'whatsapp').some((id) => shortChatId(id) === here);
+  }
   // The operator gate — reused by isCommand and every command handler. Same
   // authorization every slash command uses: the origin surface's own Self DM (ids
   // are per-surface namespaces), an authorized sender, or the account owner (isSender).
   function isOperator(ev) {
-    // Compare in short space (shortChatId is a no-op on an id that's already short) so a config
-    // chat_id in either form still matches the bridge's now-always-short ev.chatId.
-    const here = shortChatId(ev?.chatId);
-    const inSelfDm = commandChatIds(ev?.surface ?? 'whatsapp').some((id) => shortChatId(id) === here);
-    return inSelfDm || !!ev?.authorized || !!ev?.isSender;
+    return inCommandChat(ev) || !!ev?.authorized || !!ev?.isSender;
   }
 
   // Which NODE does this line address? The ONE parse behind every node reading below — the
@@ -4382,5 +4388,5 @@ export function createCommands({
   // above). `/e`/`/egpt` now carry no special meaning at all and fall through to the generic
   // catch-all like any other unrecognized token.
 
-  return { isCommand, phraseCommand, runPhrase, run, runCaptured, remoteNode, nodeCommandForMe, makeNodeExplicit, currentRoomOf, startBrowser, chromeClientFor: ensureChrome, browserConversationOf, chatChromeOf, ensureSuperChannel, linkSuperChannel, siphonReplyToAdmin, superMemberGate };
+  return { isCommand, inCommandChat, phraseCommand, runPhrase, run, runCaptured, remoteNode, nodeCommandForMe, makeNodeExplicit, currentRoomOf, startBrowser, chromeClientFor: ensureChrome, browserConversationOf, chatChromeOf, ensureSuperChannel, linkSuperChannel, siphonReplyToAdmin, superMemberGate };
 }

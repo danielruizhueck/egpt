@@ -117,10 +117,11 @@ function buildSpine({ guard, stopSwitch = null, isCommand = (ev) => String(ev.bo
   const heartbeats = { runDue() {} };
   const sender = { open() { return { activate() {}, update() {}, async finish() {}, fail() {} }; } };
   const commands = { isCommand, run: async (ev) => { ran.push(ev.body); } };
-  // Every message below is the operator's Self DM (opCmd: chatId 'self'), which is where the
-  // safe word lives since 2026-07-26 — so the Self predicate boot wires is modelled here as
-  // "chatId is 'self'". Anywhere else "stop" is ordinary text (tests/stop-file.test.mjs (D)).
-  const spine = createSpine({ bridge, brain, identity, router, gating, sender, transcript, heartbeats, commands, guard, stopSwitch, isSelfChat: (ev) => ev?.chatId === 'self', clock: { now: () => 1000 } });
+  // Every message below is the operator's Self DM (opCmd: chatId 'self'), an admin chat — where
+  // the safe word lives (Self since 2026-07-26, every admin chat since 2026-10-15) — so the
+  // predicate boot wires is modelled here as "chatId is 'self'". Anywhere else "stop" is
+  // ordinary text (tests/stop-file.test.mjs (D)/(E)).
+  const spine = createSpine({ bridge, brain, identity, router, gating, sender, transcript, heartbeats, commands, guard, stopSwitch, isAdminChat: (ev) => ev?.chatId === 'self', clock: { now: () => 1000 } });
   return { spine, ran, transcript };
 }
 // The boot-wired kill switch, faked: records what would have been written to EGPT_HOME/STOP

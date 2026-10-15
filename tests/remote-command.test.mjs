@@ -384,7 +384,7 @@ describe('lock — the STOP safe word cannot be pulled from another machine', ()
       sender: { open: () => ({ update() {}, fail() {}, async finish() {} }) },
       transcript: { async log() {} }, heartbeats: { runDue() {} },
       stopSwitch: { present: () => false, async pull(why) { pulls.push(why); } },
-      isSelfChat: () => true,          // even in the most permissive case
+      isAdminChat: () => true,         // even in the most permissive case
       clock: { now: () => 1 },
     });
     await spine.handleInbound({

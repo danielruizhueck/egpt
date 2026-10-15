@@ -77,8 +77,8 @@ const NAME_OF = { [PRIMARY]: 'primary', [SECONDARY]: 'secondary' };
 
 // THE SELF-DM — `networks.whatsapp.chat_ids[0]`, the entry the live config annotates
 // "Self-DM = the operator command channel". A room on anrodz42 and on nothing else.
-// It is also the ONLY chat id the three node-level sends ever carry: the safe word is honoured in
-// Self alone (src/spine/spine.mjs isSelfChat), and both announces target Self by construction.
+// It is also the chat id the three node-level sends carry here: the safe word is honoured in
+// Self (an admin chat, src/spine/spine.mjs isAdminChat), and both announces target Self by construction.
 // That is exactly why the arrival map cannot answer for them and the config must.
 const SELF_DM = '!self-dm-as-primary-sees-it';
 // A chat this node has neither heard nor declared — the boundary of the change, locked below.
