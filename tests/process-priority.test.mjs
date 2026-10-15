@@ -18,6 +18,12 @@ import { createCodexCliSession } from '../src/codex-cli-session.mjs';
 import { createPiCliSession } from '../src/pi-cli-session.mjs';
 import { createSandboxCliSession, spawnBoxedCommand } from '../src/sandbox-cli-session.mjs';
 import { startProfileDaemons } from '../src/daemon-runtime.mjs';
+import { _run } from '../src/tools/transcribe.mjs';
+import { startWhisperServer } from '../src/tools/whisper-server.mjs';
+import { synthesizeWithPiper } from '../src/tools/synthesizer.mjs';
+import { createChromeHost } from '../src/chrome-host.mjs';
+import { chromePipeArgs } from '../src/tools/chrome-launcher.mjs';
+import { fakeChromeChild } from './fake-pipe-chrome.mjs';
 
 const { PRIORITY_NORMAL, PRIORITY_BELOW_NORMAL } = constants.priority;
 const STORE = mkdtempSync(join(tmpdir(), 'egpt-priority-store-'));
@@ -185,5 +191,43 @@ describe('every being engine is lowered to BELOW_NORMAL right after its spawn', 
     await spawnOnce(createWarmCliSession({ spawn: f.spawn, setPriority: r.setPriority, onLog: (m) => logs.push(m) }));
     expect(r.calls).toEqual([[4242, PRIORITY_BELOW_NORMAL]]);
     expect(logs.filter((l) => /priority/i.test(l) && /4242/.test(l) && /EPERM/.test(l))).toHaveLength(1);
+  });
+});
+
+// Heavy work the spine waits on must still never out-compete it.
+describe('batch compute and Chrome run BELOW_NORMAL', () => {
+  const isLowered = (calls) => calls.length === 1 && Number.isInteger(calls[0][0]) && calls[0][0] > 0 && calls[0][1] === PRIORITY_BELOW_NORMAL;
+
+  it('ffmpeg / whisper-cli / ffprobe (transcribe.mjs _run, shared by video-frames)', async () => {
+    const r = recorder();
+    await _run(process.execPath, ['-e', ''], { setPriority: r.setPriority });
+    expect(isLowered(r.calls), JSON.stringify(r.calls)).toBe(true);
+  });
+
+  it('the resident whisper-server (whisper-server.mjs, also the transcriptor worker\'s)', async () => {
+    const r = recorder(); const f = fakeSpawn({ pid: 8181 });
+    const h = await startWhisperServer({
+      command: 'whisper-server', model: 'model.bin', host: '127.0.0.1', port: 1,
+      readyTimeoutMs: 0, reap: () => {}, serviceFor: async () => null, spawn: f.spawn, setPriority: r.setPriority,
+    });
+    h.stop();
+    expect(f.spawned).toHaveLength(1);
+    expect(r.calls).toEqual([[8181, PRIORITY_BELOW_NORMAL]]);
+  });
+
+  it('piper (synthesizer.mjs)', async () => {
+    const r = recorder();
+    await expect(synthesizeWithPiper('hola', { pythonPath: process.execPath, modelPath: 'none.onnx', setPriority: r.setPriority })).rejects.toThrow();
+    expect(isLowered(r.calls), JSON.stringify(r.calls)).toBe(true);
+  });
+
+  it('a group Chrome launched by chrome-host', () => {
+    const r = recorder();
+    const root = join(tmpdir(), 'egpt-priority-chrome', 'profiles');
+    const host = createChromeHost({ profilesRoot: root, spawn: () => fakeChromeChild({}, 9191), setPriority: r.setPriority });
+    const spine = Object.assign(new EventEmitter(), { connected: true, send: () => {} });
+    host.attach(spine);
+    spine.emit('message', { t: 'launch', id: 1, group: 'g', profileDir: join(root, 'g'), bin: 'chrome', argv: chromePipeArgs({ userDataDir: join(root, 'g') }) });
+    expect(r.calls).toEqual([[9191, PRIORITY_BELOW_NORMAL]]);
   });
 });

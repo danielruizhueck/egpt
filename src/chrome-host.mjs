@@ -11,11 +11,12 @@ import { spawn as nodeSpawn } from 'node:child_process';
 import { relative, isAbsolute } from 'node:path';
 import { createPipeChannel, createHostChannel } from './tools/cdp.mjs';
 import { findChromeExecutable, chromeProcesses, killProcessTree } from './tools/chrome-launcher.mjs';
+import { lowerChild } from './process-priority.mjs';
 
 export const CHROME_HOST_ENV = 'EGPT_CHROME_HOST';
 const ROOT_ATTACH = /^Target\.attachTo(Browser)?Target$/;
 
-export function createChromeHost({ profilesRoot, spawn = nodeSpawn, processes = chromeProcesses, killTree = killProcessTree, log = () => {} }) {
+export function createChromeHost({ profilesRoot, spawn = nodeSpawn, setPriority, processes = chromeProcesses, killTree = killProcessTree, log = () => {} }) {
   const chromes = new Map();   // group → { profileDir, child, channel, roots, attaching }
   let spine = null;
   let ownId = 0;               // the daemon's own CDP ids are negative: never a spine's
@@ -61,6 +62,7 @@ export function createChromeHost({ profilesRoot, spawn = nodeSpawn, processes = 
     let child;
     try { child = spawn(exe, argv, { stdio: ['inherit', 'inherit', 'inherit', 'pipe', 'pipe'] }); }
     catch (e) { return tell({ t: 'reply', id, error: String(e?.message ?? e) }); }
+    lowerChild(child.pid, { onLog: log, setPriority });
     const c = { profileDir, child, channel: createPipeChannel({ writable: child.stdio[3], readable: child.stdio[4] }), roots: new Set(), attaching: new Map() };
     chromes.set(group, c);
     child.stdio[3].on('error', () => {});   // EPIPE once Chrome is gone; its exit says so

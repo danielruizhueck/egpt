@@ -33,6 +33,7 @@ import { readFile, unlink, writeFile, readdir, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { signAudio } from './transcriptor.mjs';
+import { lowerChild } from '../process-priority.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -62,21 +63,22 @@ async function fileExists(p) {
 // death can leave no file, or a partial one, with a clean exit either), then transcodes
 // to Opus/ogg. Returns the ogg bytes (Buffer); throws on any piper/ffmpeg failure. All
 // temp files cleaned up in a `finally`, best-effort.
-export async function synthesizeWithPiper(text, { pythonPath, modelPath, ffmpegCommand = 'ffmpeg' }) {
+export async function synthesizeWithPiper(text, { pythonPath, modelPath, ffmpegCommand = 'ffmpeg', setPriority }) {
+  const run = (cmd, args) => { const p = execFileAsync(cmd, args); lowerChild(p.child?.pid, { setPriority }); return p; };
   const id = randomBytes(8).toString('hex');
   const txtPath = join(tmpdir(), `egpt-synthesizer-${id}.txt`);
   const wavPath = join(tmpdir(), `egpt-synthesizer-${id}.wav`);
   const oggPath = join(tmpdir(), `egpt-synthesizer-${id}.ogg`);
   try {
     await writeFile(txtPath, text, 'utf8');
-    await execFileAsync(pythonPath, [
+    await run(pythonPath, [
       '-m', 'piper',
       '--model', modelPath,
       '--input-file', txtPath,
       '--output-file', wavPath,
     ]);
     if (!(await fileExists(wavPath))) throw new Error('piper produced no output file');
-    await execFileAsync(ffmpegCommand, [
+    await run(ffmpegCommand, [
       '-hide_banner', '-loglevel', 'error', '-y',
       '-i', wavPath,
       '-c:a', 'libopus', '-b:a', '24k', '-application', 'voip',

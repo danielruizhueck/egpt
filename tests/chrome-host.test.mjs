@@ -38,6 +38,7 @@ function world(browser = { listTabs: async () => TABS }) {
   const host = createChromeHost({
     profilesRoot: ROOT,
     log: (m) => logs.push(m),
+    setPriority: () => {},
     spawn: (bin, argv) => { const child = fakeChromeChild(browser, 4000 + spawns.length); spawns.push({ bin, argv, child }); return child; },
   });
   // One spine: a fresh IPC pair to the SAME host, and the spine's end of it.

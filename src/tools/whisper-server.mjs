@@ -16,6 +16,7 @@
 import { spawn, execFile } from 'node:child_process';
 import { readFile, unlink } from 'node:fs/promises';
 import { convertToWav16k, wavDurationSec } from './transcribe.mjs';
+import { lowerChild } from '../process-priority.mjs';
 import { reapPort, portHolders, processService } from './reap-port.mjs';
 
 const READY_POLL_MS = 500;
@@ -136,6 +137,7 @@ export async function startWhisperServer({
   // INJECTION SEAMS (default to the real thing) — the adoption path has to be
   // provable without a whisper binary on the box running the tests.
   spawn: spawnFn = spawn,
+  setPriority,
   reap: reapFn = reapPort,
   serviceFor: serviceForFn = whisperServiceFor,
   // How often an ADOPTED server is re-probed. Only used when adopted: a server we
@@ -167,6 +169,7 @@ export async function startWhisperServer({
     reapFn(port, onLog, STRAY_WHISPER_REAP);
     onLog(`whisper-server: spawning ${command} ${args.join(' ')}`);
     proc = spawnFn(command, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    lowerChild(proc.pid, { onLog, setPriority });
     proc.stdout?.on('data', (d) => { const s = d.toString().trim(); if (s) onLog(`whisper-server: ${s.slice(0, 200)}`); });
     proc.stderr?.on('data', (d) => { const s = d.toString().trim(); if (/error|fail|load/i.test(s)) onLog(`whisper-server: ${s.slice(0, 200)}`); });
     proc.on('exit', (code) => {

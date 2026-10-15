@@ -11,6 +11,7 @@ import { randomBytes } from 'node:crypto';
 import { unlink, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { lowerChild } from '../process-priority.mjs';
 
 // A 16kHz · mono · 16-bit PCM WAV (whisper's input, produced by convertToWav16k)
 // has a fixed byte rate, so its duration is exact arithmetic on the file size —
@@ -41,12 +42,13 @@ export function buildWhisperArgs({ model, wav, language, extra_args, anti_repeti
   return args;
 }
 
-export function _run(cmd, args, { captureStdout = false } = {}) {
+export function _run(cmd, args, { captureStdout = false, setPriority } = {}) {
   return new Promise((resolve, reject) => {
     let out = '', err = '';
     let child;
     try { child = spawn(cmd, args, { windowsHide: true }); }
     catch (e) { return reject(e); }
+    lowerChild(child.pid, { setPriority });
     if (captureStdout) child.stdout?.on('data', d => { out += d.toString(); });
     child.stderr?.on('data', d => { err += d.toString(); });
     child.on('error', reject);
