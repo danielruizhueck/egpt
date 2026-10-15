@@ -55,7 +55,7 @@ import { createGating } from './gating.mjs';
 // createRouter + THE wake vocabulary. wakeTokens is the ONE rule for "which @tokens address this
 // agent" (declared `handles:`, else the map key) — imported, not re-implemented, so the persona
 // wake set boot hands the ports and the router's own @token scan can never disagree again.
-import { createRouter, wakeTokens, voiceWakeTokens, fallbackWake } from './router.mjs';
+import { createRouter, wakeTokens, voiceWakeTokens, fallbackWake, strangerAgentFor } from './router.mjs';
 import { createTranscript } from './transcript.mjs';
 // createSender: the reply path. makeOutbound: the ONE answer to "which connection does this
 // outbound go out on" (sender.mjs's header), asked by makePeerMouth below rather than copied.
@@ -2845,7 +2845,7 @@ export async function boot({
     // several agents naming one peer share a single probe, and empty on a node that declares
     // none — in which case isPeerAlive is never consulted and resolution is unchanged.
     router: createRouter({
-      getAgents: () => cfg.agents ?? {}, defaultBeing: defaultKey, addressWithoutAt, loadState: _loadState,
+      getAgents: () => cfg.agents ?? {}, getConfig, defaultBeing: defaultKey, addressWithoutAt, loadState: _loadState,
       isPresent: (identity, ev) => bridge.chatHasParticipant?.(ev?.chatId, identity) ?? null,
       // true | false | null(unknown). A port with no watcher returns null rather than a
       // guess, and the router reads anything but a definite false as "stay silent".
@@ -2864,7 +2864,10 @@ export async function boot({
     // here. Safe forward reference: this callback only ever fires later, on an actual write,
     // by which time `commands` is assigned (mirrors createSpine's own construction site further
     // down, which passes commands.currentRoomOf directly because by THAT point commands exists).
-    transcript: createTranscript({ contacts, persona: labelOf(defaultKey), defaultKey, labelOf, timeZone: transcriptTimeZone, io, currentRoomOf: (surface) => commands.currentRoomOf(surface), onLog: (m) => log.line?.(`[transcript] ${m}`) }),
+    transcript: createTranscript({ contacts, persona: labelOf(defaultKey), defaultKey, labelOf, timeZone: transcriptTimeZone, io, currentRoomOf: (surface) => commands.currentRoomOf(surface),
+      // a stranger's new 1:1 is created with its stranger agent as the conversation's default
+      seedOf: (ev) => { const b = strangerAgentFor(ev, getConfig()); return b ? { [b]: { default: true } } : null; },
+      onLog: (m) => log.line?.(`[transcript] ${m}`) }),
     // peerMouth (operator 2026-09-05): THE reply path, so THE place the mouth decision is made —
     // null on a node with no peer_spine, and the sender is then byte-identical to before.
     // onUndeliverable (operator 2026-10-12): a reply the mouth can place in NEITHER the routed room

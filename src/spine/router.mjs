@@ -33,8 +33,38 @@ import { mentionHits } from '../auto-mode.mjs';
 // WRITES it (incoming-media.voiceTranscriptBody), never re-spelled here. addressed() takes it off
 // before the spoken-wake scan so "the start" means the start of the TRANSCRIPT, not of the marker.
 import { VOICE_MARK } from '../incoming-media.mjs';
-import { getBeing, allowedUsersPermits } from '../conversations-state.mjs';
+import { getBeing, getContact, allowedUsersPermits, conversationDefaultOf } from '../conversations-state.mjs';
 import { surfaceOf, SHELL_SURFACE } from './identity.mjs';
+
+// A local (non-relay) agent's map key, matched case-insensitively; null when there is none.
+function localAgentKey(agents, name) {
+  const want = String(name ?? '').trim().toLowerCase();
+  if (!want) return null;
+  const hit = Object.entries(agents ?? {}).find(([k, a]) => k.toLowerCase() === want && !k.startsWith('_')
+    && a && typeof a === 'object' && !Array.isArray(a)
+    && !a.relay_channel && !Array.isArray(a.paths) && String(a.configuration ?? '').toLowerCase() !== 'relay');
+  return hit ? hit[0] : null;
+}
+
+// Is this sender on ANY allowed_users list (networks.*, agents.*.conversation_defaults)? "*" names nobody.
+function isKnownSender(senderId, config = {}) {
+  const lists = [
+    ...Object.values(config.networks ?? {}).map((n) => n?.allowed_users),
+    ...Object.values(config.agents ?? {}).map((a) => a?.conversation_defaults?.allowed_users),
+  ].filter(Array.isArray).flat().filter((u) => u !== '*');
+  return allowedUsersPermits(lists, senderId);
+}
+
+// THE STRANGER RULE (operator 2026-10-15): dispatch.stranger_agent maps a CONNECTION to the agent
+// that answers a 1:1 from a sender on no allowed_users list. Pure; the "new conversation" half is
+// the caller's (router: no entry yet; ensureContact: a brand-new entry).
+export function strangerAgentFor(ev, config = {}) {
+  const map = config?.dispatch?.stranger_agent;
+  if (!map || typeof map !== 'object' || Array.isArray(map) || !ev?.connection) return null;
+  if (ev.isSender || ev.raw?.chatType !== 'private') return null;
+  const key = localAgentKey(config.agents, map[ev.connection]);
+  return key && !isKnownSender(ev.senderId, config) ? key : null;
+}
 
 // THE wake vocabulary — the ONE definition of "which @tokens address this agent", lowercased
 // (operator 2026-07-26: "don must not wake or respond with 'egpt'" … "the key has no bearing …
@@ -332,7 +362,8 @@ export function addressed(text, agents, { addressWithoutAt = true, isVoice = fal
 // today: a guarded token nobody can evaluate must not be addressable.
 // `onLog` — the router's diagnostic sink; the ONLY thing it says is the fallback membership
 // failure below, which must never be silent.
-export function createRouter({ getAgents = () => ({}), defaultBeing = 'e', addressWithoutAt = true, loadState = null, isPresent = null, isPeerAlive = null, inboundOf = null, onLog = () => {} } = {}) {
+// `getConfig` — the node config, read for dispatch.stranger_agent and the allowed_users lists.
+export function createRouter({ getAgents = () => ({}), getConfig = () => ({}), defaultBeing = 'e', addressWithoutAt = true, loadState = null, isPresent = null, isPeerAlive = null, inboundOf = null, onLog = () => {} } = {}) {
   // ONE addressed agent → the routing target it resolves to. Per-kind semantics are
   // UNCHANGED; only the caller changed (every hit, not just the first).
   function targetFor({ name, agent, token, atStart, unlessPresent, unlessPeerAlive, reply }, ev) {
@@ -467,6 +498,14 @@ export function createRouter({ getAgents = () => ({}), defaultBeing = 'e', addre
       // against the conversation the turn runs in, and moving it would silently re-scope who may
       // wake a being. Same line f70edce drew for the mesh responder's own allowed_users.
       const org = ev?.origin ?? ev;
+      // THE CONVERSATION'S OWN AGENT (operator 2026-10-15): the entry's `agents.<being>.default: true`,
+      // else, for a chat with no entry yet, the stranger rule. It takes the fall-through below, and a
+      // stranger in its conversation reaches it and nobody else. No state read → none (unchanged).
+      const cfg = { ...(getConfig() ?? {}), agents };
+      const owner = !state ? null
+        : (localAgentKey(agents, conversationDefaultOf(state, ev?.surface, ev?.chatId))
+          ?? (getContact(state, ev?.surface, ev?.chatId) ? null : strangerAgentFor(ev, cfg)));
+      const ownerOnly = !!owner && !ev?.isSender && !isKnownSender(ev?.senderId, cfg);
       // ONE membership answer per identity per resolve() call (never per hit) — same discipline as
       // the conv-state read above. Only ever consulted for a hit that actually carries a guard, so
       // a message addressing nobody, or addressing an ordinary handle, costs nothing.
@@ -507,6 +546,7 @@ export function createRouter({ getAgents = () => ({}), defaultBeing = 'e', addre
         // replyToBeing likewise rides off ev (identity.build, from the bridge): a quote-reply to a
         // being's own post is one more hit in this loop, filtered exactly like a handle hit.
         for (const hit of addressed(ev?.body ?? '', agents, { addressWithoutAt, isVoice: ev?.isVoice, withFallback: !!isPresent || !!isPeerAlive, replyToBeing: ev?.replyToBeing })) {
+          if (ownerOnly && hit.name !== owner.toLowerCase()) continue;
           // SURFACE PIN (operator 2026-07-25): an agent may carry `surface: <name>` so it is an
           // agent ONLY on that surface; on any OTHER surface the @mention falls through (as if
           // unmatched). Co-account CORRECTNESS, not convenience: `do` and `kg` share ONE Beeper
@@ -670,7 +710,7 @@ export function createRouter({ getAgents = () => ({}), defaultBeing = 'e', addre
       // `fallthrough: true` — NOBODY was explicitly addressed; this is the persona default, not a
       // real @mention. The per-being echo gate (spine.mjs) reads it so a being's own plain signed
       // line never wakes the persona by default (only an explicit cross-being address does).
-      if (!targets.length) targets.push({ being: defaultBeing, mention: ev?.mention, address: null, fallthrough: true });
+      if (!targets.length) targets.push({ being: owner ?? defaultBeing, mention: ev?.mention, address: null, fallthrough: true });
       return { ...targets[0], targets };
     },
   };

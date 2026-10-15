@@ -544,6 +544,17 @@ export const CONFIG_SCHEMA = {
                  peer. Set to THIS node's own name is identical to local; no
                  separate branch for it.
         See src/spine/commands.mjs nodeAddressed.
+      stranger_agent
+        Map — beeper connection name -> local agent key. DEFAULT: unset (off).
+          stranger_agent: { secondary: edw-marketer }
+        A NEW 1:1 (no conversations.yaml entry yet) arriving on that connection
+        from a sender on NO allowed_users list (networks.*, agents.*.
+        conversation_defaults; "*" names nobody) is created with
+        agents.<agent>.default: true. That conversation's unaddressed lines go
+        to the agent instead of the persona, and its stranger reaches that agent
+        only (other handles are dropped). Mode is the agent's own
+        agents.<agent>.mode — quote "on". Groups, existing chats, known senders,
+        our own sends: untouched. See src/spine/router.mjs strangerAgentFor.
       send_to_egpt
         ENUM: "always" | "mode"
         DEFAULT: "mode"

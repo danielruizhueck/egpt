@@ -39,6 +39,8 @@ export function createTranscript({
   // repo's convention for an optional seam nobody wired) = every write lands on ev's own native
   // (surface, chatId), byte-identical to before this option existed.
   currentRoomOf = () => null,
+  // (ev) => seed blocks for the conversation this inbound would CREATE (boot: the stranger rule), or null.
+  seedOf = () => null,
 } = {}) {
   if (typeof contacts?.resolve !== 'function') {
     throw new Error('createTranscript: contacts (createContacts) is required');
@@ -105,11 +107,12 @@ export function createTranscript({
     // write==read helper (src/spine/contacts.mjs). A resolver without it (a unit fake) degrades to
     // resolve()+transcript.md, byte-identical to before — the same default-seam convention as
     // currentRoomOf above.
+    const agents = redirected ? null : seedOf(ev);
     if (contacts.transcriptTarget) {
-      const t = await contacts.transcriptTarget(surface, chatId, { chatName: ev.chatName });
+      const t = await contacts.transcriptTarget(surface, chatId, { chatName: ev.chatName, agents });
       return t ? { surface, chatId, slug: t.slug, room: t.room, transcriptPath: t.path } : null;
     }
-    const slug = await contacts.resolve(surface, chatId, { chatName: ev.chatName });
+    const slug = await contacts.resolve(surface, chatId, { chatName: ev.chatName, agents });
     if (!slug) return null;
     const room = Room.forChat(surface, slug);
     return { surface, chatId, slug, room, transcriptPath: room.transcriptPath };

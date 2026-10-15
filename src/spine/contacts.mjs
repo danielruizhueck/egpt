@@ -28,9 +28,10 @@ export function createContacts({ loadState, writeState, io = {}, onLog = () => {
    * the conversation_path backfill, and the name-tracking rename. ensureContact
    * only reports `changed` when a field actually differs, so a steady-state
    * re-sight (same title, nothing to backfill) does no write.
+   * `agents` seeds a BRAND-NEW entry's per-being blocks (ensureContact ignores it otherwise).
    * @returns {Promise<string|null>} the slug, or null when unresolvable (caller treats null as skip)
    */
-  async function resolve(surface, chatId, { chatName } = {}) {
+  async function resolve(surface, chatId, { chatName, agents } = {}) {
       // Serialize the whole load→mutate→write against the shared registry so two
       // DIFFERENT conversations' first-seen registrations (now concurrent, per the
       // per-conversation turn FIFO) can't interleave and lose one contact.
@@ -38,7 +39,7 @@ export function createContacts({ loadState, writeState, io = {}, onLog = () => {
       try {
         if (!chatId) return null;
         const state = await loadState();
-        const ens = ensureContact(state, surface, chatId, { pushedName: chatName, slugHint: chatName });
+        const ens = ensureContact(state, surface, chatId, { pushedName: chatName, slugHint: chatName, agents });
 
         // Rename: the chat's TITLE changed (a group renamed, or a placeholder
         // learning its real name) → ensureContact already recomputed the slug
@@ -87,8 +88,8 @@ export function createContacts({ loadState, writeState, io = {}, onLog = () => {
    * RAW read of the alias map — what distinguishes "this chatId IS a side-room" from "the primary".
    * @returns {Promise<{slug:string, room:Room, path:string}|null>} null when unresolvable
    */
-  async function transcriptTarget(surface, chatId, { chatName } = {}) {
-    const slug = await resolve(surface, chatId, { chatName });
+  async function transcriptTarget(surface, chatId, { chatName, agents } = {}) {
+    const slug = await resolve(surface, chatId, { chatName, agents });
     if (!slug) return null;
     const room = Room.forChat(surface, slug);
     const state = await loadState();

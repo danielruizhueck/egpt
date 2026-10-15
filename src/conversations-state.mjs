@@ -1082,6 +1082,13 @@ export function getBeing(state, surface, jid, being) {
   };
 }
 
+// The conversation's OWN default being: the first `agents.<being>` block carrying `default: true`
+// (the config registry's persona marker, one tier more specific). null = the node persona.
+export function conversationDefaultOf(state, surface, jid) {
+  const agents = _obj(getContact(state, surface, jid)?.entry?.agents) ?? {};
+  return Object.keys(agents).find((b) => _obj(agents[b])?.default === true) ?? null;
+}
+
 // SENDER MATCH (operator 2026-08-16): the shared allowed_users sender-match predicate
 // router.mjs's resolve() and mesh.mjs's allowedUsersDenial() both need — collapsed into ONE
 // implementation here since this module already owns and documents the two-tier allowedUsers
@@ -1455,6 +1462,8 @@ export function ensureContact(state, surface, jid, ctx = {}) {
     conversation_path: conversationPathOf(surface, candidateSlug),
     home_dir: homeDirMsys(),
     pushedName: ctx.pushedName ?? '',
+    // seed blocks for a brand-new conversation only (the stranger rule's `{ <being>: { default: true } }`)
+    ...(_obj(ctx.agents) ? { agents: ctx.agents } : {}),
   };
   nextBucket[jid] = entry;
   return { state: next, surface, jid, slug: candidateSlug, entry, isNew: true, changed: true };
