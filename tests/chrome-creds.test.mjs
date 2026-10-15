@@ -7,6 +7,9 @@
 
 import { describe, it, expect } from 'vitest';
 import crypto from 'node:crypto';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, delimiter } from 'node:path';
 import { readChromeCredential } from '../src/tools/chrome-creds.mjs';
 
 const AES_KEY = crypto.randomBytes(32);
@@ -124,8 +127,9 @@ describe('readChromeCredential — the DPAPI prefix strip', () => {
 });
 
 // ── macOS: the Keychain secret → PBKDF2 → AES-128-CBC ('v10', IV = 16 spaces) ──────────────────
-// The fake Keychain hands back a KNOWN secret the way `security -w` prints it (trailing newline);
-// the blobs are real Chrome-mac v10 ciphertexts built with node:crypto from that secret.
+// The fake Keychain hands back a KNOWN secret the way `security -w` prints it (trailing newline),
+// asynchronously like the real read; the blobs are real Chrome-mac v10 ciphertexts built with
+// node:crypto from that secret.
 const MAC_SECRET = 'mac-safe-storage-secret';
 function macV10blob(plaintext, secret = MAC_SECRET) {
   const key = crypto.pbkdf2Sync(secret, 'saltysalt', 1003, 16, 'sha1');
@@ -137,7 +141,7 @@ function makeMacSeams({ secret = MAC_SECRET, rows = [], calls = {} } = {}) {
     platform: 'darwin',
     readFile: () => { throw new Error('Local State is not read on macOS'); },
     runPowerShell: () => { calls.ps = (calls.ps ?? 0) + 1; throw new Error('no PowerShell on macOS'); },
-    readKeychain: () => { calls.keychain = (calls.keychain ?? 0) + 1; return `${secret}\n`; },
+    readKeychain: async () => { calls.keychain = (calls.keychain ?? 0) + 1; return `${secret}\n`; },
     readLogins: async () => rows,
   };
 }
@@ -161,7 +165,7 @@ describe('readChromeCredential — macOS (Keychain + AES-128-CBC)', () => {
 
   it('a throwing or empty Keychain read → null', async () => {
     const seams = makeMacSeams({ rows: macRows });
-    seams.readKeychain = () => { throw new Error('security exit 44'); };
+    seams.readKeychain = async () => { throw new Error('security exit 44'); };
     await expect(readChromeCredential({ profilePath: '/fake/brain', domain: 'classdojo.com' }, seams)).resolves.toBeNull();
     expect(await readChromeCredential({ profilePath: '/fake/brain', domain: 'classdojo.com' }, makeMacSeams({ rows: macRows, secret: '' }))).toBeNull();
   });
@@ -187,5 +191,31 @@ describe('readChromeCredential — macOS (Keychain + AES-128-CBC)', () => {
     const win = { ...makeSeams({ rows: classdojoRows }), readKeychain: () => { keychainReads++; return MAC_SECRET; } };
     expect((await readChromeCredential({ profilePath: 'C:/fake/brain', domain: 'classdojo.com' }, win))?.password).toBe('clsdjo-pass!');
     expect(keychainReads).toBe(0);
+  });
+});
+
+// The REAL default Keychain read, against a fake `security` first on PATH that answers late, the
+// way a pending "allow access" dialog does. The read must yield: a timer set before it fires before
+// it resolves. A synchronous spawn would freeze the event loop — the spine, STOP included — until
+// `security` exits. POSIX shell fake, so not on Windows (the Keychain path is macOS-only anyway).
+describe('readChromeCredential — macOS Keychain read is asynchronous', () => {
+  it.skipIf(process.platform === 'win32')('the event loop keeps running while `security` is pending', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'egpt-fake-security-'));
+    writeFileSync(join(dir, 'security'), `#!/bin/sh\nsleep 0.5\nprintf '%s\\n' '${MAC_SECRET}'\n`, { mode: 0o755 });
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${dir}${delimiter}${savedPath}`;
+    try {
+      const seams = { ...makeMacSeams({ rows: macRows }), readKeychain: undefined };   // → the default read
+      const order = [];
+      const timer = setTimeout(() => order.push('timer'), 50);
+      const got = await readChromeCredential({ profilePath: '/fake/brain', domain: 'classdojo.com' }, seams)
+        .then((r) => { order.push('read'); return r; });
+      clearTimeout(timer);
+      expect(order).toEqual(['timer', 'read']);
+      expect(got).toEqual({ username: 'parent@example.com', password: 'clsdjo-mac-pass!' });
+    } finally {
+      process.env.PATH = savedPath;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

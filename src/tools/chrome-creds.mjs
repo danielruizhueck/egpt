@@ -30,7 +30,7 @@
 import { readFileSync, copyFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, execFile } from 'node:child_process';
 import { createDecipheriv, pbkdf2Sync } from 'node:crypto';
 
 // Hostname of a URL or a bare host string, lowercased; null if there's nothing usable.
@@ -112,13 +112,17 @@ function defaultRunPowerShell(script) {
 }
 
 // Default seam (macOS): the Keychain's "Chrome Safe Storage" secret on stdout. Nothing secret is on
-// the command line and the error carries only the exit code. BOUNDED: the first read by a new
-// caller can raise macOS's "allow access" dialog, and an unanswered dialog must not hold the spine.
+// the command line and the error carries only the exit code. ASYNC and BOUNDED: the first read by a
+// new caller can raise macOS's "allow access" dialog; a synchronous wait would freeze the spine's
+// event loop (STOP included) until it is answered, so the read yields and is killed after 15 s.
 function defaultReadKeychain() {
-  const r = spawnSync('security', ['find-generic-password', '-w', '-s', 'Chrome Safe Storage', '-a', 'Chrome'], { encoding: 'utf8', timeout: 15_000, maxBuffer: 1 << 20 });
-  if (r.error) throw r.error;
-  if (r.status !== 0) throw new Error(`Keychain read failed (security exit ${r.status})`);
-  return r.stdout;
+  return new Promise((resolve, reject) => {
+    execFile('security', ['find-generic-password', '-w', '-s', 'Chrome Safe Storage', '-a', 'Chrome'], { encoding: 'utf8', timeout: 15_000, maxBuffer: 1 << 20 }, (err, stdout) => {
+      if (!err) return resolve(stdout);
+      if (err.killed) return reject(new Error('Keychain read timed out'));
+      reject(typeof err.code === 'number' ? new Error(`Keychain read failed (security exit ${err.code})`) : err);
+    });
+  });
 }
 
 // Default seam: copy the locked Login Data to a temp file and read its `logins` rows.
@@ -152,7 +156,7 @@ async function defaultReadLogins(loginDataPath) {
  * @param {string}   [seams.platform]      default process.platform; 'darwin' takes the Keychain path
  * @param {function} [seams.readFile]      (path) => utf8 string; default node:fs readFileSync
  * @param {function} [seams.runPowerShell] (script) => stdout string; default spawnSync powershell
- * @param {function} [seams.readKeychain]  () => stdout string; default spawnSync security (macOS)
+ * @param {function} [seams.readKeychain]  () => stdout string or Promise of it; default async `security` (macOS)
  * @param {function} [seams.readLogins]    (loginDataPath) => Promise<rows>; default node:sqlite
  * @returns {Promise<{username:string,password:string}|null>}
  */
@@ -171,7 +175,7 @@ export async function readChromeCredential({ profilePath, domain } = {}, {
     let aesKey, decrypt;
     if (platform === 'darwin') {
       // 1–2 (macOS). The Keychain secret, stretched → the 16-byte AES-128-CBC key.
-      const secret = String(readKeychain() ?? '').replace(/\r?\n$/, '');
+      const secret = String((await readKeychain()) ?? '').replace(/\r?\n$/, '');
       if (!secret) return null;
       aesKey = pbkdf2Sync(secret, 'saltysalt', 1003, 16, 'sha1');
       decrypt = decryptMacPassword;
