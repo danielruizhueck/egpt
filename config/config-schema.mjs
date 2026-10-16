@@ -1722,6 +1722,13 @@ export const CONFIG_SCHEMA = {
         OPTIONAL list (operator 2026-10-15) of the spine-executed limbs this
         agent may emit: book, email (top-level book: / email:). Absent = none:
         the verb is refused and logged, never run.
+      public
+        OPTIONAL Boolean (operator 2026-10-15). true = a public-facing agent
+        (edw-marketer): the person in its chat sees only its reply text - no
+        "⏳ Thinking…" placeholder, no persona prefix, no visible signature
+        (the invisible node frame stays), no error line. A failed or empty
+        turn is noticed in admin_channel instead (src/spine/sender.mjs plain
+        branch, src/bridges/persona-wrap.mjs).
       mode
         OPTIONAL (operator 2026-07-25) — THIS agent's own default reply-mode.
         ENUM: on | auto | mute | mention-direct | mention | accum | off

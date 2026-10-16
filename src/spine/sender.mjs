@@ -353,7 +353,10 @@ export function makeOutbound({ bridge, bridgeOf = null, peerMouth = null, onLog 
   };
 }
 
-export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null, labelOf = () => null, agentSignatureOpenOf = () => '', agentSignatureCloseOf = () => '', defaultKey = 'e', peerMouth = null, onUndeliverable = () => {}, onLog = () => {}, now = () => Date.now() } = {}) {
+// publicOf(being) / noticeAdmin({ being, chatId, text }) (2026-10-15): a PUBLIC being
+// (agents.<name>.public) takes the plain branch below, and its error lines go to noticeAdmin
+// (boot: the admin channel) instead of the chat.
+export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null, labelOf = () => null, agentSignatureOpenOf = () => '', agentSignatureCloseOf = () => '', defaultKey = 'e', peerMouth = null, publicOf = () => false, noticeAdmin = async () => {}, onUndeliverable = () => {}, onLog = () => {}, now = () => Date.now() } = {}) {
   if (!bridge) throw new Error('createSender: bridge is required');
   const textOf = (v) => (typeof v === 'string' ? v : v?.text ?? '');
   const outbound = makeOutbound({ bridge, bridgeOf, peerMouth, onLog });
@@ -388,20 +391,27 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
       // AND IT IS NEVER ROUTED THROUGH THE PEER MOUTH: the point of mode:auto is that the reply
       // looks like the OPERATOR typed it, on the operator's own account. Saying it from the
       // second account would defeat exactly the thing the mode exists for.
-      if (auto) {
+      // A PUBLIC being (2026-10-15) takes this same plain path: the lead sees only the reply. Its
+      // `persona` rides the send so persona-wrap drops the stamp and visible layers; what would
+      // have been an error line in the chat goes to noticeAdmin instead.
+      const isPublic = publicOf(being) === true;
+      if (auto || isPublic) {
         // sendResult (operator 2026-08-10, voice-reply-as-a-reply-to-the-text chunk): the
         // delivered message's own confirmedId, exposed so a caller can thread a FOLLOW-UP
         // send (the synthesized voice note) as a reply TO this text once it's out.
         let sendResult = null;
+        const notice = async (text) => { if (isPublic) { try { await noticeAdmin({ being, chatId, text }); } catch (e) { onLog(`sender: admin notice failed — ${e?.message ?? e}`); } } };
         return {
           activate() {},
           update() {},
-          async finish(reply, { surface = true } = {}) {
+          async finish(reply, { surface = true, commands = null } = {}) {
             const t = textOf(reply);
-            if (!surface || !t.trim()) return;          // withheld / empty → post nothing
-            sendResult = await deliverHere(t, { replyTo });   // plain text: no bodyEmoji/label, no end-marker
+            if (surface && t.trim()) { sendResult = await deliverHere(t, isPublic ? { replyTo, persona: being } : { replyTo }); return; }   // plain text: no bodyEmoji/label, no end-marker
+            // withheld / empty → post nothing; a public being's empty turn is an admin notice
+            if (surface) await notice(noReplyMark());
+            else if (!t.trim() && !commands?.length) await notice(BRIDGE_SILENCE);
           },
-          async fail() { /* a human doesn't post a typing/failure scaffold — stay silent */ },
+          async fail(e) { await notice(`turn failed: ${e?.message ?? e}`); },   // a human doesn't post a failure scaffold
           get confirmedId() { return sendResult?.confirmedId ?? null; },
         };
       }

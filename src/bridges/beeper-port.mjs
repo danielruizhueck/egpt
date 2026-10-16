@@ -89,7 +89,7 @@ export async function createBeeperBridgePort(opts = {}, { start = startBeeperBri
   // layer (per-being, from opts.agentSig*), around the stamped core. The composition lives in the
   // shared persona-wrap module (used identically by shell-port and by the 👂 echo one layer down);
   // this closure just binds this node's bridge-signature layer.
-  const wrapPersona = makeWrapPersona({ bridgeSignatureOpen, bridgeSignatureClose, nodeName });
+  const wrapPersona = makeWrapPersona({ bridgeSignatureOpen, bridgeSignatureClose, nodeName, plainOf: opts.plainOf });   // plainOf: a public being's sends are unstamped (persona-wrap.mjs)
   const real = await start({
     ...rest,
     // Forward inbound to the spine. This resolves when the message's TURN completes

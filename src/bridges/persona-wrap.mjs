@@ -72,11 +72,14 @@ const isMeshEnvelope = (t) => {
  *   node id — ALWAYS, except around a mesh envelope. `o` carries bodyEmoji, label, the inner
  *   agentSigOpen/agentSigClose, and `persona`: the key of the being speaking, if one is.
  */
-export function makeWrapPersona({ bridgeSignatureOpen = '', bridgeSignatureClose = '', nodeName = '' } = {}) {
+// plainOf(persona) (2026-10-15): true for a PUBLIC being (agents.<name>.public) — its sends carry
+// the text alone: no stamp, no visible layers, only the invisible structural frame.
+export function makeWrapPersona({ bridgeSignatureOpen = '', bridgeSignatureClose = '', nodeName = '', plainOf = () => false } = {}) {
   return (o, text) => {
     // Nothing to sign is not a message: an empty body (the mesh origin mirror opens its stream
     // with '') must stay empty, never become a signature with no content under it.
     if (!String(text ?? '').trim()) return text;
+    if (o.persona && plainOf(o.persona) === true) return stripNodeSignature(text) + encodeNodeSignature(nodeName, o.persona);
     const core = personaStamp(o.bodyEmoji, o.label, text);
     if (isMeshEnvelope(core)) return core;        // transport, not a surface send → never signed
     // skipSignature (operator 2026-10-04, the /send relay) — post back AS THE OPERATOR with NO node

@@ -1229,6 +1229,8 @@ export async function boot({
     const a = agents()[String(being ?? '').toLowerCase()];
     return (a && typeof a === 'object' && a.name) ? String(a.name) : '';
   };
+  // agents.<name>.public (2026-10-15): the lead sees only this being's reply text (sender + persona-wrap).
+  const isPublicAgent = (being) => agents()[String(being ?? '').toLowerCase()]?.public === true;
   // Named once at boot, not per turn: an agent that can take a turn (it names a `configuration`)
   // but declares no `name` will stamp blank, and silence about that is what let the key stand in.
   for (const [k, a] of Object.entries(agents())) {
@@ -2101,6 +2103,7 @@ export async function boot({
     bridgeSignatureOpen: cfg.bridge_signature_open ?? '',
     bridgeSignatureClose: cfg.bridge_signature_close ?? '',
     nodeName: node_name,                  // the STRUCTURAL layer — invisible, mandatory, asserted above
+    plainOf: isPublicAgent,               // agents.<name>.public: that being's sends carry no stamp or visible layer
     transcriptionOpen: cfg.transcription_open ?? '',
     transcriptionClose: cfg.transcription_close ?? '',
     wakeWords,                            // the persona agent's OWN name + handles only — nothing injected (operator 2026-07-09)
@@ -2878,7 +2881,11 @@ export async function boot({
     // audit poster (forward ref to logToGroup below, like currentRoomOf above: only fires at reply
     // time). log_to_group unset ⇒ logToGroup is a no-op post and the daemon line (sender's onLog) is
     // all there is — no crash, no second channel.
+    // publicOf / noticeAdmin (2026-10-15): a public being's lead sees only its reply; its errors go
+    // to admin_channel through noticeToChannel (forward ref, like logToGroup: fires at reply time).
     sender: createSender({ bridge: shellAwareBridge, bridgeOf: shellAwareBridgeOf, bodyEmojiOf, labelOf, agentSignatureOpenOf, agentSignatureCloseOf, defaultKey, peerMouth,
+      publicOf: isPublicAgent,
+      noticeAdmin: ({ being, chatId, text }) => noticeToChannel({ configKey: 'admin_channel', text: `${being} in ${chatId}: ${text}`, what: 'public-error', tag: 'public' }),
       onUndeliverable: async ({ being, chatId, origin, reason }) => { try { await logToGroup(`⚠ reply to ${chatId} (${being}) undeliverable: ${reason}`); } catch { /* best-effort: a failed notice never affects the reply */ } },
       onLog: mouthLog, now }),
     // The real cadence registry the spine's tick() drives. The heartbeat LOADER
