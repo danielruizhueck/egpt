@@ -79,6 +79,8 @@ import { createLoginLimb } from './login.mjs';
 import { readChromeCredential } from '../tools/chrome-creds.mjs';
 import { createBeingLink } from './being-link.mjs';
 import { createReplyActions } from './reply-actions.mjs';
+import { createEmail } from './email.mjs';
+import { createBookLimb } from './book.mjs';
 import { createAdvice } from './advice.mjs';
 import { createMedia } from './media.mjs';
 import { createTranscription } from './transcription.mjs';
@@ -1011,6 +1013,7 @@ export async function boot({
   setInterval: setIntervalFn = globalThis.setInterval,       // the spine tick-timer seam; injected so a test can observe the effective cadence
   clearInterval: clearIntervalFn = globalThis.clearInterval,
   setTimeout: setTimeoutFn = globalThis.setTimeout,          // the KILL SWITCH warning's cap seam (below); injected so a test can drive the 3s timer instead of waiting for it
+  fetch: fetchFn = (...a) => globalThis.fetch(...a),         // the /book calendar feed + SES seam; tests inject a fake so no request leaves
 } = {}) {
   // === THE KILL SWITCH (operator 2026-07-25) — THE FIRST THING boot DOES ===============
   // "if a file named STOP exists in .egpt it *also* stops". Checked before the config is
@@ -3277,7 +3280,11 @@ export async function boot({
   // the operator's answer can never be matched back to it (src/spine/advice.mjs's header, and
   // connectionHolding's third source above, which is what makes a NAMED channel resolvable).
   const advice = createAdvice({ bridge, bridgeOf: rawBridgeOf, getConfig, onLog: (m) => log.line?.(`[advice] ${m}`) });
-  const actions = createReplyActions({ bridge, bridgeOf: rawBridgeOf, peerMouth, bodyEmojiOf, labelOf, resolveConvDir, askAdvice: (a) => advice.ask(a), defaultKey, onLog: (m) => log.line?.(`[actions] ${m}`) });
+  // /email + /book (2026-10-15): spine-executed, enabled per agent (agents.<name>.actions); the
+  // outcome returns to the being through the background wake (spine.wakeOnBackground).
+  const mail = createEmail({ getConfig, fetch: fetchFn, now, log: (m) => log.line?.(`[email] ${m}`) });
+  const bookLimb = createBookLimb({ getConfig, fetch: fetchFn, ses: mail.ses, missingMail: mail.missing, now, log: (m) => log.line?.(`[book] ${m}`) });
+  const actions = createReplyActions({ bridge, bridgeOf: rawBridgeOf, peerMouth, bodyEmojiOf, labelOf, resolveConvDir, askAdvice: (a) => advice.ask(a), limbs: { book: bookLimb.book, email: mail.email }, actionsOf: (being) => getConfig()?.agents?.[being]?.actions, wake: (r) => spineLate?.wakeOnBackground(r), defaultKey, onLog: (m) => log.line?.(`[actions] ${m}`) });
 
   // Heartbeats are DECLARATIVE now (operator 2026-07-01): the loader collects
   // them from the node config.heartbeats block + every conversation/room entity's

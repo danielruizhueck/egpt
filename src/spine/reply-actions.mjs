@@ -42,7 +42,10 @@
 //   - /edit only touches a message the bridge itself SENT (wasSentByUs);
 //   - there is NO delete limb: a being never removes a message. If something
 //     cannot be sent, or there is nothing to say, it SAYS so (operator 2026-08-24).
-//   - an execution error is logged, never crashes the turn.
+//   - an execution error is logged, never crashes the turn;
+//   - /book and /email run ONLY for a being whose agents.<name>.actions lists them, and reach
+//     only config-fixed recipients (src/spine/book.mjs, src/spine/email.mjs). Their outcome
+//     returns to the being as a wake turn (spine.wakeOnBackground).
 //
 // EMIT SYNTAX (documented for E in config/skeletons/room/10-actions.md — a SPINE
 // CONTRACT that feeds EVERY being independent of identity, operator 2026-07-06):
@@ -52,6 +55,8 @@
 //   /media <path> [caption]    send a file from this conversation's folder (relative path)
 //   /edit #<id> <text>         edit one of your OWN earlier messages
 //   /ask <question>            (mode: auto) consult the operator in the advice channel
+//   /book <YYYY-MM-DD> <HH:MM> <summary>   book a demo on the team calendar (enabled agents only)
+//   /email <text>              send a lead summary to the team (enabled agents only)
 import { resolve as resolvePath, relative as relPath, isAbsolute } from 'node:path';
 import { realpathSync } from 'node:fs';
 // WHICH CONNECTION AN OUTBOUND GOES OUT ON — the ONE resolver (sender.mjs makeOutbound), not a
@@ -64,7 +69,8 @@ import { makeOutbound } from './sender.mjs';
 // Exported so tests/skeletons.test.mjs can hold the shipped actions CARD to it. A card
 // advertising a verb that is not in here is worse than a missing card: the model emits
 // the line, the parser refuses it, and it is posted to the chat as literal prose.
-export const ACTION_VERBS = new Set(['react', 'reply', 'media', 'edit', 'ask']);
+export const ACTION_VERBS = new Set(['react', 'reply', 'media', 'edit', 'ask', 'book', 'email']);
+const PLACEHOLDER_ONLY = /^(?:<[^<>]*>\s*)+$/;
 const ACTION_LINE = /^\/([a-z]+)(?:\s+([\s\S]*))?$/i;
 
 // A tiny word→emoji alias table so `/react like` works as well as `/react 👍`.
@@ -198,6 +204,17 @@ function parseOne(verb, args, ev, opts = {}) {
       if (!raw) return { ok: false, reason: 'ask: empty question' };
       if (/[<>]/.test(raw)) return { ok: false, reason: 'ask: placeholder, not a real question' };
       return { ok: true, action: { type: 'ask', chatId, question: raw } };
+    }
+    case 'book': {
+      // <YYYY-MM-DD> <HH:MM> <summary>. An unreadable date still runs, so its 'failed' reaches the being.
+      if (!raw || PLACEHOLDER_ONLY.test(raw)) return { ok: false, reason: 'book: empty or placeholder' };
+      const m = /^(\d{4}-\d{2}-\d{2})[ T](\d{1,2}:\d{2})(?:\s+([\s\S]*))?$/.exec(raw);
+      return { ok: true, action: { type: 'book', chatId, date: m?.[1] ?? null, time: m?.[2] ?? null, summary: (m ? m[3] ?? '' : raw).trim() } };
+    }
+    case 'email': {
+      // <text> — the whole line is the body; recipients and subject are config's.
+      if (!raw || PLACEHOLDER_ONLY.test(raw)) return { ok: false, reason: 'email: empty or placeholder' };
+      return { ok: true, action: { type: 'email', chatId, text: raw } };
     }
     case 'media': {
       // <path> [caption]. A leading "quoted path" tolerates a filename with spaces.
@@ -409,7 +426,10 @@ export function partialProse(partial, ev = {}, opts = {}) {
 // wired to more than one Beeper connection runs a being's own limbs (react/reply/media/edit)
 // against ITS OWN bridge. Absent, or returning nullish for a given being, falls straight back
 // to the single `bridge` below — BYTE-IDENTICAL to before for every existing caller.
-export function createReplyActions({ bridge, bridgeOf = null, peerMouth = null, bodyEmojiOf = () => null, labelOf = () => null, resolveConvDir = async () => null, askAdvice = null, defaultKey = 'e', onLog = () => {} } = {}) {
+// limbs / actionsOf / wake (2026-10-15, /book + /email): limbs = { book, email } — each
+// (action, ev, being) -> { outcome, detail }; actionsOf(being) -> that agent's `actions` list;
+// wake = spine.wakeOnBackground, which carries the outcome back to the being as a turn.
+export function createReplyActions({ bridge, bridgeOf = null, peerMouth = null, bodyEmojiOf = () => null, labelOf = () => null, resolveConvDir = async () => null, askAdvice = null, limbs = {}, actionsOf = () => null, wake = null, defaultKey = 'e', onLog = () => {} } = {}) {
   if (!bridge) throw new Error('createReplyActions: bridge is required');
   const outbound = makeOutbound({ bridge, bridgeOf, peerMouth, onLog });
   // …AND THE CHAT IS PART OF THE QUESTION (operator 2026-09-11, sharpened 2026-09-12). This site
@@ -451,6 +471,25 @@ export function createReplyActions({ bridge, bridgeOf = null, peerMouth = null, 
     return !!ok;
   }
 
+  // /book, /email: refused unless enabled for this being; the outcome is recorded on the action
+  // and handed back through `wake`. Not awaited: this turn holds the FIFO the wake turn queues on.
+  async function runGated(a, ev, being) {
+    const enabled = actionsOf(being);
+    if (!Array.isArray(enabled) || !enabled.includes(a.type)) {
+      onLog(`${a.type}: not enabled for ${being} (agents.${being}.actions) — refused`);
+      return false;
+    }
+    const r = limbs?.[a.type] ? await limbs[a.type](a, ev, being) : { outcome: 'not-configured' };
+    a.outcome = r?.outcome ?? 'failed';
+    const what = a.type === 'book' && a.date ? `/book ${a.date} ${a.time}` : `/${a.type}`;
+    const result = `${what} → ${a.outcome}${r?.detail ? `: ${r.detail}` : ''}`;
+    if (typeof wake !== 'function') { onLog(`${a.type}: no wake wired — result not returned to ${being}: ${result}`); return true; }
+    Promise.resolve()
+      .then(() => wake({ being, surface: ev.surface, chatId: ev.chatId, summaries: [result] }))
+      .catch((e) => onLog(`${a.type}: result wake failed: ${e?.message ?? e}`));
+    return true;
+  }
+
   // Returns whether the limb LANDED. The SAME truthiness every branch already logged on, promoted
   // to a return value (operator 2026-09-01) so the caller can record in the transcript what the
   // limb DID rather than what was merely attempted — see execute's `ran`.
@@ -485,6 +524,8 @@ export function createReplyActions({ bridge, bridgeOf = null, peerMouth = null, 
         return !!ok;
       }
       case 'media': return runMedia(a, ev, being);
+      case 'book':
+      case 'email': return runGated(a, ev, being);
       case 'edit': {
         // Made by whoever says this being's lines in this chat, on ITS OWN copy of the target
         // (sender.mjs makeOutbound `say`) — and only if THAT account sent it: the fail-closed check

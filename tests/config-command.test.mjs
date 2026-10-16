@@ -276,3 +276,22 @@ describe('/config — sandbox_oauth_token is redacted by the EXISTING key-name r
     expect(sent[0].text).toContain('<redacted>');
   });
 });
+
+// ── book.ics_url (2026-10-15): the calendar's secret iCal address is a credential, so the
+//    redactor names it — /config never shows it, dumped or read. ──
+describe('/config — book.ics_url is redacted', () => {
+  const URL_ = 'https://calendar.google.com/calendar/ical/x/private-SUPERSECRETICS/basic.ics';
+  it('a bare /config dump never leaks the secret iCal address', async () => {
+    const { cmds, sent } = harness({ config: { node_name: 'kg', book: { ics_url: URL_, calendar_email: 'demos@x' } }, configPath: await tmpConfigPath() });
+    await cmds.run({ body: '/config', chatId: '!self', authorized: true });
+    expect(sent[0].text).not.toContain('SUPERSECRETICS');
+    expect(sent[0].text).toContain('demos@x');
+  });
+
+  it('/config book.ics_url (GET) shows <redacted>', async () => {
+    const { cmds, sent } = harness({ config: { book: { ics_url: URL_ } }, configPath: await tmpConfigPath() });
+    await cmds.run({ body: '/config book.ics_url', chatId: '!self', authorized: true });
+    expect(sent[0].text).not.toContain('SUPERSECRETICS');
+    expect(sent[0].text).toContain('<redacted>');
+  });
+});

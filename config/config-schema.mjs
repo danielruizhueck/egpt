@@ -1718,6 +1718,10 @@ export const CONFIG_SCHEMA = {
         true, e.g. one dispatch.stranger_agent seeded) loads NO heartbeats —
         neither its rungs' blocks nor its heartbeats/*.yaml files are read.
         See src/spine/config-resolver.mjs.
+      actions
+        OPTIONAL list (operator 2026-10-15) of the spine-executed limbs this
+        agent may emit: book, email (top-level book: / email:). Absent = none:
+        the verb is refused and logged, never run.
       mode
         OPTIONAL (operator 2026-07-25) — THIS agent's own default reply-mode.
         ENUM: on | auto | mute | mention-direct | mention | accum | off
@@ -2938,6 +2942,67 @@ export const CONFIG_SCHEMA = {
         Per-domain overrides for sites the generic form detector misreads:
         { "<domain>": { url: "<login URL>", submit: "<CSS selector of the submit control>" } }.
         Added as needed; the generic heuristics handle the common case.
+  `,
+
+  book: `
+    The /book limb (operator 2026-10-15; src/spine/book.mjs). A being whose
+    agents.<name>.actions lists book may emit  /book <YYYY-MM-DD> <HH:MM> <summary>.
+    The spine reads the team calendar's SECRET iCal address; a free slot is booked
+    by an iCalendar invitation (METHOD:REQUEST) to calendar_email, sent over the
+    email: SES path; a taken one returns the nearest free slots inside working
+    hours. Outcome booked | busy (+ slots) | not-configured | failed, returned to
+    the being as a wake turn (spine.wakeOnBackground). A missing ics_url,
+    calendar_email, email.from or SES key = not-configured, one log line.
+
+    KEYS:
+      ics_url
+        SECRET. The calendar's "Secret address in iCal format" (Google Calendar,
+        the calendar's settings, Integrate calendar). Spine-only: never logged,
+        returned or shown to a being; /config redacts it. Use the calendar the
+        invitations land in (calendar_email's own), so a booked demo reads busy.
+      calendar_email
+        The attendee every invitation goes to. Fixed here; the being never
+        chooses it.
+      timezone
+        DEFAULT: America/Caracas. The IANA zone the requested time, the working
+        hours, and the feed's all-day/floating events are read in.
+      duration_minutes
+        DEFAULT: 30.
+      working_hours
+        DEFAULT: { days: [mon, tue, wed, thu, fri], start: "08:00", end: "17:00" }
+        A request outside them is answered busy, with the nearest free slots.
+
+    FEED: VEVENT DTSTART/DTEND in UTC, TZID and all-day forms; STATUS:CANCELLED and
+    TRANSP:TRANSPARENT are skipped. RRULE FREQ=DAILY|WEEKLY with INTERVAL / BYDAY /
+    UNTIL / COUNT / WKST is expanded; any other rule is busy at its first instance
+    only. EXDATE and moved instances (RECURRENCE-ID) leave the original busy.
+  `,
+
+  email: `
+    The Amazon SES path (SES v2 SendEmail, SigV4; src/spine/email.mjs) and the
+    /email limb on it (operator 2026-10-15). A being whose agents.<name>.actions
+    lists email may emit  /email <text>: the spine sends <text> FROM from TO the
+    fixed to: list, subject = subject_prefix + the chat's name. The being never
+    chooses recipients, sender or subject. /book's invitation rides the same path.
+    Outcome sent | not-configured | failed, returned to the being as a wake turn.
+
+    KEYS:
+      region
+        DEFAULT: us-east-1.
+      from
+        The verified SES sender: "Name <addr@domain>" (ASCII name) or a bare
+        address. Also the ORGANIZER of /book invitations.
+      to
+        The /email recipient list. Empty = not-configured.
+      subject_prefix
+        DEFAULT: "[eGPT]".
+      aws_access_key_id
+        SECRET (/config redacts it). An IAM key allowed ses:SendEmail only.
+      aws_secret_access_key
+        SECRET.
+      credentials_file
+        Instead of the two keys: a path to an AWS shared-credentials file with
+        aws_access_key_id = ... and aws_secret_access_key = ... lines.
   `,
 
   node_role: `

@@ -3942,7 +3942,7 @@ export function createCommands({
   // `allowed_users` are the operator's email and phone numbers — not secrets, but a config dump
   // exists to check values like default_node, not to post a contact list into a group.
   // `account` is ANCHORED so `peer_nodes` ([kg, do] — not sensitive, and worth seeing) stays.
-  const CONFIG_REDACT_RE = /token|key|secret|password|^account$|allowed_users/i;
+  const CONFIG_REDACT_RE = /token|key|secret|password|^account$|allowed_users|ics_url/i;   // ics_url: book's secret iCal address
   function redactConfigValue(value) {
     if (Array.isArray(value)) return value.map(redactConfigValue);
     if (value && typeof value === 'object') {
