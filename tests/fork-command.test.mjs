@@ -797,7 +797,7 @@ describe('/send — relays the replied-to message back to the original (alias OR
     await cmds.run({ chatId: SPLIT_CHAT, surface: 'whatsapp', msgId: 'snd1', replyToId: 'M1', body: '/send' });
     expect(calls.post).toHaveLength(1);
     expect(calls.post[0].chatId).toBe(C_CHAT);
-    expect(calls.post[0].text).toBe('la respuesta elegida');
+    expect(calls.post[0].text).toBe('↪ from egpt split Proyecto X:\nla respuesta elegida');   // send.origin auto names the split
   });
 
   it('post_back_from secondary: resolves the ORIGINAL\'s secondary room by title and posts THERE (Rodz), not the primary id', async () => {
@@ -964,6 +964,113 @@ describe('/send — relays the live message, line breaks intact', () => {
     const { cmds, calls } = harness({ state: stateWithJoin(), rooms: roomWith(JOIN_CHAT, TRANSCRIPT), config: sendCfg(), messages: [{ id: '26874', text: 'x' }] });
     await cmds.run({ ...EV, replyToId: '26875' });
     expect(calls.post[0].text).toBe(FLAT.replace('🐶 E: ', '').replace(' 🏰<kg>', ''));
+  });
+});
+
+// ── /send names the side group it came from (config.send.origin, 2026-10-16) ───────────────────────
+describe('/send — origin prefix (send.origin auto|always|never, send.origin_template)', () => {
+  const PHRASE = 'dame un segundo';
+  const originCfg = (send = {}) => {
+    const c = cfg({ send });
+    return { ...c, group_title: '{group}-{name}', join: { ...c.join, triggers: [PHRASE] }, split: { ...c.split, triggers: [PHRASE] } };
+  };
+  const inC = (body, over = {}) => ({ chatId: C_CHAT, surface: 'whatsapp', msgId: 'cmd1', chatName: 'SI+EduWeb', senderName: 'An', isSender: true, authorized: true, raw: { chatType: 'group' }, body, ...over });
+  const sendFrom = (chatId, over = {}) => ({ chatId, surface: 'whatsapp', msgId: 'snd1', replyToId: 'M1', body: '/send', ...over });
+  const relayed = (calls) => calls.post.filter((p) => p.chatId === C_CHAT);
+
+  async function joined({ send, discreet = false } = {}) {
+    const h = harness({ config: originCfg(send), rooms: roomWith(JOIN_CHAT) });
+    if (discreet) await h.cmds.runPhrase(inC(PHRASE), 'join');
+    else await h.cmds.run(inC('/join nue11'));
+    return h;
+  }
+  async function splitted({ send, discreet = false } = {}) {
+    const h = harness({ config: originCfg(send), rooms: roomWith(SPLIT_CHAT), createChatId: () => SPLIT_CHAT_FULL });
+    if (discreet) await h.cmds.runPhrase(inC(PHRASE), 'split');
+    else await h.cmds.run(inC('/split nue11'));
+    return h;
+  }
+
+  it('a normal /join nue11: the relay starts with "↪ from SI+EduWeb-nue11:" (title from the stored alias)', async () => {
+    const { cmds, calls } = await joined();
+    await cmds.run(sendFrom(JOIN_CHAT));
+    expect(relayed(calls)).toHaveLength(1);
+    expect(relayed(calls)[0].text).toBe('↪ from SI+EduWeb-nue11:\nla respuesta elegida');
+  });
+
+  it('the live chat name wins over the stored title', async () => {
+    const { cmds, calls } = await joined();
+    await cmds.run(sendFrom(JOIN_CHAT, { chatName: 'renamed room' }));
+    expect(relayed(calls)[0].text).toBe('↪ from renamed room:\nla respuesta elegida');
+  });
+
+  it('a discreet (phrase) /join stores discreet: true, and origin auto adds no prefix', async () => {
+    const { cmds, calls, getState } = await joined({ discreet: true });
+    expect(getState().contacts.whatsapp[JOIN_CHAT].discreet).toBe(true);
+    await cmds.run(sendFrom(JOIN_CHAT));
+    expect(relayed(calls)[0].text).toBe('la respuesta elegida');
+  });
+
+  it('origin never: no prefix', async () => {
+    const { cmds, calls } = await joined({ send: { origin: 'never' } });
+    await cmds.run(sendFrom(JOIN_CHAT));
+    expect(relayed(calls)[0].text).toBe('la respuesta elegida');
+  });
+
+  it('origin always: prefix even when discreet', async () => {
+    const { cmds, calls } = await joined({ send: { origin: 'always' }, discreet: true });
+    await cmds.run(sendFrom(JOIN_CHAT));
+    expect(relayed(calls)[0].text).toMatch(/^↪ from SI\+EduWeb-[0-9a-f]{5}:\nla respuesta elegida$/);
+  });
+
+  it('an empty origin_template: no prefix', async () => {
+    const { cmds, calls } = await joined({ send: { origin: 'always', origin_template: '' } });
+    await cmds.run(sendFrom(JOIN_CHAT));
+    expect(relayed(calls)[0].text).toBe('la respuesta elegida');
+  });
+
+  it('a custom origin_template fills {group}; an invalid origin falls back to auto', async () => {
+    const { cmds, calls } = await joined({ send: { origin: 'sometimes', origin_template: '[{group}] ' } });
+    await cmds.run(sendFrom(JOIN_CHAT));
+    expect(relayed(calls)[0].text).toBe('[SI+EduWeb-nue11] la respuesta elegida');
+  });
+
+  it('a normal /split: prefixed with the split group\'s title', async () => {
+    const { cmds, calls, getState } = await splitted();
+    expect(getContact(getState(), 'whatsapp', SPLIT_CHAT).entry.discreet).toBeUndefined();
+    await cmds.run(sendFrom(SPLIT_CHAT));
+    expect(relayed(calls)[0].text).toBe('↪ from SI+EduWeb-nue11:\nla respuesta elegida');
+  });
+
+  it('a discreet (phrase) /split stores discreet: true beside parent_chat; auto adds no prefix', async () => {
+    const { cmds, calls, getState } = await splitted({ discreet: true });
+    const entry = getContact(getState(), 'whatsapp', SPLIT_CHAT).entry;
+    expect(entry.parent_chat).toBe(C_CHAT);
+    expect(entry.discreet).toBe(true);
+    await cmds.run(sendFrom(SPLIT_CHAT));
+    expect(relayed(calls)[0].text).toBe('la respuesta elegida');
+  });
+
+  it('a room made before the flag: a random token in the title\'s {name} slot reads as discreet', async () => {
+    const legacy = (transcript) => {
+      const st = seedState();
+      return aliasContact(st, 'whatsapp', JOIN_CHAT, getContact(st, 'whatsapp', C_CHAT).jid, { transcript });
+    };
+    const a = harness({ config: originCfg(), state: legacy('SI+EduWeb-3fa9c'), rooms: roomWith(JOIN_CHAT) });
+    await a.cmds.run(sendFrom(JOIN_CHAT));
+    expect(a.calls.post[0].text).toBe('la respuesta elegida');
+    const b = harness({ config: originCfg(), state: legacy('SI+EduWeb-3fa9c 1048-10042026'), rooms: roomWith(JOIN_CHAT) });
+    await b.cmds.run(sendFrom(JOIN_CHAT));
+    expect(b.calls.post[0].text).toBe('la respuesta elegida');
+    const c = harness({ config: originCfg(), state: legacy('SI+EduWeb-emely'), rooms: roomWith(JOIN_CHAT) });
+    await c.cmds.run(sendFrom(JOIN_CHAT));
+    expect(c.calls.post[0].text).toBe('↪ from SI+EduWeb-emely:\nla respuesta elegida');
+  });
+
+  it('no title anywhere: no prefix', async () => {
+    const { cmds, calls } = harness({ config: originCfg(), state: stateWithJoin(), rooms: roomWith(JOIN_CHAT) });
+    await cmds.run(sendFrom(JOIN_CHAT));
+    expect(calls.post[0].text).toBe('la respuesta elegida');
   });
 });
 

@@ -3114,6 +3114,15 @@ export const CONFIG_SCHEMA = {
                       'primary' (the operator's OWN account; the DEFAULT) posts so it appears from the
                       operator; 'secondary' (the mouth) makes it appear from the bot's secondary
                       account. Unset/invalid → primary.
+      origin:         whether the relay says which side group it came from (2026-10-16).
+                      ENUM: auto | always | never. DEFAULT auto (also for an invalid value).
+                      auto = prefix origin_template unless the side group is DISCREET (made by a
+                      join/split phrase trigger, stored as discreet: true on its conversations-state
+                      entry; a room made before that flag counts as discreet when its title's {name}
+                      slot is a 5-hex random token). always = prefix even when discreet. never = no
+                      prefix.
+      origin_template: the prefix; {group} = the side group's title (live chat name, else the stored
+                      title). DEFAULT "↪ from {group}:\\n". "" = no prefix.
       triggers:       OPTIONAL list of extra phrases that invoke /send; the '/'-word is always a
                       trigger. A message that EQUALS one of these (trimmed, case-insensitive) runs
                       /send. Operator-only, EXACT whole-message match only (never prefix/contains).

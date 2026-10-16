@@ -478,6 +478,9 @@ export const GROUP_TITLE_DEFAULT = 'egpt {name} {group}';
 // account (primary) — /send relays as the operator, who typed it (operator 2026-10-04). The config
 // override config.send.post_back_from='secondary' still routes via the mouth when set.
 export const SEND_POST_BACK_FROM_DEFAULT = 'primary';
+// config.send.origin (auto | always | never) and config.send.origin_template ({group} = side group title).
+export const SEND_ORIGIN_DEFAULT = 'auto';
+export const SEND_ORIGIN_TEMPLATE_DEFAULT = '↪ from {group}:\n';
 // config.join.opener / config.split.opener (a {group}=parent-chat-title template) — the one message
 // posted into the freshly-created side-group FROM RODZ so the otherwise-empty group SURFACES in Beeper
 // (Beeper hides a chat with no messages — verified live). These are the small built-in fallbacks when
@@ -3391,9 +3394,18 @@ export function createCommands({
   // edits to an empty string.
   const placeholderOf = (block, dflt) => (block && typeof block.placeholder === 'string' && block.placeholder.trim()) ? block.placeholder : dflt;
   // config.group_title ({group}=parent chat name, {name}=the <name> arg), with the built-in fallback.
+  const groupTitleTpl = () => ((typeof cfg().group_title === 'string' && cfg().group_title.trim()) ? cfg().group_title : GROUP_TITLE_DEFAULT);
   const groupTitleOf = (groupName, name) =>
-    ((typeof cfg().group_title === 'string' && cfg().group_title.trim()) ? cfg().group_title : GROUP_TITLE_DEFAULT)
-      .replaceAll('{group}', String(groupName ?? '')).replaceAll('{name}', String(name ?? ''));
+    groupTitleTpl().replaceAll('{group}', String(groupName ?? '')).replaceAll('{name}', String(name ?? ''));
+  // A side group made before the `discreet` flag: its title's {name} slot holds a randomGroupToken
+  // (plus uniqueTitle's optional " HHMM-MMDDYYYY"). A typed 5-hex name also matches; that only drops the prefix.
+  const titleLooksDiscreet = (title) => {
+    const tpl = groupTitleTpl();
+    if (!title || !tpl.includes('{name}')) return false;
+    const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const body = tpl.split('{name}').map((p) => p.split('{group}').map(esc).join('.*')).join('[0-9a-f]{5}');
+    return new RegExp(`^${body}( \\d{4}-\\d{8})?$`).test(String(title));
+  };
   // config.join.opener / config.split.opener ({group}=parent chat title), with the built-in fallback —
   // the message posted into the new side-group so it surfaces in Beeper (see postOpener below).
   const openerOf = (block, dflt, groupName) =>
@@ -3640,7 +3652,7 @@ export function createCommands({
     //       transcript key; join_name/join_by find this room for the next /join of the same name).
     //       null → createGroup gave no chatId: abort, placeholder NOT edited, nothing posted.
     const participantIDs = [...new Set([rodz.rodzUserId, ...(invitee ? [invitee] : [])])];
-    const aliased = await createAliasedSideGroup(ev, surface, title, rodz.accountID, participantIDs, '/join', { join_name: key, ...(ev.senderName ? { join_by: ev.senderName } : {}), ...(invitee ? { join_by_id: invitee } : {}) });
+    const aliased = await createAliasedSideGroup(ev, surface, title, rodz.accountID, participantIDs, '/join', { join_name: key, ...(discreet ? { discreet: true } : {}), ...(ev.senderName ? { join_by: ev.senderName } : {}), ...(invitee ? { join_by_id: invitee } : {}) });
     if (!aliased) return;
     const { chatId: joinChatId, primaryJid } = aliased;
     // (c) EDIT the operator's /join message into the placeholder (raw, no persona; a reply for anyone
@@ -3872,7 +3884,7 @@ export function createCommands({
     const ensured = ensureContact(state, surface, splitChatId, { pushedName: title, slugHint: `egpt-split-${cSlug}` });
     state = ensured.state;
     const splitConvDir = slugDir(surface, ensured.slug);
-    state = patchContact(state, surface, splitChatId, { parent_chat: ev.chatId });
+    state = patchContact(state, surface, splitChatId, { parent_chat: ev.chatId, ...(discreet ? { discreet: true } : {}) });
     // (c) COPY each resident being's thread into the split conversation as a NEW, DIVERGING thread.
     //     The residents + their source thread ids come off the ORIGINAL entry (read fresh). For each:
     //     mint a newThreadId, TRANSFORM-copy the source jsonl into the new thread's store at the
@@ -3944,6 +3956,19 @@ export function createCommands({
     const body = htmlToMarkdown(live?.text) || (text ? bodyForMessageId(text, ev.replyToId) : null);
     const cleaned = body ? cleanQuotedBody(body) : null;
     if (!cleaned) { await send?.(ev.chatId, '/send: nothing to send — reply to a message that has text'); return; }
+    // ORIGIN (2026-10-16): name the side group, unless send.origin is never, or auto and the group is discreet.
+    const om = String(cfg().send?.origin ?? '').trim().toLowerCase();
+    const origin = ['auto', 'always', 'never'].includes(om) ? om : SEND_ORIGIN_DEFAULT;
+    const originTpl = typeof cfg().send?.origin_template === 'string' ? cfg().send.origin_template : SEND_ORIGIN_TEMPLATE_DEFAULT;
+    let prefix = '';
+    if (origin !== 'never' && originTpl) {
+      const raw = state.contacts?.[surface]?.[ev.chatId];
+      const side = raw?.aliasOf ? raw : (getContact(state, surface, ev.chatId)?.entry ?? {});
+      const stored = side.aliasOf ? side.transcript : side.pushedName;
+      const sideTitle = ev.chatName || (await forkBridge.chatTitle(ev.chatId)) || stored || null;
+      const discreet = side.discreet === true || [sideTitle, stored].some(titleLooksDiscreet);
+      if (sideTitle && (origin === 'always' || !discreet)) prefix = originTpl.replaceAll('{group}', sideTitle);
+    }
     const pbf = String(cfg().send?.post_back_from ?? '').trim().toLowerCase();
     let via = (pbf === 'primary' || pbf === 'secondary') ? pbf : SEND_POST_BACK_FROM_DEFAULT;
     // Rodz (the secondary) has its OWN room id for the ORIGINAL chat — a group is a different Matrix
@@ -3962,9 +3987,9 @@ export function createCommands({
     // UNSIGNED (operator 2026-10-04): /send posts back AS THE OPERATOR — no node signature (no visible
     // 🏰 bridge close, no invisible node tag). Routed into the SAME .send via skipSignature, so the
     // relay's sent id is still tracked for echo-dedup (beeper.mjs _sentIds) and this node won't re-ingest it.
-    const posted = await forkBridge.postReply(targetChatId, cleaned, null, { via, unsigned: true });
+    const posted = await forkBridge.postReply(targetChatId, prefix + cleaned, null, { via, unsigned: true });
     if (!posted) { await send?.(ev.chatId, '/send: could not post to the original chat'); return; }
-    onLog(`/send: ${ev.chatId} -> original ${originalChatId} via ${via}${targetChatId !== originalChatId ? ` (Rodz's room ${targetChatId})` : ''} (message ${ev.replyToId})`);
+    onLog(`/send: ${ev.chatId} -> original ${originalChatId} via ${via}${targetChatId !== originalChatId ? ` (Rodz's room ${targetChatId})` : ''} (message ${ev.replyToId}; origin ${prefix ? 'named' : 'omitted'})`);
   }
 
   // /end (the operator REPLIES /end in a join/split group): archive the group and drop its mapping so
