@@ -158,6 +158,7 @@ describe('spine — a background task\'s result wakes the being', () => {
     expect(brain.calls[0].ev.chatId).toBe(CHAT);
     expect(brain.calls[0].ev.line).toContain('Run the audit — completed');
     expect(brain.calls[0].ev.line).toMatch(/verify/i);
+    expect(brain.calls[0].ev.cause).toBe('background');   // agent stats: the system bucket it is counted in
     expect(b.sender.placeholders[0].finished).toEqual({ text: 'report-1', surface: true });
   });
 

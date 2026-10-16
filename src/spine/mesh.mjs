@@ -435,7 +435,7 @@ export function createMeshService({
     const surface = route?.limb ?? route?.surface ?? 'whatsapp';
     const conv = await originConv(from);
     const chat = conv?.chatId ?? chatOf(route);
-    return { surface, node, chatId: chat, chatName: conv?.name ?? chat, senderId: null, senderName: null, msgId: null, ts: Date.now(), body: prompt, line: prompt, kind: 'text', raw: null };
+    return { surface, node, chatId: chat, chatName: conv?.name ?? chat, senderId: null, senderName: null, msgId: null, ts: Date.now(), body: prompt, line: prompt, kind: 'text', raw: null, cause: 'relay' };
   }
 
   // RESPONDER: is this arriving prompt a node-addressed command for THIS node, and if so what

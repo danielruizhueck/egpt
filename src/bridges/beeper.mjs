@@ -60,7 +60,7 @@ import { stripNodeSignature, decodeNodeSignature, decodeBeingSignature } from '.
 import { reactionAction, editAction, isLiveStreamFrame } from '../dispatch-line.mjs';
 import { bodyForMessageId } from '../transcript-log.mjs';
 import { mentionStatus, mentionHits } from '../auto-mode.mjs';
-import { mediaKind } from '../media-kind.mjs';
+import { mediaKind, MEDIA_LINE } from '../media-kind.mjs';
 import { sha256Hex } from '../tools/decode-once.mjs';
 import { shouldDownload } from '../media-save.mjs';
 import { relMediaPath } from '../media-path.mjs';
@@ -182,7 +182,7 @@ const _VOICE_MARK = /^\(voice transcription(?:,[^)]*)?\)\s*/;
 // (~L1352) for a saved non-voice attachment — `(image foo.png) [saved: media/...]` — so the
 // bare-@e TEXT-mirror branch below can tell a real quoted PROSE reply apart from a quoted
 // image/video/audio/document announcement (which must never be synthesized to audio verbatim).
-const _MEDIA_MARK = /^\((?:image|video|audio|document)(?: [^)]*)?\) \[saved: /;
+const _MEDIA_MARK = MEDIA_LINE;
 // THE VOICE-NOTE PLACEHOLDERS — what the arrival path records when a voice note produced NO
 // transcript: the transcriber failed, or transcription is not running on this node (~L1919). ONE
 // definition, used at BOTH ends: the arrival WRITES these strings and the bare-wake-word reply

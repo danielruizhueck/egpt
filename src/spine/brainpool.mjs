@@ -26,7 +26,7 @@
 // the brains registry, never frozen into readonly. Every one gets the kickoff feed for
 // its own `personality:` (see wrapFresh below), and its thread persists in a per-agent
 // NESTED block (recordThread(..., being)).
-import { slugDir, getBeing, recordThread, patchBeing, readIdentityFeed, seedIdentityLayers, readAutoModeLayer, appendThreadStat, mutateState, nowIsoString, rollTranscript, stampThreadId, DETERMINISTIC_MODEL, DETERMINISTIC_EFFORT, DEFAULT_ALLOWED_TOOLS } from '../conversations-state.mjs';
+import { slugDir, getBeing, recordThread, patchBeing, readIdentityFeed, seedIdentityLayers, readAutoModeLayer, appendThreadStat, recordAgentTurn, turnUser, mutateState, nowIsoString, rollTranscript, stampThreadId, DETERMINISTIC_MODEL, DETERMINISTIC_EFFORT, DEFAULT_ALLOWED_TOOLS } from '../conversations-state.mjs';
 // THE wake vocabulary, imported — not re-read here. `handles:` (else the map key) plus the
 // CONDITIONAL fallback_handle, exactly as the mention matcher resolves them, so what the card
 // tells an agent it answers to can never drift from what actually wakes it (feedConfig below).
@@ -723,6 +723,7 @@ export function createBrainPool({
   // verifies against — so a secret minted here is the secret /being accepts. Read by exactly one
   // thing: a boxed turn's baseOpts (forBeing). null (every test that wires none) mints nothing.
   beingLink = null,
+  recordTurn = recordAgentTurn,     // (surface, chatId, being, turn, {io}) — agent usage stats, one call per turn
   onLog = () => {},
 } = {}) {
   if (!pool || typeof pool.run !== 'function') throw new Error('createBrainPool: pool (createWarmPool) is required');
@@ -1033,15 +1034,16 @@ export function createBrainPool({
     };
   }
 
-  return {
+  const api = {
     /** @returns {Promise<{ text: string, sessionId: string|null, being: string }>} */
-    async turn(being, ev, onPartial = () => {}) {
+    async turn(being, ev, onPartial = () => {}, meter = {}) {
       // `scope` is the address this being's INSTANCE lives at — the conversation itself for
       // every unscoped turn, the room for a chat invited into one. EVERY identity key below
       // derives from it and none from `ev`: thread, warm key, conv dir, run config, transcript
       // roll, thread stats. `ev` still owns what belongs to the MESSAGE — its line, its reply,
       // its own transcript (see resolveConv above).
       const { scope, slug, sessionId, identityRefreshArmed, compactionWelcome, mode, accessLevel, allowedUsers, sandboxed, sandboxedRung, verboseThinking, compaction: compactionOver, outboxTarget, configuration, allowedPaths, sources } = await resolveConv(ev, being);
+      meter.scope = scope;
       if (!slug) throw new Error(`brainpool: no slug for ${scope.surface}/${scope.chatId}`);
 
       // STRUCTURAL SAFETY GATE (operator 2026-08-16; refined 2026-08-20). Refuses the ENTIRE
@@ -1160,6 +1162,7 @@ export function createBrainPool({
       } else {
         runModel = def.model; runEffort = def.effort;
       }
+      meter.model = runModel ?? null;
       // ACCESS-LEVEL OVERRIDE (operator 2026-08-14, was /e access all|regular; phase 2, same
       // day: no longer persona-only — every being's OWN accessLevel, read per-being above via
       // resolveConv/getBeing, is eligible). Runs AFTER the being-def resolution above and
@@ -1466,6 +1469,7 @@ export function createBrainPool({
 
       const text = typeof r === 'string' ? r : (r?.text ?? '');
       const newSession = (r && typeof r === 'object' && r.sessionId) || null;
+      if (r && typeof r === 'object') Object.assign(meter, { usage: r.usage ?? null, bgStarted: r.bgStarted ?? 0 }, r.model ? { model: r.model } : {});
       // Persist a freshly-minted session so the next turn resumes it — being-aware:
       // a nested <being> block for EVERY being (the persona included, operator 2026-07-10).
       // A fresh thread's kickoff already carried the auto layer (wrapFresh) — mark the
@@ -1698,4 +1702,26 @@ export function createBrainPool({
       return (await pool.steer?.(k, ev?.line ?? ev?.body ?? '')) ?? false;
     },
   };
+
+  // AGENT USAGE STATS (operator 2026-10-16) at the one turn boundary every turn passes — reply,
+  // heartbeat, relay — answered or thrown. afterTurn fires on success only, so a failed turn
+  // could not be counted there. Fire-and-forget; a stats failure never touches the turn.
+  const turnOnce = api.turn;
+  api.turn = async (being, ev, onPartial = () => {}) => {
+    const t0 = Date.now();
+    const meter = {};
+    let error = false;
+    try { return await turnOnce(being, ev, onPartial, meter); }
+    catch (e) { error = !e?.interrupted; throw e; }
+    finally {
+      try {
+        const scope = meter.scope ?? ev ?? {};
+        Promise.resolve(recordTurn(scope.surface, scope.chatId, being, {
+          at: nowIsoString(), ms: Date.now() - t0, error, name: labelOf(being) || undefined,
+          usage: meter.usage ?? null, model: meter.model ?? null, bgStarted: meter.bgStarted ?? 0, user: turnUser(ev),
+        }, { io })).catch(() => {});
+      } catch { /* stats never break a turn */ }
+    }
+  };
+  return api;
 }

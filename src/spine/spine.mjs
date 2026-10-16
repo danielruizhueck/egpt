@@ -1456,7 +1456,7 @@ export function createSpine({
     const what = summaries.length ? summaries.join('; ') : 'a background task';
     const finished = line == null;
     line ??= `[egpt] A background task you started has finished: ${what}. Verify its result and report to the chat.`;
-    const ev = { surface, chatId, body: line, line };
+    const ev = { surface, chatId, body: line, line, cause: 'background' };   // cause: agent stats' system bucket
     const where = `${being}/${chatId}`;
     if (stopSwitch?.present()) { note(`wake ${where}: STOP file present — not woken`); return false; }
     if (standingDown) { note(`wake ${where}: standing down — not woken`); return false; }

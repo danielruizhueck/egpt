@@ -11,6 +11,10 @@ export const MIME_BY_EXT = {
   docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
 };
 
+// The line the bridge announces a saved attachment with — `(<kind> <file>) [saved: media/…]` —
+// so the bridge and the stats collector read one shape. Group 1 = the kind.
+export const MEDIA_LINE = /^\((image|video|audio|document)(?: [^)]*)?\) \[saved: /;
+
 // 'image' | 'video' | 'audio' | 'document' — prefer the mimetype, fall back to
 // the extension, else 'document'.
 export function mediaKind(mime, ext) {

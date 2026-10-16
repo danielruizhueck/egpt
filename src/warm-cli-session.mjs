@@ -8,7 +8,7 @@
 // the process is kept RESIDENT instead of re-spawned per turn.
 //
 // Interface = what `src/warm-sessions.mjs` (createWarmPool) expects of a session:
-//   turn(message, onUpdate) -> { text, sessionId }  ·  inject(message) -> bool  ·  interrupt()  ·  close()  ·  background  ·  backgroundTasks
+//   turn(message, onUpdate) -> { text, sessionId, usage?, model?, bgStarted? }  ·  inject(message) -> bool  ·  interrupt()  ·  close()  ·  background  ·  backgroundTasks
 // The pool owns lazy-warm, idle-evict (the residency/reap policy), LRU, and
 // per-key serialization, so this primitive only manages ONE process running ONE
 // turn at a time.
@@ -270,6 +270,7 @@ export function createWarmCliSession(options = {}) {
   let background = new Map();       // task_id -> { description, since }, still running
   let finished = [];                // completions no turn has taken yet
   let selfTurn = null;              // the CLI's own turn on `finished`: { done, end, timer, started }
+  let model = null;                 // the model the CLI reports in its `init` event (agent stats)
   // THE BEING LINK for an UNBOXED session (src/spine/being-link.mjs): its credential rides the spawn
   // env, revoked at close. A boxed session's rides the launcher's -SetEnv and hands none in here.
   const link = typeof options.beingLink?.mint === 'function' ? options.beingLink.mint() : null;
@@ -382,8 +383,12 @@ export function createWarmCliSession(options = {}) {
       // Capture the (possibly freshly-minted) session id, first-wins.
       if (typeof ev.session_id === 'string' && !sessionId) sessionId = ev.session_id;
       if (ev.type === 'system') {
-        if (ev.subtype === 'background_tasks_changed') background = new Map((Array.isArray(ev.tasks) ? ev.tasks : []).map((t) => [t.task_id, background.get(t.task_id) ?? { description: t.description || t.task_id, since: Date.now() }]));
-        else if (ev.subtype === 'task_notification' && background.has(ev.task_id)) finished.push(`${background.get(ev.task_id).description} — ${ev.status ?? 'done'}`);
+        if (ev.subtype === 'init' && typeof ev.model === 'string' && ev.model) model = ev.model;
+        if (ev.subtype === 'background_tasks_changed') {
+          const tasks = Array.isArray(ev.tasks) ? ev.tasks : [];
+          if (pending) pending.bgStarted = (pending.bgStarted ?? 0) + tasks.filter((t) => !background.has(t.task_id)).length;
+          background = new Map(tasks.map((t) => [t.task_id, background.get(t.task_id) ?? { description: t.description || t.task_id, since: Date.now() }]));
+        } else if (ev.subtype === 'task_notification' && background.has(ev.task_id)) finished.push(`${background.get(ev.task_id).description} — ${ev.status ?? 'done'}`);
         else if (ev.subtype === 'init' && !pending && finished.length) startSelfTurn();
       }
       if (ev.type === 'user' && ev.isReplay === true && ev.origin?.kind === 'task-notification') finished.shift();
@@ -468,7 +473,7 @@ export function createWarmCliSession(options = {}) {
           const text = verboseThinking
             ? (pending?.verboseBlocks ?? []).join('\n\n')
             : (typeof ev.result === 'string' ? ev.result : (pending?.acc ?? ''));
-          resolvePending(text);
+          resolvePending(text, ev);
         } else {
           // THE CLI'S OWN STRUCTURED REASON FIRST, stderr second (operator 2026-09-11).
           // MEASURED against claude.exe on this box with a `--resume` whose target is gone:
@@ -513,13 +518,29 @@ export function createWarmCliSession(options = {}) {
     }
   }
 
-  function resolvePending(text) {
+  function resolvePending(text, result = null) {
     if (!pending || pending.settled) return;
     pending.settled = true;
     const p = pending; pending = null;
     settleInjections(p, 'the turn ended before the CLI ingested it');
-    p.resolve({ text, sessionId });
+    p.resolve({ text, sessionId, ...turnStats(result, p) });
     p.onEnd?.();
+  }
+  // What the `result` event says the turn used — tokens only, never USD (a subscription) — plus
+  // the init model and the background tasks it started. Absent fields are omitted.
+  function turnStats(result, p) {
+    const out = {};
+    const u = result?.usage;
+    if (u && typeof u === 'object') {
+      const usage = {};
+      for (const [k, from] of [['tokens_in', 'input_tokens'], ['tokens_out', 'output_tokens'], ['cache_read', 'cache_read_input_tokens'], ['cache_write', 'cache_creation_input_tokens']]) {
+        if (Number.isFinite(u[from])) usage[k] = u[from];
+      }
+      if (Object.keys(usage).length) out.usage = usage;
+    }
+    if (model) out.model = model;
+    if (p.bgStarted) out.bgStarted = p.bgStarted;
+    return out;
   }
   function failPending(err) {
     if (pending && !pending.settled) {

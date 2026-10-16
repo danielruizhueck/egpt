@@ -218,6 +218,7 @@ describe('mesh service — responder (a request arrives at the owning node)', ()
     expect(brain.calls).toHaveLength(1);
     expect(brain.calls[0].being).toBe('don');
     expect(brain.calls[0].ev.body).toBe('hola');
+    expect(brain.calls[0].ev.cause).toBe('relay');   // agent stats: the system bucket it is counted in
 
     // ONE streamed relay-room message; its frames wrap the being's reply in the mesh tail
     expect(bridge.streams).toHaveLength(1);

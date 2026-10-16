@@ -41,7 +41,7 @@ function fakePool(scriptedResults, { steerTakes = true } = {}) {
 
 const ev = { surface: 'whatsapp', chatId: '!room:beeper.com', chatName: 'SPOILER', line: 'An@[SPOILER].wa (14:05) #m1: hola', body: 'hola' };
 
-function harness(scriptedResults, { config = {}, isOverflow, isDeadSession, loadFeed, loadManifest, loadAutoLayer, labelOf, seedSession, seedMode, seedAgents, brains, afterTurn, io, seedLayers, resolveConfig, loadPermission, skipAccessLevelDefault, poolOverride, onLog, onAlert, noticeTo, steerTakes, platform, beingLink } = {}) {
+function harness(scriptedResults, { config = {}, isOverflow, isDeadSession, loadFeed, loadManifest, loadAutoLayer, labelOf, seedSession, seedMode, seedAgents, brains, afterTurn, io, seedLayers, resolveConfig, loadPermission, skipAccessLevelDefault, poolOverride, onLog, onAlert, noticeTo, steerTakes, platform, beingLink, recordTurn } = {}) {
   let state = emptyState();
   if (seedSession || seedMode || seedAgents) {   // pre-register the contact (WITH a stored thread, an E mode, and/or per-being pins)
     const ens = ensureContact(state, ev.surface, ev.chatId, { pushedName: ev.chatName, slugHint: ev.chatName });
@@ -124,6 +124,7 @@ function harness(scriptedResults, { config = {}, isOverflow, isDeadSession, load
     ...(noticeTo ? { noticeTo } : {}),             // (text, being) -> one line in the admin channel — the compaction notice
     ...(platform ? { platform } : {}),             // 'win32' | 'linux' | ... — drives the PLATFORM-AWARE `sandboxed` default below (omit → this host's real process.platform)
     ...(beingLink ? { beingLink } : {}),           // the being link (src/spine/being-link.mjs) — omit → no boxed turn is handed a mint handle
+    ...(recordTurn ? { recordTurn } : {}),         // the agent usage recorder (omit → the real one, through `io`)
   });
   return { brain, pool, getState: () => state, setState: (s) => { state = s; } };
 }
@@ -377,6 +378,35 @@ describe('brainpool.turn', () => {
     expect(seen).toHaveLength(1);
     expect(seen[0].key).toMatch(/^e:ccode:whatsapp:SPOILER-\d{10}$/);
     expect(seen[0].sessionId).toBe('sid-9');
+  });
+
+  // AGENT USAGE STATS (operator 2026-10-16): every turn — answered or thrown — is recorded once,
+  // under the scope, attributed to the sender of the message that opened it.
+  it('records each turn with its usage, model and opening sender', async () => {
+    const seen = [];
+    const recordTurn = async (...a) => { seen.push(a); return true; };
+    const { brain } = harness([{ text: 'ok', sessionId: 'sid-u', usage: { tokens_in: 3, tokens_out: 7 }, model: 'claude-opus-4-1' }], { recordTurn, labelOf: () => 'E' });
+    await brain.turn('e', { ...ev, senderId: '@a', senderName: 'Ana' });
+    expect(seen).toHaveLength(1);
+    const [surface, chatId, being, t] = seen[0];
+    expect([surface, chatId, being]).toEqual(['whatsapp', '!room:beeper.com', 'e']);
+    expect(t).toMatchObject({ error: false, name: 'E', usage: { tokens_in: 3, tokens_out: 7 }, model: 'claude-opus-4-1', user: { id: '@a', name: 'Ana' } });
+    expect(t.ms).toBeGreaterThanOrEqual(0);
+  });
+
+  it('a thrown turn is recorded as an error and still throws; a sender-less turn goes to its system bucket', async () => {
+    const seen = [];
+    const recordTurn = async (...a) => { seen.push(a); return true; };
+    const { brain } = harness([() => Promise.reject(new Error('boom'))], { recordTurn });
+    await expect(brain.turn('e', { ...ev, cause: 'heartbeat' })).rejects.toThrow('boom');
+    expect(seen).toHaveLength(1);
+    expect(seen[0][3]).toMatchObject({ error: true, user: { id: 'system:heartbeat' } });
+  });
+
+  it('a failing stats recorder never breaks the turn', async () => {
+    const recordTurn = () => { throw new Error('stats down'); };
+    const { brain } = harness([{ text: 'ok', sessionId: 'sid-x' }], { recordTurn });
+    expect((await brain.turn('e', ev)).text).toBe('ok');
   });
 
   // --- identity kickoff (the beta-1 mechanism: first user turn, not a system prompt) ---

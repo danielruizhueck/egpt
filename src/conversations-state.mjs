@@ -29,6 +29,7 @@ import { EGPT_HOME } from './egpt-home.mjs';
 import { makeSerialByKey } from './serial-by-key.mjs';
 import { preferNewer } from './prefer-newer.mjs';
 import { shortChatId } from './bridges/chat-id.mjs';
+import { MEDIA_LINE } from './media-kind.mjs';
 
 // This module lives in src/, but the SHIPPED asset dir (config/skeletons) sits at
 // the PACKAGE ROOT — hence the '..' below. Holds for both the dev repo and the
@@ -342,23 +343,33 @@ export function sanitizeStatName(name) {
 //   - first-ever name (no prior stored) → just set name; not a transition, no history entry.
 //   - former_names capped at `cap` (~20; renames are rare — a guard, not a feature), oldest
 //     dropped on overflow.
-export function mergeNameHistory(existing = {}, name, isoTs, { cap = 20 } = {}) {
+//   - a RAW ID observed as the name (the entity's own `id`, or any bare Matrix id — what an
+//     unresolved sender displays as) is not a rename: it never replaces a real name, and an
+//     outgoing raw-id name is never recorded (2026-10-16: Rodz.yaml flapped Rodz ↔ raw id).
+export function mergeNameHistory(existing = {}, name, isoTs, { cap = 20, id } = {}) {
   const prevName = existing?.name;
   const prevHist = Array.isArray(existing?.former_names) ? existing.former_names : [];
-  if (!name || name === prevName) {
+  if (!name || name === prevName || (prevName && isRawIdName(name, id))) {
     const out = {};
     if (prevName != null) out.name = prevName;
     if (prevHist.length) out.former_names = prevHist;
     return out;
   }
   let hist = prevHist;
-  if (prevName != null && prevName !== '') {
+  if (prevName != null && prevName !== '' && !isRawIdName(prevName, id)) {
     hist = [...prevHist, { name: prevName, until: isoTs }];
     if (hist.length > cap) hist = hist.slice(hist.length - cap);   // drop oldest on overflow
   }
   const out = { name };
   if (hist.length) out.former_names = hist;
   return out;
+}
+
+// A display name that is really an id: equal to the entity's own id, or a bare Matrix id
+// (`@user:server`, `!room:server`).
+const RAW_MATRIX_ID = /^[@!][^\s:]+:\S+$/;
+export function isRawIdName(name, id) {
+  return !!name && (name === id || RAW_MATRIX_ID.test(String(name)));
 }
 
 // Resolve the on-disk stats file for one logical entity (a chat or a contact) on a surface.
@@ -552,14 +563,104 @@ export function mergeMemberIntoStats(stats, senderId, isoTs, senderName) {
   const out = { ...(stats && typeof stats === 'object' ? stats : {}) };
   const members = { ...(out.members && typeof out.members === 'object' ? out.members : {}) };
   const prev = members[senderId] && typeof members[senderId] === 'object' ? members[senderId] : {};
-  const name = senderName || prev.name;
+  const { name: _n, count: _c, last_seen: _l, ...metrics } = prev;   // the per-message metrics ride along
+  const name = (senderName && !(prev.name && isRawIdName(senderName, senderId))) ? senderName : prev.name;
   members[senderId] = {
     ...(name ? { name } : {}),   // name first — the human label leads the entry
     count: (Number(prev.count) || 0) + 1,
     last_seen: isoTs,
+    ...metrics,
   };
   out.members = members;
   return out;
+}
+
+// ── PER-MEMBER MESSAGE METRICS (operator 2026-10-16) — structural, on every message, no AI. ──
+// Running sums + counts so every average is exact; the derived fields are recomputed on write.
+//   burst:    consecutive messages by one sender, nobody else in between, each ≤ BURST_GAP_MS
+//             after the previous one. msgs_per_burst high + avg_len low = "many short".
+//   response: a message following a DIFFERENT sender's in the same chat within
+//             RESPONSE_WINDOW_MS. 6 h spans a working half-day (meetings, lunch) and stops
+//             overnight silences — a new conversation, not a reply — from swamping the mean.
+// Timed by the message's own timestamp (ev.msgTs; ev.ts is the arrival clock on Beeper).
+export const BURST_GAP_MS = 2 * 60_000;
+export const RESPONSE_WINDOW_MS = 6 * 3600_000;
+// style: bursty = ≥ 2 messages per burst and avg_len < 60; long = ≤ 1.3 per burst and
+// avg_len ≥ 150; else mixed. Only from STYLE_MIN_MESSAGES on.
+export const STYLE_MIN_MESSAGES = 10;
+const LINK = /https?:\/\/|\bwww\./i;
+const MEDIA_LINES = new RegExp(MEDIA_LINE.source, 'gm');
+
+// What one event says about the message, off the event alone (pure). null = not a message
+// (a reaction or an edit: those still bump `count`, as before).
+export function messageFacts(ev) {
+  if (!ev || ev.kind === 'reaction' || ev.kind === 'edit') return null;
+  const body = typeof ev.body === 'string' ? ev.body : '';
+  const media = {};
+  let typedEnd = body.length;
+  for (const m of body.matchAll(MEDIA_LINES)) {
+    media[m[1]] = (media[m[1]] ?? 0) + 1;
+    typedEnd = Math.min(typedEnd, m.index);
+  }
+  if (ev.isVoice) media.voice = 1;
+  const typed = ev.isVoice ? '' : body.slice(0, typedEnd).trim();   // a transcript is not typed text
+  const msgTs = Number.isFinite(ev.msgTs) ? ev.msgTs : null;
+  return {
+    id: ev.msgId ?? null,
+    at: msgTs ?? (Number.isFinite(ev.ts) ? ev.ts : null),
+    len: [...typed].length,
+    link: LINK.test(typed),
+    media,
+    bot: !!(ev.mention?.atEAnywhere || ev.mention?.replyToBot || ev.replyToBeing),
+    // The sender-account copy of a human send: ms precision = a Beeper client, whole seconds =
+    // the WhatsApp app (measured 2026-10-16). Our own output (fromNode) is not a client.
+    via: (ev.isSender && ev.fromNode == null && msgTs != null) ? (msgTs % 1000 ? 'beeper' : 'app') : null,
+  };
+}
+
+// The metric delta one message adds for `senderId`, read against the chat as it stood before
+// it (pure). null = this chat already counted this message id for this sender.
+export function messageDelta(stats, senderId, facts) {
+  const prev = stats?.members?.[senderId];
+  if (facts.id != null && prev?.last_id === facts.id) return null;
+  const last = stats?.last_msg;
+  const gap = facts.at != null && last?.at ? facts.at - Date.parse(last.at) : NaN;
+  const d = { messages: 1, bursts: (last?.sender_id === senderId && Math.abs(gap) <= BURST_GAP_MS) ? 0 : 1 };
+  if (facts.len) { d.texts = 1; d.chars = facts.len; }
+  if (last && last.sender_id !== senderId && gap >= 0 && gap <= RESPONSE_WINDOW_MS) { d.responses = 1; d.response_ms = gap; }
+  if (facts.link) d.links = 1;
+  if (Object.keys(facts.media).length) d.media = facts.media;
+  if (facts.bot) d.bot = 1;
+  if (facts.via) d.via = { [facts.via]: 1 };
+  return d;
+}
+
+// Add a delta to a member (or contact) entry and recompute the derived fields. Pure.
+const METRIC_SUMS = ['messages', 'texts', 'chars', 'bursts', 'responses', 'response_ms', 'links', 'bot'];
+export function addMetrics(entry, d) {
+  const out = { ...(entry && typeof entry === 'object' ? entry : {}) };
+  for (const k of METRIC_SUMS) if (d[k]) out[k] = (Number(out[k]) || 0) + d[k];
+  for (const k of ['media', 'via']) {
+    if (!d[k]) continue;
+    const m = { ...(out[k] && typeof out[k] === 'object' ? out[k] : {}) };
+    for (const [kind, n] of Object.entries(d[k])) m[kind] = (Number(m[kind]) || 0) + n;
+    out[k] = m;
+  }
+  for (const k of ['avg_len', 'msgs_per_burst', 'avg_response_s', 'style']) delete out[k];   // derived fields trail the sums
+  if (out.texts) out.avg_len = Math.round(out.chars / out.texts);
+  if (out.bursts) out.msgs_per_burst = Math.round((out.messages / out.bursts) * 100) / 100;
+  if (out.responses) out.avg_response_s = Math.round(out.response_ms / out.responses / 1000);
+  const style = memberStyle(out);
+  if (style) out.style = style;
+  return out;
+}
+
+export function memberStyle({ messages, bursts, avg_len } = {}) {
+  if (!(messages >= STYLE_MIN_MESSAGES) || !bursts) return undefined;
+  const perBurst = messages / bursts;
+  if (perBurst >= 2 && avg_len < 60) return 'bursty';
+  if (perBurst <= 1.3 && avg_len >= 150) return 'long';
+  return 'mixed';
 }
 
 // Merge one received message into a per-CONTACT stats object — a FLAT { count, last_seen,
@@ -568,11 +669,11 @@ export function mergeMemberIntoStats(stats, senderId, isoTs, senderName) {
 // refreshed ONLY when the event actually carries one (never invented/backfilled from nothing),
 // with a name CHANGE appending the outgoing name to former_names via the shared name-history
 // helper. Pure.
-export function mergeContactIntoStats(existing = {}, isoTs, name) {
+export function mergeContactIntoStats(existing = {}, isoTs, name, { id } = {}) {
   const out = { ...(existing && typeof existing === 'object' ? existing : {}) };
   out.count = (Number(out.count) || 0) + 1;
   out.last_seen = isoTs;
-  Object.assign(out, mergeNameHistory(existing, name, isoTs));
+  Object.assign(out, mergeNameHistory(existing, name, isoTs, { id }));
   return out;
 }
 
@@ -587,12 +688,19 @@ export function mergeContactIntoStats(existing = {}, isoTs, name) {
 // (the two never block each other, each is race-safe internally); its own try/catch, added
 // as an internal step that does NOT change the return contract (existing tests assert the
 // chat-file write's `true`). `senderName`, when present on the event, sets/refreshes name.
-export async function recordMemberStat(surface, chatId, senderId, isoTs, { io = {}, statsDirOf = statsDir, senderName, chatName } = {}) {
+//
+// `ev` (the InboundEvent) adds the per-member message metrics above to both files. A message
+// this chat already counted for this sender (same id — a second install/account delivering the
+// same event) returns false and touches neither file. A raw-id name never renames a file.
+export async function recordMemberStat(surface, chatId, senderId, isoTs, { io = {}, statsDirOf = statsDir, senderName, chatName, ev = null } = {}) {
   if (!senderId) return false;
   const dir = statsDirOf(surface, chatId);
   const readFileFn = io.readFile ?? readFile;
   const writeFileFn = io.writeFile ?? writeFile;
   const mkdirFn = io.mkdir ?? mkdir;
+  const facts = messageFacts(ev);
+  let delta = null;
+  let duplicate = false;
 
   // ── per-CHAT file: member counter + NAME-FOLLOWS-RENAME on the chat display name. ──
   // Serialized by the stable LOGICAL key (surface:chat:chatId), NOT the file path — the
@@ -604,18 +712,27 @@ export async function recordMemberStat(surface, chatId, senderId, isoTs, { io = 
     // Resolve WITH the chat name so the file lands at / renames toward its human basename. A
     // name change renames the file HERE, before the read below reads the moved file's still-old
     // bytes — so mergeNameHistory can diff the outgoing (old) name against the observed one.
-    const { path: fp } = await resolveStatFilename({ dir, idField: 'chat_id', id: chatId, name: chatName, io, rename: true });
+    const { path: fp } = await resolveStatFilename({ dir, idField: 'chat_id', id: chatId, name: chatName, io, rename: !isRawIdName(chatName, chatId) });
     let existing = {};
     try { existing = YAML.parse(await readFileFn(fp, 'utf8')) ?? {}; } catch { /* none / unreadable → fresh */ }
+    if (facts) {
+      delta = messageDelta(existing, senderId, facts);
+      if (!delta) { duplicate = true; return false; }
+    }
     const stats = mergeMemberIntoStats(existing, senderId, isoTs, senderName);   // member entry carries the sender's display name
-    Object.assign(stats, mergeNameHistory(existing, chatName, isoTs));   // chat name + former_names
+    if (delta) {
+      stats.members[senderId] = { ...addMetrics(stats.members[senderId], delta), ...(facts.id != null ? { last_id: facts.id } : {}) };
+      if (facts.at != null && !(Date.parse(existing.last_msg?.at) > facts.at)) stats.last_msg = { sender_id: senderId, at: new Date(facts.at).toISOString() };
+    }
+    Object.assign(stats, mergeNameHistory(existing, chatName, isoTs, { id: chatId }));   // chat name + former_names
     const withId = { chat_id: chatId, ...stats };
     try {
       await mkdirFn(dir, { recursive: true });
       await writeFileFn(fp, STATS_HEADER + YAML.stringify(withId), 'utf8');
       return true;
     } catch (e) { console.error(`!! recordMemberStat(${surface}/${chatId}): ${e?.message ?? e}`); return false; }
-  });
+  }).catch((e) => { console.error(`!! recordMemberStat(${surface}/${chatId}): ${e?.message ?? e}`); return false; });
+  if (duplicate) return false;
 
   // ── per-CONTACT file: flat cross-chat rollup + NAME-FOLLOWS-RENAME on the sender push name. ──
   // Own logical key (surface:contact:senderId) → its own chain (never blocks the chat file);
@@ -623,10 +740,11 @@ export async function recordMemberStat(surface, chatId, senderId, isoTs, { io = 
   // sets/refreshes name and drives the human filename.
   const contactKey = `${surface}:contact:${senderId}`;
   await serializeStatsWrite(contactKey, async () => {
-    const { path: fp } = await resolveStatFilename({ dir, idField: 'sender_id', id: senderId, name: senderName, io, rename: true });
+    const { path: fp } = await resolveStatFilename({ dir, idField: 'sender_id', id: senderId, name: senderName, io, rename: !isRawIdName(senderName, senderId) });
     let existing = {};
     try { existing = YAML.parse(await readFileFn(fp, 'utf8')) ?? {}; } catch { /* none / unreadable → fresh */ }
-    const stats = mergeContactIntoStats(existing, isoTs, senderName);
+    let stats = mergeContactIntoStats(existing, isoTs, senderName, { id: senderId });
+    if (delta) stats = addMetrics(stats, delta);
     const withId = { sender_id: senderId, ...stats };
     try {
       await mkdirFn(dir, { recursive: true });
@@ -634,6 +752,81 @@ export async function recordMemberStat(surface, chatId, senderId, isoTs, { io = 
     } catch (e) { console.error(`!! recordMemberStat contact(${surface}/${senderId}): ${e?.message ?? e}`); }
   }).catch(() => {});   // per-contact roll-up is non-fatal — never break the message path
   return wrote;
+}
+
+// ── AGENT USAGE (operator 2026-10-16) — one entry per finished or failed turn, never cost. ──
+// Per chat: `agents.<being>` and `agent_users.<user>.agents.<being>`. Per being across chats:
+// state/stats/beings/<being>.yaml (+ `users.<user>`). `beings/` is not a surface, so it never
+// collides with a chat file — state/stats/agent/<scope>.yaml is the `agent` surface's chats.
+export function beingStatsDir() {
+  return join(EGPT_HOME, 'state', 'stats', 'beings');
+}
+const BEING_STATS_HEADER = '# per-being cross-chat agent usage (spine-written — do not edit)\n';
+const TURN_TOKENS = ['tokens_in', 'tokens_out', 'cache_read', 'cache_write'];
+
+// t = { at, ms, error, usage?: {tokens_in, tokens_out, cache_read, cache_write}, model?, bgStarted? }. Pure.
+export function mergeAgentTurn(entry, t = {}) {
+  const out = { ...(entry && typeof entry === 'object' ? entry : {}) };
+  out.turns = (Number(out.turns) || 0) + 1;
+  out.errors = (Number(out.errors) || 0) + (t.error ? 1 : 0);
+  out.time_ms = (Number(out.time_ms) || 0) + (Number(t.ms) || 0);
+  out.avg_s = Math.round(out.time_ms / out.turns / 100) / 10;
+  for (const k of TURN_TOKENS) if (Number.isFinite(t.usage?.[k])) out[k] = (Number(out[k]) || 0) + t.usage[k];
+  if (t.model) out.models = { ...(out.models ?? {}), [t.model]: (Number(out.models?.[t.model]) || 0) + 1 };
+  if (t.bgStarted > 0) out.bg_tasks = (Number(out.bg_tasks) || 0) + t.bgStarted;
+  out.last_turn = t.at;
+  return out;
+}
+
+// Who a turn is attributed to: the sender of the message that opened it, else `system:<cause>`
+// (heartbeat, background, relay) or bare `system`.
+export function turnUser(ev) {
+  if (ev?.senderId) return { id: ev.senderId, ...(ev.senderName ? { name: ev.senderName } : {}) };
+  return { id: ev?.cause ? `system:${ev.cause}` : 'system' };
+}
+
+const nameFirst = (name, entry) => {
+  const { name: _old, ...rest } = entry;
+  return name ? { name, ...rest } : entry;
+};
+
+// Effectful: the turn into the chat file (same chain as the member collector and the thread
+// mirror) and into the being's rollup. NEVER fatal; true when both wrote.
+export async function recordAgentTurn(surface, chatId, being, t, { io = {}, statsDirOf = statsDir, beingsDir = beingStatsDir() } = {}) {
+  if (!surface || !chatId || !being) return false;
+  const readFileFn = io.readFile ?? readFile;
+  const writeFileFn = io.writeFile ?? writeFile;
+  const mkdirFn = io.mkdir ?? mkdir;
+  const user = t?.user?.id ? t.user : { id: 'system' };
+  const readYaml = async (fp) => { try { const d = YAML.parse(await readFileFn(fp, 'utf8')); return d && typeof d === 'object' ? d : {}; } catch { return {}; } };
+  const fail = (what) => (e) => { console.error(`!! recordAgentTurn ${what}: ${e?.message ?? e}`); return false; };
+
+  const chatOk = await serializeStatsWrite(`${surface}:chat:${chatId}`, async () => {
+    const dir = statsDirOf(surface, chatId);
+    const { path: fp } = await resolveStatFilename({ dir, idField: 'chat_id', id: chatId, name: undefined, io, rename: true });
+    const existing = await readYaml(fp);
+    const agents = { ...(existing.agents ?? {}) };
+    agents[being] = nameFirst(t.name, mergeAgentTurn(agents[being], t));
+    const users = { ...(existing.agent_users ?? {}) };
+    const u = users[user.id] ?? {};
+    users[user.id] = nameFirst(user.name ?? u.name, { agents: { ...(u.agents ?? {}), [being]: mergeAgentTurn(u.agents?.[being], t) } });
+    await mkdirFn(dir, { recursive: true });
+    await writeFileFn(fp, STATS_HEADER + YAML.stringify({ chat_id: chatId, ...existing, agents, agent_users: users }), 'utf8');
+    return true;
+  }).catch(fail(`${surface}/${chatId}`));
+
+  const rollOk = await serializeStatsWrite(`being:${being}`, async () => {
+    const fp = join(beingsDir, `${sanitizeStatKey(being)}.yaml`);
+    const { being: _b, name, users: prevUsers, ...entry } = await readYaml(fp);
+    const users = { ...(prevUsers ?? {}) };
+    const { name: userName, ...prevUser } = users[user.id] ?? {};
+    users[user.id] = nameFirst(user.name ?? userName, mergeAgentTurn(prevUser, t));
+    const out = { being, ...nameFirst(t.name ?? name, mergeAgentTurn(entry, t)), users };
+    await mkdirFn(beingsDir, { recursive: true });
+    await writeFileFn(fp, BEING_STATS_HEADER + YAML.stringify(out), 'utf8');
+    return true;
+  }).catch(fail(`being ${being}`));
+  return chatOk && rollOk;
 }
 
 // Move a contact's on-disk slug folder old→new (transcript.md, media/, identity

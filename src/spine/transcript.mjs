@@ -340,7 +340,7 @@ export function createTranscript({
           // §3.1: every received message passes ASYNCHRONOUSLY to the stats collector —
           // fire-and-forget (never awaited, so it can't block or delay the transcript
           // append), any rejection swallowed into onLog exactly like the catch below.
-          recordMemberStat(targetSurface, targetChatId, ev.senderId, isoFromMs(ev.ts), { io, senderName: ev.senderName, chatName: ev.chatName })
+          recordMemberStat(targetSurface, targetChatId, ev.senderId, isoFromMs(ev.ts), { io, senderName: ev.senderName, chatName: ev.chatName, ev })
             .catch((e) => onLog(`stats ${ev?.surface}/${ev?.chatId}: ${e?.message ?? e}`));
           // The inbound line is the dispatch line (the conversation-readable form,
           // C7.6); transcriptAppend prepends front matter on a fresh file.

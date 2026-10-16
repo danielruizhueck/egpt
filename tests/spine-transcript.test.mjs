@@ -273,6 +273,26 @@ describe('transcript.log — living-mirror stream frames are not recorded', () =
     expect(text).not.toContain('Buen lugar random para ⏳');
   });
 
+  // Member metrics (2026-10-16) ride the SAME fire-and-forget call: the transcript entry is the
+  // dispatch line exactly as before, and the stats file gains the per-message metrics.
+  it('a built inbound event: transcript entry unchanged, member metrics recorded', async () => {
+    const files = new Map();
+    const t = createTranscript({ contacts: fakeContacts, io: mkIo(files) });
+    const built = createIdentity().build({ body: 'mira https://x.io', from: {
+      chatId: '!room:beeper.com', chatName: 'fam', network: 'whatsapp', userId: '@whatsapp_555:beeper.local',
+      senderName: 'Ana', msgKey: '77', msgTs: Date.UTC(2026, 9, 16, 12, 0, 0, 532), isSender: true, atEAnywhere: true,
+    } });
+    expect(await t.log(built)).toBe(true);
+    await settle();
+    const text = transcriptText(files);
+    expect(text.endsWith(`${built.line}\n\n`)).toBe(true);
+    const chat = [...files.entries()].find(([p]) => p.endsWith('fam.yaml'))[1];
+    expect(chat).toContain('messages: 1');
+    expect(chat).toContain('links: 1');
+    expect(chat).toContain('bot: 1');
+    expect(chat).toContain('beeper: 1');
+  });
+
   it('a stream frame is not a received message either — no stats side-effect', async () => {
     const files = new Map();
     const t = createTranscript({ contacts: fakeContacts, io: mkIo(files) });
