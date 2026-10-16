@@ -60,6 +60,25 @@ describe('sender — a public being: no placeholder, no error line, errors to th
     expect(notices).toEqual([]);
   });
 
+  it('raw CLI error text returned as a reply (5xx, safeguards flag) goes to the admin channel, not the lead', async () => {
+    const { bridge, notices, open } = build();
+    const errors = [
+      'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
+      'API Error: 500 {"type":"error","error":{"type":"api_error","message":"Internal server error"}}',
+      'API Error: Claude Code is unable to respond to this request, which appears to violate our Usage Policy (https://www.anthropic.com/legal/aup). Please double press esc to edit your last message or start a new session for Claude Code to assist with a different task.',
+    ];
+    for (const text of errors) await open('edw-marketer').finish({ text });
+    expect(bridge.sent).toEqual([]);
+    expect(notices.map((n) => n.text)).toEqual(errors.map((e) => `model error: ${e.slice(0, 300)}`));
+  });
+
+  it('a reply that merely mentions an API error is still delivered', async () => {
+    const { bridge, notices, open } = build();
+    await open('edw-marketer').finish({ text: 'Si ves un "API Error" en EduWeb, escríbele a soporte.' });
+    expect(bridge.sent).toHaveLength(1);
+    expect(notices).toEqual([]);
+  });
+
   it('a queued turn shows no "⏳ Queued" placeholder either', () => {
     const { bridge, open } = build();
     open('edw-marketer', { queued: true, queuedAhead: 2 });
@@ -77,6 +96,8 @@ describe('sender — LOCK: a being that is not public (E) is unchanged', () => {
       await sender.open('!c', { being: 'egpt' }).fail(new Error('x'));
       await sender.open('!c', { being: 'egpt' }).finish({ text: '' });
       await sender.open('!c', { being: 'egpt' }).finish({ text: '' }, { surface: false });
+      await sender.open('!c', { being: 'egpt' }).finish({ text: 'API Error: 529 overloaded' });
+      await sender.open('!c', { being: 'egpt', auto: true }).finish({ text: 'API Error: 529 overloaded' });
       return JSON.stringify({ streams: bridge.streams.map(({ init, opts: o, frames, finals }) => ({ init, o, frames, finals })), sent: bridge.sent });
     };
     const notices = [];
@@ -84,6 +105,9 @@ describe('sender — LOCK: a being that is not public (E) is unchanged', () => {
     const after = await run({ publicOf: (b) => b === 'edw-marketer', noticeAdmin: async (n) => notices.push(n) });
     expect(after).toBe(before);
     expect(JSON.parse(after).streams[0].init).toBe(THINKING);
+    // E's API error text still reaches its chat exactly as before (streamed; and plain under mode:auto)
+    expect(JSON.parse(after).streams.at(-1).finals).toEqual(['API Error: 529 overloaded']);
+    expect(JSON.parse(after).sent.at(-1).text).toBe('API Error: 529 overloaded');
     expect(notices).toEqual([]);
   });
 });

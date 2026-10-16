@@ -37,3 +37,10 @@ export function isBrainFailureResult(text) {
     || /\b(?:401|403|429)\b/.test(msg)
     || /\b(?:unauthorized|authentication|rate.?limit|quota)\b/i.test(msg);
 }
+
+// The CLI's own error returned as a SUCCESSFUL result's text: "API Error: 529 {…}", "API Error: 500
+// {…}", "API Error: Claude Code is unable to respond to this request, which appears to violate our
+// Usage Policy …". Read only for a public being (sender.mjs), so no other chat changes.
+export function isCliErrorText(text) {
+  return /^\s*API Error\b/i.test(String(text ?? ''));
+}
