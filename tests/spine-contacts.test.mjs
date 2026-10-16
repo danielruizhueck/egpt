@@ -5,7 +5,7 @@
 // conv-state; no disk.
 import { describe, it, expect } from 'vitest';
 import { createContacts } from '../src/spine/contacts.mjs';
-import { emptyState, getContact, ensureContact, recordThread } from '../src/conversations-state.mjs';
+import { emptyState, getContact, ensureContact, recordThread, conversationPathOf } from '../src/conversations-state.mjs';
 
 const SURFACE = 'whatsapp';
 const CHAT = '!room:beeper.com';
@@ -92,6 +92,59 @@ describe('contacts.resolve', () => {
     expect(newSlug).not.toBe(oldSlug);
     expect(getContact(state, SURFACE, CHAT).slug).toBe(newSlug);   // state moved despite the fs miss
     expect(appends).toHaveLength(0);   // ENOENT → no folder to log the rename into
+  });
+
+  it('title change where io.rename throws EBUSY: entry stays on the OLD folder (slug + path), no renames.log; a later sighting retries', async () => {
+    let state = emptyState();
+    const ens = ensureContact(state, SURFACE, CHAT, { pushedName: 'fam', slugHint: 'fam' });
+    state = ens.state;
+    const oldSlug = ens.slug;
+    let busy = true, writes = 0;
+    const renames = [], appends = [];
+    const io = {
+      rename: async (from, to) => {
+        renames.push({ from, to });
+        if (busy) { const e = new Error('resource busy or locked'); e.code = 'EBUSY'; throw e; }
+      },
+      appendFile: async (p, data) => { appends.push({ p, data }); },
+    };
+    const contacts = createContacts({ loadState: async () => state, writeState: async (s) => { state = s; writes++; }, io });
+
+    expect(await contacts.resolve(SURFACE, CHAT, { chatName: 'crew' })).toBe(oldSlug);
+    const kept = getContact(state, SURFACE, CHAT).entry;
+    expect(kept.slug).toBe(oldSlug);
+    expect(kept.conversation_path).toBe(conversationPathOf(SURFACE, oldSlug));
+    expect(kept.pushedName).toBe('crew');   // the title refresh still lands
+    expect(appends).toHaveLength(0);
+    expect(writes).toBe(1);
+
+    // still busy: retried, nothing new to write
+    expect(await contacts.resolve(SURFACE, CHAT, { chatName: 'crew' })).toBe(oldSlug);
+    expect(renames).toHaveLength(2);
+    expect(writes).toBe(1);
+
+    // unlocked: the retry moves folder + slug + path together, logged once
+    busy = false;
+    const newSlug = await contacts.resolve(SURFACE, CHAT, { chatName: 'crew' });
+    expect(newSlug).toMatch(/^crew-\d{10}$/);
+    const moved = getContact(state, SURFACE, CHAT).entry;
+    expect(moved.slug).toBe(newSlug);
+    expect(moved.conversation_path).toBe(conversationPathOf(SURFACE, newSlug));
+    expect(appends).toHaveLength(1);
+    expect(appends[0].p).toContain(newSlug);
+  });
+
+  it('rename succeeds but renames.log append fails: the move still commits (slug follows the folder)', async () => {
+    let state = emptyState();
+    state = ensureContact(state, SURFACE, CHAT, { pushedName: 'fam', slugHint: 'fam' }).state;
+    const io = {
+      rename: async () => {},
+      appendFile: async () => { const e = new Error('denied'); e.code = 'EPERM'; throw e; },
+    };
+    const contacts = createContacts({ loadState: async () => state, writeState: async (s) => { state = s; }, io });
+    const newSlug = await contacts.resolve(SURFACE, CHAT, { chatName: 'crew' });
+    expect(newSlug).toMatch(/^crew-\d{10}$/);
+    expect(getContact(state, SURFACE, CHAT).slug).toBe(newSlug);
   });
 
   it('unknown/empty chatId → null (unresolvable, no write)', async () => {

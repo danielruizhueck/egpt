@@ -9,7 +9,7 @@
 //
 // Effectful deps (conv-state load/write, fs) are injected so it's testable
 // in-memory; the pure slug/rename helpers are imported directly.
-import { slugDir, ensureContact, renameLogLine, mutateState, aliasTargetOf, aliasTranscriptKeyOf } from '../conversations-state.mjs';
+import { slugDir, ensureContact, renameLogLine, mutateState, aliasTargetOf, aliasTranscriptKeyOf, patchContact, getContact, conversationPathOf } from '../conversations-state.mjs';
 import { Room } from '../room-core.mjs';
 import { shortChatId } from '../bridges/chat-id.mjs';
 import { rename as fsRename, appendFile as fsAppendFile } from 'node:fs/promises';
@@ -50,24 +50,28 @@ export function createContacts({ loadState, writeState, io = {}, onLog = () => {
         // filesystem half the old dispatcher did: move the slug dir so
         // transcript.md + media/ follow the name, then record the rename inside the
         // NEW folder's own history.
+        let { state: next, changed, slug } = ens;
         if (ens.renamedFrom && ens.renamedTo) {
           const newDir = slugDir(surface, ens.renamedTo);
-          try {
-            // ENOENT-tolerant: the first message after a rename may predate any
-            // folder — nothing to move, the transcript/media services mkdir the new
-            // dir on their next write.
-            await rename(slugDir(surface, ens.renamedFrom), newDir);
+          let failed = null;
+          try { await rename(slugDir(surface, ens.renamedFrom), newDir); } catch (e) { failed = e; }
+          if (!failed) {
+            onLog(`re-slugged "${ens.renamedFrom}" → "${ens.renamedTo}" (name changed)`);
             // appendRenameLog hard-codes the real fs, so append via the io seam to
             // stay in-memory-testable (operator: renames logged in the conv folder).
-            await appendFile(join(newDir, 'renames.log'), renameLogLine(ens.renamedFrom, ens.renamedTo, 'name changed'), 'utf8');
-            onLog(`re-slugged "${ens.renamedFrom}" → "${ens.renamedTo}" (name changed)`);
-          } catch (e) {
-            if (e?.code !== 'ENOENT') onLog(`re-slug rename "${ens.renamedFrom}"→"${ens.renamedTo}" failed: ${e?.message ?? e}`);
+            try { await appendFile(join(newDir, 'renames.log'), renameLogLine(ens.renamedFrom, ens.renamedTo, 'name changed'), 'utf8'); }
+            catch (e) { onLog(`renames.log "${ens.renamedTo}": ${e?.message ?? e}`); }
+          } else if (failed.code !== 'ENOENT') {   // ENOENT = no folder yet → adopt the new name
+            // Folder didn't move → entry stays on it (slug + path); a later sighting retries.
+            onLog(`re-slug rename "${ens.renamedFrom}"→"${ens.renamedTo}" failed, kept old folder: ${failed.message ?? failed}`);
+            slug = ens.renamedFrom;
+            next = patchContact(next, surface, ens.jid, { slug, conversation_path: conversationPathOf(surface, slug) });
+            changed = JSON.stringify(getContact(next, surface, chatId)?.entry) !== JSON.stringify(getContact(state, surface, chatId)?.entry);
           }
         }
 
-        if (ens.changed) await writeState(ens.state);
-        return ens.slug ?? null;
+        if (changed) await writeState(next);
+        return slug ?? null;
       } catch (e) { onLog(`resolve ${surface}/${chatId}: ${e?.message ?? e}`); return null; }
       });
   }
