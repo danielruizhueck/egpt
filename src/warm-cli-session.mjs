@@ -9,7 +9,7 @@
 //
 // Interface = what `src/warm-sessions.mjs` (createWarmPool) expects of a session:
 //   turn(message, onUpdate) -> { text, sessionId, usage?, model?, bgStarted? }  ·  inject(message) -> bool  ·  interrupt()  ·  close()  ·  background  ·  backgroundTasks
-//   · orphan (an `adopt`ed process: src/cli-host.mjs)
+//   · reconfigure(changes) · reconfigurable · orphan (an `adopt`ed process: src/cli-host.mjs)
 // The pool owns lazy-warm, idle-evict (the residency/reap policy), LRU, and
 // per-key serialization, so this primitive only manages ONE process running ONE
 // turn at a time.
@@ -85,6 +85,15 @@ let interruptSeq = 0;
 function interruptLine() {
   return JSON.stringify({ type: 'control_request', request_id: `egpt-interrupt-${++interruptSeq}`, request: { subtype: 'interrupt' } }) + '\n';
 }
+// What a live process takes without a reopen. Measured 2026-10-16 on claude 2.1.301 (idle process):
+// set_model → success, the next turn's init and messages carry the new model; apply_flag_settings
+// {effortLevel} → success, get_settings reports it applied. verboseThinking is ours alone.
+const LIVE_REQUEST = {
+  model: (v) => ({ subtype: 'set_model', model: v }),
+  effort: (v) => ({ subtype: 'apply_flag_settings', settings: { effortLevel: v } }),
+};
+export const RECONFIGURABLE = new Set([...Object.keys(LIVE_REQUEST), 'verboseThinking']);
+let controlSeq = 0;
 
 // MSYS2/Cygwin "/c/Users/.." → "C:/Users/.." for Node spawn cwd on Windows.
 function normalizeCwd(p) {
@@ -256,7 +265,9 @@ export function createWarmCliSession(options = {}) {
   // Opt-in, default off (operator 2026-08-29 ruling): when on, the turn's resolved `text` is
   // the full verbose transcript (thinking verbatim + tool-name stubs) instead of the CLI's own
   // clean `ev.result`. Wired the same way as cwd/model/effort — see brainpool.mjs baseOpts.
-  const verboseThinking = options.verboseThinking === true;
+  let verboseThinking = options.verboseThinking === true;
+  const opts = { ...options };      // what a (re)spawn builds its argv from; reconfigure() updates it
+  const controls = new Map();       // control request id → { resolve, reject }
   let orphan = null;                // an adopted turn the previous spine started, until it ends
   let proc = null;
   let stdoutBuf = '';
@@ -302,7 +313,7 @@ export function createWarmCliSession(options = {}) {
     // minted; set afterwards, so a re-spawn `--resume`s it. That either/or is not cosmetic —
     // `--session-id` on an id that already exists is refused outright ("Session ID <id> is
     // already in use.", exit 1), which is precisely what a re-spawn would hit otherwise.
-    const args = ['--input-format', 'stream-json', '--replay-user-messages', ...buildClaudeArgs({ ...options, sessionId })];
+    const args = ['--input-format', 'stream-json', '--replay-user-messages', ...buildClaudeArgs({ ...opts, sessionId })];
     const cwd = normalizeCwd(options.cwd);
     // A non-existent cwd makes Node's spawn fail with a MISLEADING `spawn <bin>
     // ENOENT` — it names the binary, not the missing dir (operator 2026-06-14:
@@ -387,6 +398,11 @@ export function createWarmCliSession(options = {}) {
       }
       // Capture the (possibly freshly-minted) session id, first-wins.
       if (typeof ev.session_id === 'string' && !sessionId) sessionId = ev.session_id;
+      if (ev.type === 'control_response') {
+        const c = controls.get(ev.response?.request_id);
+        if (c) { controls.delete(ev.response.request_id); if (ev.response.subtype === 'success') c.resolve(ev.response.response); else c.reject(new Error(ev.response.error || 'refused')); }
+        continue;
+      }
       if (ev.type === 'system') {
         if (ev.subtype === 'init' && typeof ev.model === 'string' && ev.model) model = ev.model;
         if (ev.subtype === 'background_tasks_changed') {
@@ -561,10 +577,21 @@ export function createWarmCliSession(options = {}) {
     background = new Map();
     finished = [];
     endSelfTurn();
+    for (const c of controls.values()) c.reject(new Error(`claude exited ${code}`));
+    controls.clear();
     if (pending && !pending.settled) {
       const detail = stderrBuf.trim() ? `: ${stderrBuf.trim().slice(-300)}` : '';
       failPending(new Error(`claude exited ${code} mid-turn${detail}`));
     }
+  }
+
+  function control(request) {
+    const request_id = `egpt-ctl-${++controlSeq}`;
+    return new Promise((resolve, reject) => {
+      controls.set(request_id, { resolve, reject });
+      try { proc.stdin.write(JSON.stringify({ type: 'control_request', request_id, request }) + '\n'); }
+      catch (e) { controls.delete(request_id); reject(e); }
+    });
   }
 
   // ADOPTED (src/cli-host.mjs): the daemon held this process across a spine restart. Its replay
@@ -641,6 +668,22 @@ export function createWarmCliSession(options = {}) {
       try { proc.stdin.write(interruptLine()); } catch { p.interrupted = false; return false; }
       return ended;
     },
+    // A changed configuration, applied to the live process (RECONFIGURABLE only; the pool reopens
+    // for the rest). Idle only: the pool calls it between turns. A refusal keeps the old one.
+    async reconfigure(changes) {
+      if (closed) throw new Error('warm-cli: session closed');
+      for (const [k, v] of Object.entries(changes)) {
+        if (!RECONFIGURABLE.has(k)) throw new Error(`warm-cli: ${k} cannot change in a live process`);
+        if (k === 'verboseThinking') verboseThinking = v === true;
+        else if (proc) {
+          const request = LIVE_REQUEST[k](v);
+          try { await control(request); }
+          catch (e) { throw Object.assign(new Error(`claude: ${request.subtype} refused — ${e?.message ?? e}`), { reconfigure: true }); }
+        }
+        opts[k] = v;
+      }
+    },
+    get reconfigurable() { return RECONFIGURABLE; },
     // The adopted turn still running, or null.
     get orphan() { return orphan; },
     close() {

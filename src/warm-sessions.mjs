@@ -43,6 +43,8 @@ const BACKGROUND_RECHECK_MS = 60_000;   // re-check for an always-evict (ttl 0) 
 const NOT_SPAWN = new Set(['sessionId', 'beingLink']);
 const SHOWN = new Set(['model', 'effort', 'verboseThinking']);
 const spawnOptions = (o) => Object.fromEntries(Object.entries(o).filter(([k, v]) => !NOT_SPAWN.has(k) && typeof v !== 'function'));
+const pick = (o, keys) => Object.fromEntries(keys.map((k) => [k, o[k]]));
+const _describe = (changes, opened) => Object.keys(changes).map((k) => (SHOWN.has(k) ? `${k} ${opened[k] ?? 'unset'}→${changes[k]}` : k)).join(', ');
 
 export function createWarmPool({
   max = 6,
@@ -144,6 +146,13 @@ export function createWarmPool({
     // already skips busy; the per-turn timeout was removed.)
     if (e.idleTimer) { clearTimeout(e.idleTimer); e.idleTimer = null; }
     try {
+      if (e.reconfig) {
+        const changes = e.reconfig;
+        e.reconfig = null;
+        await e.session.reconfigure(changes);
+        onLog(`warm: configuration applied to the live process on ${key} (${_describe(changes, e.opened)})`);
+        Object.assign(e.opened, changes);
+      }
       // NO turn timeout. A warm claude session stays open INDEFINITELY (like the
       // CLI) — a turn runs as long as it needs: thinking, long answers, slow
       // models. The old fake timeout guillotined legit turns AND evicted the
@@ -154,8 +163,9 @@ export function createWarmPool({
       e.lastUsed = Date.now();
       return res;
     } catch (err) {
-      // An operator stop (/agents stop) ends the turn, not the session: it stays warm.
-      if (!err?.interrupted) {
+      // An operator stop (/agents stop) ends the turn, not the session: it stays warm. So does a
+      // configuration the live process refused: it keeps the one it has.
+      if (!err?.interrupted && !err?.reconfigure) {
         e.errored = true;
         e.failure = err;   // kept only so the eviction below can say WHAT went wrong
       }
@@ -204,13 +214,17 @@ export function createWarmPool({
     // Idle-only, like the guard above. Gated on a STATED value: a caller that names none
     // (compaction's `/compact` passes no effort, and a null model when the def has none) is asking
     // for whatever is warm, not for "unset". Live background work defers the reopen (step B).
+    // What the live process takes in place (session.reconfigurable — measured control requests) is
+    // applied before the next turn, process and background work untouched; only the rest reopens.
     if (e && !e.errored && !e.busy) {
       const changed = Object.keys(spawnOptions(brainOptions)).filter((k) => brainOptions[k] != null && !isDeepStrictEqual(brainOptions[k], e.opened[k] ?? null));
-      if (changed.length) {
-        const what = changed.map((k) => (SHOWN.has(k) ? `${k} ${e.opened[k] ?? 'unset'}→${brainOptions[k]}` : k)).join(', ');
-        const n = e.session.background ?? 0;
-        if (n > 0) onLog(`warm: configuration changed on ${key} (${what}) — reopen deferred: ${n} background task(s) still running`);
-        else { _evict(key, `configuration changed: ${what}`); e = null; }
+      const live = changed.filter((k) => e.session.reconfigurable?.has(k));
+      const rest = changed.filter((k) => !live.includes(k));
+      const n = e.session.background ?? 0;
+      if (rest.length && !n) { _evict(key, `configuration changed: ${_describe(pick(brainOptions, changed), e.opened)}`); e = null; }
+      else {
+        if (rest.length) onLog(`warm: configuration changed on ${key} (${_describe(pick(brainOptions, rest), e.opened)}) — reopen deferred: ${n} background task(s) still running`);
+        if (live.length) e.reconfig = { ...e.reconfig, ...pick(brainOptions, live) };
       }
     }
     // The INJECT-INTO-RUNNING-TURN block that used to sit HERE (operator 2026-06-13) now
