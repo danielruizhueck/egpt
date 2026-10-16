@@ -28,7 +28,7 @@ const TEST_HOME = vi.hoisted(() => {
   process.env.EGPT_HOME = dir;
   return dir;
 });
-import { createCommands, resolveSecondaryParticipantId, rewriteForkSessionJsonl, JOIN_PLACEHOLDER_DEFAULT, JOIN_EXISTS_DEFAULT, SPLIT_PLACEHOLDER_DEFAULT, GROUP_TITLE_DEFAULT, JOIN_OPENER_DEFAULT, SPLIT_OPENER_DEFAULT, SEND_POST_BACK_FROM_DEFAULT } from '../src/spine/commands.mjs';
+import { createCommands, resolveSecondaryParticipantId, rewriteForkSessionJsonl, JOIN_PLACEHOLDER_DEFAULT, JOIN_EXISTS_DEFAULT, JOIN_LIMIT_DEFAULT, SPLIT_PLACEHOLDER_DEFAULT, GROUP_TITLE_DEFAULT, JOIN_OPENER_DEFAULT, SPLIT_OPENER_DEFAULT, SEND_POST_BACK_FROM_DEFAULT } from '../src/spine/commands.mjs';
 import { resolveBeingDef, sandboxSharePathsFor } from '../src/spine/brainpool.mjs';
 import { ensureContact, recordThread, getContact, getBeing, slugDir, aliasContact, aliasTargetOf, patchContact, patchBeing, readState as readConvState, writeState as writeConvState } from '../src/conversations-state.mjs';
 import { shortChatId } from '../src/bridges/chat-id.mjs';
@@ -700,6 +700,45 @@ describe('/join <name> — template placeholder, same-name reuse, member gate', 
     await cmds.run(memberJoin('/join emely', { raw: { chatType: 'private' } }));
     expect(calls.create).toHaveLength(0);
     expect(sent).toHaveLength(0);
+  });
+
+  // ── the cap: a non-operator holds at most ONE live side-room per C (each create is An's account) ──
+  it('a member\'s 2nd /join with a different name is refused with config.join.limit; no createGroup', async () => {
+    const { cmds, calls, sent } = harness({ config: cfg(), chatRaw: roster(), createChatId: byTitle });
+    await cmds.run(memberJoin('/join emely'));
+    await cmds.run(memberJoin('/join nue11'));
+    expect(calls.create).toHaveLength(1);
+    expect(sent.at(-1)).toEqual({ chatId: C_CHAT, text: JOIN_LIMIT_DEFAULT.replaceAll('{name}', 'emely') });
+  });
+
+  it('a room the member is IN (made by someone else) counts too; config.join.limit overrides the line', async () => {
+    const c = cfg(); c.join = { ...c.join, limit: 'ya tienes {name}' };
+    const { cmds, calls, sent } = harness({ config: c, chatRaw: roster(MEMBER), createChatId: byTitle });
+    await cmds.run(opJoin('/join emely'));
+    await cmds.run(memberJoin('/join nue11'));
+    expect(calls.create).toHaveLength(1);
+    expect(sent).toEqual([{ chatId: C_CHAT, text: 'ya tienes emely' }]);
+  });
+
+  it('a different member can still create one', async () => {
+    const { cmds, calls } = harness({ config: cfg(), chatRaw: roster(), createChatId: byTitle });
+    await cmds.run(memberJoin('/join emely'));
+    await cmds.run(memberJoin('/join nue11', { senderId: '@whatsapp_lid-888000:beeper.local', senderName: 'Nue' }));
+    expect(calls.create).toHaveLength(2);
+  });
+
+  it('the operator can create several', async () => {
+    const { cmds, calls } = harness({ config: cfg(), chatRaw: roster(), createChatId: byTitle });
+    for (const n of ['emely', 'nue11', 'otro']) await cmds.run(opJoin(`/join ${n}`));
+    expect(calls.create).toHaveLength(3);
+  });
+
+  it('an /end-ed room no longer counts', async () => {
+    const { cmds, calls } = harness({ config: cfg(), chatRaw: roster(), createChatId: byTitle });
+    await cmds.run(memberJoin('/join emely'));
+    await cmds.run({ chatId: shortChatId('!join-emely:beeper.local'), surface: 'whatsapp', msgId: 'end1', isSender: true, body: '/end' });
+    await cmds.run(memberJoin('/join nue11'));
+    expect(calls.create).toHaveLength(2);
   });
 
   it('a member whose id cannot be invited (not a bridged :beeper.local id) is told so; nothing created', async () => {

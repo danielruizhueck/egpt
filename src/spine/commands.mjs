@@ -468,6 +468,8 @@ const NODE_LOCAL_SURFACES = new Set([SHELL_SURFACE]);
 // /join whose name is already a live side-room the sender is not in (operator 2026-10-16).
 export const JOIN_PLACEHOLDER_DEFAULT = '🔗 joined group {name}. You can join too: send /join {name}';
 export const JOIN_EXISTS_DEFAULT = '🔗 group {name} already exists. Ask {by} to add you.';
+// config.join.limit: a non-operator holds at most one live side-room per chat (each create is An's account).
+export const JOIN_LIMIT_DEFAULT = '🔗 you already have group {name} here.';
 export const SPLIT_PLACEHOLDER_DEFAULT = '🍴🤖 ...';
 export const GROUP_TITLE_DEFAULT = 'egpt {name} {group}';
 // /send's posting account when config.send.post_back_from is unset or invalid: the operator's OWN
@@ -3509,6 +3511,7 @@ export function createCommands({
   const joinNameKey = (s) => String(s ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
   const fillVars = (tpl, vars) => Object.entries(vars).reduce((t, [k, v]) => t.replaceAll(`{${k}}`, String(v ?? '')), tpl);
   const joinExistsOf = (block) => (block && typeof block.exists === 'string' && block.exists.trim()) ? block.exists : JOIN_EXISTS_DEFAULT;
+  const joinLimitOf = (block) => (block && typeof block.limit === 'string' && block.limit.trim()) ? block.limit : JOIN_LIMIT_DEFAULT;
   // C's live /join room for a name: an alias of C (never its super channel) carrying join_name, or,
   // for a room made before join_name existed, the transcript key its title gives.
   const joinRoomOf = (state, surface, primaryJid, key, legacyKey) => {
@@ -3518,9 +3521,16 @@ export function createCommands({
     }
     return null;
   };
-  const inRoster = async (chatId, senderId) => {
-    const items = (await forkBridge.chatRaw?.(chatId))?.participants?.items;
-    return !!senderId && Array.isArray(items) && items.some((p) => String(p?.id) === String(senderId));
+  const rosterHas = (raw, senderId) => !!senderId && Array.isArray(raw?.participants?.items)
+    && raw.participants.items.some((p) => String(p?.id) === String(senderId));
+  // A sender's live side-room in C: one they made (join_by_id) or are in. Gone (404) rooms do not count.
+  const sendersRoomOf = async (state, surface, primaryJid, senderId) => {
+    for (const [chatId, e] of Object.entries(state?.contacts?.[surface] ?? {})) {
+      if (e?.aliasOf !== primaryJid || e.super === true) continue;
+      const raw = await forkBridge.chatRaw?.(chatId);
+      if (raw !== false && (e.join_by_id === senderId || rosterHas(raw, senderId))) return { chatId, entry: e };
+    }
+    return null;
   };
   // Who besides the operator may /join: a member of a GROUP C whom a being resident in C would wake,
   // by router.resolve's allowed_users test (the conversation's block, else the agent's
@@ -3593,12 +3603,21 @@ export function createCommands({
         await writeState(dropContact(await loadState(), surface, hit.chatId));
         onLog(`/join: side-room ${hit.chatId} ("${joinName}") is gone — alias dropped, creating a new one`);
       } else {
-        if (ev.isSender || await inRoster(hit.chatId, ev.senderId)) {
+        if (ev.isSender || rosterHas(await forkBridge.chatRaw?.(hit.chatId), ev.senderId)) {
           await announce(placeholder(baseTitle));
           return `already in ${hit.chatId} ("${joinName}")`;
         }
         await send?.(ev.chatId, fillVars(joinExistsOf(cfg().join), { ...vars(baseTitle), by: hit.entry.join_by ?? 'the operator' }));
         return `"${joinName}" exists (${hit.chatId}) — the sender is not in it and cannot be added from here`;
+      }
+    }
+    // THE CAP (operator 2026-10-16): one live side-room per non-operator per chat — every create is
+    // An's own WhatsApp account, and a burst of group creations can get it flagged.
+    if (!operator) {
+      const mine = await sendersRoomOf(state0, surface, contact.jid, ev.senderId);
+      if (mine) {
+        await send?.(ev.chatId, fillVars(joinLimitOf(cfg().join), { ...vars(baseTitle), name: mine.entry.join_name ?? mine.entry.transcript ?? mine.chatId }));
+        return `refused — the sender already has ${mine.chatId} here`;
       }
     }
 
@@ -3616,7 +3635,7 @@ export function createCommands({
     //       transcript key; join_name/join_by find this room for the next /join of the same name).
     //       null → createGroup gave no chatId: abort, placeholder NOT edited, nothing posted.
     const participantIDs = [...new Set([rodz.rodzUserId, ...(invitee ? [invitee] : [])])];
-    const aliased = await createAliasedSideGroup(ev, surface, title, rodz.accountID, participantIDs, '/join', { join_name: key, ...(ev.senderName ? { join_by: ev.senderName } : {}) });
+    const aliased = await createAliasedSideGroup(ev, surface, title, rodz.accountID, participantIDs, '/join', { join_name: key, ...(ev.senderName ? { join_by: ev.senderName } : {}), ...(invitee ? { join_by_id: invitee } : {}) });
     if (!aliased) return;
     const { chatId: joinChatId, primaryJid } = aliased;
     // (c) EDIT the operator's /join message into the placeholder (raw, no persona; a reply for anyone
