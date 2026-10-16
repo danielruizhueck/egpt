@@ -45,7 +45,9 @@
 //   - an execution error is logged, never crashes the turn;
 //   - /book and /email run ONLY for a being whose agents.<name>.actions lists them, and reach
 //     only config-fixed recipients (src/spine/book.mjs, src/spine/email.mjs). Their outcome
-//     returns to the being as a wake turn (spine.wakeOnBackground).
+//     returns to the being as a wake turn (spine.wakeOnBackground);
+//   - /transcribe reads only a file inside the conversation dir (checked like /media) and runs for
+//     every being; it is not awaited, and its outcome returns as a wake turn too.
 //
 // EMIT SYNTAX (documented for E in config/skeletons/room/10-actions.md — a SPINE
 // CONTRACT that feeds EVERY being independent of identity, operator 2026-07-06):
@@ -57,6 +59,7 @@
 //   /ask <question>            (mode: auto) consult the operator in the advice channel
 //   /book <YYYY-MM-DD> <HH:MM> <summary>   book a demo on the team calendar (enabled agents only)
 //   /email <text>              send a lead summary to the team (enabled agents only)
+//   /transcribe <path>         transcribe an audio/video file from this conversation's folder
 import { resolve as resolvePath, relative as relPath, isAbsolute } from 'node:path';
 import { realpathSync } from 'node:fs';
 // WHICH CONNECTION AN OUTBOUND GOES OUT ON — the ONE resolver (sender.mjs makeOutbound), not a
@@ -69,7 +72,7 @@ import { makeOutbound } from './sender.mjs';
 // Exported so tests/skeletons.test.mjs can hold the shipped actions CARD to it. A card
 // advertising a verb that is not in here is worse than a missing card: the model emits
 // the line, the parser refuses it, and it is posted to the chat as literal prose.
-export const ACTION_VERBS = new Set(['react', 'reply', 'media', 'edit', 'ask', 'book', 'email']);
+export const ACTION_VERBS = new Set(['react', 'reply', 'media', 'edit', 'ask', 'book', 'email', 'transcribe']);
 const PLACEHOLDER_ONLY = /^(?:<[^<>]*>\s*)+$/;
 const ACTION_LINE = /^\/([a-z]+)(?:\s+([\s\S]*))?$/i;
 
@@ -215,6 +218,13 @@ function parseOne(verb, args, ev, opts = {}) {
       // <text> — the whole line is the body; recipients and subject are config's.
       if (!raw || PLACEHOLDER_ONLY.test(raw)) return { ok: false, reason: 'email: empty or placeholder' };
       return { ok: true, action: { type: 'email', chatId, text: raw } };
+    }
+    case 'transcribe': {
+      // <path> — the whole rest of the line, quotes optional. Confinement is checked at execute, so a
+      // refused path still reaches the being as a wake.
+      const path = raw.replace(/^"([^"]*)"$/, '$1').trim();
+      if (!path || /[<>]/.test(path)) return { ok: false, reason: 'transcribe: empty or placeholder' };
+      return { ok: true, action: { type: 'transcribe', chatId, path } };
     }
     case 'media': {
       // <path> [caption]. A leading "quoted path" tolerates a filename with spaces.
@@ -429,6 +439,7 @@ export function partialProse(partial, ev = {}, opts = {}) {
 // limbs / actionsOf / wake (2026-10-15, /book + /email): limbs = { book, email } — each
 // (action, ev, being) -> { outcome, detail }; actionsOf(being) -> that agent's `actions` list;
 // wake = spine.wakeOnBackground, which carries the outcome back to the being as a turn.
+// limbs.transcribe (2026-10-16): (action, ev, being, absPath) -> { outcome, detail } (transcribe-limb.mjs).
 export function createReplyActions({ bridge, bridgeOf = null, peerMouth = null, bodyEmojiOf = () => null, labelOf = () => null, resolveConvDir = async () => null, askAdvice = null, limbs = {}, actionsOf = () => null, wake = null, defaultKey = 'e', onLog = () => {} } = {}) {
   if (!bridge) throw new Error('createReplyActions: bridge is required');
   const outbound = makeOutbound({ bridge, bridgeOf, peerMouth, onLog });
@@ -454,17 +465,26 @@ export function createReplyActions({ bridge, bridgeOf = null, peerMouth = null, 
   // ev.chatId" invariant honest — the cross-chat send lives ONLY in the advice service.
   const _askAdvice = askAdvice ?? (async ({ question } = {}) => { onLog(`ask: no advice channel wired — dropped (fail-closed): ${JSON.stringify(String(question ?? '').slice(0, 120))}`); return false; });
 
-  async function runMedia(a, ev, being) {
+  // A being-named path, confined to this conversation's dir: { abs } or { why } (fail-closed).
+  async function confine(ev, p) {
     const convDir = await resolveConvDir(ev);
-    if (!convDir) { onLog(`media: no conversation dir for ${ev.surface}/${ev.chatId} — skipped`); return false; }
-    const abs = resolvePath(convDir, a.path);
+    if (!convDir) return { why: `no conversation dir for ${ev.surface}/${ev.chatId}` };
+    const bad = unsafePath(p);
+    if (bad) return { why: bad };
+    const abs = resolvePath(convDir, p);
     const escapes = (rel) => rel === '' || rel.startsWith('..') || isAbsolute(rel);
     // Belt-and-suspenders confinement: the resolved path must stay INSIDE convDir.
-    if (escapes(relPath(convDir, abs))) { onLog(`media: "${a.path}" escapes the conversation dir — rejected (fail-closed)`); return false; }
+    if (escapes(relPath(convDir, abs))) return { why: 'escapes the conversation dir' };
     let real;
-    try { real = realpathSync.native(abs); } catch { onLog(`media: file not found "${a.path}" in ${convDir} — skipped`); return false; }
+    try { real = realpathSync.native(abs); } catch { return { why: 'not found in the conversation dir' }; }
     // ...and so must its REAL path: a boxed being can plant a junction in its Room, and the spine reads as the operator.
-    if (escapes(relPath(realpathSync.native(convDir), real))) { onLog(`media: "${a.path}" leaves the conversation dir through a link — rejected (fail-closed)`); return false; }
+    if (escapes(relPath(realpathSync.native(convDir), real))) return { why: 'leaves the conversation dir through a link' };
+    return { abs };
+  }
+
+  async function runMedia(a, ev, being) {
+    const { abs, why } = await confine(ev, a.path);
+    if (why) { onLog(`media: "${a.path}" ${why} — not sent (fail-closed)`); return false; }
     // No target, so nothing to key: whoever says this being's lines in this chat posts it (sender.mjs makeOutbound `say`).
     const ok = await outbound(being, ev.chatId).say((on, room) => on.sendMedia?.(room, abs, { caption: a.caption, bodyEmoji: bodyEmojiOf(being), label: labelOf(being), persona: being }), { what: 'media' });
     if (!ok) onLog(`media: send failed "${a.path}"`);
@@ -482,11 +502,28 @@ export function createReplyActions({ bridge, bridgeOf = null, peerMouth = null, 
     const r = limbs?.[a.type] ? await limbs[a.type](a, ev, being) : { outcome: 'not-configured' };
     a.outcome = r?.outcome ?? 'failed';
     const what = a.type === 'book' && a.date ? `/book ${a.date} ${a.time}` : `/${a.type}`;
-    const result = `${what} → ${a.outcome}${r?.detail ? `: ${r.detail}` : ''}`;
-    if (typeof wake !== 'function') { onLog(`${a.type}: no wake wired — result not returned to ${being}: ${result}`); return true; }
+    wakeWith(a.type, ev, being, `${what} → ${a.outcome}${r?.detail ? `: ${r.detail}` : ''}`);
+    return true;
+  }
+
+  function wakeWith(type, ev, being, result) {
+    if (typeof wake !== 'function') { onLog(`${type}: no wake wired — result not returned to ${being}: ${result}`); return; }
     Promise.resolve()
       .then(() => wake({ being, surface: ev.surface, chatId: ev.chatId, summaries: [result] }))
-      .catch((e) => onLog(`${a.type}: result wake failed: ${e?.message ?? e}`));
+      .catch((e) => onLog(`${type}: result wake failed: ${e?.message ?? e}`));
+  }
+
+  // /transcribe: every being, its own folder only. The decode can take minutes, so the turn ends
+  // now ('started') and the outcome — or the refusal — returns through `wake`.
+  async function runTranscribe(a, ev, being) {
+    const said = (outcome, detail) => `/transcribe ${a.path} → ${outcome}${detail ? `: ${detail}` : ''}`;
+    const { abs, why } = await confine(ev, a.path);
+    if (why) { onLog(`transcribe: "${a.path}" ${why} — refused (fail-closed)`); wakeWith(a.type, ev, being, said('failed', why)); return false; }
+    if (!limbs?.transcribe) { wakeWith(a.type, ev, being, said('not-configured')); return false; }
+    a.outcome = 'started';
+    new Promise((res) => res(limbs.transcribe(a, ev, being, abs)))
+      .catch((e) => ({ outcome: 'failed', detail: e?.message ?? String(e) }))
+      .then((r) => wakeWith(a.type, ev, being, said(r?.outcome ?? 'failed', r?.detail)));
     return true;
   }
 
@@ -526,6 +563,7 @@ export function createReplyActions({ bridge, bridgeOf = null, peerMouth = null, 
       case 'media': return runMedia(a, ev, being);
       case 'book':
       case 'email': return runGated(a, ev, being);
+      case 'transcribe': return runTranscribe(a, ev, being);
       case 'edit': {
         // Made by whoever says this being's lines in this chat, on ITS OWN copy of the target
         // (sender.mjs makeOutbound `say`) — and only if THAT account sent it: the fail-closed check

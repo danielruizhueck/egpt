@@ -234,6 +234,7 @@ export function buildTranscriptionPipeline({
         else if (eng.type === 'whisper-cli') t = await tryCli(eng, audioPath, log, meta, decodingHere);
         else { onLog(`pipeline: "${eng.name}" has unknown type "${eng.type}" — skipping`); continue; }
         if (t) {
+          if (meta) meta.engine = eng.name;   // which rung answered (the /transcribe limb reports it)
           // A LOCAL rung produced this transcript while a worker rung above it did not — reconcile it to
           // those workers by sha so THEY never decode these bytes (operator 2026-09-29). A remote rung
           // that won is already in its worker's store, so it never reconciles.
