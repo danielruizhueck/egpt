@@ -1493,10 +1493,14 @@ export function createSpine({
   // conversation's FIFO and the reply path. false = not woken; else the turn, true when it answered.
   // `line`: liveness's "are they still necessary?" ask rides this same path. A finished task's wake
   // ends the being's status message ✓ and posts its own placeholder at the bottom.
-  async function wakeOnBackground({ being, surface, chatId, summaries = [], line = null }) {
-    const what = summaries.length ? summaries.join('; ') : 'a background task';
-    const finished = line == null;
-    line ??= `[egpt] A background task you started has finished: ${what}. Verify its result and report to the chat.`;
+  // `reply`: a turn the daemon held across a spine restart finished after it (src/cli-host.mjs) — its
+  // answer never reached the chat, so the being is handed it to send.
+  async function wakeOnBackground({ being, surface, chatId, summaries = [], reply = null, line = null }) {
+    const what = reply != null ? 'a reply written across a restart' : summaries.length ? summaries.join('; ') : 'a background task';
+    const finished = line == null && reply == null;
+    line ??= reply != null
+      ? `[egpt] Your last reply was written while the bridge restarted and never reached the chat. It was:\n\n${reply}\n\nSend it to the chat now.`
+      : `[egpt] A background task you started has finished: ${what}. Verify its result and report to the chat.`;
     const ev = { surface, chatId, body: line, line, cause: 'background' };   // cause: agent stats' system bucket
     const where = `${being}/${chatId}`;
     if (stopSwitch?.present()) { note(`wake ${where}: STOP file present — not woken`); return false; }

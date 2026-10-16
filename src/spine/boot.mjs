@@ -30,6 +30,7 @@ import { mergeAudit } from './audit-merge.mjs';
 import { createWarmPool } from '../warm-sessions.mjs';
 import { createBrainSession } from '../brain-session.mjs';
 import { createSandboxCliSession, spawnBoxedCommand } from '../sandbox-cli-session.mjs';
+import { connectCliHost } from '../cli-host.mjs';
 import { raiseSelfToNormal } from '../process-priority.mjs';
 import { readConfigSync, configContentHashSync } from '../tools/config-io.mjs';
 import { restartKeysChanged, changedKeys } from './config-swap.mjs';
@@ -1102,6 +1103,7 @@ export async function boot({
   clearInterval: clearIntervalFn = globalThis.clearInterval,
   setTimeout: setTimeoutFn = globalThis.setTimeout,          // the KILL SWITCH warning's cap seam (below); injected so a test can drive the 3s timer instead of waiting for it
   fetch: fetchFn = (...a) => globalThis.fetch(...a),         // the /book calendar feed + SES seam; tests inject a fake so no request leaves
+  cliHost = connectCliHost(),         // the daemon holding every claude session (src/cli-host.mjs); null = this spine spawns them
 } = {}) {
   // === THE KILL SWITCH (operator 2026-07-25) — THE FIRST THING boot DOES ===============
   // "if a file named STOP exists in .egpt it *also* stops". Checked before the config is
@@ -2811,8 +2813,19 @@ export async function boot({
     await goDown(code);
   }
 
+  // THE DAEMON HOLDS EVERY CLAUDE SESSION when it can (src/cli-host.mjs): spawned through it, held by
+  // it across a spine restart, adopted back below. `meta` is what the next spine adopts it with — the
+  // pool's own facts, where it last ran, and the being-link secret its environment already carries.
+  // codex/pi/llama are not held: they end with the spine and resume by id, as before.
+  const hosted = (opts) => {
+    const engine = String(opts.engine ?? 'ccode').toLowerCase();
+    if (!cliHost || !opts.pool || (engine !== 'ccode' && engine !== 'claude-code')) return makeSession(opts);
+    const meta = { ...opts.pool, conv: brain.convOfKey(opts.pool.key), sessionId: opts.sessionId ?? null, link: null };
+    const beingLinkOf = opts.beingLink && { mint: (secret) => { const l = opts.beingLink.mint(secret); meta.link = l?.secret ?? null; return l; } };
+    return makeSession({ ...opts, ...(beingLinkOf ? { beingLink: beingLinkOf } : {}), spawn: cliHost.spawner(opts.pool.key, meta) });
+  };
   const pool = createWarmPool({
-    makeSession,
+    makeSession: hosted,
     max: cfg.warm?.max ?? 6,
     // E runs as a PERSISTENT background agent: the claude process stays resident
     // (context in memory) instead of re-spawning + `--resume`-ing (which reloads
@@ -3601,6 +3614,25 @@ export async function boot({
 
   spine.start();
   spine.tick();   // fire the first beat immediately so alive.txt exists at once
+
+  // ADOPT what the daemon held across the restart (src/cli-host.mjs): each session goes back into the
+  // warm pool as it was — same process, background agents and all; what it emitted meanwhile is
+  // replayed into it, so a finished task or reply wakes the being through the usual path. After the
+  // spine exists, because that replay can wake it. Anything not adoptable is ended.
+  if (cliHost) (async () => {
+    for (const h of await cliHost.list()) {
+      const m = h.meta ?? {};
+      const [being, , surface, ...slug] = String(h.key ?? '').split(':');
+      if (!m.opened || pool.has(h.key)) { log.line?.(`[cli-host] ending held ${h.key} pid ${h.pid} — ${m.opened ? 'the key is already open' : 'nothing to adopt it with'}`); cliHost.kill(h.hid); continue; }
+      try {
+        const a = await cliHost.adopt(h.hid);
+        const link = m.link && beingLink.forBeing({ being, surface, slug: slug.join(':'), boxed: m.opened.sandboxed === true });
+        brain.adoptKey(h.key, m.conv);
+        pool.adopt(h.key, { brainOptions: { ...m.opened, sessionId: a.sessionId ?? m.sessionId ?? null, adopt: a, ...(link ? { beingLink: { mint: () => link.mint(m.link) } } : {}) }, klass: m.klass, idleTtlMs: m.idleTtlMs, opened: m.opened });
+        log.line?.(`[cli-host] adopted ${h.key} pid ${a.pid}${a.background?.length ? ` (${a.background.length} background task(s))` : ''}${a.orphan ? ' — a turn still running' : ''}`);
+      } catch (e) { log.line?.(`[cli-host] could not adopt ${h.key}, ending it: ${e?.message ?? e}`); cliHost.kill(h.hid); }
+    }
+  })().catch((e) => log.line?.(`[cli-host] adoption failed: ${e?.message ?? e}`));
 
   // Feed the shell surface into the SAME dispatch (handleInbound is the spine's documented
   // direct-caller seam — the identical path bridge.onMessage/enqueue runs). Registered

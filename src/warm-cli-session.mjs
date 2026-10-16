@@ -9,6 +9,7 @@
 //
 // Interface = what `src/warm-sessions.mjs` (createWarmPool) expects of a session:
 //   turn(message, onUpdate) -> { text, sessionId, usage?, model?, bgStarted? }  ·  inject(message) -> bool  ·  interrupt()  ·  close()  ·  background  ·  backgroundTasks
+//   · orphan (an `adopt`ed process: src/cli-host.mjs)
 // The pool owns lazy-warm, idle-evict (the residency/reap policy), LRU, and
 // per-key serialization, so this primitive only manages ONE process running ONE
 // turn at a time.
@@ -256,6 +257,7 @@ export function createWarmCliSession(options = {}) {
   // the full verbose transcript (thinking verbatim + tool-name stubs) instead of the CLI's own
   // clean `ev.result`. Wired the same way as cwd/model/effort — see brainpool.mjs baseOpts.
   const verboseThinking = options.verboseThinking === true;
+  let orphan = null;                // an adopted turn the previous spine started, until it ends
   let proc = null;
   let stdoutBuf = '';
   let unreadable = 0;               // stdout lines this session could not parse (see onStdout)
@@ -313,8 +315,11 @@ export function createWarmCliSession(options = {}) {
     }
     const bin = resolveClaudeBin(options.bin);
     onLog(`warm-cli: spawn ${bin} ${args.join(' ')}`);
-    proc = _spawn(bin, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, ...(cwd ? { cwd } : {}), ...(env ? { env } : {}) });
+    attach(_spawn(bin, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, ...(cwd ? { cwd } : {}), ...(env ? { env } : {}) }));
     lowerChild(proc.pid, { onLog, setPriority: options.setPriority });
+  }
+  function attach(p) {
+    proc = p;
     proc.stdout?.setEncoding?.('utf8');
     proc.stdout?.on('data', onStdout);
     proc.stderr?.setEncoding?.('utf8');
@@ -562,9 +567,32 @@ export function createWarmCliSession(options = {}) {
     }
   }
 
+  // ADOPTED (src/cli-host.mjs): the daemon held this process across a spine restart. Its replay
+  // arrives on stdout like any output; the state before it comes from the host.
+  if (options.adopt) {
+    const a = options.adopt;
+    sessionId = a.sessionId ?? sessionId;
+    model = a.model ?? null;
+    background = new Map((a.background ?? []).map((t) => [t.task_id, { description: t.description || t.task_id, since: t.since }]));
+    // A turn the previous spine was waiting on: its result is still this conversation's reply.
+    if (a.orphan) {
+      const opener = String(a.orphan.opener ?? '');
+      orphan = new Promise((resolve, reject) => {
+        pending = { resolve, reject, onUpdate: null, acc: '', msgBreak: false, verboseBlocks: [], settled: false, openerText: opener, openerReplayed: true, injections: [] };
+      }).then((r) => {
+        if (/^\s*\//.test(opener)) return onLog(`warm-cli: the adopted turn (${opener.trim().split(/\s/)[0]}) finished — a command, nothing to deliver`);
+        if (typeof options.onBackgroundDone !== 'function') return onLog('warm-cli: the adopted turn finished — nobody is listening');
+        onLog('warm-cli: the adopted turn finished — reporting its reply up');
+        options.onBackgroundDone({ reply: r.text });
+      }, (e) => onLog(`warm-cli: the adopted turn ended without a reply — ${e?.message ?? e}`)).finally(() => { orphan = null; });
+    }
+    attach(a.proc);
+  }
+
   return {
     async turn(message, onUpdate = () => {}) {
       if (closed) throw new Error('warm-cli: session closed');
+      while (orphan) await orphan;
       if (pending) throw new Error('warm-cli: a turn is already in flight (the pool must serialize per key)');
       while (selfTurn || (finished.length && proc)) await expectSelfTurn().done;
       if (closed) throw new Error('warm-cli: session closed');
@@ -613,6 +641,8 @@ export function createWarmCliSession(options = {}) {
       try { proc.stdin.write(interruptLine()); } catch { p.interrupted = false; return false; }
       return ended;
     },
+    // The adopted turn still running, or null.
+    get orphan() { return orphan; },
     close() {
       link?.revoke();
       closed = true;

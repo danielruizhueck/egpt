@@ -152,14 +152,16 @@ export function createBeingLink({ port, startBrowser, chromeClientFor = null, re
     },
   };
 
-  function mint(who) {
-    const secret = randomBytes(32).toString('hex');
+  // `secret`: re-registers one a live process already holds — a session the daemon kept across a
+  // spine restart (src/cli-host.mjs), whose environment cannot change.
+  function mint(who, secret = randomBytes(32).toString('hex')) {
     const bound = { being: String(who?.being ?? ''), surface: String(who?.surface ?? ''), slug: String(who?.slug ?? ''), boxed: who?.boxed === true };
     live.set(secret, bound);
     return {
       // NAME=VALUE entries for the launcher's ONE -SetEnv element (boxed) or the spawn env (unboxed).
       // The VALUES are never logged: the launcher logs names only, and nothing here logs at all.
       env: [`${SPINE_PORT_ENV}=${port}`, `${BEING_TOKEN_ENV}=${secret}`, `${ASK_SPINE_ENV}=${clientPath}`, `${CDP_MODULE_ENV}=${cdpModule}`],
+      secret,
       revoke() {
         live.delete(secret);
         for (const t of tunnels.get(bound) ?? []) t.close();
@@ -179,7 +181,7 @@ export function createBeingLink({ port, startBrowser, chromeClientFor = null, re
   return {
     // THE HANDLE brainpool hands a boxed session (baseOpts.beingLink): it can mint for THIS being
     // in THIS room and nothing else — sandbox-cli-session never learns who it is minting for.
-    forBeing(who) { return { mint: () => mint(who) }; },
+    forBeing(who) { return { mint: (secret) => mint(who, secret) }; },
 
     // Which live credential produced this answer to this nonce — or null. The limb's whole
     // question at the handshake; it never sees a secret.

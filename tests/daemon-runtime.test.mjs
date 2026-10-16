@@ -2095,3 +2095,48 @@ describe('the S1 daemon holds the group Chromes', () => {
     expect(h.seen).toEqual([]);
   });
 });
+
+// …and every being's claude session (src/cli-host.mjs): the same IPC slot, its own flag, every spine
+// attached. Only the exits whose next spine cannot adopt them end what it holds.
+describe('the S1 daemon holds the claude sessions', () => {
+  const fakeCliHost = () => {
+    const seen = [];
+    const create = () => ({ attach: (child) => seen.push(['attach', child]), endAll: (why) => seen.push(['endAll', why]) });
+    return { seen, create };
+  };
+
+  it('S1: the spine gets the ipc slot + EGPT_CLI_HOST, and the host every child', () => {
+    const h = fakeCliHost();
+    const { runtime, children } = makeRuntime({ session1: true, createChromeHost: null, createCliHost: h.create });
+    runtime.start();
+    runtime.spawnShell();
+    expect(children[0].opts.stdio).toEqual(['inherit', 'inherit', 'inherit', 'ipc']);
+    expect(children[0].opts.env).toMatchObject({ EGPT_CLI_HOST: '1' });
+    expect(children[0].opts.env.EGPT_CHROME_HOST).toBeUndefined();
+    expect(h.seen).toEqual([['attach', children[0].child], ['attach', children[1].child]]);
+  });
+
+  it('S0: no host, no flag', () => {
+    const h = fakeCliHost();
+    const { runtime, children } = makeRuntime({ createCliHost: h.create });
+    runtime.start();
+    expect(children[0].opts.stdio).toBe('inherit');
+    expect(children[0].opts.env.EGPT_CLI_HOST).toBeUndefined();
+    expect(h.seen).toEqual([]);
+  });
+
+  it('42, 43 and a crash keep them for the next spine; 44 (/rewind) and 45 (/standdown) end them', async () => {
+    const ended = async (code) => {
+      const h = fakeCliHost();
+      const { runtime, children } = makeRuntime({ session1: true, createChromeHost: null, createCliHost: h.create, existsSync: () => false });
+      runtime.start();
+      await children[0].child.handlers.exit(code, null);
+      return h.seen.filter(([what]) => what === 'endAll').length;
+    };
+    expect(await ended(UPGRADE_EXIT_CODE)).toBe(0);
+    expect(await ended(RESTART_EXIT_CODE)).toBe(0);
+    expect(await ended(1)).toBe(0);
+    expect(await ended(REWIND_EXIT_CODE)).toBe(1);
+    expect(await ended(STANDDOWN_EXIT_CODE)).toBe(1);
+  });
+});
