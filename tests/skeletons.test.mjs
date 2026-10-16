@@ -90,7 +90,7 @@ describe('config/skeletons/room/10-actions.md (the limbs card)', () => {
   });
 
   it('every advertised verb actually parses as an action, not as prose', () => {
-    const sample = { react: '/react #1 x', reply: '/reply #1 hi', media: '/media a.png', edit: '/edit #1 hi', ask: '/ask hi' };
+    const sample = { react: '/react #1 x', reply: '/reply #1 hi', media: '/media a.png', edit: '/edit #1 hi', ask: '/ask hi', transcribe: '/transcribe a.wma' };
     for (const verb of new Set(advertised)) {
       const line = sample[verb];
       expect(line, `no sample line for advertised verb /${verb}`).toBeTruthy();
