@@ -391,6 +391,8 @@ function shapeDef(name, def, agent = {}, brainType = 'ccode') {
     // identity is decided in the same place, from the same two objects, as its display name.
     personality: personalityFor(agent, def),
     dangerously_skip_permissions: def?.dangerously_skip_permissions === true,   // carried so an unconfined type file survives shaping
+    // A type's OWN top-level list (not 'all'/'*'), so it can narrow its access level's grant in turn().
+    ...(def?.allowed_tools != null && def.allowed_tools !== 'all' && def.allowed_tools !== '*' ? { declares_tools: true } : {}),
     // verbose_thinking (operator 2026-08-29 ruling, wren's "see your full chain of thought"):
     // carried the same way dangerously_skip_permissions is, so a type file's opt-in survives shaping.
     // STILL LOAD-BEARING after the 2026-08-30 move to config.yaml ("verbose thinking should be
@@ -1175,9 +1177,20 @@ export function createBrainPool({
       // are levels is permission-levels.mjs's own answer (isAccessLevel), not a copy of its
       // list kept in sync by hand — that copy is what made the third tier unreachable by
       // command for a day.
+      // A ccode type that declares its own list only NARROWS the level's (2026-10-15): level ∩ type,
+      // in the type's order, sent as --tools so unlisted tools do not exist (claude-args.mjs).
+      // A type with no list keeps the level's whole grant (2026-09-23: a boxed being gets every tool).
+      let narrowedTools = null;
       if (isAccessLevel(accessLevel)) {
         const perm = loadPermission(accessLevel);
-        if (perm) def = { ...def, dangerously_skip_permissions: perm.dangerouslySkipPermissions, allowed_tools: perm.allowedTools };
+        if (perm) {
+          if (def.declares_tools === true && (def.type ?? brainType) === 'ccode') {
+            const own = Array.isArray(def.allowed_tools) ? def.allowed_tools : String(def.allowed_tools).split(/[\s,]+/).filter(Boolean);
+            const granted = new Set(perm.allowedTools.map((t) => t.toLowerCase()));
+            narrowedTools = own.filter((t) => granted.has(String(t).toLowerCase()));
+          }
+          def = { ...def, dangerously_skip_permissions: perm.dangerouslySkipPermissions, allowed_tools: narrowedTools ?? perm.allowedTools };
+        }
       }
       const engine = def.type ?? brainType;
       // The identity-feed selector (operator 2026-07-02): a property of the resolved
@@ -1276,6 +1289,7 @@ export function createBrainPool({
         engine,
         cwd,
         allowedTools: def.allowed_tools ?? DEFAULT_ALLOWED_TOOLS,
+        ...(narrowedTools ? { tools: narrowedTools } : {}),
         ...(runModel ? { model: runModel } : {}),
         ...(runEffort ? { effort: runEffort } : {}),
         ...(appendSystemPrompt ? { appendSystemPrompt } : {}),

@@ -1224,7 +1224,7 @@ describe('brainpool.turn — the boxed tier feeds the CLI nothing at all (operat
 //    being that asks for it gets exactly the tier it always got. A change that quietly made
 //    the value unreachable would be a different (and worse) change. ──
 describe('brainpool.turn — the access-level default is the BOX (operator 2026-09-23)', () => {
-  const brains = { resolve: () => ({ name: 'egpt', type: 'ccode', allowed_tools: ['Read', 'Grep'] }) };
+  const brains = { resolve: () => ({ name: 'egpt', type: 'ccode' }) };
   const levelOf = async ({ seed, platform = 'win32' } = {}) => {
     let seenLevel = null;
     const { brain, pool } = harness([{ text: 'ok', sessionId: 's' }], {
@@ -1372,21 +1372,21 @@ describe('brainpool.turn — dangerously_skip_permissions:true skips coercion + 
 //    got written. ──
 describe('brainpool.turn — accessLevel override (operator 2026-08-14, was /e access, now /agents … access_level)', () => {
   it("accessLevel 'all' overrides dangerously_skip_permissions/allowedTools on an ALREADY-LIVE (resumed) thread too — applied fresh every turn", async () => {
-    const brains = { resolve: () => ({ name: 'sonnet-high', type: 'ccode', model: 'haiku', effort: 'low', allowed_tools: ['Read'] }) };
+    const brains = { resolve: () => ({ name: 'sonnet-high', type: 'ccode', model: 'haiku', effort: 'low' }) };
     const { brain, pool } = harness([{ text: 'ok', sessionId: 'sid-live' }], {
       brains, seedSession: 'sid-live', seedAgents: { e: { access_level: 'all', allowed_users: ['123'] } },
       loadPermission: (level) => (level === 'all' ? { dangerouslySkipPermissions: true, allowedTools: ['Read', 'Write', 'Bash', 'Agent'] } : null),
     });
     await brain.turn('e', ev);
     const opts = pool.calls[0].brainOptions;
-    expect(opts.allowedTools).toEqual(['Read', 'Write', 'Bash', 'Agent']);   // the permissions file's grant, not the def's own ['Read']
+    expect(opts.allowedTools).toEqual(['Read', 'Write', 'Bash', 'Agent']);   // the permissions file's grant (the type declares no list of its own)
     expect(opts.confineToDirs).toBeUndefined();                             // dangerously_skip_permissions:true → unconfined
     expect(opts.dangerouslySkipPermissions).toBe(true);                     // the explicit field buildClaudeArgs acts on
     expect(opts.sessionId).toBe('sid-live');                                // genuinely resumed, not a fresh turn
   });
 
   it("accessLevel 'regular' overrides dangerously_skip_permissions/allowedTools to a confined grant on a fresh (never-instanced) turn too", async () => {
-    const brains = { resolve: () => ({ name: 'meta-engineer', type: 'ccode', model: 'sonnet', effort: 'high', dangerously_skip_permissions: true, allowed_tools: ['Read', 'Bash'] }) };
+    const brains = { resolve: () => ({ name: 'meta-engineer', type: 'ccode', model: 'sonnet', effort: 'high', dangerously_skip_permissions: true }) };
     const { brain, pool } = harness([{ text: 'ok', sessionId: 's' }], {
       brains, seedAgents: { e: { access_level: 'regular' } },
       loadPermission: (level) => (level === 'regular' ? { dangerouslySkipPermissions: false, allowedTools: DEFAULT_ALLOWED_TOOLS } : null),
@@ -1421,7 +1421,7 @@ describe('brainpool.turn — accessLevel override (operator 2026-08-14, was /e a
   // conversation — accessLevel is read per-being (getBeing(..., being)), so a persona-level pin
   // never leaks into a sibling's, even when both are set on the very same conversation.
   it('REGRESSION: a sibling\'s OWN accessLevel governs its turn — the PERSONA\'s accessLevel on the same conversation never leaks in (per-being isolation, unchanged by phase 2)', async () => {
-    const brains = { resolve: (name) => name === 'sonnet-high' ? ({ name: 'sonnet-high', type: 'ccode', model: 'sonnet', effort: 'high', allowed_tools: ['Read', 'Bash'] }) : null };
+    const brains = { resolve: (name) => name === 'sonnet-high' ? ({ name: 'sonnet-high', type: 'ccode', model: 'sonnet', effort: 'high' }) : null };
     const config = { agents: { wren: { configuration: 'sonnet-high', name: 'wren' } } };
     const { brain, pool } = harness([{ text: 'ok', sessionId: 'w1' }], {
       brains, config, seedAgents: { e: { access_level: 'all', allowed_users: ['123'] }, wren: { access_level: 'regular' } },
@@ -1439,7 +1439,7 @@ describe('brainpool.turn — accessLevel override (operator 2026-08-14, was /e a
   // by hand-editing conversations.yaml, or — since 2026-08-15 — via
   // `/agents access_level all wren`) now gets the SAME live override the persona does.
   it('PHASE 2: a SIBLING with its OWN accessLevel now ALSO gets the live override — no longer persona-only', async () => {
-    const brains = { resolve: (name) => name === 'sonnet-high' ? ({ name: 'sonnet-high', type: 'ccode', model: 'sonnet', effort: 'high', allowed_tools: ['Read'] }) : null };
+    const brains = { resolve: (name) => name === 'sonnet-high' ? ({ name: 'sonnet-high', type: 'ccode', model: 'sonnet', effort: 'high' }) : null };
     const config = { agents: { wren: { configuration: 'sonnet-high', name: 'wren' } } };
     const { brain, pool } = harness([{ text: 'ok', sessionId: 'w1' }], {
       brains, config, seedAgents: { wren: { access_level: 'all', allowed_users: ['123'] } },
@@ -1447,7 +1447,7 @@ describe('brainpool.turn — accessLevel override (operator 2026-08-14, was /e a
     });
     await brain.turn('wren', ev);
     const opts = pool.calls[0].brainOptions;
-    expect(opts.allowedTools).toEqual(['Read', 'Write', 'Bash', 'Agent']);   // the permissions file's grant, not wren's own ['Read']
+    expect(opts.allowedTools).toEqual(['Read', 'Write', 'Bash', 'Agent']);   // the permissions file's grant (the type declares no list of its own)
     expect(opts.confineToDirs).toBeUndefined();                             // dangerously_skip_permissions:true → unconfined
   });
 
@@ -1473,7 +1473,7 @@ describe('brainpool.turn — accessLevel override (operator 2026-08-14, was /e a
   });
 
   it('end-to-end with the REAL config/permissions/*.md files (no injected loadPermission): all → dangerously_skip_permissions + bare Bash/Agent, regular → confined DEFAULT_ALLOWED_TOOLS', async () => {
-    const brains = { resolve: () => ({ name: 'sonnet-high', type: 'ccode', model: 'sonnet', effort: 'high', allowed_tools: ['Read'] }) };
+    const brains = { resolve: () => ({ name: 'sonnet-high', type: 'ccode', model: 'sonnet', effort: 'high' }) };
     // loadPermission: loadPermissionLevel — the REAL config/permissions/*.md reader; the harness's
     // own default is a no-op (operator 2026-08-16, see harness()'s comment) so this end-to-end
     // test must opt back in explicitly.
@@ -1555,7 +1555,7 @@ describe('brainpool.turn — STRUCTURAL SAFETY GATE (operator 2026-08-16, refine
   });
 
   it("accessLevel 'all' with allowed_users: ['*'] → the explicit wildcard escape hatch, proceeds normally", async () => {
-    const brains = { resolve: () => ({ name: 'sonnet-high', type: 'ccode', model: 'sonnet', effort: 'high', allowed_tools: ['Read'] }) };
+    const brains = { resolve: () => ({ name: 'sonnet-high', type: 'ccode', model: 'sonnet', effort: 'high' }) };
     const { brain, pool } = harness([{ text: 'ok', sessionId: 's' }], {
       brains, skipAccessLevelDefault: true, seedAgents: { e: { access_level: 'all', allowed_users: ['*'] } },
       loadPermission: (level) => (level === 'all' ? { dangerouslySkipPermissions: true, allowedTools: ['Bash'] } : null),
@@ -1567,7 +1567,7 @@ describe('brainpool.turn — STRUCTURAL SAFETY GATE (operator 2026-08-16, refine
   });
 
   it("accessLevel 'all' with allowed_users: ['123'] (an ordinary non-empty list) → proceeds normally", async () => {
-    const brains = { resolve: () => ({ name: 'sonnet-high', type: 'ccode', model: 'sonnet', effort: 'high', allowed_tools: ['Read'] }) };
+    const brains = { resolve: () => ({ name: 'sonnet-high', type: 'ccode', model: 'sonnet', effort: 'high' }) };
     const { brain, pool } = harness([{ text: 'ok', sessionId: 's' }], {
       brains, skipAccessLevelDefault: true, seedAgents: { e: { access_level: 'all', allowed_users: ['123'] } },
       loadPermission: (level) => (level === 'all' ? { dangerouslySkipPermissions: true, allowedTools: ['Bash'] } : null),
@@ -1579,7 +1579,7 @@ describe('brainpool.turn — STRUCTURAL SAFETY GATE (operator 2026-08-16, refine
   });
 
   it("accessLevel 'regular' (no allowed_users involved) → proceeds normally, unaffected by rule 2", async () => {
-    const brains = { resolve: () => ({ name: 'sonnet-high', type: 'ccode', model: 'sonnet', effort: 'high', allowed_tools: ['Read'] }) };
+    const brains = { resolve: () => ({ name: 'sonnet-high', type: 'ccode', model: 'sonnet', effort: 'high' }) };
     const { brain, pool } = harness([{ text: 'ok', sessionId: 's' }], {
       brains, skipAccessLevelDefault: true, seedAgents: { e: { access_level: 'regular' } },
       loadPermission: (level) => (level === 'regular' ? { dangerouslySkipPermissions: false, allowedTools: DEFAULT_ALLOWED_TOOLS } : null),
@@ -1816,7 +1816,7 @@ describe("permission-levels — the 'sandbox' level (operator 2026-09-05)", () =
 });
 
 describe("brainpool.turn — access_level 'sandbox' (operator 2026-09-05)", () => {
-  const brains = { resolve: () => ({ name: 'sonnet-high', type: 'ccode', model: 'sonnet', effort: 'high', allowed_tools: ['Read'] }) };
+  const brains = { resolve: () => ({ name: 'sonnet-high', type: 'ccode', model: 'sonnet', effort: 'high' }) };
 
   it("REPRODUCE-FIRST: a per-conversation sandboxed:false does NOT unbox a 'sandbox' being — the level forces true ahead of the ?? walk", async () => {
     const { brain, pool } = harness([{ text: 'ok', sessionId: 's' }], {
@@ -2270,7 +2270,7 @@ describe('brainpool — sandboxed, the resolved box and the rung that decided it
 //    allowed_users global tier exactly. ──
 describe('brainpool.turn — accessLevel GLOBAL-DEFAULT tier (operator 2026-08-15, conversation_defaults)', () => {
   it("REPRODUCE-FIRST: access_level set ONLY at config.yaml's agents.<being>.conversation_defaults.access_level (no per-conversation override) still applies on the being's next turn", async () => {
-    const brains = { resolve: () => ({ name: 'sonnet-high', type: 'ccode', model: 'sonnet', effort: 'high', allowed_tools: ['Read'] }) };
+    const brains = { resolve: () => ({ name: 'sonnet-high', type: 'ccode', model: 'sonnet', effort: 'high' }) };
     const config = { agents: { e: { conversation_defaults: { access_level: 'all', allowed_users: ['123'] } } } };
     const { brain, pool } = harness([{ text: 'ok', sessionId: 's' }], {
       brains, config,
@@ -2283,7 +2283,7 @@ describe('brainpool.turn — accessLevel GLOBAL-DEFAULT tier (operator 2026-08-1
   });
 
   it('REGRESSION: a per-conversation accessLevel override still WINS over the node global conversation_defaults.access_level default', async () => {
-    const brains = { resolve: () => ({ name: 'sonnet-high', type: 'ccode', model: 'sonnet', effort: 'high', allowed_tools: ['Read'] }) };
+    const brains = { resolve: () => ({ name: 'sonnet-high', type: 'ccode', model: 'sonnet', effort: 'high' }) };
     const config = { agents: { e: { conversation_defaults: { access_level: 'all' } } } };
     const { brain, pool } = harness([{ text: 'ok', sessionId: 's' }], {
       brains, config, seedAgents: { e: { access_level: 'regular' } },

@@ -1809,6 +1809,11 @@ export const CONFIG_SCHEMA = {
             being's own Bash walks past. A meta engineer must therefore declare
             access_level: all explicitly - the shipped skeleton's wren does.
 
+            A ccode TYPE FILE that declares its own top-level allowed_tools
+            NARROWS the level's list to (level ∩ type), sent to the CLI as
+            --tools so unlisted tools do not exist, boxed or not (2026-10-15).
+            A type with no list gets the level's whole list.
+
             All three are the SAME values /agents <handle>|all
             access_level <level> writes per-conversation - that validator and
             this enum are the same list, ACCESS_LEVELS in

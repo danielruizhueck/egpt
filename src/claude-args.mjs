@@ -60,6 +60,8 @@
 //                                     "MultiEdit(...)","NotebookEdit(...)"] — Claude's
 //                                     own engine, NOT a hand-rolled hook. The dir is
 //                                     also --add-dir'd so READS still work.
+//   tools (a type's list narrowing its level, brainpool) → --tools "<a,b,c>": unlisted tools
+//                                     do not exist, in every tier above (2026-10-15)
 //   model   → --model ;  effort → --effort ;  sessionId → --resume ;
 //   appendSystemPrompt → --append-system-prompt
 //
@@ -154,6 +156,7 @@ export function buildClaudeArgs(options = {}) {
     args.push('--dangerously-skip-permissions');
     args.push('--permission-mode', 'bypassPermissions');
   }
+  if (Array.isArray(options.tools)) args.push('--tools', options.tools.join(','));
 
   // ── tool permission + confinement (mirror buildSdkOptions) ──
   //
