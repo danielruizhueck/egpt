@@ -89,6 +89,14 @@ describe('config/skeletons/room/10-actions.md (the limbs card)', () => {
     expect(advertised).not.toContain('delete');
   });
 
+  it('does NOT offer a transcribe limb (reverted 2026-10-16: audio enters through the bridge)', () => {
+    expect(ACTION_VERBS.has('transcribe')).toBe(false);
+    expect(advertised).not.toContain('transcribe');
+    const { run, prose } = parseReplyActions('/transcribe desktop/court.wma', { surface: 'whatsapp', chatId: 'c' });
+    expect(run).toEqual([]);
+    expect(prose).toContain('/transcribe desktop/court.wma');
+  });
+
   it('every advertised verb actually parses as an action, not as prose', () => {
     const sample = { react: '/react #1 x', reply: '/reply #1 hi', media: '/media a.png', edit: '/edit #1 hi', ask: '/ask hi' };
     for (const verb of new Set(advertised)) {
