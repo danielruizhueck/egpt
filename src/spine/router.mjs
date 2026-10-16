@@ -47,7 +47,7 @@ function localAgentKey(agents, name) {
 }
 
 // Is this sender on ANY allowed_users list (networks.*, agents.*.conversation_defaults)? "*" names nobody.
-function isKnownSender(senderId, config = {}) {
+export function isKnownSender(senderId, config = {}) {
   const lists = [
     ...Object.values(config.networks ?? {}).map((n) => n?.allowed_users),
     ...Object.values(config.agents ?? {}).map((a) => a?.conversation_defaults?.allowed_users),

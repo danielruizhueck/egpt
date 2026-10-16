@@ -10,7 +10,7 @@
 // with a short note.
 import { lifecycleExit } from './ingest.mjs';
 import { isAutoMode, AUTO_MODES, DEFAULT_AUTO_MODE, isDeliberateSilence, superModeOf } from '../auto-mode.mjs';
-import { patchBeing, patchContact, deleteBeing, getContact, getBeing, ensureContact, recordThread, findThreadJsonl, aliasContact, dropContact, aliasTargetOf, superChannelFor, isSuperChannel, residentsOf, slugDir, statsPath, conversationPathOf, seedIdentityLayers, skeletonIdentityFiles, slugSuffix, rollTranscript, fixedSlugFor, DETERMINISTIC_MODEL, DETERMINISTIC_EFFORT, DEFAULT_ALLOWED_TOOLS, LOBBY_SLUG } from '../conversations-state.mjs';
+import { patchBeing, patchContact, deleteBeing, getContact, getBeing, ensureContact, recordThread, findThreadJsonl, aliasContact, dropContact, aliasTargetOf, superChannelFor, isSuperChannel, residentsOf, defaultBeingOf, allowedUsersPermits, slugDir, statsPath, conversationPathOf, seedIdentityLayers, skeletonIdentityFiles, slugSuffix, rollTranscript, fixedSlugFor, DETERMINISTIC_MODEL, DETERMINISTIC_EFFORT, DEFAULT_ALLOWED_TOOLS, LOBBY_SLUG } from '../conversations-state.mjs';
 import { stripFrontMatter } from '../transcript-meta.mjs';
 // WHERE A SANDBOXED BEING'S CLI STORE LIVES — the ONE formula, taken from the module that
 // CREATES it (src/sandbox-cli-session.mjs) rather than rebuilt here, so the two verbs that retire
@@ -23,7 +23,7 @@ import { loadPermissionLevel, ACCESS_LEVELS, isAccessLevel } from './permission-
 // over a single already-extracted token is the house single-token lookup (src/spine/mesh.mjs's
 // findAgentByToken, src/spine/heartbeat-loader.mjs's `agent:`); `addressableTokens` LISTS the
 // valid handles in the not-hosted log line. See agentsCmd's HANDLE → KEY block.
-import { addressed, addressableTokens } from './router.mjs';
+import { addressed, addressableTokens, isKnownSender } from './router.mjs';
 import { superChannelAlive } from './gating.mjs';
 import { stat as fsStat, readFile as fsReadFile, writeFile as fsWriteFile, mkdir as fsMkdir, readdir as fsReaddir, rm as fsRm, rename as fsRename } from 'node:fs/promises';
 import { readdirSync } from 'node:fs';
@@ -254,6 +254,8 @@ const quoteLeadingCommand = (text) => String(text ?? '').replace(/^\/([a-z0-9_-]
 // isCommand admits it from any sender, because all it does is read a chat's own backlog back to that
 // same chat. One pattern, read by that gate and by run()'s dispatch, so the two cannot disagree.
 const RECAP_CMD = /^\/recap\b/i;
+// /join (operator 2026-10-16) — admitted from any sender too; joinGroup decides who may run it.
+const JOIN_CMD = /^\/join\b/i;
 
 // /recap's listing: one line per message the chat sent while the node slept — sender, local time,
 // the first ~100 characters — in stamp order, whitespace folded so a message is one line. The clock
@@ -462,7 +464,10 @@ const NODE_LOCAL_SURFACES = new Set([SHELL_SURFACE]);
 // command never edits to an empty string or makes an untitled group when a key is unset; the real
 // text is set in config.yaml on each node. Exported so tests assert the fallback without
 // re-hardcoding the strings.
-export const JOIN_PLACEHOLDER_DEFAULT = '🤖↔️🤔 ...';
+// config.join.placeholder is a template ({name} {title} {group} {by}); config.join.exists answers a
+// /join whose name is already a live side-room the sender is not in (operator 2026-10-16).
+export const JOIN_PLACEHOLDER_DEFAULT = '🔗 joined group {name}. You can join too: send /join {name}';
+export const JOIN_EXISTS_DEFAULT = '🔗 group {name} already exists. Ask {by} to add you.';
 export const SPLIT_PLACEHOLDER_DEFAULT = '🍴🤖 ...';
 export const GROUP_TITLE_DEFAULT = 'egpt {name} {group}';
 // /send's posting account when config.send.post_back_from is unset or invalid: the operator's OWN
@@ -930,13 +935,14 @@ export function createCommands({
   // against cfg.telegram.chat_id, not whatsapp's — ids are per-surface namespaces.
   // Fall back to the whatsapp block when ev.surface is absent (safety). Authorized
   // senders (per-surface allowed_users / isSender) can command from anywhere.
-  // …EXCEPT /recap, which anybody may type (RECAP_CMD, above — operator 2026-09-27). It is the ONLY
-  // exception: every other command, lifecycle included, still needs the operator.
+  // …EXCEPT /recap, which anybody may type (RECAP_CMD, above — operator 2026-09-27), and /join, which
+  // joinGroup gates itself (JOIN_CMD, operator 2026-10-16). Every other command, lifecycle and
+  // /agents included, still needs the operator.
   function isCommand(ev) {
     const body = String(ev?.body ?? '').trim();
     if (isOperator(ev) && isRadioQuickReply(ev)) return true;
     if (!body.startsWith('/')) return false;
-    return isOperator(ev) || RECAP_CMD.test(body);
+    return isOperator(ev) || RECAP_CMD.test(body) || JOIN_CMD.test(body);
   }
 
   // Run a command and CAPTURE its reply instead of sending it. Routes through the ONE run()
@@ -1232,14 +1238,15 @@ export function createCommands({
     // reply /send to a message in either group to relay it back to the original chat; /end — reply
     // /end in either group to archive it and drop its mapping (operator 2026-10-03). They sit
     // pre-catch-all like the rest. Operator-only automatically: isCommand gates every '/'-verb except
-    // /recap behind isOperator, so no handler re-checks it (same as chrome/radio). NOT in
+    // /recap and /join behind isOperator, so no handler re-checks it (same as chrome/radio); joinGroup
+    // runs its own member gate (operator 2026-10-16). NOT in
     // NODE_ADDRESSABLE: a /join/split node override is parsed by the handler itself (`/join do` or
     // `/join=do`). Each handler STANDS DOWN SILENTLY on the node that is not the right one (not the
     // node_role=primary / addressed node for /join+/split; no alias-or-parent for /send+/end), so a
     // shared Beeper account never double-answers. Written as `<name>Match = /^\/word…` so the /help
     // drift guard (tests/spine-commands.test.mjs) sees them.
     const joinMatch = /^\/join\b[\s\S]*$/i.exec(line);
-    if (joinMatch) { await joinGroup(ev); return; }
+    if (joinMatch) { return await joinGroup(ev); }   // returns an outcome for the audit on its member paths
     const splitMatch = /^\/split\b[\s\S]*$/i.exec(line);
     if (splitMatch) { await splitGroup(ev); return; }
     const sendMatch = /^\/send\b[\s\S]*$/i.exec(line);
@@ -3497,6 +3504,40 @@ export function createCommands({
     return { chatId, primaryJid };
   }
 
+  // ── /join shared by C's members (operator 2026-10-16) ──
+  // The name key is case- and space-insensitive, so `/join Emely` finds `/join emely`'s room.
+  const joinNameKey = (s) => String(s ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+  const fillVars = (tpl, vars) => Object.entries(vars).reduce((t, [k, v]) => t.replaceAll(`{${k}}`, String(v ?? '')), tpl);
+  const joinExistsOf = (block) => (block && typeof block.exists === 'string' && block.exists.trim()) ? block.exists : JOIN_EXISTS_DEFAULT;
+  // C's live /join room for a name: an alias of C (never its super channel) carrying join_name, or,
+  // for a room made before join_name existed, the transcript key its title gives.
+  const joinRoomOf = (state, surface, primaryJid, key, legacyKey) => {
+    for (const [chatId, e] of Object.entries(state?.contacts?.[surface] ?? {})) {
+      if (e?.aliasOf !== primaryJid || e.super === true) continue;
+      if (e.join_name != null ? e.join_name === key : e.transcript === legacyKey) return { chatId, entry: e };
+    }
+    return null;
+  };
+  const inRoster = async (chatId, senderId) => {
+    const items = (await forkBridge.chatRaw?.(chatId))?.participants?.items;
+    return !!senderId && Array.isArray(items) && items.some((p) => String(p?.id) === String(senderId));
+  };
+  // Who besides the operator may /join: a member of a GROUP C whom a being resident in C would wake,
+  // by router.resolve's allowed_users test (the conversation's block, else the agent's
+  // conversation_defaults; a stranger reaches only the conversation's own agent). The room is C's
+  // alias, so it grants nothing C does not. /agents and every other verb keep isOperator.
+  const mayJoinHere = (state, surface, chatId, ev) => {
+    if (ev?.raw?.chatType !== 'group') return false;
+    const entry = getContact(state, surface, chatId)?.entry;
+    const owner = defaultBeingOf(entry);
+    const beings = (owner && !isKnownSender(ev.senderId, cfg())) ? [owner] : residentsOf(entry);
+    return beings.some((b) => {
+      const conv = getBeing(state, surface, chatId, b)?.allowedUsers;
+      const global = cfg().agents?.[b]?.conversation_defaults?.allowed_users;
+      return allowedUsersPermits(Array.isArray(conv) ? conv : (Array.isArray(global) ? global : null), ev.senderId);
+    });
+  };
+
   // /join (operator types /join [<name>|<node>] in chat C): create the side-group and ALIAS it to C.
   // Every precondition resolves BEFORE any bridge/state mutation (an unresolvable Rodz STOPS, nothing
   // created).
@@ -3506,6 +3547,13 @@ export function createCommands({
     const { node, name } = parseForkArgs(ev.body);
     if (!forkNodeSelected(node)) return;                     // not the selected node → silent
     const state0 = await loadState();
+    const contact = getContact(state0, surface, ev.chatId);
+    // A non-operator gets in only through mayJoinHere; refused silently, like an unanswered wake.
+    const operator = isOperator(ev);
+    if (!operator && !(contact && mayJoinHere(state0, surface, ev.chatId, ev))) {
+      onLog(`/join: ${ev.senderName ?? ev.senderId ?? '?'} may not wake a being in ${ev.chatId} — refused.`);
+      return 'refused — the sender may not wake a being here';
+    }
     // /join only ALIASES this chat's conversation onto the new side-group, so it needs a KNOWN
     // conversation to alias — NOT an existing being thread. A chat the being never answered in (an
     // ingested 1:1 transcript, no agents block) is still joinable: a fresh E invocation in the
@@ -3513,35 +3561,68 @@ export function createCommands({
     // without polluting the 1:1 (operator 2026-10-06). NB /split keeps residesHere — it COPIES
     // resident threads, so a thread-less split is meaningless. The chat where /join was typed is
     // always a known contact; this guard only trips on a genuinely-unknown chat.
-    if (!getContact(state0, surface, ev.chatId)) {
+    if (!contact) {
       onLog(`/join: ${ev.chatId} is not a known conversation — nothing to alias, refusing.`);
       await send?.(ev.chatId, '/join: I don\'t know this conversation yet — send a message here first, then /join.');
       return;
     }
-    const rodz = await resolveRodz(ev.chatId, '/join');
-    if (!rodz) return;
+    // A sender other than the account itself goes into the new group; only a bridged id can be invited.
+    const invitee = !ev.isSender && String(ev.senderId ?? '').endsWith(':beeper.local') ? ev.senderId : null;
+    if (!operator && !invitee) {
+      await send?.(ev.chatId, '/join: I can\'t add you to a group from this account.');
+      return 'refused — the sender id cannot be invited';
+    }
     const cTitle = ev.chatName || (await forkBridge.chatTitle(ev.chatId)) || ev.chatId;
-    const placeholder = placeholderOf(cfg().join, JOIN_PLACEHOLDER_DEFAULT);
     // DISCREET (a phrase trigger): a RANDOM group name instead of the parsed <name>, and the
     // operator's message is left UNEDITED below — so nothing in the chat shows a command ran.
-    let title = groupTitleOf(cTitle, discreet ? randomGroupToken() : (name ?? defaultNameOf(cfg().join, 'egpt super')));
+    const joinName = discreet ? randomGroupToken() : (name ?? defaultNameOf(cfg().join, 'egpt super'));
+    const baseTitle = groupTitleOf(cTitle, joinName);
+    const vars = (title) => ({ name: joinName, title, group: cTitle, by: ev.senderName ?? '' });
+    const placeholder = (title) => fillVars(placeholderOf(cfg().join, JOIN_PLACEHOLDER_DEFAULT), vars(title));
+    // Our own message is edited in place; anyone else's is not ours to edit, so it gets a reply.
+    const announce = (text) => (ev.isSender ? forkBridge.editMessage(ev.chatId, ev.msgId, text) : send?.(ev.chatId, text));
+
+    // SAME NAME, LIVE ROOM → no second group (operator 2026-10-16). A room the bridge reports gone
+    // is dropped and replaced. The Desktop API has no add-member endpoint, so a sender not already in
+    // the room is told whom to ask.
+    const key = joinNameKey(joinName);
+    const hit = joinRoomOf(state0, surface, contact.jid, key, sanitizeSlug(baseTitle));
+    if (hit) {
+      const alive = forkBridge.chatRaw ? await superChannelAlive(hit.chatId, { chatRaw: forkBridge.chatRaw, config: cfg() }) : null;
+      if (alive === false) {
+        await writeState(dropContact(await loadState(), surface, hit.chatId));
+        onLog(`/join: side-room ${hit.chatId} ("${joinName}") is gone — alias dropped, creating a new one`);
+      } else {
+        if (ev.isSender || await inRoster(hit.chatId, ev.senderId)) {
+          await announce(placeholder(baseTitle));
+          return `already in ${hit.chatId} ("${joinName}")`;
+        }
+        await send?.(ev.chatId, fillVars(joinExistsOf(cfg().join), { ...vars(baseTitle), by: hit.entry.join_by ?? 'the operator' }));
+        return `"${joinName}" exists (${hit.chatId}) — the sender is not in it and cannot be added from here`;
+      }
+    }
+
+    const rodz = await resolveRodz(ev.chatId, '/join');
+    if (!rodz) return;
     // …then make it unique (suffix the title if the primary already has a group by that exact name, so the
     // opener's by-title lookup lands in THIS group, not a stale same-named one — the 2026-10-04 bug).
-    title = await uniqueTitle('/join', title, rodz.accountID);
+    const title = await uniqueTitle('/join', baseTitle, rodz.accountID);
 
     // ── mutations begin ──
-    // (a+b) CREATE the group (operator + Rodz, forced to a group; no inline opener — the group
-    //       inherits C's whole thread by the alias) and ALIAS its SHORT chatId to C's canonical
-    //       entry, via the create+alias core shared with the super channel (createAliasedSideGroup,
-    //       which also stores the sanitized title as the alias's per-surface transcript key).
+    // (a+b) CREATE the group (operator + Rodz + a member who ran it, forced to a group; no inline
+    //       opener — the group inherits C's whole thread by the alias) and ALIAS its SHORT chatId to
+    //       C's canonical entry, via the create+alias core shared with the super channel
+    //       (createAliasedSideGroup, which also stores the sanitized title as the alias's per-surface
+    //       transcript key; join_name/join_by find this room for the next /join of the same name).
     //       null → createGroup gave no chatId: abort, placeholder NOT edited, nothing posted.
-    const aliased = await createAliasedSideGroup(ev, surface, title, rodz.accountID, [rodz.rodzUserId], '/join');
+    const participantIDs = [...new Set([rodz.rodzUserId, ...(invitee ? [invitee] : [])])];
+    const aliased = await createAliasedSideGroup(ev, surface, title, rodz.accountID, participantIDs, '/join', { join_name: key, ...(ev.senderName ? { join_by: ev.senderName } : {}) });
     if (!aliased) return;
     const { chatId: joinChatId, primaryJid } = aliased;
-    // (c) EDIT the operator's /join message into the placeholder marker (raw, no persona) — SKIPPED
-    //     when discreet, so a phrase-triggered /join leaves the operator's natural words in the chat.
-    if (!discreet) await forkBridge.editMessage(ev.chatId, ev.msgId, placeholder);
-    onLog(`/join${discreet ? ' (discreet)' : ''}: ${cTitle} -> group ${joinChatId} aliased to ${primaryJid} (member ${rodz.rodzUserId})`);
+    // (c) EDIT the operator's /join message into the placeholder (raw, no persona; a reply for anyone
+    //     else) — SKIPPED when discreet, so a phrase-triggered /join leaves the natural words in the chat.
+    if (!discreet) await announce(placeholder(title));
+    onLog(`/join${discreet ? ' (discreet)' : ''}: ${cTitle} -> group ${joinChatId} aliased to ${primaryJid} (members ${participantIDs.join(', ')})`);
     // (d) POST THE OPENER so the new (otherwise-empty) group surfaces in Beeper — added step AFTER the
     //     success path; a failure here never undoes the alias/placeholder above.
     await postOpener({ verb: '/join', newChatId: joinChatId, title, openerText: openerOf(cfg().join, JOIN_OPENER_DEFAULT, cTitle), accountID: rodz.accountID });
