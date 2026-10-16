@@ -33,11 +33,19 @@ describe('/config <key>=<value> — bare leaf + dotted path resolution, write, r
     await cmds.run({ body: '/config=kg default_node=do', chatId: '!self', authorized: true });
     expect(sent).toHaveLength(1);
     expect(sent[0].text).toMatch(/dispatch\.default_node/);
-    // Names the COMMAND, not just "restart": the operator relaunched the editor and wondered
-    // why nothing changed — the spine is a separate, long-running process.
-    expect(sent[0].text).toMatch(/\/restart/);
+    // A hot key (step B): the spine swaps the re-read file in on its next tick.
+    expect(sent[0].text).toMatch(/next tick, no restart/);
     const written = await readFile(configPath, 'utf8');
     expect(written).toMatch(/dispatch:\s*\n\s*default_node: do/);
+  });
+
+  it('a restart-only key (config-swap.mjs RESTART_KEYS) says so and names the COMMAND', async () => {
+    const configPath = await tmpConfigPath();
+    const { cmds, sent } = harness({ config: {}, configPath });
+    await cmds.run({ body: '/config shell.port=23999', chatId: '!self', authorized: true });
+    // Names the COMMAND, not just "restart": the operator relaunched the editor and wondered
+    // why nothing changed — the spine is a separate, long-running process.
+    expect(sent[0].text).toMatch(/restart-only key.*\/restart/);
   });
 
   it('dotted path form (dispatch.default_node) behaves identically to the bare-leaf form', async () => {

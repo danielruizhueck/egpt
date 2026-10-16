@@ -1,14 +1,13 @@
-// AUTO-RESTART ON CONFIG CHANGE (operator 2026-10-09).
+// CONFIG CHANGE ON THE TICK (operator 2026-10-09; step B 2026-10-16).
 //
-// config.yaml is read ONCE at boot (boot.mjs `const cfg = readConfig()`), and many values are
-// captured into services there, so an edit otherwise needs a manual /restart. When the feature is
-// ON, the spine's tick pulse notices a SETTLED config.yaml content change and triggers the SAME
-// exit-43 drain the ingest /restart runs (requestRestart → boot's announceAndExit(43)) — a FULL
-// restart, so every boot-captured value applies consistently.
+// The spine's tick pulse (and every message arrival) notices a SETTLED config.yaml content change
+// and hands it to boot's applyConfig: hot keys are swapped in with no restart; a restart-only key
+// takes the SAME exit-43 drain the ingest /restart runs (requestRestart → boot's
+// announceAndExit(43)) when auto_restart_on_config_change is on; an invalid file is refused.
 //
-// Two halves. The SEAM half drives createSpine directly with an injected read/hash and
-// restart-trigger, firing tick() by hand — the five behaviours the ruling names. The SEAM-UNIT
-// half exercises the real file read/hash (configContentHashSync): no-op save, change, malformed.
+// Two halves. The SEAM half drives createSpine directly with an injected hash, applyConfig answer
+// and restart trigger, firing tick() by hand. The SEAM-UNIT half exercises the real file read/hash
+// (configContentHashSync): no-op save, change, malformed.
 import { describe, it, expect } from 'vitest';
 import { writeFileSync, rmSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -31,86 +30,112 @@ const deps = () => ({
 
 const BOOT = 'hash-boot';
 const NEXT = 'hash-next';
+const RESTART = { restart: ['shell'], autoRestart: true };
 
-function build(opts = {}) {
+function build({ answer = () => RESTART, live = BOOT, ...opts } = {}) {
   const restarts = [];
   const lines = [];
+  const group = [];
+  const applied = [];
+  let hash = live;
+  let fire = null;
   const spine = createSpine({
     ...deps(),
+    bridge: { onMessage(cb) { fire = cb; }, send() {}, stop() {} },
     log: { line: (s) => lines.push(s) },
+    configBootHash: BOOT, readConfigHash: () => hash,
+    applyConfig: () => { applied.push(hash); return answer(); },
     requestRestart: () => restarts.push('restart'),
+    logToGroup: async (t) => { group.push(t); },
     ...opts,
   });
-  return { spine, restarts, lines };
+  spine.start();
+  const arrive = () => fire?.({ surface: 'wa', chatId: 'c', msgId: `m${lines.length}`, body: 'hola', kind: 'text', raw: {} });
+  return { spine, restarts, lines, group, applied, arrive, save: (h) => { hash = h; } };
 }
 
-describe('spine tick — auto-restart on a config.yaml content change', () => {
-  it('content changed + ENABLED → one /restart, fired exactly once across many ticks', () => {
-    let live = BOOT;
-    const { spine, restarts, lines } = build({
-      autoRestartOnConfigChange: true, configBootHash: BOOT, readConfigHash: () => live,
-    });
+describe('spine tick — a config.yaml content change is applied, restarted, or refused', () => {
+  it('hot keys only → applied once, no restart', () => {
+    const { spine, restarts, applied, lines, save } = build({ answer: () => ({ changed: ['agents.e', 'liveness'] }) });
     spine.tick();
-    expect(restarts).toEqual([]);          // unchanged yet
-
-    live = NEXT;                           // the operator saved an edit
-    spine.tick();
-    spine.tick();
-    spine.tick();
-    expect(restarts).toEqual(['restart']); // once — the latch, not once per tick
-    expect(lines.some((l) => l.includes('config.yaml changed on disk'))).toBe(true);
-  });
-
-  it('content changed + DISABLED → nothing (default false, the conservative node)', () => {
-    let live = BOOT;
-    const { spine, restarts } = build({
-      autoRestartOnConfigChange: false, configBootHash: BOOT, readConfigHash: () => live,
-    });
-    live = NEXT;
-    spine.tick();
-    spine.tick();
+    expect(applied).toEqual([]);           // unchanged yet
+    save(NEXT);
+    spine.tick(); spine.tick();
+    expect(applied).toEqual([NEXT]);       // once per content
     expect(restarts).toEqual([]);
+    expect(lines.some((l) => l.includes('config.yaml applied without a restart: agents.e, liveness'))).toBe(true);
   });
 
-  it('a no-op save (same content hash) → no restart', () => {
-    const { spine, restarts } = build({
-      autoRestartOnConfigChange: true, configBootHash: BOOT, readConfigHash: () => BOOT,
-    });
+  it('a restart-only key + the switch ON → one /restart, fired exactly once across many ticks', () => {
+    const { spine, restarts, lines, save } = build();
+    save(NEXT);
+    spine.tick(); spine.tick();
+    save('hash-third');
     spine.tick();
-    spine.tick();
+    expect(restarts).toEqual(['restart']); // the latch, not once per tick
+    expect(lines.some((l) => l.includes('restart-only key(s) shell — triggering /restart'))).toBe(true);
+  });
+
+  it('a restart-only key + the switch OFF → nothing restarts, and it says why', () => {
+    const { spine, restarts, applied, lines, save } = build({ answer: () => ({ restart: ['shell'], autoRestart: false }) });
+    save(NEXT);
+    spine.tick(); spine.tick();
+    expect(restarts).toEqual([]);
+    expect(applied).toEqual([NEXT]);
+    expect(lines.some((l) => l.includes('auto_restart_on_config_change is off'))).toBe(true);
+  });
+
+  it('an invalid config → refused, the logging group told once, no restart', async () => {
+    const { spine, restarts, group, save } = build({ answer: () => ({ error: 'boot: no node_name' }) });
+    save(NEXT);
+    spine.tick(); spine.tick();
+    await Promise.resolve();
+    expect(restarts).toEqual([]);
+    expect(group).toEqual(['config.yaml change refused, the running config stays: boot: no node_name']);
+  });
+
+  it('a message arrival applies a hot change, but leaves a restart to the tick', async () => {
+    const hot = build({ answer: () => ({ changed: ['agents.e'] }) });
+    hot.save(NEXT);
+    await hot.arrive();
+    expect(hot.applied).toEqual([NEXT]);
+
+    const cold = build();
+    cold.save(NEXT);
+    await cold.arrive();
+    expect(cold.restarts).toEqual([]);
+    cold.spine.tick();
+    expect(cold.restarts).toEqual(['restart']);
+  });
+
+  it('a no-op save (same content hash) → nothing is read', () => {
+    const { spine, restarts, applied } = build();
+    spine.tick(); spine.tick();
+    expect(applied).toEqual([]);
     expect(restarts).toEqual([]);
   });
 
   it('malformed/partial write (hash null) → nothing, the spine WAITS; the settled change then restarts', () => {
-    let live = null;                       // mid-write: readConfigHash cannot parse it → null
-    const { spine, restarts } = build({
-      autoRestartOnConfigChange: true, configBootHash: BOOT, readConfigHash: () => live,
-    });
-    spine.tick();
-    spine.tick();
-    expect(restarts).toEqual([]);          // never a restart onto a broken config
-
-    live = NEXT;                           // the file settled to a valid, changed config
+    const { spine, restarts, applied, save } = build({ live: null });
+    spine.tick(); spine.tick();
+    expect(applied).toEqual([]);           // never a restart onto a broken config
+    save(NEXT);
     spine.tick();
     expect(restarts).toEqual(['restart']);
   });
 
   it('after a respawn carrying the NEW content (boot hash == live hash) → no re-trigger', () => {
-    // The respawned spine captures the new content as its OWN boot hash — the fire-once guarantee.
-    const { spine, restarts } = build({
-      autoRestartOnConfigChange: true, configBootHash: NEXT, readConfigHash: () => NEXT,
-    });
-    spine.tick();
-    spine.tick();
+    const { spine, restarts } = build({ configBootHash: NEXT, live: NEXT });
+    spine.tick(); spine.tick();
     expect(restarts).toEqual([]);
   });
 
-  it('inert when a seam is missing (older caller / unexercised test) even with the flag on', () => {
-    let live = NEXT;
-    // no readConfigHash, no configBootHash
-    const a = build({ autoRestartOnConfigChange: true, requestRestart: () => a.restarts.push('x'), readConfigHash: () => live });
+  it('inert when a seam is missing (older caller / unexercised test)', () => {
+    const a = build({ configBootHash: null, live: NEXT });
     a.spine.tick();
-    expect(a.restarts).toEqual([]);        // configBootHash null → inert
+    const b = build({ applyConfig: null, live: NEXT });
+    b.spine.tick();
+    expect([...a.restarts, ...b.restarts, ...a.applied, ...b.applied]).toEqual([]);
   });
 });
 

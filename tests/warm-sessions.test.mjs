@@ -433,8 +433,9 @@ describe('warm-session pool', () => {
   it('no churn when the model/effort are unchanged, or when a caller states none (compaction\'s /compact omits effort)', async () => {
     const { makeSession, made } = heldFactory();
     const pool = createWarmPool({ makeSession });
-    await pool.run('k', 'a', () => {}, { brainOptions: { sessionId: 'SID00001', model: 'opus', effort: 'high' } });
-    await pool.run('k', 'b', () => {}, { brainOptions: { sessionId: 'SID00001', model: 'opus', effort: 'high' } });
+    // a turn states cwd + allowedTools too (brainpool baseOpts); compaction repeats the turn's own
+    await pool.run('k', 'a', () => {}, { brainOptions: { sessionId: 'SID00001', cwd: '/c', allowedTools: [], model: 'opus', effort: 'high' } });
+    await pool.run('k', 'b', () => {}, { brainOptions: { sessionId: 'SID00001', cwd: '/c', allowedTools: [], model: 'opus', effort: 'high' } });
     await pool.run('k', '/compact', () => {}, { brainOptions: { sessionId: 'SID00001', cwd: '/c', model: 'opus', allowedTools: [] } });
     await pool.run('k', '/compact', () => {}, { brainOptions: { sessionId: 'SID00001', cwd: '/c', model: null, allowedTools: [] } });
     await pool.run('k', 'c');

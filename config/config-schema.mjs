@@ -2681,22 +2681,27 @@ export const CONFIG_SCHEMA = {
   `,
 
   auto_restart_on_config_change: `
-    Auto-apply a config.yaml edit by restarting (operator 2026-10-09;
-    src/spine/spine.mjs maybeRestartOnConfigChange, wired at boot's createSpine).
-    config.yaml is read ONCE at boot and many values are captured into services
-    there, so an edit otherwise needs a manual /restart. When ON, the spine's
-    tick pulse notices a changed config.yaml and triggers the SAME drain+respawn
-    the ingest /restart does (exit 43) — a FULL restart, so every boot-captured
-    value applies consistently.
+    Restart to apply a config.yaml edit that touches a RESTART-ONLY key
+    (operator 2026-10-09; step B 2026-10-16; src/spine/spine.mjs
+    maybeApplyConfigChange, boot's applyConfig). Every other edit is applied
+    WITHOUT a restart, flag or not: the spine's tick (and each message arrival)
+    swaps the new config in, and a being whose spawn options changed reopens its
+    own warm session on its next turn. The restart-only keys are the ones boot
+    binds once (Beeper connections, shell, node identity, the transcription and
+    voice services, …) — the list is src/spine/config-swap.mjs RESTART_KEYS.
+    When ON, such an edit triggers the SAME drain+respawn the ingest /restart
+    does (exit 43); the value read is the one in the NEW file. An edit that
+    fails boot's assertions is refused: the running config stays and the
+    logging group (log_to_group) is told.
 
       ENUM: true | false
       DEFAULT: false (ABSENT or any non-true value) — a generic node does not
         auto-restart; the operator opts in explicitly per node.
 
     Keyed on the config.yaml CONTENT hash, not mtime — a no-op save (identical
-    bytes) does NOT restart. Parse-gated: a mid-write or malformed config is
-    IGNORED (the spine waits), never a restart onto a broken config. Fires ONCE
-    per change — the respawned spine captures the new content as its boot hash.
+    bytes) does nothing. Parse-gated: a mid-write or malformed config is
+    IGNORED (the spine waits). Acted on ONCE per content — the respawned spine
+    captures the new content as its boot hash.
     Only operator-triggered writes touch config.yaml (/config set, /radio
     disable); nothing automatic does, so there is no restart loop.
   `,

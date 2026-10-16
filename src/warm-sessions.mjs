@@ -32,7 +32,15 @@
 // SDK — I11). Callers that want a non-warmable brain keep using the cold
 // `stream()` path.
 
+import { isDeepStrictEqual } from 'node:util';
+
 const BACKGROUND_RECHECK_MS = 60_000;   // re-check for an always-evict (ttl 0) session held for background work
+
+// The options a session keeps from its spawn: all but the session id (its own guard) and the being
+// link (minted per turn). Only these three are logged with their values — the rest may hold a secret.
+const NOT_SPAWN = new Set(['sessionId', 'beingLink']);
+const SHOWN = new Set(['model', 'effort', 'verboseThinking']);
+const spawnOptions = (o) => Object.fromEntries(Object.entries(o).filter(([k, v]) => !NOT_SPAWN.has(k) && typeof v !== 'function'));
 
 export function createWarmPool({
   max = 6,
@@ -186,19 +194,21 @@ export function createWarmPool({
       }
     }
     // CONFIGURATION GUARD (operator 2026-09-17), the same shape one field over. A warm process
-    // takes its model, effort and verbose_thinking at SPAWN, and the key does not carry them — so a conversation
+    // takes its options at SPAWN (argv, system prompt, sandbox, …), and the key does not carry them — so a conversation
     // repointed at another configuration (conversations.yaml agents.<being>.configuration, or a
     // config.yaml edit) kept running on the old one for as long as its process stayed warm. If the
-    // caller now asks for a model or effort other than the one this entry was opened with, evict
+    // caller now asks for any spawn option other than the one this entry was opened with, evict
     // and reopen: the same sessionId is passed again, so the thread resumes on the new engine.
     // Idle-only, like the guard above. Gated on a STATED value: a caller that names none
     // (compaction's `/compact` passes no effort, and a null model when the def has none) is asking
-    // for whatever is warm, not for "unset".
+    // for whatever is warm, not for "unset". Live background work defers the reopen (step B).
     if (e && !e.errored && !e.busy) {
-      const changed = ['model', 'effort', 'verboseThinking'].filter((k) => brainOptions[k] != null && brainOptions[k] !== e.opened[k]);
+      const changed = Object.keys(spawnOptions(brainOptions)).filter((k) => brainOptions[k] != null && !isDeepStrictEqual(brainOptions[k], e.opened[k] ?? null));
       if (changed.length) {
-        _evict(key, `configuration changed: ${changed.map((k) => `${k} ${e.opened[k] ?? 'unset'}→${brainOptions[k]}`).join(', ')}`);
-        e = null;
+        const what = changed.map((k) => (SHOWN.has(k) ? `${k} ${e.opened[k] ?? 'unset'}→${brainOptions[k]}` : k)).join(', ');
+        const n = e.session.background ?? 0;
+        if (n > 0) onLog(`warm: configuration changed on ${key} (${what}) — reopen deferred: ${n} background task(s) still running`);
+        else { _evict(key, `configuration changed: ${what}`); e = null; }
       }
     }
     // The INJECT-INTO-RUNNING-TURN block that used to sit HERE (operator 2026-06-13) now
@@ -213,10 +223,10 @@ export function createWarmPool({
     // for, by name, once policy (conversation_defaults.allow_new_input) has said it may.
     if (!e) {
       _lruEvictIfFull(key);
-      // `opened` is what the CONFIGURATION GUARD above compares against: the model/effort this
+      // `opened` is what the CONFIGURATION GUARD above compares against: the options this
       // process was spawned with, kept on the entry because not every session exposes its own.
       const seam = onBackgroundDone ? { onBackgroundDone: (info) => _backgroundDone(key, info) } : {};
-      e = { session: makeSession({ ...brainOptions, onLog, ...seam }), klass, lastUsed: Date.now(), idleTimer: null, busy: false, errored: false, chain: Promise.resolve(), idleTtlMs: undefined, opened: { model: brainOptions.model ?? null, effort: brainOptions.effort ?? null, verboseThinking: brainOptions.verboseThinking ?? null } };
+      e = { session: makeSession({ ...brainOptions, onLog, ...seam }), klass, lastUsed: Date.now(), idleTimer: null, busy: false, errored: false, chain: Promise.resolve(), idleTtlMs: undefined, opened: spawnOptions(brainOptions) };
       _s.set(key, e);
       onLog(`warm: opened ${key} (klass=${klass}); size=${_s.size}/${max}`);
     }

@@ -49,6 +49,7 @@ import { compactionTargets, dueForCompaction, windowForModel, compactionPolicy, 
 import { compactionRatio } from './compaction.mjs';
 import { NODE_FILE, REGISTRY_FILE, parseEntityConfig } from './config-resolver.mjs';
 import { CONFIG_YAML_PATH, writeConfigKey } from '../tools/config-io.mjs';
+import { isRestartKey } from './config-swap.mjs';
 import { resolveConfigKey } from '../../config/config-schema.mjs';
 import { createCdpClient, createChannelTransport } from '../tools/cdp.mjs';
 import { resolveBrainProfile, chromePipeArgs, profileHolder as defaultProfileHolder } from '../tools/chrome-launcher.mjs';
@@ -3011,8 +3012,8 @@ export function createCommands({
 
   // Flip `enabled: false` on one or more of THIS node's radios — BOTH persisted
   // (writeConfigKey, comment-preserving) AND live immediately: `cfg()` is the SAME object
-  // reference boot handed to createRadioNoteRelay (boot.mjs `const cfg = readConfig()`,
-  // `getConfig = () => cfg`), so mutating radios[name].enabled here is visible to the very
+  // createRadioNoteRelay reads through boot's getConfig (until the spine swaps in the re-read
+  // file, which carries the same write), so mutating radios[name].enabled here is visible to the very
   // next relay/say attempt with no restart — a blocking feature that only blocks after a
   // reboot would be worse than none (operator ruling 2026-08-08).
   async function disableRadiosOnThisNode(names) {
@@ -4052,9 +4053,9 @@ export function createCommands({
   // <key> resolves through resolveConfigKey (config/config-schema.mjs — a dotted path used as-is,
   // or a bare leaf looked up in the KEYS: index); <value> is JSON.parse'd, falling back to the raw
   // string on a parse failure (same coercion the extension used), then written via writeConfigKey
-  // — the comment-preserving single-key writer, never the whole-file writeConfig. Config is read
-  // at boot, so the reply always says the write takes effect on the NEXT restart; nothing here
-  // triggers one.
+  // — the comment-preserving single-key writer, never the whole-file writeConfig. The spine picks
+  // the change up itself (step B): the reply says whether the key applies live or needs a restart
+  // (config-swap.mjs RESTART_KEYS); nothing here triggers one.
   // Matched against KEY NAMES, recursively. Credentials AND personal identifiers: a dump goes
   // to whatever surface asked, which is usually a real Beeper chat, permanently. `account` and
   // `allowed_users` are the operator's email and phone numbers — not secrets, but a config dump
@@ -4108,7 +4109,9 @@ export function createCommands({
     // transcript.md rather than merely flashing past.
     const echoLeaf = resolved.path.split('.').pop();
     const shown = redactConfigValue({ [echoLeaf]: val })[echoLeaf];
-    return `set ${resolved.path} = ${JSON.stringify(shown)} — run /restart to apply (the spine, not the editor)`;
+    return isRestartKey(resolved.path)
+      ? `set ${resolved.path} = ${JSON.stringify(shown)} — a restart-only key: the spine restarts itself if auto_restart_on_config_change is on, else run /restart (the spine, not the editor)`
+      : `set ${resolved.path} = ${JSON.stringify(shown)} — applies on the spine's next tick, no restart`;
   }
 
   // /activate <id> — a brain member is ACTIVE while its Chrome tab is open (a live

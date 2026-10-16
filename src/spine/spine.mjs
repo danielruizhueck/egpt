@@ -174,10 +174,9 @@ export function createSpine({
   // of small file reads) relative to the turn-dispatch machinery around it. Null (every
   // existing pipe path / test) = the option cannot engage — byte-identical to before.
   refreshConfig = null,
-  // AUTO-RESTART ON CONFIG CHANGE (operator 2026-10-09): see maybeRestartOnConfigChange + tick.
-  // All injected; null/false = inert (byte-identical to before for every existing caller/test).
-  autoRestartOnConfigChange = false,   // the enabled flag (config auto_restart_on_config_change; DEFAULT false)
-  configBootHash = null,               // boot-time config.yaml content hash (boot's configContentHashSync())
+  // CONFIG CHANGE (step B, 2026-10-16): see maybeApplyConfigChange + tick. All injected; null = inert.
+  applyConfig = null,                  // () => { changed } | { restart, autoRestart } | { error } — boot's swap of a changed config.yaml
+  configBootHash = null,               // the hash of the config boot read
   readConfigHash = null,               // () => string|null — live config content hash; null = absent/malformed/partial (ignore, wait)
   requestRestart = null,               // () => void — boot wires announceAndExit(43), the ingest /restart's own path
   roomRelay = null,                    // optional §Phase-4 room brain-member fan-out (createRoomRelay, boot-wired): delivers a received room message to each brain member per mode, streams the reply back, and RE-ENTERS it as a non-human turn. Null = no web-brain members (byte-identical to before).
@@ -190,7 +189,7 @@ export function createSpine({
   clock = { now: () => Date.now() },
   log = {},
   tickMs = 0,
-  livenessEveryMs,                     // every live message's pulse (config liveness.every_ms); undefined → liveness.mjs default
+  livenessEveryMs,                     // () => ms — every live message's pulse (config liveness.every_ms, read each tick); undefined → liveness.mjs default
   // DEFECT 2 (operator 2026-07-04, "there should be a bridge timeout?"): a per-turn
   // backstop. 10 min — a genuinely wedged/hung CLI, never a legitimately long
   // tool-heavy turn (WebSearch+WebFetch+deep reasoning finish well under it). On
@@ -728,7 +727,9 @@ export function createSpine({
   //     promise and re-serialize every turn globally) — or undefined when no turn runs. ---
   async function handleFast(msg) {
     // CONFIG REFRESH ON MESSAGE ARRIVAL: before anything else, so every config-dependent
-    // read for this message (gating, brainpool, transcription) sees the freshest scan.
+    // read for this message (gating, brainpool, transcription) sees the freshest scan — a changed
+    // config.yaml included (a restart it needs is left to the tick).
+    maybeApplyConfigChange({ mayRestart: false });
     await refreshConfig?.();
     const ev = identity.build(msg);
     // SI PEER-LINK (2026-10-13): a canary-stamped super-channel intro arriving in a side-group this
@@ -1851,25 +1852,36 @@ export function createSpine({
   // operator wrote by hand survives.
   function tick() {
     if (stopSwitch?.present()) { note('STOP file present — stopping the service'); stopSwitch.pull({ reason: 'EGPT_HOME/STOP appeared' }); return; }
-    maybeRestartOnConfigChange();
+    maybeApplyConfigChange();
     resumedAt();
     liveness.tick();
     heartbeats.runDue(clock.now());
   }
 
-  // AUTO-RESTART ON CONFIG CHANGE (operator 2026-10-09): rides THIS pulse like the STOP check.
-  // A content-hash diff from the boot hash triggers the SAME exit-43 drain the ingest /restart
-  // does (requestRestart → boot's announceAndExit(43)); it does not re-implement it. Content hash
-  // (no-op save → no restart), parse-gated in readConfigHash (null = mid-write/malformed, ignored),
-  // latched once (the respawn's new boot hash does the rest), and read-free when the flag is off.
+  // CONFIG WITHOUT RESTART (step B, 2026-10-16): rides THIS pulse like the STOP check, and every
+  // message arrival. A content-hash change (no-op save → nothing; null = mid-write, wait) hands the
+  // file to boot's applyConfig, once per content: hot keys are swapped in; a restart-only key takes
+  // the SAME exit-43 drain the ingest /restart does (requestRestart), only from the tick and only
+  // when the new file's auto_restart_on_config_change is on; an invalid file is refused, the
+  // running config stays, and the logging group is told.
+  let configHash = configBootHash;
   let configRestartRequested = false;
-  function maybeRestartOnConfigChange() {
-    if (!autoRestartOnConfigChange || !readConfigHash || !requestRestart || configBootHash == null) return;
-    if (configRestartRequested) return;
+  function maybeApplyConfigChange({ mayRestart = true } = {}) {
+    if (!applyConfig || !readConfigHash || configHash == null || configRestartRequested) return;
     let h; try { h = readConfigHash(); } catch { return; }
-    if (h == null || h === configBootHash) return;
+    if (h == null || h === configHash) return;
+    let r; try { r = applyConfig() ?? {}; } catch (e) { r = { error: e?.message ?? String(e) }; }
+    if (r.restart?.length && !mayRestart) return;   // the tick decides it
+    configHash = h;
+    if (r.error) {
+      note(`config.yaml change REFUSED — the running config stays: ${r.error}`);
+      if (logToGroup) Promise.resolve(logToGroup(`config.yaml change refused, the running config stays: ${r.error}`)).catch((e) => note(`config: logging group refused the line — ${e?.message ?? e}`));
+      return;
+    }
+    if (!r.restart?.length) { note(`config.yaml applied without a restart${r.changed?.length ? `: ${r.changed.join(', ')}` : ''}`); return; }
+    if (!r.autoRestart || !requestRestart) { note(`config.yaml changed restart-only key(s) ${r.restart.join(', ')} — auto_restart_on_config_change is off; /restart applies them`); return; }
     configRestartRequested = true;
-    note('config.yaml changed on disk — triggering /restart to apply it');
+    note(`config.yaml changed restart-only key(s) ${r.restart.join(', ')} — triggering /restart to apply it`);
     try { requestRestart(); } catch (e) { note(`config-change restart: ${e?.message ?? e}`); }
   }
 

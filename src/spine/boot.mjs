@@ -32,6 +32,7 @@ import { createBrainSession } from '../brain-session.mjs';
 import { createSandboxCliSession, spawnBoxedCommand } from '../sandbox-cli-session.mjs';
 import { raiseSelfToNormal } from '../process-priority.mjs';
 import { readConfigSync, configContentHashSync } from '../tools/config-io.mjs';
+import { restartKeysChanged, changedKeys } from './config-swap.mjs';
 import { reapPort } from '../tools/reap-port.mjs';
 // THE liveness question for a Beeper install, already written and already tested
 // (tests/beeper-whoami.test.mjs): GET /v1/accounts with a candidate's OWN token. Imported, never
@@ -821,7 +822,7 @@ export function computeShellHeader({ nodeName, agents, defaultNode, currentRoom 
 // stops, which is the guard working, not a bug.
 export function createRadioNoteRelay({
   resolveConvRoom,             // (surface, chatId) -> Room|null — the ONE conversation-room resolver
-  cfg,                          // live config object — radio_service map lives at cfg.radio_service
+  getConfig = () => ({}),       // the live config — radio_service map lives at .radio_service
   uploadNote: uploadNoteFn = uploadNote,
   readFile: readFileFn = readFile,
   // THE OUTBOUND CEILING (src/lasso.mjs) — boot always passes lasso.gate, the SAME seam the 👂
@@ -855,6 +856,7 @@ export function createRadioNoteRelay({
       const doc = await room.loadConfig();
       const radioName = doc.radio?.join;
       if (!radioName) return;                              // room not joined to a radio
+      const cfg = getConfig() ?? {};
       const radio = cfg.radio_service?.[radioName];
       if (!radio || radio.enabled !== true) return;         // not configured on THIS node, or disabled
       const blocked = Array.isArray(cfg.radio_blocked_senders) ? cfg.radio_blocked_senders : [];
@@ -971,8 +973,93 @@ export function logStamp(d = new Date()) {
 // throws leaves nowhere to report it to.
 export function stderrLine(s) { try { console.error(`${logStamp()} ${s}`); } catch { /* stderr is gone */ } }
 
+const CONFIG_FILE = 'config/config.yaml';   // named in the fatal message so the operator knows where to fix it
+
+// The `agents:` block is the ONE registry (operator 2026-07-02, new-config-only): the
+// persona identity + local beings + mesh addressing all live here. It is REQUIRED, and
+// exactly ONE agent must carry `default: true` — that agent IS the persona (it answers
+// un-@mentioned messages and terminates relay chains that resolve to it). No agents block,
+// no default agent, or MORE THAN ONE default agent is a fatal misconfiguration, not a
+// silent fallback to a guessed default. Fail loudly so the operator fixes it — the
+// agent-identity refactor (operator 2026-07-10) removed the hardcoded e/egpt persona test:
+// the persona is `default: true`, its being-id is its MAP KEY, nothing about the key
+// string is magic anywhere below.
+function personaOf(cfg) {
+  const found = [];
+  for (const [name, a] of Object.entries(cfg.agents ?? {})) {
+    if (!a || typeof a !== 'object' || Array.isArray(a)) continue;
+    if (a.default === true) found.push({ name, agent: a });
+  }
+  if (found.length === 1) return found[0];
+  if (found.length === 0) {
+    throw new Error(`boot: no persona agent — config.agents must declare exactly one agent with \`default: true\` (${CONFIG_FILE}). See config/skeletons/config.yaml.`);
+  }
+  throw new Error(`boot: ${found.length} agents carry \`default: true\` (${found.map((f) => f.name).join(', ')}) — exactly one is allowed (${CONFIG_FILE}).`);
+}
+
+// The 👂 echo candidate set (see echoPlan in boot): peer_priority, else the legacy echo_priority,
+// else peer_nodes, else [self]; lowercased.
+const echoPeersOf = (cfg, nodeName) => (
+  Array.isArray(cfg.transcription_service?.echo?.peer_priority) ? cfg.transcription_service.echo.peer_priority
+  : Array.isArray(cfg.echo_priority) ? cfg.echo_priority
+  : Array.isArray(cfg.peer_nodes) ? cfg.peer_nodes
+  : [nodeName]
+).map((p) => String(p).toLowerCase());
+
+// BOOT'S CONFIG ASSERTIONS — fatal at boot, and the same check a changed config.yaml must pass
+// before it is swapped in or restarted onto (step B): an invalid file never replaces a running one.
+export function assertConfig(cfg) {
+  if (!cfg.agents || typeof cfg.agents !== 'object' || Array.isArray(cfg.agents)) {
+    throw new Error(`boot: config.agents must be a map declaring exactly one persona agent (\`default: true\`) — no agents block is a fatal misconfiguration (${CONFIG_FILE}). See config/skeletons/config.yaml.`);
+  }
+  personaOf(cfg);
+
+  // BOOT ASSERTION (operator 2026-09-13): access_level 'sandbox' FORCES the OS sandbox on
+  // (brainpool.mjs resolveSandboxed, rung 1), so a `sandboxed: false` sitting beside it in the
+  // SAME conversation_defaults block is DEAD config — unreachable, not an override — while
+  // reading exactly as though it turned the box off. That is not hypothetical: it is how a live
+  // agent's config was explained wrongly, twice, in one session. Fail loudly so the operator fixes the config —
+  // this makes the silent-dead-line class impossible, the same way the echo peer-set assertion
+  // below kills the silent-divergence one. (The per-conversation tier of the same field lives in
+  // conversations.yaml, is hand-edited and is NOT fixed at boot; brainpool logs that one on every
+  // turn instead — same predicate, so the two can never disagree about what a contradiction is.)
+  for (const [name, a] of Object.entries(cfg.agents)) {
+    if (!a || typeof a !== 'object' || Array.isArray(a)) continue;
+    const cd = a.conversation_defaults;
+    if (!cd || typeof cd !== 'object' || Array.isArray(cd)) continue;
+    if (!isSandboxContradiction(cd.access_level, cd.sandboxed)) continue;
+    throw new Error(`boot: agent "${name}" declares access_level: sandbox together with sandboxed: ${JSON.stringify(cd.sandboxed)} in conversation_defaults — 'sandbox' means "all's capability, but only inside the OS box", so it forces the sandbox ON and that \`sandboxed\` line is dead config, not an override (${CONFIG_FILE}). Remove the \`sandboxed\` line to keep the OS box, or set \`access_level: all\` (with allowed_users) / \`access_level: regular\` if this agent is really meant to run unboxed.`);
+  }
+
+  // === THE STRUCTURAL NODE SIGNATURE (operator 2026-07-26) ==============================
+  // "spine doesn't boot without the invisible ones. the visible one are prescindable, there are
+  // only for human purviews." The invisible, machine-readable layer every outbound frame carries
+  // is `node_name` TAG-ENCODED (src/node-signature.mjs) — so requiring the marker and requiring
+  // the name are ONE requirement, not two. A separate `node_signature:` key could only ever hold
+  // a redundant copy of node_name and a second chance to get it wrong; this is that ruling made
+  // executable. Same shape as the persona-agent throw above: a node that cannot say WHICH node it
+  // is has no business posting to an account two spines share.
+  // The VISIBLE bridge_signature_open/close stay optional and are NOT checked here — empty is a
+  // legitimate configuration and must never block boot.
+  const nodeName = String(cfg.node_name ?? '').trim();
+  if (!nodeName) {
+    throw new Error(`boot: no node_name — every frame a spine commits to a surface carries an invisible structural signature encoded from it, and a node that cannot identify itself must not post (${CONFIG_FILE}). Set \`node_name: <short node id>\` (e.g. \`node_name: kg\`). See config/skeletons/config.yaml.`);
+  }
+
+  // BOOT ASSERTION (operator 2026-07-11, adapted 2026-07-24): a node that echoes MUST appear in its own
+  // candidate set. echoRank returns the rank-0 never-post sentinel (note-independent) when node_name
+  // isn't in the set, so this node would SILENTLY never echo (and if the peer is likewise misconfigured,
+  // no node echoes — or both do). Fail loudly so the operator fixes the config — this makes the
+  // silent-divergence class impossible. echo:false opts out entirely, so the check is skipped there.
+  const echoPeers = echoPeersOf(cfg, nodeName);
+  if (cfg.echo !== false && echoRank(nodeName, echoPeers, '') === 0) {
+    throw new Error(`boot: node_name "${nodeName}" is not in the 👂 echo peer set [${echoPeers.join(', ')}] — a node that echoes must appear in transcription_service.echo.peer_priority (or the legacy echo_priority / peer_nodes), else it would never echo (${CONFIG_FILE}). Add "${nodeName}" to the list, or set echo:false to opt out.`);
+  }
+}
+
 export async function boot({
   readConfig = readConfigSync,
+  readConfigHash = configContentHashSync,   // () => config.yaml content hash, null while absent/malformed — the change detector's seam
   startBridge = null,                 // createBeeperBridgePort's `start` seam (null = real beeper)
   makeSession = (opts) => (opts.sandboxed ? createSandboxCliSession(opts) : createBrainSession(opts)),   // engine-dispatching session factory (ccode remains default); sandboxed:true wraps the ccode session in setup/sandbox-logon-launcher.ps1's OS-level isolation
   loadState = null, writeState = null,// conv-state IO (null = real CONV_YAML_PATH)
@@ -1084,7 +1171,10 @@ export async function boot({
     },
   };
 
-  const cfg = readConfig() ?? {};
+  // THE LIVE CONFIG (step B, 2026-10-16): swapped by applyConfig (below) when config.yaml changes and
+  // no restart-only key moved — so every reader goes through getConfig() or reads `cfg` at use time.
+  let cfg = readConfig() ?? {};
+  const configBootHash = readConfigHash();
   const getConfig = () => cfg;
 
   // THE TRANSCRIPT CLOCK'S ZONE (operator 2026-07-26: "timestamps should be rendered as per
@@ -1145,69 +1235,15 @@ export async function boot({
   // tests don't write into a profile. Never fatal.
   if (ingest) { try { seedSkeletons({ onLog: (m) => log.line?.(`[seed] ${m}`) }); } catch (e) { log.line?.(`[boot] seed failed: ${e?.message ?? e}`); } }
 
-  // The `agents:` block is the ONE registry (operator 2026-07-02, new-config-only): the
-  // persona identity + local beings + mesh addressing all live here. It is REQUIRED, and
-  // exactly ONE agent must carry `default: true` — that agent IS the persona (it answers
-  // un-@mentioned messages and terminates relay chains that resolve to it). No agents block,
-  // no default agent, or MORE THAN ONE default agent is a fatal misconfiguration, not a
-  // silent fallback to a guessed default. Fail loudly so the operator fixes it — the
-  // agent-identity refactor (operator 2026-07-10) removed the hardcoded e/egpt persona test:
-  // the persona is `default: true`, its being-id is its MAP KEY, nothing about the key
-  // string is magic anywhere below.
+  // Fatal on a bad config (assertConfig, above boot) — the same check a hot reload runs.
+  assertConfig(cfg);
   const agents = () => cfg.agents ?? {};
-  const CONFIG_FILE = 'config/config.yaml';   // named in the fatal message so the operator knows where to fix it
-  const personaAgent = () => {
-    const found = [];
-    for (const [name, a] of Object.entries(agents())) {
-      if (!a || typeof a !== 'object' || Array.isArray(a)) continue;
-      if (a.default === true) found.push({ name, agent: a });
-    }
-    if (found.length === 1) return found[0];
-    if (found.length === 0) {
-      throw new Error(`boot: no persona agent — config.agents must declare exactly one agent with \`default: true\` (${CONFIG_FILE}). See config/skeletons/config.yaml.`);
-    }
-    throw new Error(`boot: ${found.length} agents carry \`default: true\` (${found.map((f) => f.name).join(', ')}) — exactly one is allowed (${CONFIG_FILE}).`);
-  };
-  if (!cfg.agents || typeof cfg.agents !== 'object' || Array.isArray(cfg.agents)) {
-    throw new Error(`boot: config.agents must be a map declaring exactly one persona agent (\`default: true\`) — no agents block is a fatal misconfiguration (${CONFIG_FILE}). See config/skeletons/config.yaml.`);
-  }
+  const personaAgent = () => personaOf(cfg);
   // The persona's being-id: the lowercased MAP KEY of the single default agent, resolved
   // ONCE here and injected into the pure modules (router/gating/brainpool) that can't read
   // config. Every persona check downstream compares against this, never against 'e'/'egpt'.
   const defaultKey = personaAgent().name.toLowerCase();
-
-  // BOOT ASSERTION (operator 2026-09-13): access_level 'sandbox' FORCES the OS sandbox on
-  // (brainpool.mjs resolveSandboxed, rung 1), so a `sandboxed: false` sitting beside it in the
-  // SAME conversation_defaults block is DEAD config — unreachable, not an override — while
-  // reading exactly as though it turned the box off. That is not hypothetical: it is how a live
-  // agent's config was explained wrongly, twice, in one session. `cfg` is read ONCE at boot, so
-  // this tier is knowable here and nowhere later. Fail loudly so the operator fixes the config —
-  // this makes the silent-dead-line class impossible, the same way the echo peer-set assertion
-  // below kills the silent-divergence one. (The per-conversation tier of the same field lives in
-  // conversations.yaml, is hand-edited and is NOT fixed at boot; brainpool logs that one on every
-  // turn instead — same predicate, so the two can never disagree about what a contradiction is.)
-  for (const [name, a] of Object.entries(agents())) {
-    if (!a || typeof a !== 'object' || Array.isArray(a)) continue;
-    const cd = a.conversation_defaults;
-    if (!cd || typeof cd !== 'object' || Array.isArray(cd)) continue;
-    if (!isSandboxContradiction(cd.access_level, cd.sandboxed)) continue;
-    throw new Error(`boot: agent "${name}" declares access_level: sandbox together with sandboxed: ${JSON.stringify(cd.sandboxed)} in conversation_defaults — 'sandbox' means "all's capability, but only inside the OS box", so it forces the sandbox ON and that \`sandboxed\` line is dead config, not an override (${CONFIG_FILE}). Remove the \`sandboxed\` line to keep the OS box, or set \`access_level: all\` (with allowed_users) / \`access_level: regular\` if this agent is really meant to run unboxed.`);
-  }
-
-  // === THE STRUCTURAL NODE SIGNATURE (operator 2026-07-26) ==============================
-  // "spine doesn't boot without the invisible ones. the visible one are prescindable, there are
-  // only for human purviews." The invisible, machine-readable layer every outbound frame carries
-  // is `node_name` TAG-ENCODED (src/node-signature.mjs) — so requiring the marker and requiring
-  // the name are ONE requirement, not two. A separate `node_signature:` key could only ever hold
-  // a redundant copy of node_name and a second chance to get it wrong; this is that ruling made
-  // executable. Same shape as the persona-agent throw above: a node that cannot say WHICH node it
-  // is has no business posting to an account two spines share.
-  // The VISIBLE bridge_signature_open/close stay optional and are NOT checked here — empty is a
-  // legitimate configuration and must never block boot.
-  const node_name = String(cfg.node_name ?? '').trim();
-  if (!node_name) {
-    throw new Error(`boot: no node_name — every frame a spine commits to a surface carries an invisible structural signature encoded from it, and a node that cannot identify itself must not post (${CONFIG_FILE}). Set \`node_name: <short node id>\` (e.g. \`node_name: kg\`). See config/skeletons/config.yaml.`);
-  }
+  const node_name = String(cfg.node_name ?? '').trim();   // asserted non-empty: the structural node signature
 
   // A being's body_emoji + display label, resolved purely from the agents registry BY KEY
   // (the being IS the key now — no e/egpt special case). body_emoji falls back to the dog;
@@ -1285,7 +1321,7 @@ export async function boot({
   //   (6) null ⇒ the legacy beeper_token / BEEPER_ACCESS_TOKEN path, unchanged.
   //
   // (1) is the per-agent pin below, which still beats all of this. Computed ONCE: the `beeper:`
-  // block cannot change while the process runs (there is no config watcher), and this is asked
+  // block cannot change while the process runs (a change to it restarts — config-swap.mjs), and this is asked
   // once per being on the bridge-construction path.
   // Split out of defaultConnection so the `use:`-less answer can be NAMED — the boot line beside
   // inboundConnections below tells the operator what removing an explicit `use:` would do, and it
@@ -1460,13 +1496,13 @@ export async function boot({
   // entry[<being>] thread blocks — but it stopped being an address. The live bug: DOLLY's persona
   // is KEYED `egpt` and DISPLAYS as "don" (handles [d, don]), so one `@egpt` in a group woke BOTH
   // spines and the human got two replies, one stamped `egpt` and one stamped `don`.
-  const wakeWords = (() => { const pa = personaAgent(); return [...new Set(wakeTokens(pa.name, pa.agent))]; })();
+  const wakeWords = [];
   // THE SPOKEN counterpart (operator 2026-08-09): voice_handles, the persona agent's own list —
   // NO map-key fallback (voiceWakeTokens, router.mjs), so an unconfigured persona wakes on NO
   // spoken alias. Gates a voice note's whisper transcript at the START of it, never `@` — the
   // SAME rule as a bare @handle since 2026-09-09 (it used to match anywhere in the sentence,
   // which is how `perro` woke E out of "tengo un perro grande").
-  const voiceWakeWords = (() => { const pa = personaAgent(); return [...new Set(voiceWakeTokens(pa.agent))]; })();
+  const voiceWakeWords = [];
   // THE BARE-REPLY GATE'S OWN LIST (operator 2026-09-01) — wakeWords ∪ the persona's OWN
   // fallback_handle tokens (fallbackWake, router.mjs: the same fail-closed rule, so a
   // half-written declaration contributes nothing here either).
@@ -1485,10 +1521,15 @@ export async function boot({
   // left wakeWords, and with it this gate — replying `e` to a voice note silently did nothing and
   // only `ekg`/`egptkg` read a note back. A persona that declares no fallback hands the two lists
   // identical, so this is a no-op everywhere else.
-  const replyWakeWords = (() => {
+  const replyWakeWords = [];
+  // Filled IN PLACE, and refilled on a config swap: both limbs hold these three arrays.
+  const fillWakeWords = () => {
     const pa = personaAgent();
-    return [...new Set([...wakeWords, ...(fallbackWake(pa.agent)?.handles ?? [])])];
-  })();
+    wakeWords.splice(0, Infinity, ...new Set(wakeTokens(pa.name, pa.agent)));
+    voiceWakeWords.splice(0, Infinity, ...new Set(voiceWakeTokens(pa.agent)));
+    replyWakeWords.splice(0, Infinity, ...new Set([...wakeWords, ...(fallbackWake(pa.agent)?.handles ?? [])]));
+  };
+  fillWakeWords();
   // THE BARE-HANDLE SWITCH (operator 2026-07-27: "this addressing without the '@' must be an
   // option, easy to turn on/off globally") — dispatch.address_without_at, DEFAULT true, so a node
   // that configures nothing keeps the live behaviour. Read ONCE here and handed by the SAME route
@@ -1528,12 +1569,7 @@ export async function boot({
   // else the legacy top-level echo_priority, else peer_nodes, else [self] (a solo node is always
   // rank 1); all lowercased so config casing never splits the order.
   const echoCfg = cfg.transcription_service?.echo ?? {};
-  const echoPeers = (
-    Array.isArray(echoCfg.peer_priority) ? echoCfg.peer_priority
-    : Array.isArray(cfg.echo_priority) ? cfg.echo_priority
-    : Array.isArray(cfg.peer_nodes) ? cfg.peer_nodes
-    : [node_name]
-  ).map((p) => String(p).toLowerCase());
+  const echoPeers = echoPeersOf(cfg, node_name);
   // `method`/`participants` are descriptive for now (no behavior branches on them): assert the method,
   // if present, is the one we implement, else warn — never hard-fail, so a config naming a future
   // method still boots on HRW.
@@ -1550,14 +1586,7 @@ export async function boot({
   // note counts as already-covering it, so this node stands down instead of double-echoing (the bridge's
   // noteCovered query; replaced the observed-set + arrival-lag scaffold). Default 0.6.
   const coverageThreshold = Number.isFinite(cfg.echo_coverage_similarity) ? cfg.echo_coverage_similarity : 0.6;
-  // BOOT ASSERTION (operator 2026-07-11, adapted 2026-07-24): a node that echoes MUST appear in its own
-  // candidate set. echoRank returns the rank-0 never-post sentinel (note-independent) when node_name
-  // isn't in the set, so this node would SILENTLY never echo (and if the peer is likewise misconfigured,
-  // no node echoes — or both do). Fail loudly so the operator fixes the config — this makes the
-  // silent-divergence class impossible. echo:false opts out entirely, so the check is skipped there.
-  if (cfg.echo !== false && echoRank(node_name, echoPeers, '') === 0) {
-    throw new Error(`boot: node_name "${node_name}" is not in the 👂 echo peer set [${echoPeers.join(', ')}] — a node that echoes must appear in transcription_service.echo.peer_priority (or the legacy echo_priority / peer_nodes), else it would never echo (${CONFIG_FILE}). Add "${node_name}" to the list, or set echo:false to opt out.`);
-  }
+  // (A node that echoes is in its own candidate set — assertConfig.)
   // Per-note HRW plan: rendezvous-hash the peer set for the note's key (the audio-hash the bridge feeds)
   // and read off this node's rank. echo:false is the hard opt-out (rank 0, never post/promote).
   const echoPlan = cfg.echo === false
@@ -2535,7 +2564,7 @@ export async function boot({
   // both this AND the spine's ev, and how the two are correlated. gate: lasso.gate — the SAME
   // node-wide outbound ceiling the echo (echoGate, above) and every port send already go
   // through; a note reaching the station counts as an outbound message, never a second budget.
-  const radioRelay = createRadioNoteRelay({ resolveConvRoom, cfg, gate: lasso.gate, onLog: (m) => log.line?.(`[radio] ${m}`) });
+  const radioRelay = createRadioNoteRelay({ resolveConvRoom, getConfig, gate: lasso.gate, onLog: (m) => log.line?.(`[radio] ${m}`) });
   bridge.onMedia((m) => { radioRelay.noteMedia(m); return media.save(m); });
 
   // The operator-console LIMB (plans/2607191835-SHELL-LIMB-S1-PLAN.md Phase 1, direction
@@ -2552,7 +2581,8 @@ export async function boot({
   // 2026-07-26. The wrap is a Proxy precisely so this port's `isConnected` GETTER stays live.
   // THE PERMANENT SHELL HEADER (operator 2026-07-27, computeShellHeader above): computed HERE,
   // the ONE place config is read for this feature — the editor never touches config.yaml.
-  const shellHeader = computeShellHeader({ nodeName: node_name, agents: cfg.agents, defaultNode: cfg.dispatch?.default_node });
+  const shellHeaderAt = (currentRoom) => computeShellHeader({ nodeName: node_name, agents: cfg.agents, defaultNode: cfg.dispatch?.default_node, currentRoom });
+  const shellHeader = shellHeaderAt();
   // The watchers, built before the router that consults them. Ports come from the agents block
   // and nowhere else, so a node declaring no unless_peer_alive builds none and probes nothing.
   const peerLiveness = new Map();
@@ -3186,7 +3216,7 @@ export async function boot({
     // above). Every other surface is a no-op: only the shell has a status line to update.
     onRoomChange: (surface, slug) => {
       if (surface !== SHELL_SURFACE) return;
-      shellPort.setHeader(computeShellHeader({ nodeName: node_name, agents: cfg.agents, defaultNode: cfg.dispatch?.default_node, currentRoom: slug }));
+      shellPort.setHeader(shellHeaderAt(slug));
     },
     backlogOf: (ev) => spineLate?.backlogOf(ev) ?? [],   // /recap — the spine's wake backlog for this chat (spineLate, above)
     timeZone: transcriptTimeZone,                        // …read out on the transcript's own clock
@@ -3464,8 +3494,8 @@ export async function boot({
   // tickMs<=0 (tests drive tick() by hand) stays 0 = no auto-timer.
   // The liveness pulse (config liveness.every_ms) rides the tick too.
   const { finestMs } = await heartbeatLoader.collect();
-  const livenessEveryMs = cfg.liveness?.every_ms > 0 ? cfg.liveness.every_ms : LIVENESS_EVERY_MS;
-  const effectiveTickMs = tickMs > 0 ? Math.max(500, Math.min(tickMs, finestMs ?? tickMs, livenessEveryMs)) : tickMs;
+  const livenessEveryMs = () => (cfg.liveness?.every_ms > 0 ? cfg.liveness.every_ms : LIVENESS_EVERY_MS);   // read each liveness tick; the tick itself is sized at boot
+  const effectiveTickMs = tickMs > 0 ? Math.max(500, Math.min(tickMs, finestMs ?? tickMs, livenessEveryMs())) : tickMs;
 
   // The SINGLE guard (C7.7, plans/260722-COMMAND-SURFACE-ROADMAP.md phase 3), ONE guard with TWO
   // TRIGGERS since 2026-09-20: a RATE (`turns` non-human turns inside `window` MINUTES) and
@@ -3540,12 +3570,24 @@ export async function boot({
   // factory's own default); -1 or any value <= 0 flows through to runTurnWithTimeout's
   // `!(turnTimeoutMs > 0)` disable so a turn runs uncapped.
   const turnTimeoutMs = Number.isFinite(cfg.turn_timeout_ms) ? cfg.turn_timeout_ms : 600_000;
-  // AUTO-RESTART ON CONFIG CHANGE (operator 2026-10-09): flag + boot-time content hash, passed to
-  // the spine beside turnTimeoutMs. DEFAULT false. read/hash seam = configContentHashSync; restart
-  // seam = announceAndExit(43), the SAME exit-43 drain the ingest /restart runs (not duplicated).
-  const autoRestartOnConfigChange = cfg.auto_restart_on_config_change === true;
-  const configBootHash = configContentHashSync();
-  const spine = createSpine({ bridge, bridgeOf: rawBridgeOf, peerMouth, brain, turns, ...services, commands, mesh, actions, limbWork: transcribeLimb.background, backgroundWork: () => pool.stats().keys.flatMap((k) => pool.background(k).map((t) => ({ ...(brain.convOfKey(k) ?? { being: '?', chatId: k }), ...t }))), advice, guard, guardOverride, fromThisNode, say: sayOnce, logToGroup: (text) => logToGroup(`${getConfig()?.node_name ?? '?'} · ${text}`), stopSwitch, isSelfChat, isTransit: (ev) => isRelayChannelChat(getConfig(), ev), roomRelay, readTranscript, refreshConfig: heartbeatLoader.reload, autoRestartOnConfigChange, configBootHash, readConfigHash: configContentHashSync, requestRestart: () => announceAndExit(43), radioRelay: radioRelay.relay, synthesize: vx.synthesize, voice: vx.voice, defaultBeing: defaultKey, labelOf, timeZone: transcriptTimeZone, clock: { now }, log, turnTimeoutMs, livenessEveryMs, tickMs: effectiveTickMs, setInterval: setIntervalFn, clearInterval: clearIntervalFn });
+  // CONFIG WITHOUT RESTART (step B, 2026-10-16): the spine hands a changed config.yaml here (its tick,
+  // and every message arrival). Same reader, same assertions as boot. Only restart-only keys
+  // (config-swap.mjs RESTART_KEYS) leave the running config in place for the drained /restart,
+  // gated by the NEW file's auto_restart_on_config_change; anything else is swapped in now, and what
+  // boot built from it is rebuilt: the persona's wake words, the shell header, the heartbeat set.
+  const applyConfig = () => {
+    const next = readConfig() ?? {};
+    try { assertConfig(next); } catch (e) { return { error: e?.message ?? String(e) }; }
+    const restart = restartKeysChanged(cfg, next);
+    if (restart.length) return { restart, autoRestart: next.auto_restart_on_config_change === true };
+    const changed = changedKeys(cfg, next);
+    cfg = next;
+    fillWakeWords();
+    shellPort.setHeader(shellHeaderAt(commands.currentRoomOf(SHELL_SURFACE)));
+    Promise.resolve(heartbeatLoader.reload()).catch((e) => log.line?.(`[config] heartbeat reload after the swap: ${e?.message ?? e}`));
+    return { changed };
+  };
+  const spine = createSpine({ bridge, bridgeOf: rawBridgeOf, peerMouth, brain, turns, ...services, commands, mesh, actions, limbWork: transcribeLimb.background, backgroundWork: () => pool.stats().keys.flatMap((k) => pool.background(k).map((t) => ({ ...(brain.convOfKey(k) ?? { being: '?', chatId: k }), ...t }))), advice, guard, guardOverride, fromThisNode, say: sayOnce, logToGroup: (text) => logToGroup(`${getConfig()?.node_name ?? '?'} · ${text}`), stopSwitch, isSelfChat, isTransit: (ev) => isRelayChannelChat(getConfig(), ev), roomRelay, readTranscript, refreshConfig: heartbeatLoader.reload, applyConfig, configBootHash, readConfigHash, requestRestart: () => announceAndExit(43), radioRelay: radioRelay.relay, synthesize: vx.synthesize, voice: vx.voice, defaultBeing: defaultKey, labelOf, timeZone: transcriptTimeZone, clock: { now }, log, turnTimeoutMs, livenessEveryMs, tickMs: effectiveTickMs, setInterval: setIntervalFn, clearInterval: clearIntervalFn });
   // Bind the advice service's answer-routing dispatch now that the spine exists: an
   // operator answer in the advice channel re-enters the pipe as a turn in the origin chat.
   advice.useDispatch(spine.handleInbound);
@@ -3650,7 +3692,8 @@ export async function boot({
   }
 
   return {
-    spine, bridge, shellPort, pool, cfg, peerNodes,      // shellPort: the second LIMB — exposed so its regulation is assertable, like bridge's
+    spine, bridge, shellPort, pool, peerNodes,           // shellPort: the second LIMB — exposed so its regulation is assertable, like bridge's
+    get cfg() { return cfg; },                           // the LIVE config (swapped by applyConfig)
     peerMouth,                                           // null on a node with no peer_spine — exposed for the same reason: "absent means absent" is assertable
     noticeToAdmin,                                       // the admin-channel notice compaction says — exposed so it is assertable without a cooling timer
     logToGroup,                                          // the per-command audit sink (config.log_to_group) — exposed for the same reason: the generalized resolve+post is assertable without running the whole dispatch

@@ -70,7 +70,7 @@ function harness({ cfg, room, uploadNote, readFile, gate } = {}) {
   const log = [];
   const relay = createRadioNoteRelay({
     resolveConvRoom: async () => room ?? null,
-    cfg: cfg ?? {},
+    getConfig: () => cfg ?? {},
     uploadNote: uploadNote ?? vi.fn(async () => ({ ok: true, status: 201 })),
     readFile: readFile ?? (async () => Buffer.from('audio-bytes')),
     ...(gate ? { gate } : {}),

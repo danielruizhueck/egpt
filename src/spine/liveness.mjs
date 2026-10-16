@@ -15,13 +15,13 @@
 import { LIVE_FRAME_MARK } from '../dispatch-line.mjs';
 import { elapsed } from './sender.mjs';
 
-export const LIVENESS_EVERY_MS = 15_000;       // every live message's pulse (operator 2026-10-16); config liveness.every_ms overrides
+export const LIVENESS_EVERY_MS = 15_000;       // every live message's pulse (operator 2026-10-16); config liveness.every_ms overrides (read each tick)
 export const ASK_AFTER_MS = 2 * 3_600_000;     // continuous background work this long → ask, then once per interval
 export const ASK_ANSWER_MS = 30 * 60_000;      // an ask with no answer by then → the logging group
 
 const STILL_THINKING = `${LIVE_FRAME_MARK} still thinking…`;
 
-export function createLiveness({ sender, brain, now, everyMs = LIVENESS_EVERY_MS, stopped = () => false, labelOf = (b) => b, ask = null, report = null, note = () => {} }) {
+export function createLiveness({ sender, brain, now, everyMs = () => LIVENESS_EVERY_MS, stopped = () => false, labelOf = (b) => b, ask = null, report = null, note = () => {} }) {
   const turns = new Set();     // { out, being, ev, chat, auto, since, last, status }
   const bg = new Map();        // `${being} ${chatId}` → { out, being, ev, chat, auto, last, what, quiet, reply }
   const asks = new Map();      // same key → { at, settled, reported, text }
@@ -62,14 +62,15 @@ export function createLiveness({ sender, brain, now, everyMs = LIVENESS_EVERY_MS
 
   function tick() {
     const t = now();
+    const every = everyMs();
     for (const x of turns) {
-      if (t - x.last < everyMs) continue;
+      if (t - x.last < every) continue;
       x.last = t;
       if (!x.status && x.out.pulse?.(t - x.since) !== false) continue;
       x.status = roll(x.status, x, STILL_THINKING, t - x.since);
     }
     for (const [k, s] of bg) {
-      if (t - s.last < everyMs) continue;
+      if (t - s.last < every) continue;
       s.last = t;
       const tasks = brain.background?.(s.being, s.ev) ?? [];
       if (!tasks.length) {

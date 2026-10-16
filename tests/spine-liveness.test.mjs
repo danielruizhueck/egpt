@@ -112,7 +112,7 @@ describe('liveness — a running turn', () => {
   });
 
   it('(a) the cadence is config-driven (liveness.every_ms → livenessEveryMs)', async () => {
-    const b = build({ livenessEveryMs: 20 * sec });
+    const b = build({ livenessEveryMs: () => 20 * sec });
     b.bridge.emit(mention('@e long job'));
     await flush();
     const ph = b.bridge.streams[0];
@@ -120,6 +120,19 @@ describe('liveness — a running turn', () => {
     expect(ph.frames).toEqual([]);                                   // not on the 15 s default
     for (const t of [20, 25, 35, 40]) { at(t * sec); b.spine.tick(); }
     expect(ph.frames).toEqual(['⏳ Thinking… ⤴️ 20s', '⏳ Thinking… ↪️ 40s']);
+  });
+
+  it('a changed liveness.every_ms reaches the next tick — read each tick, no restart (step B)', async () => {
+    let every = 20 * sec;
+    const b = build({ livenessEveryMs: () => every });
+    b.bridge.emit(mention('@e long job'));
+    await flush();
+    const ph = b.bridge.streams[0];
+    for (const t of [10, 20]) { at(t * sec); b.spine.tick(); }
+    expect(ph.frames).toEqual(['⏳ Thinking… ⤴️ 20s']);
+    every = 10 * sec;
+    for (const t of [25, 30]) { at(t * sec); b.spine.tick(); }
+    expect(ph.frames).toEqual(['⏳ Thinking… ⤴️ 20s', '⏳ Thinking… ↪️ 30s']);
   });
 
   it('(d) at the 15 s cadence nothing edits the placeholder at or past LIVE_EDIT_MS; the rolled status ticks on', async () => {
@@ -331,7 +344,7 @@ describe('liveness — background work with no turn in flight', () => {
   });
 
   it('(b) config liveness.every_ms sets the background cadence too', async () => {
-    const b = build({ livenessEveryMs: 20 * sec });
+    const b = build({ livenessEveryMs: () => 20 * sec });
     await dispatchBackground(b);
     const st = b.bridge.streams[1];
     for (let t = 5 * sec; t <= 60 * sec; t += 5 * sec) { at(t); b.spine.tick(); }
