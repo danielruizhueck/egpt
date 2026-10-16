@@ -1562,6 +1562,57 @@ describe('the voice attach is said by the MOUTH, replying to the text in its own
   });
 });
 
+// ── 10b. A BACKGROUND STATUS QUOTES THE BEING'S OWN REPLY, IN THE ROOM IT OPENS IN (2026-10-16) ──
+// liveness opens the status with the dispatching turn's reply id and the room that id lives in
+// (`replyIn`, the sender's confirmedIn). Same room → that id; a mouth's room → its own copy, found as
+// /reply and the voice attach find it (keyOf + quote); else unquoted. Never another room's id.
+describe("a background status quotes the being's reply in the room the status opens in", () => {
+  const STATUS = '⚙️ working in background: Run the audit';
+  const statusNode = (shape) => {
+    const n = earAndMouth(shape);
+    const sender = createSender({ bridge: n.ear, bodyEmojiOf: () => '🐶', peerMouth: n.peerMouth, onLog: (m) => n.logs.push(`[mouth] ${m}`) });
+    const open = async (replyTo, replyIn) => { sender.open(CHAT_ID, { being: 'e', status: STATUS, replyTo, replyIn }); await settled(); };
+    return { ...n, open };
+  };
+  const mouthRoom = (bridge) => ({ connection: 'secondary', bridge, chatId: SECONDARY_CHAT_ID });
+  const opened = (bridge) => bridge.streams.map((s) => [s.chat, s.opts.replyTo]);
+
+  it('the mouth said the reply: the status opens from the mouth, quoting that id as-is', async () => {
+    const { ear, mouthBridge, open } = statusNode({ mouthMessages: [SAID_ON_SECONDARY] });
+    await open(SAID_ON_SECONDARY.id, mouthRoom(mouthBridge));
+    expect(opened(mouthBridge)).toEqual([[SECONDARY_CHAT_ID, SAID_ON_SECONDARY.id]]);
+    expect(ear.streams).toEqual([]);
+  });
+
+  it("the reply fell back to the ear: the status opens from the mouth, quoting the MOUTH's own copy — never the ear's id", async () => {
+    const { ear, mouthBridge, open } = statusNode({ earMessages: [SAID_ON_PRIMARY], mouthMessages: [SAID_ON_SECONDARY] });
+    await open(SAID_ON_PRIMARY.id, null);
+    expect(opened(mouthBridge)).toEqual([[SECONDARY_CHAT_ID, SAID_ON_SECONDARY.id]]);
+    expect(ear.streams).toEqual([]);
+  });
+
+  it('the mouth cannot find its copy: the status goes out UNQUOTED from the mouth, and the log says why', async () => {
+    const { mouthBridge, logs, open } = statusNode({ earMessages: [SAID_ON_PRIMARY], mouthMessages: [] });
+    await open(SAID_ON_PRIMARY.id, null);
+    expect(opened(mouthBridge)).toEqual([[SECONDARY_CHAT_ID, null]]);
+    expect(logs.join('\n')).toMatch(/status e\/chat-1: 'secondary' cannot find #2950 on its own copy/);
+  });
+
+  it("the reply lives in the mouth's room but the status opens on the ear: UNQUOTED, never the mouth's id", async () => {
+    const { ear, mouthBridge, open } = statusNode({ mouthIsMember: false });
+    await open(SAID_ON_SECONDARY.id, mouthRoom(mouthBridge));
+    expect(opened(ear)).toEqual([[CHAT_ID, null]]);
+    expect(mouthBridge.streams).toEqual([]);
+  });
+
+  it("NO mouth: the status quotes the ear's own id and no message list is read", async () => {
+    const { ear, earListed, open } = statusNode({ withMouth: false });
+    await open(SAID_ON_PRIMARY.id, null);
+    expect(opened(ear)).toEqual([[CHAT_ID, SAID_ON_PRIMARY.id]]);
+    expect(earListed).toEqual([]);
+  });
+});
+
 // ── 11. A REACTION THAT COMES BACK OFF (2026-09-16, the 🎧 listening mark) ───────────────────────
 // THE LIVE FAULT, node kg: `reaction 🎧 by An → #7780` — the listening mark on a voice note came from
 // the operator's own account, because the bridge placed it on whichever connection received the note.

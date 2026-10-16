@@ -26,7 +26,7 @@ function fakeBridge() {
     onMessage(fn) { cb = fn; }, emit(msg) { return cb(msg); }, stop() {},
     send(chat, text, opts) { sent.push({ chat, text, opts }); return { ok: true, confirmedId: null }; },
     startStream(chat, init, opts) {
-      const h = { chat, init, opts, frames: [], finals: [], delivered: false, update(t) { h.frames.push(t); }, async finish(t) { h.finals.push(t); h.delivered = true; } };
+      const h = { chat, init, opts, frames: [], finals: [], delivered: false, confirmedId: `${chat}#${streams.length + 1}`, update(t) { h.frames.push(t); }, async finish(t) { h.finals.push(t); h.delivered = true; } };
       streams.push(h);
       return h;
     },
@@ -268,6 +268,7 @@ describe('liveness — background work with no turn in flight', () => {
     b.brain.tasks = [{ description: 'Run the audit', since: T0 + 5 * sec }];
     b.brain.calls[0].release('started it');
     await done;
+    await flush();
   }
 
   it('(b) ONE status message opens when the dispatching turn ends and animates; the wake ends it ✓ and posts its own placeholder', async () => {
@@ -277,7 +278,7 @@ describe('liveness — background work with no turn in flight', () => {
     const st = b.bridge.streams[1];
     expect(st.chat).toBe(CHAT);
     expect(st.init).toBe('⚙️ working in background: Run the audit ⏳');
-    expect(st.opts).toMatchObject({ bodyEmoji: '🐶', persona: 'egpt', replyTo: null });
+    expect(st.opts).toMatchObject({ bodyEmoji: '🐶', persona: 'egpt', replyTo: b.bridge.streams[0].confirmedId });
 
     at(4 * min + 5 * sec); b.spine.tick();
     expect(st.frames).toEqual(['⚙️ working in background: Run the audit ⏳ ⤴️ 4m00s']);
@@ -303,6 +304,7 @@ describe('liveness — background work with no turn in flight', () => {
     at(1 * min); b.spine.tick();
     expect(st.finals).toEqual([]);                                    // one quiet tick: a wake may be on its way
     at(2 * min); b.spine.tick();
+    await flush();
     expect(st.finals).toEqual(['✓ background work ended: Run the audit']);
     b.spine.wakeOnBackground({ being: 'egpt', surface: 'whatsapp', chatId: CHAT, summaries: ['x'] });
     await flush();
@@ -324,6 +326,7 @@ describe('liveness — background work with no turn in flight', () => {
     for (let t = 65 * sec; t <= 85 * sec; t += 5 * sec) { at(t); b.spine.tick(); }
     expect(st.finals).toEqual([]);                                    // quiet at 1m15s: a wake may be on its way
     at(90 * sec); b.spine.tick();
+    await flush();
     expect(st.finals).toEqual(['✓ background work ended: Run the audit']);
   });
 
@@ -347,12 +350,80 @@ describe('liveness — background work with no turn in flight', () => {
     b.brain.tasks = [{ description: 'Run the audit', since: T0 }];
     b.brain.calls[0].release('started it');
     await done;
+    await flush();
     at(90 * sec); b.spine.tick();
     const frames = b.bridge.streams.flatMap((s) => s.frames.map((f) => [s.init, f]));
     expect(frames).toHaveLength(2);
     for (const [init, f] of frames) expect(isLiveStreamFrame(editAction({ targetId: '1', oldText: init, newText: f }))).toBe(true);
     expect(b.logged).toEqual(['@e run the audit in the background', 'started it']);
     expect(b.streamed).toEqual([]);
+  });
+
+  it("(i) the status is a REPLY to the dispatching turn's own message; its rolled replacement replies to the same one", async () => {
+    const b = build();
+    await dispatchBackground(b);
+    const reply = b.bridge.streams[0];
+    expect(reply.finals).toEqual(['started it']);
+    for (let t = 30 * sec; t <= 14 * min; t += 30 * sec) { at(t); b.spine.tick(); }
+    await flush();
+    const statuses = b.bridge.streams.filter((s) => s.init.startsWith('⚙️'));
+    expect(statuses).toHaveLength(2);
+    expect(statuses.map((s) => s.opts.replyTo)).toEqual([reply.confirmedId, reply.confirmedId]);
+    expect(statuses.map((s) => s.opts.replyTo)).not.toContain('m1');   // never the human's trigger
+  });
+
+  it("(i) the dispatching turn's reply id is unknown: the status posts unquoted, as before", async () => {
+    const b = build();
+    const done = b.bridge.emit(mention('@e run the audit in the background'));
+    await flush();
+    b.bridge.streams[0].confirmedId = null;                          // the placeholder never resolved its id
+    b.brain.tasks = [{ description: 'Run the audit', since: T0 }];
+    b.brain.calls[0].release('started it');
+    await done;
+    await flush();
+    const st = b.bridge.streams[1];
+    expect(st.init).toBe('⚙️ working in background: Run the audit ⏳');
+    expect(st.opts.replyTo).toBeNull();
+  });
+
+  it("(i) work launched by an earlier turn with no status yet: the status replies to the MOST RECENT turn's message", async () => {
+    const stop = { present: true };
+    const b = build({ stop });
+    const first = b.bridge.emit(mention('@e start the audit', 'm1'));
+    await flush();
+    b.brain.tasks = [{ description: 'Run the audit', since: T0 }];
+    b.brain.calls[0].release('started it');
+    await first;
+    await flush();
+    expect(b.bridge.streams.filter((s) => s.init.startsWith('⚙️'))).toEqual([]);   // STOP: no status opened
+    stop.present = false;
+    const second = b.bridge.emit(mention('@e and the crawl too', 'm2'));
+    await flush();
+    b.brain.calls[1].release('crawl started too');
+    await second;
+    await flush();
+    const st = b.bridge.streams.find((s) => s.init.startsWith('⚙️'));
+    expect(st.opts.replyTo).toBe(b.bridge.streams[1].confirmedId);
+    expect(b.bridge.streams[1].finals).toEqual(['crawl started too']);
+  });
+
+  it("(i) in a MOUTH chat the status quotes the mouth's own reply, by its id in the mouth's room — never an ear-side id", async () => {
+    const mouth = fakeBridge();
+    const b = build({ mouth });
+    const done = b.bridge.emit(mention('@e run the audit in the background'));
+    await flush();
+    b.brain.tasks = [{ description: 'Run the audit', since: T0 }];
+    b.brain.calls[0].release('started it');
+    await done;
+    await flush();
+    for (let t = 30 * sec; t <= 14 * min; t += 30 * sec) { at(t); b.spine.tick(); }
+    await flush();
+    const reply = mouth.streams[0];
+    expect(reply).toMatchObject({ chat: 'mouth-room', finals: ['started it'] });
+    const statuses = mouth.streams.filter((s) => s.init.startsWith('⚙️'));
+    expect(statuses).toHaveLength(2);
+    expect(statuses.map((s) => [s.chat, s.opts.replyTo])).toEqual([['mouth-room', reply.confirmedId], ['mouth-room', reply.confirmedId]]);
+    expect(b.bridge.streams).toEqual([]);
   });
 
   it('(e) STOP: the status is not animated while the STOP file exists', async () => {

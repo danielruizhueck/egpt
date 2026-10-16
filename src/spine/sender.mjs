@@ -367,8 +367,10 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
   const outbound = makeOutbound({ bridge, bridgeOf, peerMouth, onLog });
   return {
     // `status`: a liveness status message (src/spine/liveness.mjs) — opens on that line instead of THINKING.
-    open(chatId, { being = defaultKey, replyTo = null, queued = false, queuedAhead = 0, auto = false, origin = null, status = null } = {}) {
-      const { bridge: bridgeForThisBeing, route: peerRoute } = outbound(being, chatId);
+    // `replyIn`: the room `replyTo` (an id, or a promise of one) lives in — a local mouth's route answer, or
+    // null for this chat's own connection. Given, the quote is resolved for the room the stream opens in.
+    open(chatId, { being = defaultKey, replyTo = null, replyIn = undefined, queued = false, queuedAhead = 0, auto = false, origin = null, status = null } = {}) {
+      const { bridge: bridgeForThisBeing, route: peerRoute, keyOf } = outbound(being, chatId);
       // ROUTED-TARGET FALLBACK (never a silent drop): a send the sending account can't place on the
       // routed room (a super/alias room it isn't a member of → resolveChatId null → DROPPED) re-sends
       // to the origin chat. origin unset / == chatId ⇒ byte-identical to before. When the mouth is
@@ -451,7 +453,21 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
       // hand by the time there is anything to show. A route that throws — or a peerMouth that
       // throws synchronously — reads as "no peer": never a lost reply. Absent peerMouth ⇒ null ⇒
       // the local stream opens immediately below, exactly as it always has.
-      const route = peerRoute();
+      const decided = peerRoute();
+      // `replyIn` given: that room's id as-is, a local mouth's own copy (keyOf + quote, as `say`), else unquoted.
+      const quoteIn = async (via) => {
+        const id = await replyTo;
+        const into = via?.bridge ? via : null;
+        if (id == null || (into?.bridge === replyIn?.bridge && into?.chatId === replyIn?.chatId)) return id ?? null;
+        if (!into) return null;
+        let hit = null;
+        try { hit = await peerMouth.quote?.(into, await keyOf(id, 'status', replyIn)()); }
+        catch (e) { hit = { reason: 'threw', detail: e?.message ?? String(e) }; }
+        if (hit?.ok) return hit.msgId;
+        onLog(`status ${being}/${chatId}: '${into.connection}' cannot find #${id} on its own copy (${hit?.reason ?? 'no answer'}${hit?.detail ? `: ${hit.detail}` : ''}) — unquoted`);
+        return null;
+      };
+      const route = replyIn === undefined ? decided : Promise.resolve(decided).then(async (via) => { tag.replyTo = await quoteIn(via); return via; });
       // What the human has already read, in two parts: `tail` is the block the current
       // frame extends, `head` everything sealed behind a seam. See RETAINED_SEAM.
       let head = '';

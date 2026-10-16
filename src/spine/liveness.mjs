@@ -7,8 +7,9 @@
 // the sender's `pulse` and settled with its `end`:
 //   · a running turn: its placeholder shows the elapsed time; once the placeholder is past its edit
 //     window a status message takes over, rolled to a fresh one each window, ended ✓ with the turn.
-//   · background work: ONE status message per being per chat, opened when the dispatching turn ends,
-//     ended ✓ when a finished task's wake starts (the wake posts its own placeholder) or the work is gone.
+//   · background work: ONE status message per being per chat, opened when the dispatching turn ends — as a
+//     reply to that turn's own message, as is each rolled one — ended ✓ when a finished task's wake starts
+//     (the wake posts its own placeholder) or the work is gone.
 //   · background running ASK_AFTER_MS: the being is asked through the wake path whether it is still
 //     needed; no answer → one line to the logging group. Nothing is evicted or killed here.
 import { LIVE_FRAME_MARK } from '../dispatch-line.mjs';
@@ -22,13 +23,13 @@ const STILL_THINKING = `${LIVE_FRAME_MARK} still thinking…`;
 
 export function createLiveness({ sender, brain, now, everyMs = LIVENESS_EVERY_MS, stopped = () => false, labelOf = (b) => b, ask = null, report = null, note = () => {} }) {
   const turns = new Set();     // { out, being, ev, chat, auto, since, last, status }
-  const bg = new Map();        // `${being} ${chatId}` → { out, being, ev, chat, auto, last, what, quiet }
+  const bg = new Map();        // `${being} ${chatId}` → { out, being, ev, chat, auto, last, what, quiet, reply }
   const asks = new Map();      // same key → { at, settled, reported, text }
   const chatNames = new Map(); // same key → the chat's name, for the logging-group line
   const keyOf = (being, chatId) => `${being} ${chatId}`;
   const names = (tasks) => tasks.map((t) => t.description).join('; ');
   const working = (what) => `⚙️ working in background: ${what}`;
-  const open = (e, label) => sender.open(e.chat, { being: e.being, status: label, auto: e.auto, origin: e.ev.chatId });
+  const open = (e, label) => sender.open(e.chat, { being: e.being, status: label, auto: e.auto, origin: e.ev.chatId, ...e.reply });
   const end = (out, text = null) => Promise.resolve(out?.end?.(text)).catch((err) => note(`liveness: could not settle a status — ${err?.message ?? err}`));
 
   // Pulse `out`; once it is past its edit window, freeze it and open a fresh status in its place.
@@ -103,7 +104,8 @@ export function createLiveness({ sender, brain, now, everyMs = LIVENESS_EVERY_MS
       if (bg.has(k) || stopped()) return;
       const tasks = brain.background?.(x.being, x.ev) ?? [];
       if (!tasks.length) return;
-      const s = { being: x.being, ev: x.ev, chat: x.chat, auto: x.auto, last: now(), what: names(tasks), quiet: false };
+      const reply = { replyTo: x.out?.confirmedId ?? null, replyIn: x.out?.confirmedIn ?? null };   // the turn's own message, where it was said
+      const s = { being: x.being, ev: x.ev, chat: x.chat, auto: x.auto, last: now(), what: names(tasks), quiet: false, reply };
       s.out = open(s, working(s.what));
       bg.set(k, s);
       note(`liveness: ${x.being}/${x.ev.chatId} — background task(s) ${s.what} still running, status opened`);
