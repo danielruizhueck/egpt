@@ -1619,6 +1619,13 @@ export function createBrainPool({
       if (k) pool.evict?.(k);
     },
 
+    // A key adopted from the daemon after a spine restart (boot, src/cli-host.mjs): where it last ran,
+    // so a wake, /agents stop and the liveness asks find it before its next turn.
+    adoptKey(key, conv) {
+      const c = `${conv?.being}:${conv?.surface}:${conv?.chatId}`;
+      if (conv?.being && conv?.surface && conv?.chatId && !lastKeyByConv.has(c)) lastKeyByConv.set(c, key);
+    },
+
     // The being + conversation a warm key last ran for — lastKeyByConv read backwards. A background
     // task finished on that key with no turn in flight: this is where it is woken.
     convOfKey(key) {

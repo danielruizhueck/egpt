@@ -26,6 +26,8 @@
 //     (session.background > 0) is NEVER idle- or LRU-evicted — closing it kills them, and that is
 //     not the bridge's to decide (operator 2026-10-15); the spine asks the being instead (liveness).
 //     Its completion report goes up through onBackgroundDone(key, info).
+//   - ADOPT (2026-10-16): a process the daemon held across a spine restart (src/cli-host.mjs) is
+//     put back as its key's entry — adopt(), no spawn.
 //
 // Brain-agnostic over the warm primitive: the session factory is INJECTED. egpt
 // wires `createWarmCliSession` — a resident `claude` CLI background agent (no
@@ -41,6 +43,8 @@ const BACKGROUND_RECHECK_MS = 60_000;   // re-check for an always-evict (ttl 0) 
 const NOT_SPAWN = new Set(['sessionId', 'beingLink']);
 const SHOWN = new Set(['model', 'effort', 'verboseThinking']);
 const spawnOptions = (o) => Object.fromEntries(Object.entries(o).filter(([k, v]) => !NOT_SPAWN.has(k) && typeof v !== 'function'));
+const pick = (o, keys) => Object.fromEntries(keys.map((k) => [k, o[k]]));
+const _describe = (changes, opened) => Object.keys(changes).map((k) => (SHOWN.has(k) ? `${k} ${opened[k] ?? 'unset'}→${changes[k]}` : k)).join(', ');
 
 export function createWarmPool({
   max = 6,
@@ -103,7 +107,7 @@ export function createWarmPool({
 
   function _backgroundDone(key, info) {
     if (!_s.has(key)) return;
-    onLog(`warm: background work finished on ${key} with no turn in flight`);
+    onLog(`warm: ${info?.reply != null ? 'an adopted turn' : 'background work'} finished on ${key} with no turn in flight`);
     try { Promise.resolve(onBackgroundDone(key, info)).catch((err) => onLog(`warm: background wake ${key} failed: ${err?.message ?? err}`)); }
     catch (err) { onLog(`warm: background wake ${key} failed: ${err?.message ?? err}`); }
   }
@@ -142,6 +146,13 @@ export function createWarmPool({
     // already skips busy; the per-turn timeout was removed.)
     if (e.idleTimer) { clearTimeout(e.idleTimer); e.idleTimer = null; }
     try {
+      if (e.reconfig) {
+        const changes = e.reconfig;
+        e.reconfig = null;
+        await e.session.reconfigure(changes);
+        onLog(`warm: configuration applied to the live process on ${key} (${_describe(changes, e.opened)})`);
+        Object.assign(e.opened, changes);
+      }
       // NO turn timeout. A warm claude session stays open INDEFINITELY (like the
       // CLI) — a turn runs as long as it needs: thinking, long answers, slow
       // models. The old fake timeout guillotined legit turns AND evicted the
@@ -152,8 +163,9 @@ export function createWarmPool({
       e.lastUsed = Date.now();
       return res;
     } catch (err) {
-      // An operator stop (/agents stop) ends the turn, not the session: it stays warm.
-      if (!err?.interrupted) {
+      // An operator stop (/agents stop) ends the turn, not the session: it stays warm. So does a
+      // configuration the live process refused: it keeps the one it has.
+      if (!err?.interrupted && !err?.reconfigure) {
         e.errored = true;
         e.failure = err;   // kept only so the eviction below can say WHAT went wrong
       }
@@ -202,13 +214,17 @@ export function createWarmPool({
     // Idle-only, like the guard above. Gated on a STATED value: a caller that names none
     // (compaction's `/compact` passes no effort, and a null model when the def has none) is asking
     // for whatever is warm, not for "unset". Live background work defers the reopen (step B).
+    // What the live process takes in place (session.reconfigurable — measured control requests) is
+    // applied before the next turn, process and background work untouched; only the rest reopens.
     if (e && !e.errored && !e.busy) {
       const changed = Object.keys(spawnOptions(brainOptions)).filter((k) => brainOptions[k] != null && !isDeepStrictEqual(brainOptions[k], e.opened[k] ?? null));
-      if (changed.length) {
-        const what = changed.map((k) => (SHOWN.has(k) ? `${k} ${e.opened[k] ?? 'unset'}→${brainOptions[k]}` : k)).join(', ');
-        const n = e.session.background ?? 0;
-        if (n > 0) onLog(`warm: configuration changed on ${key} (${what}) — reopen deferred: ${n} background task(s) still running`);
-        else { _evict(key, `configuration changed: ${what}`); e = null; }
+      const live = changed.filter((k) => e.session.reconfigurable?.has(k));
+      const rest = changed.filter((k) => !live.includes(k));
+      const n = e.session.background ?? 0;
+      if (rest.length && !n) { _evict(key, `configuration changed: ${_describe(pick(brainOptions, changed), e.opened)}`); e = null; }
+      else {
+        if (rest.length) onLog(`warm: configuration changed on ${key} (${_describe(pick(brainOptions, rest), e.opened)}) — reopen deferred: ${n} background task(s) still running`);
+        if (live.length) e.reconfig = { ...e.reconfig, ...pick(brainOptions, live) };
       }
     }
     // The INJECT-INTO-RUNNING-TURN block that used to sit HERE (operator 2026-06-13) now
@@ -226,7 +242,9 @@ export function createWarmPool({
       // `opened` is what the CONFIGURATION GUARD above compares against: the options this
       // process was spawned with, kept on the entry because not every session exposes its own.
       const seam = onBackgroundDone ? { onBackgroundDone: (info) => _backgroundDone(key, info) } : {};
-      e = { session: makeSession({ ...brainOptions, onLog, ...seam }), klass, lastUsed: Date.now(), idleTimer: null, busy: false, errored: false, chain: Promise.resolve(), idleTtlMs: undefined, opened: spawnOptions(brainOptions) };
+      const opened = spawnOptions(brainOptions);
+      // `pool`: what a daemon-held process needs to be adopted back into an entry like this one (boot).
+      e = { session: makeSession({ ...brainOptions, onLog, ...seam, pool: { key, klass, idleTtlMs, opened } }), klass, lastUsed: Date.now(), idleTimer: null, busy: false, errored: false, chain: Promise.resolve(), idleTtlMs: undefined, opened };
       _s.set(key, e);
       onLog(`warm: opened ${key} (klass=${klass}); size=${_s.size}/${max}`);
     }
@@ -318,6 +336,23 @@ export function createWarmPool({
     return { stopped: 'evict' };
   }
 
+  // A process the daemon held across a spine restart (src/cli-host.mjs) becomes this key's entry
+  // again: no spawn, no --resume. brainOptions carries the adopted process (`adopt`); an adopted turn
+  // still running keeps the entry busy until it ends.
+  function adopt(key, { brainOptions = {}, klass = 'sibling', idleTtlMs, opened = {} } = {}) {
+    if (_s.has(key)) { onLog(`warm: adopt ${key} refused — the key is already open`); return false; }
+    const seam = onBackgroundDone ? { onBackgroundDone: (info) => _backgroundDone(key, info) } : {};
+    const o = { ...opened };
+    const e = { session: makeSession({ ...brainOptions, onLog, ...seam, pool: { key, klass, idleTtlMs, opened: o } }), klass, lastUsed: Date.now(), idleTimer: null, busy: false, errored: false, chain: Promise.resolve(), idleTtlMs, opened: o };
+    _s.set(key, e);
+    const orphan = e.session.orphan;
+    onLog(`warm: adopted ${key} (klass=${klass}${orphan ? ', a turn still running' : ''}); size=${_s.size}/${max}`);
+    if (!orphan) { _armIdle(key); return true; }
+    e.busy = true;
+    e.chain = Promise.resolve(orphan).then(() => {}, () => {}).then(() => { e.busy = false; if (_s.get(key) === e) _armIdle(key); });
+    return true;
+  }
+
   function has(key) { return _s.has(key); }
   function background(key) { return _s.get(key)?.session.backgroundTasks ?? []; }
   function busy(key) { return _s.get(key)?.busy === true; }
@@ -325,5 +360,5 @@ export function createWarmPool({
   function close() { for (const k of [..._s.keys()]) _evict(k, 'pool close'); }
   function stats() { return { size: _s.size, max, keys: [..._s.keys()] }; }
 
-  return { run, steer, interrupt, has, busy, background, evict, close, stats };
+  return { run, adopt, steer, interrupt, has, busy, background, evict, close, stats };
 }

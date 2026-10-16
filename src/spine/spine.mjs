@@ -621,10 +621,11 @@ export function createSpine({
     const busy = turns.busy();
     return { busy, n: busy.reduce((sum, [, c]) => sum + c, 0), list: busy.map(([k, c]) => (c > 1 ? `${k} ×${c}` : k)).join(', ') };
   }
-  // BACKGROUND WORK (step C, 2026-10-16): a restart kills each warm `claude` and its background
-  // agents, so the drain waits for them too, with NO cap: past RESTART_DRAIN_CAP_MS the logging
-  // group is told (once per cap) and the wait goes on. `force` (/restart force) skips it; turns
-  // are still waited for. Work a turn starts mid-drain is not blocked, only marked.
+  // BACKGROUND WORK (step C, 2026-10-16): a restart kills each warm `claude` THIS spine holds (none
+  // when the daemon holds them — boot's backgroundWork) and its background agents, so the drain waits
+  // for them too, with NO cap: past RESTART_DRAIN_CAP_MS the logging group is told (once per cap) and
+  // the wait goes on. `force` (/restart force) skips it; turns are still waited for. Work a turn
+  // starts mid-drain is not blocked, only marked.
   function liveBackground(since) {
     const now = clock.now();
     return (backgroundWork?.() ?? []).map((b) => ({ ...b, running: elapsed(now - b.since), duringDrain: b.since >= since }));
@@ -1502,10 +1503,14 @@ export function createSpine({
   // conversation's FIFO and the reply path. false = not woken; else the turn, true when it answered.
   // `line`: liveness's "are they still necessary?" ask rides this same path. A finished task's wake
   // ends the being's status message ✓ and posts its own placeholder at the bottom.
-  async function wakeOnBackground({ being, surface, chatId, summaries = [], line = null }) {
-    const what = summaries.length ? summaries.join('; ') : 'a background task';
-    const finished = line == null;
-    line ??= `[egpt] A background task you started has finished: ${what}. Verify its result and report to the chat.`;
+  // `reply`: a turn the daemon held across a spine restart finished after it (src/cli-host.mjs) — its
+  // answer never reached the chat, so the being is handed it to send.
+  async function wakeOnBackground({ being, surface, chatId, summaries = [], reply = null, line = null }) {
+    const what = reply != null ? 'a reply written across a restart' : summaries.length ? summaries.join('; ') : 'a background task';
+    const finished = line == null && reply == null;
+    line ??= reply != null
+      ? `[egpt] Your last reply was written while the bridge restarted and never reached the chat. It was:\n\n${reply}\n\nSend it to the chat now.`
+      : `[egpt] A background task you started has finished: ${what}. Verify its result and report to the chat.`;
     const ev = { surface, chatId, body: line, line, cause: 'background' };   // cause: agent stats' system bucket
     const where = `${being}/${chatId}`;
     if (stopSwitch?.present()) { note(`wake ${where}: STOP file present — not woken`); return false; }
