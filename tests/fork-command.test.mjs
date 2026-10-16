@@ -702,17 +702,40 @@ describe('/join <name> — template placeholder, same-name reuse, member gate', 
     expect(sent).toHaveLength(0);
   });
 
-  // ── the cap: a non-operator holds at most ONE live side-room per C (each create is An's account) ──
-  it('a member\'s 2nd /join with a different name is refused with config.join.limit; no createGroup', async () => {
-    const { cmds, calls, sent } = harness({ config: cfg(), chatRaw: roster(), createChatId: byTitle });
+  // ── the cap: config.join.member_cap (operator 2026-10-16) — -1/absent = unlimited; N >= 1 = at most N
+  //    live side-rooms per non-operator per C (each create is An's own account). The operator is never capped.
+  const capped = (n) => { const c = cfg(); c.join = { ...c.join, member_cap: n }; return c; };
+  const three = ['emely', 'nue11', 'otro'];
+
+  it('no member_cap (absent) → a member creates freely', async () => {
+    const { cmds, calls } = harness({ config: cfg(), chatRaw: roster(), createChatId: byTitle });
+    for (const n of three) await cmds.run(memberJoin(`/join ${n}`));
+    expect(calls.create).toHaveLength(3);
+  });
+
+  it('member_cap -1 → unlimited', async () => {
+    const { cmds, calls } = harness({ config: capped(-1), chatRaw: roster(), createChatId: byTitle });
+    for (const n of three) await cmds.run(memberJoin(`/join ${n}`));
+    expect(calls.create).toHaveLength(3);
+  });
+
+  it('member_cap 1: a member\'s 2nd /join with a different name is refused with config.join.limit; no createGroup', async () => {
+    const { cmds, calls, sent } = harness({ config: capped(1), chatRaw: roster(), createChatId: byTitle });
     await cmds.run(memberJoin('/join emely'));
     await cmds.run(memberJoin('/join nue11'));
     expect(calls.create).toHaveLength(1);
     expect(sent.at(-1)).toEqual({ chatId: C_CHAT, text: JOIN_LIMIT_DEFAULT.replaceAll('{name}', 'emely') });
   });
 
-  it('a room the member is IN (made by someone else) counts too; config.join.limit overrides the line', async () => {
-    const c = cfg(); c.join = { ...c.join, limit: 'ya tienes {name}' };
+  it('member_cap 2: two rooms, the third is refused', async () => {
+    const { cmds, calls, sent } = harness({ config: capped(2), chatRaw: roster(), createChatId: byTitle });
+    for (const n of three) await cmds.run(memberJoin(`/join ${n}`));
+    expect(calls.create.map((c) => c.title)).toEqual(['egpt emely de Proyecto X', 'egpt nue11 de Proyecto X']);
+    expect(sent.at(-1)).toEqual({ chatId: C_CHAT, text: JOIN_LIMIT_DEFAULT.replaceAll('{name}', 'emely, nue11') });
+  });
+
+  it('member_cap 1: a room the member is IN (made by someone else) counts too; config.join.limit overrides the line', async () => {
+    const c = capped(1); c.join = { ...c.join, limit: 'ya tienes {name}' };
     const { cmds, calls, sent } = harness({ config: c, chatRaw: roster(MEMBER), createChatId: byTitle });
     await cmds.run(opJoin('/join emely'));
     await cmds.run(memberJoin('/join nue11'));
@@ -720,21 +743,21 @@ describe('/join <name> — template placeholder, same-name reuse, member gate', 
     expect(sent).toEqual([{ chatId: C_CHAT, text: 'ya tienes emely' }]);
   });
 
-  it('a different member can still create one', async () => {
-    const { cmds, calls } = harness({ config: cfg(), chatRaw: roster(), createChatId: byTitle });
+  it('member_cap 1: a different member can still create one', async () => {
+    const { cmds, calls } = harness({ config: capped(1), chatRaw: roster(), createChatId: byTitle });
     await cmds.run(memberJoin('/join emely'));
     await cmds.run(memberJoin('/join nue11', { senderId: '@whatsapp_lid-888000:beeper.local', senderName: 'Nue' }));
     expect(calls.create).toHaveLength(2);
   });
 
-  it('the operator can create several', async () => {
-    const { cmds, calls } = harness({ config: cfg(), chatRaw: roster(), createChatId: byTitle });
-    for (const n of ['emely', 'nue11', 'otro']) await cmds.run(opJoin(`/join ${n}`));
+  it('member_cap 1: the operator is never capped', async () => {
+    const { cmds, calls } = harness({ config: capped(1), chatRaw: roster(), createChatId: byTitle });
+    for (const n of three) await cmds.run(opJoin(`/join ${n}`));
     expect(calls.create).toHaveLength(3);
   });
 
-  it('an /end-ed room no longer counts', async () => {
-    const { cmds, calls } = harness({ config: cfg(), chatRaw: roster(), createChatId: byTitle });
+  it('member_cap 1: an /end-ed room no longer counts', async () => {
+    const { cmds, calls } = harness({ config: capped(1), chatRaw: roster(), createChatId: byTitle });
     await cmds.run(memberJoin('/join emely'));
     await cmds.run({ chatId: shortChatId('!join-emely:beeper.local'), surface: 'whatsapp', msgId: 'end1', isSender: true, body: '/end' });
     await cmds.run(memberJoin('/join nue11'));

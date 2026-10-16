@@ -3057,8 +3057,19 @@ export const CONFIG_SCHEMA = {
     beeper.secondary.phone; the group title is config.group_title; and the texts that live here are:
       default_name: the {name} used in the group title when /join carries NO <name> arg. Unset → the
                    built-in "egpt super". (A nameless /join no longer titles the group "…-join".)
-      placeholder: what the operator's /join message is edited into (the "thinking with the robot"
-                   marker). Unset → a small built-in default.
+      placeholder: what the operator's /join message is edited into (a member's /join gets it as a
+                   reply). A template (2026-10-16): {name} the /join name, {title} the group title,
+                   {group} the parent chat's title, {by} the sender; no braces → used as-is. Unset → a
+                   built-in default naming the group and the command to join it.
+      exists:      the reply when /join <name> matches a live side-room of this chat the sender is not
+                   in (no second group is created; the Desktop API cannot add a member). {name} {by}
+                   ({by} = who made it). Unset → a built-in default.
+      member_cap:  how many live side-rooms ONE non-operator may hold per chat (rooms they made or are
+                   in; /end-ed and deleted rooms do not count). A number. DEFAULT -1 = unlimited; N >= 1
+                   = at most N, every create being the operator's own WhatsApp account. The operator is
+                   never capped. (operator 2026-10-16)
+      limit:       the reply when member_cap is reached; {name} lists that member's rooms. Unset → a
+                   built-in default.
       opener:      the one message posted from Rodz into the new group right after it is created, so
                    the otherwise-empty group surfaces in Beeper (Beeper hides chats with no messages).
                    A {group} template ({group} = the parent chat's title). Unset → a small built-in

@@ -468,7 +468,8 @@ const NODE_LOCAL_SURFACES = new Set([SHELL_SURFACE]);
 // /join whose name is already a live side-room the sender is not in (operator 2026-10-16).
 export const JOIN_PLACEHOLDER_DEFAULT = '🔗 joined group {name}. You can join too: send /join {name}';
 export const JOIN_EXISTS_DEFAULT = '🔗 group {name} already exists. Ask {by} to add you.';
-// config.join.limit: a non-operator holds at most one live side-room per chat (each create is An's account).
+// config.join.limit: the answer when config.join.member_cap (live side-rooms per non-operator per
+// chat; -1/unset = unlimited) is reached. {name} lists that member's rooms.
 export const JOIN_LIMIT_DEFAULT = '🔗 you already have group {name} here.';
 export const SPLIT_PLACEHOLDER_DEFAULT = '🍴🤖 ...';
 export const GROUP_TITLE_DEFAULT = 'egpt {name} {group}';
@@ -3523,14 +3524,15 @@ export function createCommands({
   };
   const rosterHas = (raw, senderId) => !!senderId && Array.isArray(raw?.participants?.items)
     && raw.participants.items.some((p) => String(p?.id) === String(senderId));
-  // A sender's live side-room in C: one they made (join_by_id) or are in. Gone (404) rooms do not count.
-  const sendersRoomOf = async (state, surface, primaryJid, senderId) => {
+  // A sender's live side-rooms in C: ones they made (join_by_id) or are in. Gone (404) rooms do not count.
+  const sendersRoomsOf = async (state, surface, primaryJid, senderId) => {
+    const out = [];
     for (const [chatId, e] of Object.entries(state?.contacts?.[surface] ?? {})) {
       if (e?.aliasOf !== primaryJid || e.super === true) continue;
       const raw = await forkBridge.chatRaw?.(chatId);
-      if (raw !== false && (e.join_by_id === senderId || rosterHas(raw, senderId))) return { chatId, entry: e };
+      if (raw !== false && (e.join_by_id === senderId || rosterHas(raw, senderId))) out.push({ chatId, entry: e });
     }
-    return null;
+    return out;
   };
   // Who besides the operator may /join: a member of a GROUP C whom a being resident in C would wake,
   // by router.resolve's allowed_users test (the conversation's block, else the agent's
@@ -3611,13 +3613,15 @@ export function createCommands({
         return `"${joinName}" exists (${hit.chatId}) — the sender is not in it and cannot be added from here`;
       }
     }
-    // THE CAP (operator 2026-10-16): one live side-room per non-operator per chat — every create is
-    // An's own WhatsApp account, and a burst of group creations can get it flagged.
-    if (!operator) {
-      const mine = await sendersRoomOf(state0, surface, contact.jid, ev.senderId);
-      if (mine) {
-        await send?.(ev.chatId, fillVars(joinLimitOf(cfg().join), { ...vars(baseTitle), name: mine.entry.join_name ?? mine.entry.transcript ?? mine.chatId }));
-        return `refused — the sender already has ${mine.chatId} here`;
+    // THE CAP (operator 2026-10-16): config.join.member_cap live side-rooms per non-operator per chat —
+    // every create is An's own WhatsApp account. -1/unset (or anything but an integer >= 1) = unlimited.
+    const cap = Number(cfg().join?.member_cap);
+    if (!operator && Number.isInteger(cap) && cap >= 1) {
+      const mine = await sendersRoomsOf(state0, surface, contact.jid, ev.senderId);
+      if (mine.length >= cap) {
+        const names = mine.map((r) => r.entry.join_name ?? r.entry.transcript ?? r.chatId).join(', ');
+        await send?.(ev.chatId, fillVars(joinLimitOf(cfg().join), { ...vars(baseTitle), name: names }));
+        return `refused — the sender already has ${mine.length} side-room(s) here (member_cap ${cap})`;
       }
     }
 
