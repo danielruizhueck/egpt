@@ -243,6 +243,13 @@ export const CONFIG_SCHEMA = {
       A plain command beat (no chat output) and a node-level beat (no chat) do
       not announce. With silent: true the announcement — and the output — go to
       eGPT Admin instead (see silent above).
+      TURN IT OFF (operator 2026-10-16): the notice is a switch, nearest wins —
+        announce: false            on one beat  → that beat never announces
+        heartbeat_announce: false  top-level key, in config.yaml (every beat on
+                                   the node) or in one chat's conversations.yaml
+                                   entry / config/rooms.yaml row (that chat's beats)
+      Only the 🫀 line goes: the beat still runs and posts its output as before.
+      A non-boolean announce: skips the entry (like silent:).
 
     TRIGGER (operator 2026-07-02):
       An entry may use  when: <M/D/YYYY H:MMa | 24h | ISO>  INSTEAD of
@@ -383,6 +390,24 @@ export const CONFIG_SCHEMA = {
 
     Paste-ready templates live in config/skeletons/ (script.x.md,
     heartbeats.yaml).
+  `,
+
+  heartbeat_announce: `
+    Whether a heartbeat that SENDS into a chat (a post: command, an agent: turn)
+    first posts its one-line "🫀 <name>" notice there (src/spine/heartbeat-loader.mjs,
+    operator 2026-10-16: "tiene que ser una opción en config.yaml para que muestre
+    o no muestre corazón con el latido").
+
+    DEFAULT: true — the notice is the chat's warning that an automatic process is
+    starting, so it stays on unless someone turns it off.
+
+    RUNGS, nearest wins: config.yaml (the whole node) < a conversations.yaml entry
+    or config/rooms.yaml row (that chat) < a beat's own  announce: <bool>  (that
+    beat; see heartbeats above).
+
+    false hides ONLY the notice: the beat still fires, and its output (post: text,
+    an agent beat's reply) still posts where silent: says. A non-boolean value is
+    logged once and read as true.
   `,
 
   default_time_zone: `

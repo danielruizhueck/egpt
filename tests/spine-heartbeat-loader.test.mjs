@@ -2268,3 +2268,110 @@ describe('createHeartbeatLoader — firing announcement + silent:', () => {
     expect(h.logs.some((l) => l.includes('whatsapp/x:beat: silent "yes" is not true or false — skipped'))).toBe(true);
   });
 });
+
+// ── TURNING THE ANNOUNCEMENT OFF (operator 2026-10-16: "tiene que ser una opción en config.yaml para
+//    que muestre o no muestre corazón con el latido"). heartbeat_announce in config.yaml (node) or in a
+//    chat's row (entity), and announce: on one beat — nearest wins. Only the 🫀 notice goes: the beat
+//    still runs and still posts its output. ──
+describe('createHeartbeatLoader — heartbeat_announce / announce: turn the 🫀 notice off', () => {
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+  const ENT = { dir: '/home/c/whatsapp/x', ns: 'whatsapp/x' };
+  const ANNOUNCE = '🫀 beat';
+
+  // `nodeExtra` lands in config.yaml, `rowExtra` beside `heartbeats:` in the chat's rooms.yaml row.
+  function build(raw, { nodeExtra = {}, rowExtra = {} } = {}) {
+    const logs = [], posts = [], turns = [];
+    const { spawn, calls } = makeSpawn();
+    const registry = makeRegistry();
+    const loader = makeLoader({
+      getConfig: () => ({ default_time_zone: 'UTC', agents: { egpt: { default: true, handles: ['e'] } }, ...nodeExtra }),
+      aliveMs: 0, egptHome: '/home', procCwd: '/checkout', spawn,
+      listEntityDirs: async () => [ENT],
+      readEntityConfig: async () => ({ heartbeats: { beat: raw }, ...rowExtra }),
+      dispatchPost: async (p) => { posts.push(p); },
+      dispatchTurn: async (t) => { turns.push(t); return { text: 'the reply' }; },
+      io: { writeFile: async () => {}, mkdir: async () => {}, readFile: async () => 'script body\n' },
+      onLog: (m) => logs.push(m), now: () => 1_000_000,
+    });
+    return {
+      loader, logs, posts, turns, calls,
+      async start() { loader.wrapRegistry(registry); await loader.collect(); await loader.activate({ stats: () => ({}) }); logs.length = 0; },
+      beat: () => registry.registered.find((r) => r.name === 'whatsapp/x:beat')?.fn,
+    };
+  }
+  const TURN = { frequency: '30m', agent: 'e', prompt: 'do a thing' };
+
+  it('heartbeat_announce: false in config.yaml — the agent beat still runs, but posts no 🫀', async () => {
+    const h = build(TURN, { nodeExtra: { heartbeat_announce: false } });
+    await h.start();
+    h.beat()();
+    await flush();
+    expect(h.turns).toHaveLength(1);      // the beat ran
+    expect(h.posts).toEqual([]);          // no notice
+  });
+
+  it('heartbeat_announce: false — a post: beat still posts its OUTPUT, only the notice is gone', async () => {
+    const h = build({ frequency: '24h', command: 'node x.js', post: 'out: {stdout}' }, { nodeExtra: { heartbeat_announce: false } });
+    await h.start();
+    h.beat()();
+    h.calls[0].child.stdout.emit('data', '1637\n');
+    h.calls[0].child.emit('close', 0);
+    await flush();
+    expect(h.posts.map((p) => p.text)).toEqual(['out: 1637']);
+  });
+
+  it('heartbeat_announce: false on the chat\'s row turns it off for that chat, over the node default', async () => {
+    const h = build(TURN, { rowExtra: { heartbeat_announce: false } });
+    await h.start();
+    h.beat()();
+    await flush();
+    expect(h.turns).toHaveLength(1);
+    expect(h.posts).toEqual([]);
+  });
+
+  it('a beat\'s own announce: true wins over heartbeat_announce: false', async () => {
+    const h = build({ ...TURN, announce: true }, { nodeExtra: { heartbeat_announce: false } });
+    await h.start();
+    h.beat()();
+    await flush();
+    expect(h.posts.map((p) => p.text)).toEqual([ANNOUNCE]);
+  });
+
+  it('announce: false on one beat — no notice, and its action says so', async () => {
+    const h = build({ ...TURN, announce: false });
+    const e = (await h.loader.collect()).entries.find((x) => x.name === 'whatsapp/x:beat');
+    expect(e.action.announce).toBe(false);
+    await h.start();
+    h.beat()();
+    await flush();
+    expect(h.turns).toHaveLength(1);
+    expect(h.posts).toEqual([]);
+  });
+
+  it('REGRESSION: nothing set — the beat still announces, and its action carries no announce key', async () => {
+    const h = build(TURN);
+    const e = (await h.loader.collect()).entries.find((x) => x.name === 'whatsapp/x:beat');
+    expect('announce' in e.action).toBe(false);
+    await h.start();
+    h.beat()();
+    await flush();
+    expect(h.posts.map((p) => p.text)).toEqual([ANNOUNCE]);
+  });
+
+  it('a non-boolean announce: is malformed — the whole entry is skipped + logged', async () => {
+    const h = build({ ...TURN, announce: 'no' });
+    expect((await h.loader.collect()).entries).toEqual([]);
+    expect(h.logs.some((l) => l.includes('whatsapp/x:beat: announce "no" is not true or false — skipped'))).toBe(true);
+  });
+
+  it('a non-boolean heartbeat_announce is logged ONCE and read as the default — the beat still announces', async () => {
+    const h = build(TURN, { nodeExtra: { heartbeat_announce: 'off' } });
+    await h.loader.collect();
+    await h.loader.collect();   // a reload must not repeat the line
+    expect(h.logs.filter((l) => l.includes('heartbeat_announce "off" is not true or false')).length).toBe(1);
+    await h.start();
+    h.beat()();
+    await flush();
+    expect(h.posts.map((p) => p.text)).toEqual([ANNOUNCE]);
+  });
+});

@@ -108,6 +108,17 @@
 // the own chat (that would defeat "silent"). A non-boolean `silent:` skips the entry, like any other
 // malformed field.
 //
+// TURNING THE ANNOUNCEMENT OFF (operator 2026-10-16: "tiene que ser una opción en config.yaml para que
+// muestre o no muestre corazón con el latido"). The 🫀 notice stays the DEFAULT — it is the chat's
+// warning that an automatic process is starting — but it is now a switch, nearest rung wins:
+//   heartbeat_announce: false   in config.yaml          → no beat on the node announces
+//   heartbeat_announce: <bool>  in a conversations.yaml entry / config/rooms.yaml row → that chat's beats
+//   announce: <bool>            on ONE beat              → that beat, over both of the above
+// Only the NOTICE goes: the beat still runs and still posts its output (a `post:` command's text, an
+// agent beat's reply) exactly as before, and `silent:` still decides WHERE things land. A non-boolean
+// `announce:` skips the entry like a malformed `silent:`; a non-boolean `heartbeat_announce` is logged
+// once and read as the default (announce), so a typo in a shared file never takes every beat down.
+//
 // THE KEY WAS `ai_run:` UNTIL 2026-08-22. It named neither a path nor its type, while
 // house style names paths explicitly (model_path, conversation_path, home_dir) — and now
 // that `agent:` carries the "an AI runs this" meaning by naming WHO, the other key only
@@ -301,6 +312,15 @@ function _replyPrefix(text) {
 // `<name>` half of the `<ns>:<name>` the loader keys it by (operator 2026-09-30: the notice shows the
 // short name everywhere, own chat and eGPT Admin alike, never the qualified form).
 const _ANNOUNCE = (shortName) => `🫀 ${shortName}`;
+
+// A rung's `heartbeat_announce` value → true/false (see TURNING THE ANNOUNCEMENT OFF in the header).
+// Absent → true, the default. Anything but a boolean is said once (logOnce) and read as true.
+function _announceSetting(value, where, logOnce) {
+  if (value == null) return true;
+  if (typeof value === 'boolean') return value;
+  logOnce(`announce:${where}:${JSON.stringify(value)}`, `${where}: heartbeat_announce ${JSON.stringify(value)} is not true or false — announcing (the default)`);
+  return true;
+}
 
 // ── frequency parser (pure) ─────────────────────────────────────────────────
 // A number is taken as milliseconds; a string is `<quantity><unit>` with unit
@@ -540,7 +560,7 @@ function _resolveAction({ name, raw, isAlive, aliveCommand, cwd, aliveCwd, ns, a
 // collide. `isAlive` gives the deadman its defaults (aliveFallbackMs + aliveCommand).
 // `logOnce(key, line)` says a line once per process (collect() passes the loader's): what every reload
 // would otherwise repeat — a stale when:, a clamped cadence — is said the first time only.
-function _normalizeEntry({ name, source, cwd, raw, isAlive, aliveFallbackMs, aliveCommand, aliveCwd, ns, agents, beingWritten = false, timeZone, nowMs, onLog, logOnce = (_key, m) => onLog(m) }) {
+function _normalizeEntry({ name, source, cwd, raw, isAlive, aliveFallbackMs, aliveCommand, aliveCwd, ns, agents, beingWritten = false, announceDefault = true, timeZone, nowMs, onLog, logOnce = (_key, m) => onLog(m) }) {
   const triggers = ['frequency', 'when', 'daily'].filter((k) => raw?.[k] != null);
   if (triggers.length > 1) { onLog(`${name}: ${triggers.length === 2 ? 'both' : 'all of'} ${triggers.slice(0, -1).join(', ')} and ${triggers.at(-1)} set — skipped (use one trigger)`); return null; }
   const hasWhen = raw?.when != null;
@@ -550,6 +570,8 @@ function _normalizeEntry({ name, source, cwd, raw, isAlive, aliveFallbackMs, ali
   // instead of the beat's own chat (operator 2026-09-30) — carried on the action below, threaded to
   // boot's dispatchers. A non-boolean is malformed, skipped + logged like any other bad field.
   if (raw?.silent != null && typeof raw.silent !== 'boolean') { onLog(`${name}: silent ${JSON.stringify(raw.silent)} is not true or false — skipped`); return null; }
+  // `announce:` — this beat's own say over the 🫀 notice, over its chat's and the node's heartbeat_announce.
+  if (raw?.announce != null && typeof raw.announce !== 'boolean') { onLog(`${name}: announce ${JSON.stringify(raw.announce)} is not true or false — skipped`); return null; }
 
   const action = _resolveAction({ name, raw, isAlive, aliveCommand, cwd, aliveCwd, ns, agents, source, beingWritten, onLog });
   if (action === _INVALID_ACTION) return null;
@@ -560,6 +582,8 @@ function _normalizeEntry({ name, source, cwd, raw, isAlive, aliveFallbackMs, ali
   if (action && beingWritten) Object.assign(action, { beingWritten: true, ns });
   // Carried only when true, so a non-silent action's shape is unchanged (the loader's toEqual locks).
   if (action && raw?.silent === true) action.silent = true;
+  // Same rule: carried only when OFF, so an announcing action's shape is unchanged.
+  if (action && (raw?.announce ?? announceDefault) === false) action.announce = false;
 
   // ── daily: every day at a wall-clock time in a zone (see the header) ──
   if (hasDaily) {
@@ -685,6 +709,7 @@ export function createHeartbeatLoader({
     }
     const nodeConfig = set.node.config ?? {};
     const timeZone = resolveTimeZone(nodeConfig.default_time_zone, { onLog });
+    const nodeAnnounce = _announceSetting(nodeConfig.heartbeat_announce, NODE_FILE, _logOnce);
     const nowMs = now();
     const entries = [];
     const nodeBlock = nodeConfig.heartbeats;
@@ -708,7 +733,7 @@ export function createHeartbeatLoader({
         if (raw === false) { onLog('alive disabled (heartbeats.alive: false) — the supervisor will respawn-loop with backoff until restored'); continue; }
       }
       if (!raw || typeof raw !== 'object') { onLog(`${name}: not a heartbeat block — skipped`); continue; }
-      const e = _normalizeEntry({ name, source: NODE_FILE, cwd: procCwd, raw, isAlive, aliveFallbackMs, aliveCommand, aliveCwd, ns: null, agents: agentsMap, timeZone, nowMs, onLog, logOnce: _logOnce });
+      const e = _normalizeEntry({ name, source: NODE_FILE, cwd: procCwd, raw, isAlive, aliveFallbackMs, aliveCommand, aliveCwd, ns: null, agents: agentsMap, announceDefault: nodeAnnounce, timeZone, nowMs, onLog, logOnce: _logOnce });
       if (e) { e.shortName = name; entries.push(e); }   // the beat's OWN name — what the firing announcement shows
     }
 
@@ -729,10 +754,13 @@ export function createHeartbeatLoader({
     //    is why this appends rather than replaces). Names are namespaced
     //    (`<surface>/<slug>:<name>`, `room/<name>:<name>`) so they can't collide with
     //    node-level names.
-    for (const { dir, ns, heartbeats, heartbeatSource, beingWritten } of set.entities.values()) {
+    for (const { dir, ns, heartbeats, heartbeatSource, beingWritten, config: entityConfig, source: entitySource } of set.entities.values()) {
+      // The entity's resolved config already layers config.yaml < conversations.yaml < rooms.yaml, so
+      // its heartbeat_announce IS the nearest rung's (or the node's when no rung states one).
+      const entityAnnounce = _announceSetting(entityConfig?.heartbeat_announce, entitySource?.heartbeat_announce ?? NODE_FILE, _logOnce);
       for (const [name, raw] of Object.entries(heartbeats)) {
         if (!raw || typeof raw !== 'object') { onLog(`${ns}:${name}: not a heartbeat block — skipped`); continue; }
-        const e = _normalizeEntry({ name: `${ns}:${name}`, source: heartbeatSource[name], cwd: dir, raw, isAlive: false, aliveFallbackMs, aliveCommand, aliveCwd, ns, agents: agentsMap, beingWritten: beingWritten.has(name), timeZone, nowMs, onLog, logOnce: _logOnce });
+        const e = _normalizeEntry({ name: `${ns}:${name}`, source: heartbeatSource[name], cwd: dir, raw, isAlive: false, aliveFallbackMs, aliveCommand, aliveCwd, ns, agents: agentsMap, beingWritten: beingWritten.has(name), announceDefault: entityAnnounce, timeZone, nowMs, onLog, logOnce: _logOnce });
         if (e) { e.shortName = name; entries.push(e); }   // the beat's OWN name (un-namespaced) — what the firing announcement shows
       }
     }
@@ -869,7 +897,7 @@ export function createHeartbeatLoader({
   function _fire(entry, stats, onSettle) {
     const a = entry.action;
     onLog(a.kind === 'turn' ? `${entry.name}: fire turn — ${a.being} ${a.script ?? `prompt: ${_replyPrefix(a.prompt)}`}` : `${entry.name}: fire ${a.beingWritten ? 'boxed ' : ''}command — ${a.command}`);
-    if (_sendsToChat(a) && typeof dispatchPost === 'function') _announce(entry);
+    if (_sendsToChat(a) && a.announce !== false && typeof dispatchPost === 'function') _announce(entry);
     const startedMs = now();
     if (a.kind === 'turn') { _dispatchTurn(entry, startedMs, onSettle); return; }
     _spawnAction(entry, stats, startedMs, onSettle);
@@ -1048,6 +1076,7 @@ export function createHeartbeatLoader({
     else row.action = `command: ${e.action.command}`;
     if (e.action.post) row.post = e.action.post;
     if (e.action.browser) row.browser = true;
+    if (e.action.announce === false) row.announce = false;
     if (e.action.nativeShell && _bash) row.shell = 'native (liveness never runs under the POSIX bash)';
     if (e.action.kind === 'command' && e.action.beingWritten) row.shell = 'boxed — the conversation\'s pool account, through setup/sandbox-logon-launcher.ps1';
     row.cwd = e.action.cwd;
