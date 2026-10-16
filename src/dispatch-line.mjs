@@ -190,7 +190,6 @@ export function limbAction(action = {}) {
     case 'ask': return `asked the advice channel${snip(action.question) ? ` "${snip(action.question)}"` : ''}`;
     case 'book': return `/book ${action.date ?? '?'} ${action.time ?? '?'}${snip(action.summary) ? ` "${snip(action.summary)}"` : ''} → ${action.outcome ?? '?'}`;
     case 'email': return `/email${snip(action.text) ? ` "${snip(action.text)}"` : ''} → ${action.outcome ?? '?'}`;
-    case 'transcribe': return `/transcribe ${snip(action.path)} → ${action.outcome ?? '?'}`;
     default: return null;   // an unknown limb invents no vocabulary — the raw reply line already holds it
   }
 }
