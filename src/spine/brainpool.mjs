@@ -1180,14 +1180,17 @@ export function createBrainPool({
       // A ccode type that declares its own list only NARROWS the level's (2026-10-15): level ∩ type,
       // in the type's order, sent as --tools so unlisted tools do not exist (claude-args.mjs).
       // A type with no list keeps the level's whole grant (2026-09-23: a boxed being gets every tool).
+      // A scoped entry `Tool(args)` is admitted by its base `Tool`, and --tools names that base: the
+      // arg pattern is a permission rule, which skip-permissions does not enforce anyway.
       let narrowedTools = null;
+      const toolBase = (t) => String(t).replace(/\(.*$/s, '').trim();
       if (isAccessLevel(accessLevel)) {
         const perm = loadPermission(accessLevel);
         if (perm) {
           if (def.declares_tools === true && (def.type ?? brainType) === 'ccode') {
             const own = Array.isArray(def.allowed_tools) ? def.allowed_tools : String(def.allowed_tools).split(/[\s,]+/).filter(Boolean);
-            const granted = new Set(perm.allowedTools.map((t) => t.toLowerCase()));
-            narrowedTools = own.filter((t) => granted.has(String(t).toLowerCase()));
+            const granted = new Set(perm.allowedTools.map((t) => toolBase(t).toLowerCase()));
+            narrowedTools = own.filter((t) => granted.has(toolBase(t).toLowerCase()));
           }
           def = { ...def, dangerously_skip_permissions: perm.dangerouslySkipPermissions, allowed_tools: narrowedTools ?? perm.allowedTools };
         }
@@ -1289,7 +1292,7 @@ export function createBrainPool({
         engine,
         cwd,
         allowedTools: def.allowed_tools ?? DEFAULT_ALLOWED_TOOLS,
-        ...(narrowedTools ? { tools: narrowedTools } : {}),
+        ...(narrowedTools ? { tools: [...new Set(narrowedTools.map(toolBase))] } : {}),
         ...(runModel ? { model: runModel } : {}),
         ...(runEffort ? { effort: runEffort } : {}),
         ...(appendSystemPrompt ? { appendSystemPrompt } : {}),

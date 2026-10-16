@@ -102,6 +102,21 @@ describe('a ccode type that declares allowed_tools narrows its level to that lis
     expect(opts.tools).toEqual(['Read']);
   });
 
+  it('REGRESSION (dolly djh): a scoped entry `Bash(curl:*)` admits its base tool, so the DJ keeps Bash', async () => {
+    const types = { ...TYPES, djhaiku: 'type: ccode\nmodel: haiku\nallowed_tools: [ Read, Bash(curl:*) ]\n' };
+    const agents = { ...AGENTS, djh: { configuration: 'djhaiku', conversation_defaults: { access_level: 'all', allowed_users: ['*'] } } };
+    const { opts, argv } = await optionsFor('djh', agents, types);
+    expect(opts.allowedTools).toEqual(['Read', 'Bash(curl:*)']);
+    expect(opts.tools).toEqual(['Read', 'Bash']);
+    expect(argv).toEqual(['--print', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--dangerously-skip-permissions', '--permission-mode', 'bypassPermissions', '--tools', 'Read,Bash', '--allowedTools', 'Read Bash(curl:*)', '--model', 'haiku', '--settings', '{"cleanupPeriodDays":3650000}']);
+  });
+
+  it('two scoped entries of one tool name it once in --tools', async () => {
+    const types = { ...TYPES, 'edw-marketer': 'type: ccode\nmodel: sonnet\nallowed_tools: [ Read, Bash(git:*), Bash(curl:*) ]\n' };
+    const { opts } = await optionsFor('edw-marketer', { ...AGENTS, 'edw-marketer': { configuration: 'edw-marketer', conversation_defaults: { access_level: 'sandbox' } } }, types);
+    expect(opts.tools).toEqual(['Read', 'Bash']);
+  });
+
   it('a non-ccode type (pi, its own tool names) is untouched: the level list, no --tools', async () => {
     const { opts } = await optionsFor('pi');
     expect(opts.allowedTools).toEqual(['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash', 'Agent', 'WebSearch', 'WebFetch']);
