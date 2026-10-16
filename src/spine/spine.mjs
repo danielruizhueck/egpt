@@ -570,6 +570,7 @@ export function createSpine({
     dwellBy.clear();
     note(`standdown: PENDING — ${inFlight} turn(s) in flight; no new turns will be admitted`);
     if (inFlight === 0) drained();
+    return inFlight;   // for the /standdown audit line (commands.mjs)
   }
 
   // --- THE RESTART DRAIN (operator 2026-09-28, verbatim: "yes, restart should wait for turns in

@@ -18,6 +18,8 @@ vi.hoisted(() => {
 });
 import { createCommands } from '../src/spine/commands.mjs';
 import { ensureContact, getContact, aliasContact, patchContact } from '../src/conversations-state.mjs';
+import { standdownLine } from '../src/spine/successor-announce.mjs';
+import { SHELL_SURFACE } from '../src/spine/identity.mjs';
 
 const C_CHAT = '!chatC';
 const JOIN_CHAT = '!chatJoin';
@@ -36,7 +38,7 @@ function stateWithSplit() {
 }
 
 // A createCommands wired with a fake forkBridge (records archives only) and a fake audit sink.
-function harness({ config = CFG, state, logToGroup, backlogOf } = {}) {
+function harness({ config = CFG, state, logToGroup, backlogOf, exit = async () => undefined, session1 = false } = {}) {
   let st = state ?? seedC();
   const sent = [];
   const audit = [];
@@ -60,6 +62,8 @@ function harness({ config = CFG, state, logToGroup, backlogOf } = {}) {
     defaultKey: 'e',
     forkBridge,
     ...(backlogOf ? { backlogOf } : {}),
+    exit,
+    session1,
     logToGroup: logToGroup ?? (async (text) => { audit.push(text); return true; }),
     onLog: () => {},
   });
@@ -157,5 +161,72 @@ describe('what is NOT audited', () => {
     await cmds.run(ev(C_CHAT, '/status=do', 'conversas con favel'));
     expect(audit).toHaveLength(0);                           // the node gate stands this node down silently, with no audit
     expect(sent).toHaveLength(0);
+  });
+});
+
+// /standdown says who asked and why (dolly 2026-10-16: "/standdown in shell by operator" told the
+// operator nothing). The successor's request is unchanged on the wire; the background spine reads
+// its shape. `exit` stands in for boot's announceAndExit(45) → spine.standdown's in-flight count,
+// which includes the /standdown message itself.
+describe('/standdown audit — who asked, who steps aside, why', () => {
+  const shellEv = (body) => ({ chatId: 'shell-1', surface: SHELL_SURFACE, node: 'sh', msgId: null, chatName: 'shell', senderName: 'operator', body });
+  const SUCCESSOR = 'the Session 1 spine is back up and asked over the console to take the profile back; this background (Session 0) spine steps aside';
+  const BY_HAND = 'typed by hand; this node stays parked until another spine takes the profile';
+
+  it('the successor still sends plain `/standdown <port>` (an older incumbent parses it); that shape is what carries the reason', () => {
+    expect(standdownLine(23475)).toBe('/standdown 23475');
+  });
+
+  it("the successor's line on the background spine names the Session 1 spine and who steps aside", async () => {
+    const { cmds, audit } = harness({ exit: async () => 1 });
+    await cmds.run(shellEv(standdownLine(23475)));
+    expect(audit).toEqual([`/standdown in shell by operator → ${SUCCESSOR} — no other turn in flight`]);
+  });
+
+  it('counts the other turns still finishing (the /standdown message itself is not one)', async () => {
+    const one = harness({ exit: async () => 2 });
+    await one.cmds.run(shellEv(standdownLine(23475)));
+    expect(one.audit).toEqual([`/standdown in shell by operator → ${SUCCESSOR} — 1 turn finishing first`]);
+    const three = harness({ exit: async () => 4 });
+    await three.cmds.run(shellEv(standdownLine(23475)));
+    expect(three.audit).toEqual([`/standdown in shell by operator → ${SUCCESSOR} — 3 turns finishing first`]);
+  });
+
+  it('no count from the exit seam (a stand-down already pending) → the reason alone', async () => {
+    const { cmds, audit } = harness({ exit: async () => undefined });
+    await cmds.run(shellEv(standdownLine(23475)));
+    expect(audit).toEqual([`/standdown in shell by operator → ${SUCCESSOR}`]);
+  });
+
+  it('a bare /standdown typed at the console reads as typed by hand', async () => {
+    const { cmds, audit } = harness({ exit: async () => 1 });
+    await cmds.run(shellEv('/standdown'));
+    expect(audit).toEqual([`/standdown in shell by operator → ${BY_HAND} — no other turn in flight`]);
+  });
+
+  it('/standdown <port> typed in a chat (not the console) reads as typed by hand', async () => {
+    const { cmds, audit } = harness({ exit: async () => 1 });
+    await cmds.run(ev(C_CHAT, '/standdown 23475', 'Self'));
+    expect(audit).toEqual([`/standdown in Self by An → ${BY_HAND} — no other turn in flight`]);
+  });
+
+  it('on the Session 1 spine itself a console /standdown <port> is not attributed to the successor', async () => {
+    const { cmds, audit } = harness({ exit: async () => 1, session1: true });
+    await cmds.run(shellEv(standdownLine(23475)));
+    expect(audit).toEqual([`/standdown in shell by operator → ${BY_HAND} — no other turn in flight`]);
+  });
+
+  it('/restart, /upgrade and /rewind audit lines are unchanged, even when the exit seam returns a count', async () => {
+    const { cmds, audit } = harness({ exit: async () => 3 });
+    await cmds.run(shellEv('/restart'));
+    await cmds.run(shellEv('/upgrade'));
+    await cmds.run(shellEv('/rewind abc123'));
+    await cmds.run(ev(C_CHAT, '/restart', 'Self'));
+    expect(audit).toEqual([
+      '/restart in shell by operator',
+      '/upgrade in shell by operator',
+      '/rewind in shell by operator',
+      '/restart in Self by An',
+    ]);
   });
 });

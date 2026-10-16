@@ -2768,7 +2768,7 @@ export async function boot({
   // would defeat it.
   let restartCode = null;   // the code a pending restart drain leaves with
   async function announceAndExit(code) {
-    if (code === 45) { spine.standdown(() => { goDown(code).catch((e) => log.line?.(`[standdown] ${e?.message ?? e}`)); }); return; }
+    if (code === 45) { return spine.standdown(() => { goDown(code).catch((e) => log.line?.(`[standdown] ${e?.message ?? e}`)); }); }
     if (code === 42 || code === 43) {
       restartCode = restartCode === 42 ? 42 : code;
       spine.drainForRestart(() => { goDown(restartCode).catch((e) => log.line?.(`[drain] ${e?.message ?? e}`)); }, {
@@ -3141,6 +3141,7 @@ export async function boot({
     // the daemon fell back to this profile's own console port; harmless while the two agree, wrong
     // the moment they do not. It is also the door the successor's announce comes in through.
     writeStanddownTarget: (port) => writeFile(join(EGPT_HOME, 'standdown-target.txt'), port, 'utf8'),
+    session1,                                         // the /standdown audit names who asked from this
     loadState: _loadState, writeState: _writeState,   // /agents … auto/reset/access_level persist into conversations.yaml
     logTranscript: (ev, reply) => services.transcript.log(ev, reply),   // THE reply writer — the same service commandTranscript wraps above; /agents rethread's accum boundary rides it instead of assembling a line of its own
     resolveConvRoom,                                  // (surface, chatId) → the conversation's Room — the SAME resolver the phase-4 relay reads members from, so /members writes where the relay reads (bug fix 2026-07-23)

@@ -199,6 +199,20 @@ describe('spine — the deferred stand-down', () => {
     await flush();
     expect(exits).toEqual(['first']);               // exactly one exit, and it is the first caller's
   });
+
+  it('(e) returns the in-flight count — a /standdown command inside the chokepoint counts itself; an ignored token returns nothing', async () => {
+    const counts = [];
+    const commands = { isCommand: (ev) => String(ev.body ?? '').startsWith('/'), run: async () => { counts.push(spine.standdown(() => {})); } };
+    const { spine, bridge, brain } = build({ commands });
+    const p1 = bridge.emit(mention('one', 'm1'));
+    await flush();
+    await bridge.emit(mention('/standdown', 'm2'));   // turn 'one' + this message
+    await bridge.emit(mention('/standdown', 'm3'));   // already pending
+    expect(counts).toEqual([2, undefined]);
+    brain.releaseFirst();
+    await p1;
+    expect(build().spine.standdown(() => {})).toBe(0);
+  });
 });
 
 // boot.mjs is the ONE place the deferral is wired: every lifecycle code goes down through goDown,
@@ -214,7 +228,7 @@ describe('spine — the deferred stand-down', () => {
 describe('boot announceAndExit — 45 defers through the stand-down, 43/42 through the restart drain, 44 leaves immediately', () => {
   function makeAnnounceAndExit({ spine, goDown }) {
     return async (code) => {
-      if (code === 45) { spine.standdown(() => { goDown(code); }); return; }
+      if (code === 45) { return spine.standdown(() => { goDown(code); }); }
       if (code === 42 || code === 43) { spine.drainForRestart(() => { goDown(code); }); return; }
       await goDown(code);
     };
@@ -238,8 +252,8 @@ describe('boot announceAndExit — 45 defers through the stand-down, 43/42 throu
 
   it('45 goes through the spine and only goes down when the spine says it has drained', async () => {
     const down = []; let drain = null;
-    const announceAndExit = makeAnnounceAndExit({ spine: { standdown: (done) => { drain = done; } }, goDown: (c) => down.push(c) });
-    await announceAndExit(45);
+    const announceAndExit = makeAnnounceAndExit({ spine: { standdown: (done) => { drain = done; return 1; } }, goDown: (c) => down.push(c) });
+    expect(await announceAndExit(45)).toBe(1);   // the spine's in-flight count, handed back for the audit line
     expect(down).toEqual([]);      // pending — the turn in flight is still being written
     drain();
     expect(down).toEqual([45]);
@@ -247,7 +261,8 @@ describe('boot announceAndExit — 45 defers through the stand-down, 43/42 throu
 
   it('boot.mjs really is wired that way (source lock)', () => {
     const BOOT_SRC = readFileSync(new URL('../src/spine/boot.mjs', import.meta.url), 'utf8');
-    expect(BOOT_SRC).toContain('if (code === 45) { spine.standdown(');
+    expect(BOOT_SRC).toContain('if (code === 45) { return spine.standdown(');
+    expect(BOOT_SRC).toMatch(/createCommands\(\{[\s\S]*?\n\s+session1,/);   // the receiver's own session reaches the audit
     expect(BOOT_SRC).toContain('if (code === 42 || code === 43) {');
     expect(BOOT_SRC).toContain('spine.drainForRestart(() => { goDown(restartCode)');
     expect(BOOT_SRC).toContain("writeStanddownTarget: (port) => writeFile(join(EGPT_HOME, 'standdown-target.txt'), port, 'utf8')");
