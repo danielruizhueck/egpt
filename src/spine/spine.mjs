@@ -1565,7 +1565,7 @@ export function createSpine({
 
   // The reply train's turn body (DEFECT 1 + accumulation FEATURE). Fully guarded: from
   // the moment the placeholder opened, EVERY exit resolves it VISIBLY — the reply, the
-  // no-reply marker (surfaced-but-empty or a failure-shaped result), or a failure marker
+  // no-reply marker (surfaced-but-empty or a failed turn), or a failure marker
   // (brain throw / timeout / a fault in delivery). It can never resolve empty-and-silent
   // or stay stuck on "⏳ Thinking…". The reply is RECORDED before delivery (the transcript
   // is the durable record — it swallows its own errors and never throws — so the reply
@@ -1704,18 +1704,18 @@ export function createSpine({
       const reply = await runTurnWithTimeout(to, ev, promptEv, onPartial);
       const rawText = reply?.text ?? '';
       const surfaced = gating.surfaces(d, rawText);
-      // A failure-SHAPED result string (isBrainFailureResult — the CLI returned an error
-      // AS its result text; the brainpool self-heals only overflow/dead-session, not this):
-      // do NOT deliver it as a reply. Blank it so the placeholder resolves to the no-reply
-      // marker, and record the raw failure UNsurfaced (the record is never lost).
-      const failShaped = surfaced && isBrainFailureResult(rawText);
+      // A turn the ENGINE reported failed (isBrainFailureResult — the structural flag, never the
+      // text; the brainpool self-heals only overflow/dead-session, not this): do NOT deliver it as
+      // a reply. Blank it so the placeholder resolves to the no-reply marker, and record the raw
+      // failure UNsurfaced (the record is never lost).
+      const turnFailed = surfaced && isBrainFailureResult(reply);
       // Emitted actions (E's LIMBS, ROADMAP §3). Parse own-line action commands out of the
       // reply — but only a reply that WOULD surface acts (a withheld/context reply doesn't
-      // emit limbs), and never a failure-shaped result. The STRIPPED prose is delivered; the
+      // emit limbs), and never a failed turn. The STRIPPED prose is delivered; the
       // RAW reply (action lines included) is recorded, so nothing E emitted is ever lost.
       // `quotedId`: the message THIS reply is itself posted as a quote of — the honest premise
       // for the /reply redundancy guard (a /reply at what we already quote is the rogue twin).
-      const parsed = (actions?.parse && surfaced && !failShaped) ? actions.parse(rawText, ev, { quotedId: replyTo }) : null;
+      const parsed = (actions?.parse && surfaced && !turnFailed) ? actions.parse(rawText, ev, { quotedId: replyTo }) : null;
       const proseText = parsed ? parsed.prose : rawText;
       const hadActions = !!parsed && (parsed.run.length + parsed.stripped.length) > 0;
       // Action-only: the reply is nothing but action lines AND at least one of them RUNS.
@@ -1732,12 +1732,12 @@ export function createSpine({
       // actually is — surfaced with nothing deliverable — so it takes the path that branch
       // already exists for: the `note` below, and a VISIBLE no-reply marker. `hadActions` still
       // gates execute, so the stripped line is still logged there.
-      const actionOnly = surfaced && !failShaped && !!parsed && parsed.run.length > 0 && !proseText.trim();
-      const deliverable = surfaced && !!proseText.trim() && !failShaped;
+      const actionOnly = surfaced && !turnFailed && !!parsed && parsed.run.length > 0 && !proseText.trim();
+      const deliverable = surfaced && !!proseText.trim() && !turnFailed;
       const responded = deliverable || actionOnly;   // E answered — with prose and/or a limb
       // Observability (operator: "diagnose WHY it was empty"): a turn that was meant to
       // surface but has nothing to deliver (and did nothing) is noted — the silent swallow is loud.
-      if (surfaced && !responded) note(`brain ${to}/${ev.chatId}: no deliverable text (${failShaped ? `failure-shaped: ${rawText.slice(0, 80)}` : 'empty'}) — placeholder resolved with no-reply marker`);
+      if (surfaced && !responded) note(`brain ${to}/${ev.chatId}: no deliverable text (${turnFailed ? `failed, ${reply.failReason ?? 'no reason'}: ${rawText.slice(0, 80)}` : 'empty'}) — placeholder resolved with no-reply marker`);
       // RECORD FIRST (durable) — reply.text is RAW (action lines kept). ALWAYS the reply
       // alone: the message itself went on the record at ingestion, so however many agents
       // answer it, each appends exactly one reply line under the one inbound line.
@@ -1755,7 +1755,7 @@ export function createSpine({
       if (d.mode === 'auto' && deliverable) await sleepTyping(proseText);
       // DELIVER the STRIPPED prose. Action-only → surface:false, which resolves the
       // placeholder to the silence mark '…' (operator 2026-08-24: nothing is ever deleted);
-      // failShaped → blanked → no-reply marker; else the prose (or no-reply marker if empty).
+      // turnFailed → blanked → no-reply marker; else the prose (or no-reply marker if empty).
       // UNCONDITIONAL — the normal streaming path (placeholder → live edits → final text,
       // kept) runs exactly as it always did, whether or not voice-out follows below.
       // `commands` (operator 2026-09-01): an action-only turn is not silence. Without it the
@@ -1763,7 +1763,7 @@ export function createSpine({
       // model" — for a turn whose limbs were about to fire, and (the message being append-only)
       // it landed under a seam beneath prose the human had already read. The verbs go down, the
       // sender says it is processing them, and the transcript records what each one did below.
-      await out.finish(failShaped ? { text: '' } : { ...reply, text: proseText }, {
+      await out.finish(turnFailed ? { text: '', failed: true, error: rawText } : { ...reply, text: proseText }, {
         surface: actionOnly ? false : surfaced,
         commands: actionOnly ? parsed.run.map((a) => a.type) : null,
         // verbose_thinking, resolved once by brainpool's resolveConv and carried out on the reply

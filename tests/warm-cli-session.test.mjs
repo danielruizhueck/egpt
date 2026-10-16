@@ -922,3 +922,54 @@ describe('warm-cli-session — a background task finishes', () => {
     s.close();
   });
 });
+
+// THE CLI'S OWN VERDICT (operator 2026-10-16: failure is structural, never the reply text). An API
+// error ends a turn as subtype "success" with is_error:true. MEASURED on claude 2.1.301 with an
+// invalid token: {"type":"result","subtype":"success","is_error":true,"api_error_status":401,
+// "terminal_reason":"api_error","result":"Failed to authenticate. API Error: 401 OAuth access token is invalid."}.
+// The other texts are what the CLI's own transcripts record as isApiErrorMessage (529, 403, 429, safeguards).
+describe('warm-cli-session — is_error marks the turn failed', () => {
+  function fakeResult(result) {
+    const spawn = () => {
+      const proc = new EventEmitter();
+      proc.stdout = new EventEmitter(); proc.stdout.setEncoding = () => {};
+      proc.stderr = new EventEmitter(); proc.stderr.setEncoding = () => {};
+      proc.kill = () => {};
+      proc.stdin = { write: () => { setImmediate(() => proc.stdout.emit('data', JSON.stringify({ type: 'result', session_id: 's1', ...result }) + '\n')); }, end: () => {} };
+      return proc;
+    };
+    return createWarmCliSession({ spawn });
+  }
+
+  it('the measured 401 result resolves failed, with the CLI\'s reason', async () => {
+    const s = fakeResult({ subtype: 'success', is_error: true, api_error_status: 401, terminal_reason: 'api_error', result: 'Failed to authenticate. API Error: 401 OAuth access token is invalid.' });
+    const r = await s.turn('hi');
+    expect(r).toMatchObject({ failed: true, failReason: 'is_error api_error 401', text: 'Failed to authenticate. API Error: 401 OAuth access token is invalid.' });
+    s.close();
+  });
+
+  it('every real API-error text the CLI records is failed through the flag', async () => {
+    for (const [status, text] of [
+      [529, 'API Error: 529 Overloaded. This is a server-side issue, usually temporary — try again in a moment.'],
+      [403, 'Your organization has disabled Claude subscription access for Claude Code · Use an Anthropic API key instead'],
+      [429, "You've hit your session limit · resets 6:30pm (America/New_York)"],
+      [undefined, "API Error: Opus 5.5's safeguards flagged this session (https://www.anthropic.com/legal/aup)."],
+      [undefined, 'Login expired · Please run /login'],
+    ]) {
+      const s = fakeResult({ subtype: 'success', is_error: true, api_error_status: status, terminal_reason: 'api_error', result: text });
+      expect((await s.turn('hi')).failed, text).toBe(true);
+      s.close();
+    }
+  });
+
+  it('is_error with normal-looking text is still failed; a reply about a 403 without it is not', async () => {
+    const a = fakeResult({ subtype: 'success', is_error: true, result: 'Listo, ya está.' });
+    expect((await a.turn('hi')).failed).toBe(true);
+    a.close();
+    const b = fakeResult({ subtype: 'success', is_error: false, result: 'Ahora responde 403.\nRequire all denied' });
+    const r = await b.turn('hi');
+    expect(r.text).toBe('Ahora responde 403.\nRequire all denied');
+    expect(r).not.toHaveProperty('failed');
+    b.close();
+  });
+});

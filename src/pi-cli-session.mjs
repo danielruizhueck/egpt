@@ -155,11 +155,16 @@ export function createPiCliSession(options = {}) {
       }
       return;
     }
+    // The last assistant message decides (a retry's message replaces a failed one).
+    if (ev.type === 'message_end' && ev.message?.role === 'assistant') {
+      pending.failed = ev.message.stopReason === 'error' ? (ev.message.errorMessage || 'error') : null;
+      return;
+    }
     // NOT agent_end — see trap 1 above.
     if (ev.type === 'agent_settled') {
-      const { resolve, acc } = pending;
+      const { resolve, acc, failed } = pending;
       pending = null;
-      resolve({ text: acc, sessionId });
+      resolve({ text: acc, sessionId, ...(failed ? { failed: true, failReason: `stopReason error: ${failed}` } : {}) });
     }
   }
 

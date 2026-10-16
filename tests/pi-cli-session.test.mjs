@@ -49,6 +49,27 @@ describe('pi cli session (rpc mode)', () => {
     expect(await p).toEqual({ text: 'Hello world', sessionId: expect.any(String) });
   });
 
+  // Failure is pi's own stopReason (docs/rpc.md), never the text.
+  it('an assistant message ending in stopReason "error" resolves the turn failed', async () => {
+    const proc = fakePi();
+    const s = createPiCliSession({ spawn: spawnFake(proc) });
+    const p = s.turn('go');
+    proc.emitEvent({ type: 'message_end', message: { role: 'assistant', content: [], stopReason: 'error', errorMessage: '529 overloaded' } });
+    proc.emitEvent({ type: 'agent_settled' });
+    expect(await p).toMatchObject({ text: '', failed: true, failReason: 'stopReason error: 529 overloaded' });
+  });
+
+  it('a retry that succeeds after an error is not failed; a reply about a 403 is not either', async () => {
+    const proc = fakePi();
+    const s = createPiCliSession({ spawn: spawnFake(proc) });
+    const p = s.turn('go');
+    proc.emitEvent({ type: 'message_end', message: { role: 'assistant', content: [], stopReason: 'error', errorMessage: 'overloaded' } });
+    proc.textDelta('Ahora responde 403. Require all denied');
+    proc.emitEvent({ type: 'message_end', message: { role: 'assistant', content: [], stopReason: 'stop' } });
+    proc.emitEvent({ type: 'agent_settled' });
+    expect(await p).toEqual({ text: 'Ahora responde 403. Require all denied', sessionId: expect.any(String) });
+  });
+
   // dj-son overflow (2026-08-28). Pi mints its own session and, unpinned, never told
   // us which — so `turn()` reported sessionId:null, brainpool's recordThread never
   // fired, and its next turn resolved sessionId:null again and re-sent the identity

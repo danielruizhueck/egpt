@@ -25,11 +25,10 @@ import { crossAccountMsgKey, _msgTimestampMs } from '../bridges/beeper.mjs';
 // run — a HIDDEN one (on/auto) resolves the placeholder to the quiet limb mark '✓' below, never a
 // delete, never left as '…' (operator 2026-10-08). Owned by auto-mode.mjs.
 import { isDeliberateSilence } from '../auto-mode.mjs';
-import { isCliErrorText } from '../brain-errors.mjs';
 
 const FAIL_SUFFIX = '… ❌ Sending failed.';
 // A turn that was MEANT to surface but produced no deliverable text (brainpool
-// returned '' / whitespace, OR the spine blanked a failure-shaped result) must
+// returned '' / whitespace, OR the spine blanked a failed turn) must
 // resolve its placeholder VISIBLY — never a silent delete or a forever "⏳ Thinking…"
 // (operator 2026-07-04, DEFECT 1: turn 1 vanished with its placeholder stuck). Its own
 // "⚠️ …" marker; distinct from FAIL_SUFFIX (a SEND fault). It still flows through the
@@ -413,7 +412,7 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
           update() {},
           async finish(reply, { surface = true, commands = null } = {}) {
             const t = textOf(reply);
-            if (surface && isPublic && isCliErrorText(t)) { await notice(`model error: ${t.trim().slice(0, 300)}`); return; }   // the CLI's error, not the being's words
+            if (surface && isPublic && reply?.failed) { await notice(`model error: ${String(reply.error ?? '').trim().slice(0, 300)}`); return; }   // the CLI's error, not the being's words
             if (surface && t.trim()) { sendResult = await deliverHere(t, isPublic ? { replyTo, persona: being } : { replyTo }); return; }   // plain text: no bodyEmoji/label, no end-marker
             // withheld / empty → post nothing; a public being's empty turn is an admin notice
             if (surface) await notice(noReplyMark());

@@ -3381,7 +3381,7 @@ export async function boot({
   // result): said into the chat as THAT being — its own stamp and agent signature layers, the tag
   // the reply train hands the port — through the same one-shot placement a `post:` beat uses
   // (heartbeatSay below), recorded under the being. An empty or "…" reply is the being declining:
-  // nothing posted. A failure-shaped result (isBrainFailureResult, the spine's own test) is not a
+  // nothing posted. A failed turn (isBrainFailureResult, the spine's own test) is not a
   // reply: it throws, so nothing is posted and the beat's outcome line says FAILED. The LOADER still
   // logs the run's one outcome line from the returned result.
   //
@@ -3398,7 +3398,7 @@ export async function boot({
     // beingWritten: the beat came from <entity>/heartbeats/ — brainpool.turn refuses it for an 'all' being or one that would run unboxed
     const res = await brain.turn(being, { ...ev, line: prompt, body: prompt, beingWritten, cause: 'heartbeat' });
     const text = String(res?.text ?? '').trim();
-    if (isBrainFailureResult(text)) throw new Error(`the turn failed: ${text.slice(0, 200)}`);
+    if (isBrainFailureResult(res)) throw new Error(`the turn failed: ${text.slice(0, 200)}`);
     if (isSilenceReply(text)) return res;
     const tag = { bodyEmoji: bodyEmojiOf(being), label: labelOf(being), agentSigOpen: agentSignatureOpenOf(being), agentSigClose: agentSignatureCloseOf(being), persona: being };
     if (silent) {

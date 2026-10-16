@@ -95,14 +95,14 @@ const stateWithPrimes = () => {
 let app = null;
 afterEach(() => { try { app?.stop(); } catch {} app = null; });
 
-async function bootWith(cfg) {
+async function bootWith(cfg, makeSession = REPLY_SESSION) {
   const { start, built } = fakeTransport();
   const lines = [];
   let convState = stateWithPrimes();
   app = await boot({
     readConfig: () => cfg,
     startBridge: start,
-    makeSession: REPLY_SESSION,
+    makeSession,
     probeEndpoint: async () => ({ ok: false, status: 0 }),
     loadState: async () => convState,
     writeState: async (s) => { convState = s; },
@@ -166,5 +166,22 @@ describe('a silent: heartbeat posts its whole self to eGPT Admin', () => {
     const t = await bootWith(config({ admin_channel: 'eGPT Admin' }));
     await t.app.noticeToAdmin('🗜️ compacted', 'egpt');
     expect(t.sentTo(ADMIN_ROOM)).toHaveLength(1);
+  });
+});
+
+// The heartbeat caller decides failure from the engine's flag, never the reply text.
+describe('a heartbeat turn fails on the engine\'s flag, never on its text', () => {
+  const session = (reply) => (opts) => ({ sessionId: opts.sessionId ?? 'sess-1', async turn() { return { sessionId: 'sess-1', ...reply }; }, close() {} });
+
+  it('a beat reply about a 403 and "denied" is posted', async () => {
+    const t = await bootWith(config(), session({ text: 'El portal responde 403: Require all denied.' }));
+    await t.app.dispatchHeartbeatTurn({ being: 'egpt', ns: NS, prompt: 'check', name: `${NS}:check` });
+    expect(t.sentTo(PRIMES_ROOM).some((s) => s.text.includes('responde 403'))).toBe(true);
+  });
+
+  it('a flagged failure throws, so nothing is posted', async () => {
+    const t = await bootWith(config(), session({ text: 'Listo.', failed: true, failReason: 'is_error api_error 529' }));
+    await expect(t.app.dispatchHeartbeatTurn({ being: 'egpt', ns: NS, prompt: 'check', name: `${NS}:check` })).rejects.toThrow(/the turn failed/);
+    expect(t.sentTo(PRIMES_ROOM).some((s) => s.text.includes('Listo.'))).toBe(false);
   });
 });

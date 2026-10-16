@@ -127,17 +127,41 @@ describe('spine — DEFECT 1: an empty / failed / thrown turn resolves the place
     expect(notes.some((n) => /no deliverable text \(empty\)/.test(n))).toBe(true);   // and it's LOUD in the log
   });
 
-  it('brain returns a FAILURE-SHAPED result string → no-reply marker, raw failure recorded UNsurfaced (not delivered raw)', async () => {
+  // Failure is the ENGINE's flag (brainpool carries ccode is_error / pi stopReason up), never the text.
+  it('brain returns a FAILED turn (the structural flag) → no-reply marker, raw failure recorded UNsurfaced (not delivered raw)', async () => {
+    const REJECTED = 'Failed to authenticate. API Error: 401 OAuth access token is invalid.';
     const bridge = fakeBridge();
     const transcript = recordingTranscript();
-    const brain = { async turn() { return { text: '!! claude exit 1: boom', sessionId: 's0' }; } };
-    buildSpine({ bridge, brain, sender: createSender({ bridge }), transcript });
+    const notes = [];
+    const brain = { async turn() { return { text: REJECTED, sessionId: 's0', failed: true, failReason: 'is_error api_error 401' }; } };
+    buildSpine({ bridge, brain, sender: createSender({ bridge }), transcript, log: { line: (s) => notes.push(s) } });
     await bridge.emit(mention('@e hola', 'm1'));
 
-    expect(bridge.streams[0].finals).toEqual(['⚠️ no reply (turn failed/empty)']);   // NOT the raw '!! claude exit…' failure text
+    expect(bridge.streams[0].finals).toEqual(['⚠️ no reply (turn failed/empty)']);   // NOT the raw CLI error text
     const rec = transcript.entries.find((e) => e.reply);
-    expect(rec.reply.text).toBe('!! claude exit 1: boom');                             // raw failure preserved
+    expect(rec.reply.text).toBe(REJECTED);                                             // raw failure preserved
     expect(rec.reply.surfaced).toBe(false);                                            // recorded, not surfaced
+    expect(notes.some((n) => n.includes('failed, is_error api_error 401'))).toBe(true);   // the log names the CLI's reason
+  });
+
+  it('a flagged failure with normal-looking text is still a failed turn', async () => {
+    const bridge = fakeBridge();
+    const brain = { async turn() { return { text: 'Listo, ya está.', sessionId: 's0', failed: true }; } };
+    buildSpine({ bridge, brain, sender: createSender({ bridge }) });
+    await bridge.emit(mention('@e hola', 'm1'));
+    expect(bridge.streams[0].finals).toEqual(['⚠️ no reply (turn failed/empty)']);
+  });
+
+  it('a PUBLIC being\'s failed turn: nothing in the chat, the CLI\'s error goes to the admin channel', async () => {
+    const bridge = fakeBridge();
+    const notices = [];
+    const text = 'API Error: 529 Overloaded. This is a server-side issue, usually temporary — try again in a moment.';
+    const brain = { async turn() { return { text, sessionId: 's0', failed: true }; } };
+    buildSpine({ bridge, brain, sender: createSender({ bridge, publicOf: (b) => b === 'e', noticeAdmin: async (n) => { notices.push(n.text); } }) });
+    await bridge.emit(mention('@e hola', 'm1'));
+    expect(bridge.sent).toEqual([]);
+    expect(bridge.streams).toEqual([]);
+    expect(notices).toEqual([`model error: ${text}`]);
   });
 
   it('a THROW after the placeholder opened (delivery fault) → placeholder fails visibly AND the reply is still recorded', async () => {

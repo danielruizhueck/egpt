@@ -544,7 +544,9 @@ export function createWarmCliSession(options = {}) {
     pending.settled = true;
     const p = pending; pending = null;
     settleInjections(p, 'the turn ended before the CLI ingested it');
-    p.resolve({ text, sessionId, ...turnStats(result, p) });
+    // The CLI's own verdict: an API error (401/403/429/5xx, a safeguards refusal) ends a "success" with is_error.
+    const failed = result?.is_error === true ? { failed: true, failReason: ['is_error', result.terminal_reason, result.api_error_status].filter((x) => x != null).join(' ') } : {};
+    p.resolve({ text, sessionId, ...turnStats(result, p), ...failed });
     p.onEnd?.();
   }
   // What the `result` event says the turn used — tokens only, never USD (a subscription) — plus

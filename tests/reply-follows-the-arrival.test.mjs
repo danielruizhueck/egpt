@@ -1048,7 +1048,7 @@ describe('a scheduled send with NO arrival since boot: the chat is placed at reg
   });
 
   it('prompt: — a FAILED turn posts nothing and the beat logs FAILED', async () => {
-    for (const reply of [() => { throw new Error('model unavailable'); }, () => ({ text: '!! claude exit 1: rate limit' })]) {
+    for (const reply of [() => { throw new Error('model unavailable'); }, () => ({ text: "You've hit your session limit · resets 6:30pm (America/New_York)", failed: true })]) {
       const script = { prompts: [], reply };
       await declare({ [SLUG]: ['el-porque:', '  frequency: 24h', '  agent: gauss', '  prompt: "Di en una frase por qué 1637 es primo."'] });
       const { app, byConnection, lines } = await bootWith(withGauss(), { state: known(BOTH_AS_PRIMARY), makeSession: scriptedSession(script) });

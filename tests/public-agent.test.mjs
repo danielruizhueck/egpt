@@ -60,22 +60,24 @@ describe('sender — a public being: no placeholder, no error line, errors to th
     expect(notices).toEqual([]);
   });
 
-  it('raw CLI error text returned as a reply (5xx, safeguards flag) goes to the admin channel, not the lead', async () => {
+  // The spine blanks a failed turn and hands the CLI's text over as `error` (src/spine/spine.mjs).
+  it('a failed turn (5xx, safeguards flag) sends its CLI error to the admin channel, not the lead', async () => {
     const { bridge, notices, open } = build();
     const errors = [
       'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
       'API Error: 500 {"type":"error","error":{"type":"api_error","message":"Internal server error"}}',
       'API Error: Claude Code is unable to respond to this request, which appears to violate our Usage Policy (https://www.anthropic.com/legal/aup). Please double press esc to edit your last message or start a new session for Claude Code to assist with a different task.',
     ];
-    for (const text of errors) await open('edw-marketer').finish({ text });
+    for (const error of errors) await open('edw-marketer').finish({ text: '', failed: true, error });
     expect(bridge.sent).toEqual([]);
     expect(notices.map((n) => n.text)).toEqual(errors.map((e) => `model error: ${e.slice(0, 300)}`));
   });
 
-  it('a reply that merely mentions an API error is still delivered', async () => {
+  it('a reply that mentions an API error, even one opening with it, is delivered — no flag, no notice', async () => {
     const { bridge, notices, open } = build();
     await open('edw-marketer').finish({ text: 'Si ves un "API Error" en EduWeb, escríbele a soporte.' });
-    expect(bridge.sent).toHaveLength(1);
+    await open('edw-marketer').finish({ text: 'API Error 403 en EduWeb significa que tu sesión expiró: vuelve a entrar.' });
+    expect(bridge.sent).toHaveLength(2);
     expect(notices).toEqual([]);
   });
 

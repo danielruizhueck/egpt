@@ -14,6 +14,8 @@ const _PRIVATE_HOME = vi.hoisted(() => {
 import { promises as fs } from 'node:fs';
 import { dirname } from 'node:path';
 import { encodeNodeSignature } from '../src/node-signature.mjs';
+import { EventEmitter } from 'node:events';
+import { createWarmCliSession } from '../src/warm-cli-session.mjs';
 
 let boot, emptyState, ensureContact;
 beforeAll(async () => {
@@ -121,6 +123,63 @@ describe('boot — a public being', () => {
     expect(spy.streams).toHaveLength(1);
     expect(spy.streams[0].init).toMatch(/^🐶 EduWeb: ⏳ Thinking… 🏰/);
     expect(spy.streams[0].finals[0]).toMatch(/^🐶 EduWeb: Hola, ¿de qué colegio me escribes\? 🏰/);
+    app.stop();
+  });
+});
+
+// END TO END through the real warm-cli-session: the CLI's result event decides failure, never the text.
+// The 401 event is measured (claude 2.1.301, invalid token); the 403 text is E's live reply of 2026-10-16.
+const cliResult = (result) => () => createWarmCliSession({
+  spawn: () => {
+    const proc = new EventEmitter();
+    proc.stdout = new EventEmitter(); proc.stdout.setEncoding = () => {};
+    proc.stderr = new EventEmitter(); proc.stderr.setEncoding = () => {};
+    proc.kill = () => {};
+    proc.stdin = { write: () => { setImmediate(() => proc.stdout.emit('data', JSON.stringify({ type: 'result', subtype: 'success', session_id: 'sess-1', ...result }) + '\n')); }, end: () => {} };
+    return proc;
+  },
+});
+
+describe('boot — a turn fails on the CLI\'s is_error, never on its text', () => {
+  async function runCli({ isPublic, result }) {
+    const { start, built } = fakeTransport();
+    let convState = seedOn();
+    const app = await boot({
+      readConfig: CONFIG(isPublic),
+      startBridge: start,
+      makeSession: cliResult(result),
+      probeEndpoint: async () => ({ ok: false, status: 0 }),
+      loadState: async () => convState,
+      writeState: async (s) => { convState = s; },
+      io: memIo(), ingest: false, tickMs: 0,
+      now: () => Date.UTC(2026, 9, 16, 21, 24),
+      log: { line: () => {} },
+    });
+    await built[0].onIncoming('¿ya quedó csi_n?', { chatId: CHAT, chatName: 'Bea', network: 'whatsapp', userId: 'u-1', senderName: 'Bea', authorized: true, msgKey: 'm1' });
+    return { app, spy: built[0] };
+  }
+  const LIVE = 'Listo. csi_n ya está en la carpeta protegida.\nAhora responde 403 y no se puede abrir por web; el .htaccess quedó con:\nRequire all denied';
+
+  it('E\'s live reply about a 403 and "denied" is delivered', async () => {
+    const { app, spy } = await runCli({ isPublic: false, result: { is_error: false, result: LIVE } });
+    expect(spy.streams[0].finals[0]).toContain('Ahora responde 403');
+    expect(spy.streams[0].finals[0]).toContain('Require all denied');
+    expect(spy.streams[0].finals[0]).not.toContain('no reply (turn failed/empty)');
+    app.stop();
+  });
+
+  it('the measured 401 result is a failed turn: the no-reply marker, not the CLI text', async () => {
+    const { app, spy } = await runCli({ isPublic: false, result: { is_error: true, api_error_status: 401, terminal_reason: 'api_error', result: 'Failed to authenticate. API Error: 401 OAuth access token is invalid.' } });
+    expect(spy.streams[0].finals[0]).toContain('⚠️ no reply (turn failed/empty)');
+    expect(spy.streams[0].finals[0]).not.toContain('API Error');
+    app.stop();
+  });
+
+  it('is_error with normal-looking text still fails; a public being\'s failure goes to the admin channel', async () => {
+    const { app, spy } = await runCli({ isPublic: true, result: { is_error: true, result: 'Hola, ¿de qué colegio me escribes?' } });
+    await vi.waitFor(() => expect(spy.sent.some((s) => s.chatId === ADMIN)).toBe(true), { timeout: 3000 });
+    expect(spy.sent.filter((s) => s.chatId === CHAT)).toEqual([]);
+    expect(spy.sent.find((s) => s.chatId === ADMIN).text).toContain('model error: Hola, ¿de qué colegio me escribes?');
     app.stop();
   });
 });

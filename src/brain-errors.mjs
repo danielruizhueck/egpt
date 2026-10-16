@@ -27,20 +27,8 @@ export function isDeadSessionError(text) {
   return /no conversation found with session id/i.test(msg);
 }
 
-export function isBrainFailureResult(text) {
-  const msg = String(text ?? '').trim();
-  return /^!!\s+/.test(msg)
-    || /^\[(?:codex|claude(?:-sdk|-code)?)\s+(?:exit|timed out)\b/i.test(msg)
-    || /invalid_request_error/i.test(msg)
-    || /model .*not supported/i.test(msg)
-    || /not supported when using Codex/i.test(msg)
-    || /\b(?:401|403|429)\b/.test(msg)
-    || /\b(?:unauthorized|authentication|rate.?limit|quota)\b/i.test(msg);
-}
-
-// The CLI's own error returned as a SUCCESSFUL result's text: "API Error: 529 {…}", "API Error: 500
-// {…}", "API Error: Claude Code is unable to respond to this request, which appears to violate our
-// Usage Policy …". Read only for a public being (sender.mjs), so no other chat changes.
-export function isCliErrorText(text) {
-  return /^\s*API Error\b/i.test(String(text ?? ''));
+// A turn the engine itself reported failed: ccode's result is_error (warm-cli-session), pi's
+// stopReason "error" (pi-cli-session). codex and llama reject instead. Never read from the text.
+export function isBrainFailureResult(reply) {
+  return reply?.failed === true;
 }

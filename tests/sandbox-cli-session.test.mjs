@@ -866,6 +866,7 @@ describe('sandbox-cli-session — a missing or rejected sandbox_oauth_token tell
     expect(r.text).toContain('REJECTED');
     expect(r.text, 'the LENGTH is what distinguishes "set but wrong" from "blank"').toContain(`(${TOKEN.length} characters)`);
     expect(r.sessionId, 'wrapping turn() must not break the sessionId getter').toBe('sess-401');
+    expect(r.failed, 'the remedy keeps the CLI\'s is_error flag, so the spine still fails the turn').toBe(true);
     s.close();
   });
 

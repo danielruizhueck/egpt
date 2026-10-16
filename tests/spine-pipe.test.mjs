@@ -1051,6 +1051,35 @@ describe('spine — /reply handled BEFORE posting (no visible token, no delete+r
     expect(bridge.sent[0]).toMatchObject({ chat: MSG.chatId, text: 'sounds good', opts: { replyTo: '157204' } });
   });
 
+  // THE LIVE TURN OF 2026-10-16 17:24 (SI+EduWeb), rebuilt from the logged fragments. E's correct
+  // answer mentioned a 403 and "denied"; the old text classifier called it failure-shaped, so the
+  // /reply never ran and the chat got "⚠️ no reply (turn failed/empty)". Failure is now the engine's flag.
+  it('REPRODUCE: E\'s live /reply about a 403 and "Require all denied" is delivered', async () => {
+    const live = '/reply #32886 Listo, Cuigmar. csi_n ya está en la carpeta protegida.\n'
+      + 'Ahora responde 403 y no se puede abrir por web; el .htaccess quedó con:\nRequire all denied';
+    const { bridge, transcript } = buildStreaming({ replyText: live });
+    await bridge.emit(MSG);
+
+    expect(bridge.sent).toHaveLength(1);
+    expect(bridge.sent[0]).toMatchObject({ chat: MSG.chatId, opts: { replyTo: '32886' } });
+    expect(bridge.sent[0].text).toContain('Ahora responde 403');
+    expect(bridge.sent[0].text).toContain('Require all denied');
+    expect(bridge.streams[0].finals).not.toContain('⚠️ no reply (turn failed/empty)');
+    expect(replies(transcript)[0].reply.surfaced).toBe(true);
+  });
+
+  it('prose that mentions 401, 429, authentication or a rate limit is delivered as written', async () => {
+    for (const text of [
+      'El endpoint devuelve 401 Unauthorized si el token venció.',
+      'Si ves un 429 es el rate limit de la API: espera un minuto.',
+      'La authentication del panel usa el mismo usuario de siempre.',
+    ]) {
+      const { bridge } = buildStreaming({ replyText: text });
+      await bridge.emit(MSG);
+      expect(bridge.streams[0].finals, text).toEqual([text]);
+    }
+  });
+
   // THE LIVE SHAPE (operator 2026-07-15, Zohykar): E's WHOLE reply is `/reply #<trigger> …`.
   // Stripping it as "redundant" left the reply with no prose at all → action-only → the
   // placeholder was DELETED and nothing was posted: E's words were EATEN. Quoting the trigger
