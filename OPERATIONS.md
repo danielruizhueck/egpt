@@ -115,6 +115,27 @@ Done when `<profile>/config/logs/session1-daemon.log` shows a fresh
 `--remote-debugging-pipe` Chrome left on a profile under `<profile>/chrome/profiles` (an orphan
 of the old spine); nothing else.
 
+### The Session 1 daemon holds the claude sessions
+
+Since 2026-10-16 (`feat/cli-host`) the same daemon also spawns and holds every being's `claude`
+(a boxed being's launcher too, so its lease stays) and its stdio (`src/cli-host.mjs`). `/upgrade`,
+`/restart`, a config restart, a spine crash or a wedge-restart leave each session and its
+background agents running; the new spine adopts them (`[cli-host] adopted <key> pid …` in its
+log). What they emit meanwhile is buffered (4 MB per session, partial deltas shed first) and
+replayed: a finished task wakes the being as usual. So the restart drain waits for turns in flight,
+no longer for background work. A config change reaches a live session as a control request (model,
+effort, verbose_thinking); anything else reopens it by resume, never while its background work runs.
+
+Still ended, resumed by thread id on the next turn: a daemon restart or reboot (the daemon's
+children die with it, measured), `/rewind`, `/standdown`. Session 0 holds none of them: its spine
+spawns its own, and its restarts still wait for background work.
+
+**One-time, on each node, after the `/upgrade` that ships this:** restart the Session 1 daemon —
+the three lines in the section above. Until then the new spine finds no cli-host and spawns its
+own sessions, exactly as before. The restart ends today's sessions, their background agents and
+the Chromes once: pick a moment with no background work (a chat that has some shows the being's
+status message).
+
 **A deploy that died partway** leaves prod HEAD unchanged, some files already new
 (one truncated), a stale lock, service never restarted. Confirm nothing holds the
 lock (`Get-Process git`), then reset:
