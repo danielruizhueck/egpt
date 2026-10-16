@@ -1,7 +1,7 @@
 // The command ingest box: lifecycle mapping + the consume-on-read sweep, against
 // an in-memory dir. No fs, no process.exit.
 import { describe, it, expect } from 'vitest';
-import { createIngest, lifecycleExit, isShellConnectMarker } from '../src/spine/ingest.mjs';
+import { createIngest, lifecycleExit, lifecycleForce, isShellConnectMarker } from '../src/spine/ingest.mjs';
 
 describe('isShellConnectMarker', () => {
   it('recognizes the shell editor\'s self-announce (trimmed) and nothing else', () => {
@@ -98,6 +98,17 @@ describe('lifecycleExit', () => {
     expect(lifecycleExit('/standdown 23375', w)).toBe(45);
     expect(refs).toEqual(['abc123']);   // …and the stand-down did not touch it
     expect(ports).toEqual(['23375']);
+  });
+});
+
+// `/restart force` / `/upgrade force` (step C): skip the drain's wait for background work.
+describe('lifecycleForce', () => {
+  it('is true only for /restart force and /upgrade force — the code is still 43 / 42', () => {
+    expect(lifecycleForce('/restart force')).toBe(true);
+    expect(lifecycleForce('  /upgrade force \n')).toBe(true);
+    expect(lifecycleExit('/restart force')).toBe(43);
+    expect(lifecycleExit('/upgrade force')).toBe(42);
+    for (const line of ['/restart', '/upgrade', '/rewind force', '/standdown force', '/restart forced', 'force', '', null]) expect(lifecycleForce(line)).toBe(false);
   });
 });
 

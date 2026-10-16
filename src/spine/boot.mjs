@@ -70,7 +70,7 @@ import { fanoutInbound } from './bridge-fanout.mjs';
 // relay_channel, so not a conversation at all) and whether a frame was committed by ANOTHER
 // node's spine. Both derive from the SAME agents block / node identity every other gate reads.
 import { fromOtherNode, isRelayChannelChat, ownNodeNamesOf } from './node-names.mjs';
-import { createIngest, lifecycleExit, isShellConnectMarker } from './ingest.mjs';
+import { createIngest, lifecycleExit, lifecycleForce, isShellConnectMarker } from './ingest.mjs';
 // THE SESSION 1 SUCCESSOR'S ANNOUNCE (chunk 3 of plans/2609061200-SESSION-0-TO-1-HANDOVER-PLAN.md).
 // Absent EGPT_SESSION1 this is one `false` and nothing else runs — every Session 0 spine, every
 // test and every other node take the identical path they took before it existed.
@@ -2768,13 +2768,14 @@ export async function boot({
   // the spot: /rewind is the way back FROM bad code, and waiting on a turn that code is writing
   // would defeat it.
   let restartCode = null;   // the code a pending restart drain leaves with
-  async function announceAndExit(code) {
+  async function announceAndExit(code, { force = false } = {}) {
     if (code === 45) { return spine.standdown(() => { goDown(code).catch((e) => log.line?.(`[standdown] ${e?.message ?? e}`)); }); }
     if (code === 42 || code === 43) {
       restartCode = restartCode === 42 ? 42 : code;
       spine.drainForRestart(() => { goDown(restartCode).catch((e) => log.line?.(`[drain] ${e?.message ?? e}`)); }, {
         // temp → rename, the ingest box's own rule for its writers: upgrade.ps1 never reads half a file.
         onWait: async (rec) => { await writeFile(`${drainingFile}.tmp`, JSON.stringify(rec), 'utf8'); await rename(`${drainingFile}.tmp`, drainingFile); },
+        force,   // /restart force: skip the wait for background work
       });
       return;
     }
@@ -3544,7 +3545,7 @@ export async function boot({
   // seam = announceAndExit(43), the SAME exit-43 drain the ingest /restart runs (not duplicated).
   const autoRestartOnConfigChange = cfg.auto_restart_on_config_change === true;
   const configBootHash = configContentHashSync();
-  const spine = createSpine({ bridge, bridgeOf: rawBridgeOf, peerMouth, brain, turns, ...services, commands, mesh, actions, limbWork: transcribeLimb.background, advice, guard, guardOverride, fromThisNode, say: sayOnce, logToGroup: (text) => logToGroup(`${getConfig()?.node_name ?? '?'} · ${text}`), stopSwitch, isSelfChat, isTransit: (ev) => isRelayChannelChat(getConfig(), ev), roomRelay, readTranscript, refreshConfig: heartbeatLoader.reload, autoRestartOnConfigChange, configBootHash, readConfigHash: configContentHashSync, requestRestart: () => announceAndExit(43), radioRelay: radioRelay.relay, synthesize: vx.synthesize, voice: vx.voice, defaultBeing: defaultKey, labelOf, timeZone: transcriptTimeZone, clock: { now }, log, turnTimeoutMs, livenessEveryMs, tickMs: effectiveTickMs, setInterval: setIntervalFn, clearInterval: clearIntervalFn });
+  const spine = createSpine({ bridge, bridgeOf: rawBridgeOf, peerMouth, brain, turns, ...services, commands, mesh, actions, limbWork: transcribeLimb.background, backgroundWork: () => pool.stats().keys.flatMap((k) => pool.background(k).map((t) => ({ ...(brain.convOfKey(k) ?? { being: '?', chatId: k }), ...t }))), advice, guard, guardOverride, fromThisNode, say: sayOnce, logToGroup: (text) => logToGroup(`${getConfig()?.node_name ?? '?'} · ${text}`), stopSwitch, isSelfChat, isTransit: (ev) => isRelayChannelChat(getConfig(), ev), roomRelay, readTranscript, refreshConfig: heartbeatLoader.reload, autoRestartOnConfigChange, configBootHash, readConfigHash: configContentHashSync, requestRestart: () => announceAndExit(43), radioRelay: radioRelay.relay, synthesize: vx.synthesize, voice: vx.voice, defaultBeing: defaultKey, labelOf, timeZone: transcriptTimeZone, clock: { now }, log, turnTimeoutMs, livenessEveryMs, tickMs: effectiveTickMs, setInterval: setIntervalFn, clearInterval: clearIntervalFn });
   // Bind the advice service's answer-routing dispatch now that the spine exists: an
   // operator answer in the advice channel re-enters the pipe as a turn in the origin chat.
   advice.useDispatch(spine.handleInbound);
@@ -3641,7 +3642,7 @@ export async function boot({
           // port when it is absent, which is why no port means nothing is written.
           writeStanddownTarget: (port) => writeFile(join(EGPT_HOME, 'standdown-target.txt'), port, 'utf8'),
         });
-        if (code != null) { log.line?.(`[ingest] ${line} -> exit ${code}`); await announceAndExit(code); }
+        if (code != null) { log.line?.(`[ingest] ${line} -> exit ${code}`); await announceAndExit(code, { force: lifecycleForce(line) }); }
         else log.line?.(`[ingest] ignored: ${JSON.stringify(line)}`);
       },
     });

@@ -25,7 +25,7 @@ import { createTurns } from './turns.mjs';
 import { createLiveness } from './liveness.mjs';
 // WHICH CONNECTION AN OUTBOUND GOES OUT ON — the ONE resolver (sender.mjs makeOutbound), not a
 // fourth local copy of `bridgeOf(being) ?? bridge`.
-import { makeOutbound } from './sender.mjs';
+import { makeOutbound, elapsed } from './sender.mjs';
 import { isBrainFailureResult } from '../brain-errors.mjs';
 import { replyLine, contextSinceLastTurn, promptWithRecentContext, bodyForMessageId, promptWithQuotedMessage, RECENT_CONTEXT_MAX_CHARS } from '../transcript-log.mjs';
 import { isHumanTurn, turnKind, parseStopWord } from '../stop-guard.mjs';
@@ -158,6 +158,7 @@ export function createSpine({
   fromThisNode = () => false,          // (ev) => did THIS node's own spine commit this text? boot: `ev.fromNode != null && !fromOtherNode(getConfig(), ev)` — the SAME ownNodeNamesOf set every other "who are we" question reads. The guard's third bucket (stop-guard turnKind 'echo'): our own ⏳ placeholder coming back through Beeper is bookkeeping, so it neither counts toward the loop cap nor resets it (kg 2026-09-20, "🌴FAMILIA PALMA🌴"). Default false = never our own frame, byte-identical to before.
   logToGroup = null,                   // optional (text) => Promise — boot's log_to_group poster (node-prefixed there). Liveness reports a being that did not answer whether its long background work is still needed. Null ⇒ the note is all there is.
   limbWork = null,                     // optional (being, ev) => [{ description, since }] — spine-run limb jobs in flight (/transcribe); liveness shows them beside the brain's background tasks
+  backgroundWork = null,               // optional () => [{ being, chatId, description, since }] — every warm session's live background tasks (boot: the pool's); the restart drain waits for them
   say = null,                          // optional ({ chatId, text, what }) => Promise<boolean> — boot's sayOnce, i.e. THE outbound placement (sender.mjs makeOutbound `say`), the same one the STOP confirmation and the lifecycle lines go through. The ONE thing the spine says on its own account: the loop guard's pause notice (operator 2026-09-20: "if the bridge pauses, it must emit warning in the channel with instructions on how to recover, instead of leaving everybody hanging"). Null (tests, a bare pipe) ⇒ a pause is logged and nothing is posted.
   // RECENT CONTEXT read seam (operator 2026-07-26) — `(chatId, {chatName, network}) =>
   // Promise<string|null>`, the conversation's transcript.md. THE SAME function boot
@@ -617,43 +618,82 @@ export function createSpine({
   const RESTART_DRAIN_CAP_MS = 30 * 60_000;   // 2026-09-28: three full-length (10 min) turns back to back — generous, but never an unbounded deploy
   const RESTART_DRAIN_POLL_MS = 1_000;
   const RESTART_DRAIN_LOG_MS = 30_000;
-  let restartDrain = null;   // { since, lastLog, timer, done, onWait } while an /upgrade or /restart waits
+  const RESTART_DRAIN_BG_SETTLE_MS = 10_000;   // quiet after background work ends: its wake turn starts within warm-cli's SELF_TURN_START_MS (5 s)
+  let restartDrain = null;   // { since, lastLog, timer, done, onWait, force, turnsSince, noticeAt, bgSeenAt } while an /upgrade or /restart waits
   function inFlightTurns() {
     const busy = turns.busy();
     return { busy, n: busy.reduce((sum, [, c]) => sum + c, 0), list: busy.map(([k, c]) => (c > 1 ? `${k} ×${c}` : k)).join(', ') };
   }
+  // BACKGROUND WORK (step C, 2026-10-16): a restart kills each warm `claude` and its background
+  // agents, so the drain waits for them too, with NO cap: past RESTART_DRAIN_CAP_MS the logging
+  // group is told (once per cap) and the wait goes on. `force` (/restart force) skips it; turns
+  // are still waited for. Work a turn starts mid-drain is not blocked, only marked.
+  function liveBackground(since) {
+    const now = clock.now();
+    return (backgroundWork?.() ?? []).map((b) => ({ ...b, running: elapsed(now - b.since), duringDrain: b.since >= since }));
+  }
+  const bgLabel = (b) => `${b.being}/${b.chatId}: ${b.description} (${b.running}${b.duringDrain ? ', started during the drain' : ''})`;
+  function skipBackground(since) {
+    const bg = liveBackground(since);
+    if (bg.length) note(`drain: force — not waiting for ${bg.length} background task(s): ${bg.map(bgLabel).join('; ')}`);
+  }
   // What the drain publishes (boot writes it to state/draining.json for setup/upgrade.ps1): at the
   // start and with every 30 s line, so the script always prints who the spine is waiting for now.
   // Fire-and-forget like every other side effect this file hands out, with its own catch.
-  function publishDrain(d, t) {
-    const rec = { since: new Date(d.since).toISOString(), busy: t.busy.map(([k]) => k), turns: t.n, cap: RESTART_DRAIN_CAP_MS };
+  function publishDrain(d, t, bg) {
+    const background = bg.map((b) => ({ being: b.being, chatId: b.chatId, description: b.description, since: new Date(b.since).toISOString(), running: b.running, duringDrain: b.duringDrain }));
+    const rec = { since: new Date(d.since).toISOString(), busy: t.busy.map(([k]) => k), turns: t.n, cap: RESTART_DRAIN_CAP_MS, background };
     Promise.resolve().then(() => d.onWait?.(rec)).catch((e) => note(`drain: could not publish the drain state — ${e?.message ?? e}`));
   }
-  function drainForRestart(done, { onWait = null } = {}) {
+  function drainForRestart(done, { onWait = null, force = false } = {}) {
     // A STAND-DOWN ALREADY DRAINING: leave now. A /restart is the operator's way out of a
     // stand-down whose drain has wedged — its admission gate lets lifecycle commands through for
     // exactly that — so it must not queue behind the same wedge.
     if (standingDown) { note('drain: a stand-down is already draining — restarting now, without waiting'); done(); return; }
-    if (restartDrain) { note('drain: already waiting for turns in flight — no second drain'); return; }
-    const t = inFlightTurns();
-    if (!t.n) { done(); return; }
+    if (restartDrain) {
+      if (!force || restartDrain.force) { note('drain: already waiting for turns in flight — no second drain'); return; }
+      restartDrain.force = true;   // the operator's override reaches the drain already waiting
+      restartDrain.bgSeenAt = null;
+      skipBackground(restartDrain.since);
+      pollRestartDrain();
+      return;
+    }
     const since = clock.now();
+    const t = inFlightTurns();
+    if (force) skipBackground(since);
+    const bg = force ? [] : liveBackground(since);
+    if (!t.n && !bg.length) { done(); return; }
     // NOT unref'd: while it waits, this timer is what keeps the process here to leave with 42/43.
-    restartDrain = { since, lastLog: since, done, onWait, timer: setIntervalFn(pollRestartDrain, RESTART_DRAIN_POLL_MS) };
-    note(`drain: waiting for ${t.n} turn(s) before restarting — ${t.list} (cap ${RESTART_DRAIN_CAP_MS / 60_000} min; new messages are still answered)`);
-    publishDrain(restartDrain, t);
+    restartDrain = { since, lastLog: since, done, onWait, force, turnsSince: since, noticeAt: since + RESTART_DRAIN_CAP_MS, bgSeenAt: bg.length ? since : null, timer: setIntervalFn(pollRestartDrain, RESTART_DRAIN_POLL_MS) };
+    const what = [t.n && `${t.n} turn(s)`, bg.length && `${bg.length} background task(s)`].filter(Boolean).join(' and ');
+    const who = [t.n && t.list, ...bg.map(bgLabel)].filter(Boolean).join('; ');
+    note(`drain: waiting for ${what} before restarting — ${who} (cap ${RESTART_DRAIN_CAP_MS / 60_000} min${bg.length ? ' for turns; background work has none — /restart force skips it' : ''}; new messages are still answered)`);
+    publishDrain(restartDrain, t, bg);
   }
   function pollRestartDrain() {
     const d = restartDrain;
     if (!d) return;
     const t = inFlightTurns();
-    const waited = clock.now() - d.since;
-    if (!t.n) { endRestartDrain(`drain: nothing in flight after ${Math.round(waited / 1000)}s — restarting`); return; }
-    if (waited >= RESTART_DRAIN_CAP_MS) { endRestartDrain(`drain: CAP — ${t.n} turn(s) STILL in flight after ${RESTART_DRAIN_CAP_MS / 60_000} min: ${t.list} — restarting ANYWAY; they die with this process`); return; }
-    if (clock.now() - d.lastLog < RESTART_DRAIN_LOG_MS) return;
-    d.lastLog = clock.now();
-    note(`drain: still waiting after ${Math.round(waited / 1000)}s — ${t.n} turn(s): ${t.list}`);
-    publishDrain(d, t);
+    const bg = d.force ? [] : liveBackground(d.since);
+    const now = clock.now();
+    const waited = now - d.since;
+    if (!t.n && !bg.length) {
+      if (d.bgSeenAt != null && now - d.bgSeenAt < RESTART_DRAIN_BG_SETTLE_MS) return;   // a finished task's wake may be on its way
+      endRestartDrain(`drain: nothing in flight after ${Math.round(waited / 1000)}s — restarting`); return;
+    }
+    if (bg.length) {
+      d.turnsSince = d.bgSeenAt = now;   // the turns' cap counts only while no background work holds the drain
+      if (now >= d.noticeAt) {
+        d.noticeAt = now + RESTART_DRAIN_CAP_MS;
+        const line = `restart waiting ${elapsed(waited)} for background work: ${bg.map(bgLabel).join('; ')}. Send /restart force to proceed.`;
+        note(`drain: ${line}`);
+        if (logToGroup) Promise.resolve(logToGroup(line)).catch((e) => note(`drain: logging group refused the line — ${e?.message ?? e}`));
+      }
+    } else if (now - d.turnsSince >= RESTART_DRAIN_CAP_MS) { endRestartDrain(`drain: CAP — ${t.n} turn(s) STILL in flight after ${RESTART_DRAIN_CAP_MS / 60_000} min: ${t.list} — restarting ANYWAY; they die with this process`); return; }
+    if (now - d.lastLog < RESTART_DRAIN_LOG_MS) return;
+    d.lastLog = now;
+    note(`drain: still waiting after ${Math.round(waited / 1000)}s — ${[t.n && `${t.n} turn(s): ${t.list}`, bg.length && `${bg.length} background task(s): ${bg.map(bgLabel).join('; ')}`].filter(Boolean).join('; ')}`);
+    publishDrain(d, t, bg);
   }
   function endRestartDrain(line) {
     const d = restartDrain;

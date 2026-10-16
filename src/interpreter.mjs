@@ -72,8 +72,8 @@ export const COMMANDS = [
   { cmd: '/conversation',   surface: 'shell',     usage: '/conversation <name|path>',                      desc: 'switch to a conversation file' },
   { cmd: '/exit',           surface: 'shell',     usage: '/exit',                                          desc: 'quit egpt', wired: 'editor' },
   { cmd: '/version',        surface: 'shell',     usage: '/version',                                       desc: 'show current commit, branch, last tag, and dirty state' },
-  { cmd: '/upgrade',        surface: 'shell',     usage: '/upgrade',                                       desc: 'exit with code 42; egpt-daemon pulls + rebuilds + restarts', wired: true },
-  { cmd: '/restart',        surface: 'shell',     usage: '/restart',                                       desc: 'exit with code 43; egpt-daemon respawns from current disk (picks up external git pulls)', wired: true },
+  { cmd: '/upgrade',        surface: 'shell',     usage: '/upgrade [force]',                               desc: 'exit with code 42; egpt-daemon pulls + rebuilds + restarts. Waits for turns and background work first; force skips the background wait', wired: true },
+  { cmd: '/restart',        surface: 'shell',     usage: '/restart [force]',                               desc: 'exit with code 43; egpt-daemon respawns from current disk (picks up external git pulls). Waits for turns and background work first; force skips the background wait', wired: true },
   { cmd: '/rewind',         surface: 'shell',     usage: '/rewind <ref>',                                  desc: 'exit with code 44; egpt-daemon checks out <ref>, installs, builds, restarts', wired: true },
   // LISTED, deliberately, and it was a real question (2026-09-06). /standdown is machine-to-machine
   // plumbing — the Session 1 successor's announce (src/spine/successor-announce.mjs) is what

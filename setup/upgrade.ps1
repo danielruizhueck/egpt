@@ -5,6 +5,8 @@
 # deploy. This script adds the part that is tedious by hand: proving it actually landed.
 # Since 2026-09-28 the spine first finishes any turn in flight (state/draining.json says so
 # while it waits, capped at 30 min) -- this script waits that out before counting down.
+# Since 2026-10-16 it also waits for the beings' background work, with no cap; -Force skips
+# that wait (drops '/upgrade force'), turns are still finished.
 #
 # Use setup/deploy.ps1 INSTEAD when the change alters what the SUPERVISOR spawns (an
 # entry-point rename, daemon-runtime appPath). That one restarts the service and needs UAC.
@@ -18,13 +20,15 @@
 #   powershell -ExecutionPolicy Bypass -File setup\upgrade.ps1
 #   powershell -ExecutionPolicy Bypass -File setup\upgrade.ps1 -EgptHome "$env:USERPROFILE\.egpt-secondary"
 #   powershell -ExecutionPolicy Bypass -File setup\upgrade.ps1 -Peer an@192.168.1.102
+#   powershell -ExecutionPolicy Bypass -File setup\upgrade.ps1 -Force
 [CmdletBinding()]
 param(
   [string]$EgptHome  = $(if ($env:EGPT_HOME) { $env:EGPT_HOME } else { Join-Path $env:USERPROFILE '.egpt' }),
   [string]$Repo      = (Join-Path $env:USERPROFILE 'bin\egpt'),
   [string]$Source    = (Join-Path $env:USERPROFILE 'src\egpt'),   # the CHECKOUT people edit and run by hand
   [int]$TimeoutSec   = 120,
-  [string]$Peer      = ''     # user@host -- deploy THIS node, then run this same script there over ssh
+  [string]$Peer      = '',    # user@host -- deploy THIS node, then run this same script there over ssh
+  [switch]$Force               # do not wait for background work (turns in flight are still finished)
 )
 $ErrorActionPreference = 'Stop'
 
@@ -209,20 +213,20 @@ if ($git) {
 Write-Host ""
 
 # --- THE SPINE MAY BE DRAINING (operator 2026-09-28: "yes, restart should wait for turns in
-#     progress"). /upgrade and /restart no longer leave the moment they are read: the spine keeps
-#     serving until no turn is in flight, and says so in state/draining.json -- { since, busy,
-#     turns, cap } -- until it exits. This returns that record while it is there AND still inside
-#     the spine's own cap plus a margin, else $null: a file a spine left behind by dying mid-drain
-#     (boot clears it too) can never hold a deploy past the cap. The cap is READ from the file,
-#     so the spine's one constant (src/spine/spine.mjs RESTART_DRAIN_CAP_MS) is the only copy. ---
+#     progress"; 2026-10-16: and for background work). /upgrade and /restart no longer leave the
+#     moment they are read: the spine keeps serving until no turn and no background task is in
+#     flight, and says so in state/draining.json -- { since, busy, turns, cap, background } -- until
+#     it exits, rewriting it every ~30 s. Background work has no cap, so the record is live while
+#     it is FRESH, else $null: a file a spine left behind by dying mid-drain (boot clears it too)
+#     can never hold a deploy. ---
 $DrainMarginSec = 120
 function Get-Drain {
   if (-not (Test-Path $draining)) { return $null }
   try {
     $d = Get-Content -Raw $draining | ConvertFrom-Json
-    $until = [DateTimeOffset]::Parse($d.since).AddMilliseconds([double]$d.cap).AddSeconds($DrainMarginSec)
+    $age = ((Get-Date) - (Get-Item $draining).LastWriteTime).TotalSeconds
   } catch { return $null }
-  if ([DateTimeOffset]::UtcNow -gt $until) { return $null }
+  if ($age -gt $DrainMarginSec) { return $null }
   return $d
 }
 
@@ -238,7 +242,7 @@ function Invoke-Bounce([string]$Command) {
   $boot0 = Get-SpineBoot
   # --- temp -> rename, because the sweep skips *.tmp so a half-written file is never read ---
   New-Item -ItemType Directory -Force -Path $ingest | Out-Null
-  $name  = $Command.TrimStart('/')
+  $name  = $Command.TrimStart('/') -replace '\s+', '-'
   $tmp   = Join-Path $ingest "$name.tmp"
   $final = Join-Path $ingest $name
   [IO.File]::WriteAllText($tmp, $Command, (New-Object Text.UTF8Encoding $false))
@@ -271,16 +275,24 @@ function Invoke-Bounce([string]$Command) {
       $beat0 = (Get-Item $alive).LastWriteTime
       if (-not $drainSeen) { $drainSeen = Get-Date }
       if (-not $drainTold -or ((Get-Date) - $drainTold).TotalSeconds -ge 30) {
-        Write-Host ("  the spine is waiting for " + $d.turns + " turn(s) to finish: " + (@($d.busy) -join ', ')) -ForegroundColor DarkYellow
+        if ($d.turns -gt 0) { Write-Host ("  the spine is waiting for " + $d.turns + " turn(s) to finish: " + (@($d.busy) -join ', ')) -ForegroundColor DarkYellow }
+        $bg = @($d.background | Where-Object { $_ })
+        if ($bg.Count -gt 0) {
+          Write-Host ("  the spine is waiting for " + $bg.Count + " background task(s), no cap -- rerun with -Force to skip them:") -ForegroundColor DarkYellow
+          foreach ($b in $bg) {
+            $mark = if ($b.duringDrain) { ', started during the drain' } else { '' }
+            Write-Host ("    " + $b.being + "/" + $b.chatId + ": " + $b.description + " (" + $b.running + $mark + ")") -ForegroundColor DarkYellow
+          }
+        }
         $drainTold = Get-Date
       }
       continue
     }
     if ($drainSeen) {
       if (Test-Path $draining) {
-        Write-Host "  the spine is PAST its own drain cap and has not left -- no longer waiting on it" -ForegroundColor Red
+        Write-Host "  the spine stopped updating its drain record and has not left -- no longer waiting on it" -ForegroundColor Red
       } else {
-        Write-Host ("  ...the turns finished after " + [int]((Get-Date) - $drainSeen).TotalSeconds + " s -- waiting for the bounce") -ForegroundColor DarkGray
+        Write-Host ("  ...the drain finished after " + [int]((Get-Date) - $drainSeen).TotalSeconds + " s -- waiting for the bounce") -ForegroundColor DarkGray
       }
       $drainSeen = $null
     }
@@ -306,7 +318,8 @@ function Invoke-Bounce([string]$Command) {
   return $false
 }
 
-$ok = Invoke-Bounce '/upgrade'
+$forceArg = if ($Force) { ' force' } else { '' }
+$ok = Invoke-Bounce ('/upgrade' + $forceArg)
 
 $after = Get-ShortHead $git $Repo
 
@@ -387,7 +400,7 @@ if (-not (Test-Path $runner)) {
 if ($migrationsApplied) {
   Write-Host ""
   Write-Host "config migrations applied - restarting once more so the spine reads them" -ForegroundColor Yellow
-  if (-not (Invoke-Bounce '/restart')) {
+  if (-not (Invoke-Bounce ('/restart' + $forceArg))) {
     Write-Host "=== NO HEARTBEAT after the /restart ($TimeoutSec s) ===" -ForegroundColor Red
     Write-Host "  The deploy and its migrations landed; the spine did not come back from the restart."
     Write-Host "  Check the log:  $EgptHome\config\logs\service-stdout.log"
@@ -414,6 +427,7 @@ if ($Peer) {
   # shell (a quoted C:\Users\... arrives as C:\Users\anbinegpt...), and quoting to survive
   # both shells is worse. Windows accepts / in a path, and this one has no spaces.
   $remote = 'powershell -NoProfile -ExecutionPolicy Bypass -File ~/bin/egpt/setup/upgrade.ps1'
+  if ($Force) { $remote += ' -Force' }
   & ssh -o ConnectTimeout=8 $Peer $remote
   if ($LASTEXITCODE -ne 0) { Write-Host "PEER DEPLOY FAILED (exit $LASTEXITCODE)" -ForegroundColor Red; exit 1 }
 }

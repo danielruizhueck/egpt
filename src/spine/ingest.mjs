@@ -110,3 +110,9 @@ export function lifecycleExit(line, { writeRewindTarget, writeStanddownTarget } 
   }
   return null;
 }
+
+// `/restart force` / `/upgrade force`: the drain skips its wait for background work (turns are
+// still waited for). Same code as the bare command; the callers hand this to announceAndExit.
+export function lifecycleForce(line) {
+  return /^\/(restart|upgrade)\s+force$/.test(String(line ?? '').trim());
+}

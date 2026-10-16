@@ -8,7 +8,7 @@
 // commands need a richer ctx (sessions, bridge, channels) and land as that ctx is
 // built (Phase 4c); until then they are RECOGNIZED (not leaked to E) and answered
 // with a short note.
-import { lifecycleExit } from './ingest.mjs';
+import { lifecycleExit, lifecycleForce } from './ingest.mjs';
 import { isAutoMode, AUTO_MODES, DEFAULT_AUTO_MODE, isDeliberateSilence, superModeOf } from '../auto-mode.mjs';
 import { patchBeing, patchContact, deleteBeing, getContact, getBeing, ensureContact, recordThread, findThreadJsonl, aliasContact, dropContact, aliasTargetOf, superChannelFor, isSuperChannel, residentsOf, defaultBeingOf, allowedUsersPermits, slugDir, statsPath, conversationPathOf, seedIdentityLayers, skeletonIdentityFiles, slugSuffix, rollTranscript, fixedSlugFor, DETERMINISTIC_MODEL, DETERMINISTIC_EFFORT, DEFAULT_ALLOWED_TOOLS, LOBBY_SLUG } from '../conversations-state.mjs';
 import { stripFrontMatter } from '../transcript-meta.mjs';
@@ -1012,7 +1012,7 @@ export function createCommands({
     const code = lifecycleExit(line, { writeRewindTarget, writeStanddownTarget });
     if (code != null) {
       onLog(`${line} -> exit ${code}`);
-      const inFlight = await exit(code);   // process leaves (after the bridge's "restarting…" announce); the daemon respawns
+      const inFlight = await exit(code, { force: lifecycleForce(line) });   // process leaves (after the bridge's "restarting…" announce); the daemon respawns
       if (code === 45) return standdownWhy(ev, line, inFlight);
       return;
     }
