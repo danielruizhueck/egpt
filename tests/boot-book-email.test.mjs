@@ -136,6 +136,10 @@ describe('boot — /email and /book run for an enabled agent and wake it with th
     expect(prompts[1]).toContain('A background task you started has finished: /email → sent.');
     expect(prompts[2]).toContain('A background task you started has finished: /book 2026-10-20 10:00 → booked: invitation sent to the team calendar for 2026-10-20 10:00-10:30 (America/Caracas).');
 
+    const raw = Buffer.from(net.ses[0].body.Content.Raw.Data, 'base64').toString('utf8');
+    const attachment = raw.split(/\r\n--egpt-[^\r\n]+/).find((p) => p.includes('Content-Disposition: attachment; filename="transcript-Bea-'));
+    expect(Buffer.from(attachment.slice(attachment.indexOf('\r\n\r\n') + 4).replace(/\s+/g, ''), 'base64').toString('utf8')).toContain('quiero una demo el martes 20 a las 10');
+
     const transcript = [...io.files.entries()].find(([p]) => p.endsWith('transcript.md'))?.[1] ?? '';
     expect(transcript).toContain('/email "Lead: Bea, Colegio San José" → sent');
     expect(transcript).toContain('/book 2026-10-20 10:00 "Demo EduWeb — Bea" → booked');

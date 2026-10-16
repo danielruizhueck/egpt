@@ -2988,7 +2988,9 @@ export const CONFIG_SCHEMA = {
     /email limb on it (operator 2026-10-15). A being whose agents.<name>.actions
     lists email may emit  /email <text>: the spine sends <text> FROM from TO the
     fixed to: list, subject = subject_prefix + the chat's name. The being never
-    chooses recipients, sender or subject. /book's invitation rides the same path.
+    chooses recipients, sender or subject. The spine attaches that conversation's
+    transcript.md (text/markdown, transcript-<chat>-<date>.md; over 1 MB, its last
+    1 MB, and the body says so). /book's invitation rides the same path.
     Outcome sent | not-configured | failed, returned to the being as a wake turn.
 
     KEYS:

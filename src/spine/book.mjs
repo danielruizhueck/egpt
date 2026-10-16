@@ -12,7 +12,7 @@
 // busy at its first instance only (logged). EXDATE / RECURRENCE-ID exceptions are not applied:
 // the original instance stays busy (conservative — never a double booking).
 import { randomUUID } from 'node:crypto';
-import { oneLine } from './email.mjs';
+import { oneLine, mimeMessage } from './email.mjs';
 
 export const BOOK_OUTCOMES = ['booked', 'busy', 'not-configured', 'failed'];
 const DEFAULT_TZ = 'America/Caracas';
@@ -183,18 +183,6 @@ export function invitation({ uid, stamp: at, start, end, title, description, org
     'SEQUENCE:0', 'STATUS:CONFIRMED', 'END:VEVENT', 'END:VCALENDAR',
   ].map(fold).join('\r\n') + '\r\n';
 }
-const b64 = (s) => Buffer.from(String(s), 'utf8').toString('base64').replace(/.{76}/g, '$&\r\n');
-function mime({ from, to, subject, text, ics, date }) {
-  const boundary = `egpt-${randomUUID()}`;
-  return [
-    `From: ${from}`, `To: ${to}`, `Subject: =?UTF-8?B?${Buffer.from(subject, 'utf8').toString('base64')}?=`,
-    `Date: ${new Date(date).toUTCString()}`, 'MIME-Version: 1.0', `Content-Type: multipart/alternative; boundary="${boundary}"`, '',
-    `--${boundary}`, 'Content-Type: text/plain; charset=UTF-8', 'Content-Transfer-Encoding: base64', '', b64(text),
-    `--${boundary}`, 'Content-Type: text/calendar; charset=UTF-8; method=REQUEST', 'Content-Transfer-Encoding: base64', '', b64(ics),
-    `--${boundary}--`, '',
-  ].join('\r\n');
-}
-
 // ── config readers ──
 function workWindow(h) {
   const hm = (s) => { const m = /^(\d{1,2}):(\d{2})$/.exec(String(s ?? '').trim()); return m && +m[1] < 24 && +m[2] < 60 ? +m[1] * 60 + +m[2] : null; };
@@ -258,7 +246,11 @@ export function createBookLimb({ getConfig = () => ({}), fetch = (...a) => globa
       const where = `${ev?.chatName ?? ev?.chatId ?? '?'} · ${ev?.surface ?? '?'} · eGPT ${being}`;
       const when = `${local(tz, start)}-${local(tz, start + durMs).slice(11)} (${tz})`;
       const ics = invitation({ uid: `${randomUUID()}@egpt`, stamp: now(), start, end: start + durMs, title, description: `${title}\n${when}\n\n${where}`, organizer: /<([^>]+)>/.exec(sender)?.[1] ?? sender, attendee });
-      const sent = await ses({ to: [attendee], raw: mime({ from: sender, to: attendee, subject: title, text: `${title}\n${when}\n\n${where}`, ics, date: now() }), what: 'book invitation' });
+      const raw = mimeMessage({ from: sender, to: [attendee], subject: title, date: now(), kind: 'alternative', parts: [
+        { type: 'text/plain; charset=UTF-8', body: `${title}\n${when}\n\n${where}` },
+        { type: 'text/calendar; charset=UTF-8; method=REQUEST', body: ics },
+      ] });
+      const sent = await ses({ to: [attendee], raw, what: 'book invitation' });
       if (sent !== 'sent') return done(sent === 'not-configured' ? 'not-configured' : 'failed', null, `invitation ${sent}`);
       booked.push({ s: start, e: start + durMs });
       return done('booked', `invitation sent to the team calendar for ${when}`, local(tz, start));

@@ -5,13 +5,15 @@
 //   - the AWS keys are locals: they sign the request and are never returned, logged or posted;
 //   - every output is an outcome token: 'sent' | 'not-configured' | 'failed';
 //   - recipients, sender and subject prefix come from config only. The being supplies body text,
-//     which lands in Body.Text (or a base64 MIME part), never in a header.
-import { createHash, createHmac } from 'node:crypto';
+//     which lands in a base64 MIME part, never in a header. The transcript is attached by the
+//     spine, never chosen by the being.
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { readFile as fsReadFile } from 'node:fs/promises';
 
 export const EMAIL_OUTCOMES = ['sent', 'not-configured', 'failed'];
 const TIMEOUT_MS = 20_000;
 const SES_PATH = '/v2/email/outbound-emails';
+const ATTACH_MAX = 1024 * 1024;   // transcript attachment cap; a longer one sends its tail
 
 const sha256 = (s) => createHash('sha256').update(s).digest('hex');
 const hmac = (k, s) => createHmac('sha256', k).update(s).digest();
@@ -32,7 +34,40 @@ export const addressList = (v) => (Array.isArray(v) ? v : (v == null ? [] : [v])
 // One header-safe line: no control characters, collapsed whitespace.
 export const oneLine = (s, max = 200) => String(s ?? '').replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
 
-export function createEmail({ getConfig = () => ({}), fetch = (...a) => globalThis.fetch(...a), readFile = fsReadFile, now = () => Date.now(), log = () => {} } = {}) {
+const b64 = (s) => Buffer.from(String(s), 'utf8').toString('base64');
+const b64Lines = (s) => b64(s).replace(/.{76}/g, '$&\r\n');
+/**
+ * The ONE raw MIME builder (the /email body + transcript, /book's invitation). Every part is
+ * base64; `from`/`to` come from config and the subject is an encoded word, so no caller text can
+ * become a header. parts: [{ type, body, filename? }].
+ */
+export function mimeMessage({ from, to, subject, date, kind = 'mixed', parts = [] }) {
+  const boundary = `egpt-${randomUUID()}`;
+  return [
+    `From: ${from}`, `To: ${addressList(to).join(', ')}`, `Subject: =?UTF-8?B?${b64(oneLine(subject))}?=`,
+    `Date: ${new Date(date).toUTCString()}`, 'MIME-Version: 1.0', `Content-Type: multipart/${kind}; boundary="${boundary}"`, '',
+    ...parts.flatMap((p) => [
+      `--${boundary}`, `Content-Type: ${p.type}`, 'Content-Transfer-Encoding: base64',
+      ...(p.filename ? [`Content-Disposition: attachment; filename="${p.filename}"`] : []), '', b64Lines(p.body),
+    ]),
+    `--${boundary}--`, '',
+  ].join('\r\n');
+}
+
+// transcript-<chat>-<YYYY-MM-DD>.md, ASCII only.
+const fileSafe = (s) => String(s ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'chat';
+// The last ATTACH_MAX bytes, from the first whole line inside them.
+function tail(text) {
+  const bytes = Buffer.from(text, 'utf8');
+  if (bytes.length <= ATTACH_MAX) return text;
+  let cut = bytes.subarray(bytes.length - ATTACH_MAX);
+  const nl = cut.indexOf(0x0a);
+  if (nl >= 0 && nl < cut.length - 1) cut = cut.subarray(nl + 1);
+  return cut.toString('utf8');
+}
+
+// readTranscript(ev) -> that conversation's transcript.md text, or null (boot: the ONE transcript reader).
+export function createEmail({ getConfig = () => ({}), fetch = (...a) => globalThis.fetch(...a), readFile = fsReadFile, readTranscript = async () => null, now = () => Date.now(), log = () => {} } = {}) {
   const cfg = () => getConfig()?.email || {};
 
   // Inline keys, else an AWS shared-credentials file (aws_access_key_id / aws_secret_access_key lines).
@@ -53,10 +88,10 @@ export function createEmail({ getConfig = () => ({}), fetch = (...a) => globalTh
   }
 
   /**
-   * The ONE SendEmail. `to` is decided by the caller from config; content is Simple
-   * ({subject, text}) or a raw MIME message ({raw}). Never throws.
+   * The ONE SendEmail: a raw MIME message (mimeMessage) to `to`, which the caller takes from
+   * config. Never throws.
    */
-  async function ses({ to, subject, text, raw = null, what = 'ses' } = {}) {
+  async function ses({ to, raw, what = 'ses' } = {}) {
     const c = cfg();
     const dest = addressList(to);
     const { creds, gaps } = await ready(c);
@@ -66,10 +101,7 @@ export function createEmail({ getConfig = () => ({}), fetch = (...a) => globalTh
     try {
       const region = String(c.region || 'us-east-1');
       const host = `email.${region}.amazonaws.com`;
-      const content = raw != null
-        ? { Raw: { Data: Buffer.from(String(raw), 'utf8').toString('base64') } }
-        : { Simple: { Subject: { Data: oneLine(subject), Charset: 'UTF-8' }, Body: { Text: { Data: String(text ?? ''), Charset: 'UTF-8' } } } };
-      const body = JSON.stringify({ FromEmailAddress: String(c.from).trim(), Destination: { ToAddresses: dest }, Content: content });
+      const body = JSON.stringify({ FromEmailAddress: String(c.from).trim(), Destination: { ToAddresses: dest }, Content: { Raw: { Data: b64(raw) } } });
       const amzDate = new Date(now()).toISOString().replace(/\.\d{3}Z$/, 'Z').replace(/[-:]/g, '');
       const headers = { 'content-type': 'application/json' };
       const authorization = sigv4({ method: 'POST', host, path: SES_PATH, headers, body, region, service: 'ses', accessKeyId: creds.id, secretAccessKey: creds.secret, amzDate });
@@ -85,13 +117,25 @@ export function createEmail({ getConfig = () => ({}), fetch = (...a) => globalTh
     }
   }
 
-  // The /email limb: the lead summary to the FIXED email.to list under the FIXED subject prefix.
+  // The /email limb: the lead summary to the FIXED email.to list under the FIXED subject prefix,
+  // with this conversation's transcript attached by the spine.
   async function email(a, ev = {}, being = '') {
     const c = cfg();
     const where = ev?.chatName ?? ev?.chatId ?? '?';
-    const subject = `${c.subject_prefix ?? '[eGPT]'} ${where}`;
-    const text = `${String(a?.text ?? '')}\n\n--\n${where} · ${ev?.surface ?? '?'} · eGPT ${being}`;
-    return { outcome: await ses({ to: c.to, subject, text, what: 'email' }) };
+    let transcript = null;
+    try { transcript = await readTranscript(ev); } catch (e) { log(`email: transcript unreadable (${oneLine(e?.message, 120)})`); }
+    const attached = [];
+    let note = 'No transcript was found for this conversation.';
+    if (transcript) {
+      const full = String(transcript);
+      const att = tail(full);
+      const filename = `transcript-${fileSafe(where)}-${new Date(now()).toISOString().slice(0, 10)}.md`;
+      note = att === full ? `Transcript attached: ${filename}` : `The transcript is ${Buffer.byteLength(full)} bytes; attached are its last ${Buffer.byteLength(att)} bytes.`;
+      attached.push({ type: `text/markdown; charset=UTF-8; name="${filename}"`, body: att, filename });
+    }
+    const text = `${String(a?.text ?? '')}\n\n--\n${where} · ${ev?.surface ?? '?'} · eGPT ${being}\n${note}`;
+    const raw = mimeMessage({ from: String(c.from ?? '').trim(), to: c.to, subject: `${c.subject_prefix ?? '[eGPT]'} ${where}`, date: now(), parts: [{ type: 'text/plain; charset=UTF-8', body: text }, ...attached] });
+    return { outcome: await ses({ to: c.to, raw, what: 'email' }) };
   }
 
   return { ses, email, missing: async () => (await ready(cfg())).gaps };

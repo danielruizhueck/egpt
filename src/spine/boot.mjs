@@ -3282,7 +3282,7 @@ export async function boot({
   const advice = createAdvice({ bridge, bridgeOf: rawBridgeOf, getConfig, onLog: (m) => log.line?.(`[advice] ${m}`) });
   // /email + /book (2026-10-15): spine-executed, enabled per agent (agents.<name>.actions); the
   // outcome returns to the being through the background wake (spine.wakeOnBackground).
-  const mail = createEmail({ getConfig, fetch: fetchFn, now, log: (m) => log.line?.(`[email] ${m}`) });
+  const mail = createEmail({ getConfig, fetch: fetchFn, readTranscript: (ev) => readTranscript(ev.chatId, { chatName: ev.chatName, network: ev.surface }), now, log: (m) => log.line?.(`[email] ${m}`) });
   const bookLimb = createBookLimb({ getConfig, fetch: fetchFn, ses: mail.ses, missingMail: mail.missing, now, log: (m) => log.line?.(`[book] ${m}`) });
   const actions = createReplyActions({ bridge, bridgeOf: rawBridgeOf, peerMouth, bodyEmojiOf, labelOf, resolveConvDir, askAdvice: (a) => advice.ask(a), limbs: { book: bookLimb.book, email: mail.email }, actionsOf: (being) => getConfig()?.agents?.[being]?.actions, wake: (r) => spineLate?.wakeOnBackground(r), defaultKey, onLog: (m) => log.line?.(`[actions] ${m}`) });
 

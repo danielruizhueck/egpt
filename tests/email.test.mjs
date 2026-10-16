@@ -17,11 +17,27 @@ function fakeFetch(status = 200, body = '{"MessageId":"m-1"}') {
   const fetch = async (url, init = {}) => { calls.push({ url, init, body: init.body ? JSON.parse(init.body) : null }); return { ok: status >= 200 && status < 300, status, text: async () => body }; };
   return { fetch, calls };
 }
-function build({ config = CONFIG(), status, body } = {}) {
+function build({ config = CONFIG(), status, body, transcript = '# transcript\n- Bea: hola\n' } = {}) {
   const logs = [];
+  const reads = [];
   const f = fakeFetch(status, body);
-  const mail = createEmail({ getConfig: () => config, fetch: f.fetch, now: () => Date.UTC(2026, 9, 15, 18, 0, 0), log: (m) => logs.push(m) });
-  return { mail, logs, calls: f.calls };
+  const readTranscript = async (ev) => { reads.push(ev); return transcript; };
+  const mail = createEmail({ getConfig: () => config, fetch: f.fetch, readTranscript, now: () => Date.UTC(2026, 9, 15, 18, 0, 0), log: (m) => logs.push(m) });
+  return { mail, logs, reads, calls: f.calls };
+}
+
+// The raw MIME of an SES call: top headers, the decoded subject, and each part's headers + decoded body.
+function decode(call) {
+  const raw = Buffer.from(call.body.Content.Raw.Data, 'base64').toString('utf8');
+  const cut = raw.indexOf('\r\n\r\n');
+  const headers = raw.slice(0, cut);
+  const boundary = /boundary="([^"]+)"/.exec(headers)[1];
+  const parts = raw.slice(cut).split(`--${boundary}`).slice(1, -1).map((p) => {
+    const at = p.indexOf('\r\n\r\n');
+    return { headers: p.slice(0, at).trim(), body: Buffer.from(p.slice(at + 4).replace(/\s+/g, ''), 'base64').toString('utf8') };
+  });
+  const subject = Buffer.from(/^Subject: =\?UTF-8\?B\?(.*)\?=$/m.exec(headers)[1], 'base64').toString('utf8');
+  return { headers, parts, subject };
 }
 
 describe('sigv4 — the published AWS test vectors', () => {
@@ -47,8 +63,10 @@ describe('/email — the lead summary to the FIXED recipients', () => {
     expect(calls[0].init.headers.authorization).toMatch(/^AWS4-HMAC-SHA256 Credential=AKIAFAKEKEYID0000001\/20261015\/us-east-1\/ses\/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=[0-9a-f]{64}$/);
     expect(calls[0].body.FromEmailAddress).toBe('EduWeb <ventas@eduweb.com.ve>');
     expect(calls[0].body.Destination).toEqual({ ToAddresses: ['contacto@eserviciosat.net'] });
-    expect(calls[0].body.Content.Simple.Subject.Data).toBe('[EduWeb lead] Juan Pérez');
-    expect(calls[0].body.Content.Simple.Body.Text.Data).toContain('Lead: Juan, Colegio San José, 0414-000');
+    const m = decode(calls[0]);
+    expect(m.subject).toBe('[EduWeb lead] Juan Pérez');
+    expect(m.headers).toMatch(/^To: contacto@eserviciosat\.net$/m);
+    expect(m.parts[0].body).toContain('Lead: Juan, Colegio San José, 0414-000');
   });
 
   it('addresses and headers in the being\'s text never become recipients or headers', async () => {
@@ -58,9 +76,11 @@ describe('/email — the lead summary to the FIXED recipients', () => {
     const b = calls[0].body;
     expect(b.Destination).toEqual({ ToAddresses: ['contacto@eserviciosat.net'] });
     expect(Object.keys(b)).toEqual(['FromEmailAddress', 'Destination', 'Content']);
-    expect(Object.keys(b.Content.Simple)).toEqual(['Subject', 'Body']);   // no Headers block
-    expect(b.Content.Simple.Subject.Data).not.toMatch(/[\r\n]/);
-    expect(b.Content.Simple.Body.Text.Data).toContain(text);              // body text only
+    const m = decode(calls[0]);
+    expect(m.headers.split('\r\n').map((l) => l.split(':')[0])).toEqual(['From', 'To', 'Subject', 'Date', 'MIME-Version', 'Content-Type']);
+    expect(m.headers).not.toMatch(/evil/);
+    expect(m.subject).not.toMatch(/[\r\n]/);
+    expect(m.parts[0].body).toContain(text);                               // body text only, base64 in its part
   });
 
   it('not-configured: no keys, no sender, or no recipients — one log line, no request', async () => {
@@ -100,5 +120,44 @@ describe('/email — the lead summary to the FIXED recipients', () => {
     const mail = createEmail({ getConfig: () => CONFIG(), fetch: async () => { throw new Error(`boom ${SECRET}`); }, log: (m) => logs.push(m) });
     expect(await mail.email({ type: 'email', text: 'x' }, EV, 'b')).toEqual({ outcome: 'failed' });
     expect(logs.join('\n')).not.toContain(SECRET);
+  });
+});
+
+describe('/email — the spine attaches the conversation\'s transcript', () => {
+  it('attached as text/markdown, named after the chat and date; recipients stay fixed', async () => {
+    const transcript = '# Juan Pérez\n- Juan: quiero una demo\n- EduWeb: con gusto\n';
+    const { mail, calls, reads } = build({ transcript });
+    expect(await mail.email({ type: 'email', text: 'Lead: Juan' }, EV, 'edw-marketer')).toEqual({ outcome: 'sent' });
+    expect(reads).toEqual([EV]);
+    expect(calls[0].body.Destination).toEqual({ ToAddresses: ['contacto@eserviciosat.net'] });
+    const m = decode(calls[0]);
+    expect(m.headers).toMatch(/^Content-Type: multipart\/mixed; boundary="/m);
+    expect(m.headers).toMatch(/^To: contacto@eserviciosat\.net$/m);
+    expect(m.parts).toHaveLength(2);
+    expect(m.parts[0].headers).toMatch(/^Content-Type: text\/plain; charset=UTF-8$/m);
+    expect(m.parts[1].headers).toMatch(/^Content-Type: text\/markdown; charset=UTF-8; name="transcript-Juan-Perez-2026-10-15\.md"$/m);
+    expect(m.parts[1].headers).toMatch(/^Content-Disposition: attachment; filename="transcript-Juan-Perez-2026-10-15\.md"$/m);
+    expect(m.parts[1].body).toBe(transcript);
+  });
+
+  it('over 1 MB: the last 1 MB from a line start is attached, and the body says so', async () => {
+    const line = (i) => `- line ${String(i).padStart(7, '0')} ${'x'.repeat(80)}\n`;
+    const transcript = Array.from({ length: 15000 }, (_, i) => line(i)).join('');
+    const { mail, calls } = build({ transcript });
+    await mail.email({ type: 'email', text: 'Lead' }, EV, 'b');
+    const m = decode(calls[0]);
+    const att = m.parts[1].body;
+    expect(Buffer.byteLength(att)).toBeLessThanOrEqual(1024 * 1024);
+    expect(transcript.endsWith(att)).toBe(true);
+    expect(att.startsWith('- line ')).toBe(true);
+    expect(m.parts[0].body).toContain(`The transcript is ${Buffer.byteLength(transcript)} bytes; attached are its last ${Buffer.byteLength(att)} bytes.`);
+  });
+
+  it('no transcript: still sent, no attachment, the body says so', async () => {
+    const { mail, calls } = build({ transcript: null });
+    expect(await mail.email({ type: 'email', text: 'Lead' }, EV, 'b')).toEqual({ outcome: 'sent' });
+    const m = decode(calls[0]);
+    expect(m.parts).toHaveLength(1);
+    expect(m.parts[0].body).toContain('No transcript was found for this conversation.');
   });
 });
