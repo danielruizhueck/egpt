@@ -621,10 +621,11 @@ export function createSpine({
     const busy = turns.busy();
     return { busy, n: busy.reduce((sum, [, c]) => sum + c, 0), list: busy.map(([k, c]) => (c > 1 ? `${k} ×${c}` : k)).join(', ') };
   }
-  // BACKGROUND WORK (step C, 2026-10-16): a restart kills each warm `claude` and its background
-  // agents, so the drain waits for them too, with NO cap: past RESTART_DRAIN_CAP_MS the logging
-  // group is told (once per cap) and the wait goes on. `force` (/restart force) skips it; turns
-  // are still waited for. Work a turn starts mid-drain is not blocked, only marked.
+  // BACKGROUND WORK (step C, 2026-10-16): a restart kills each warm `claude` THIS spine holds (none
+  // when the daemon holds them — boot's backgroundWork) and its background agents, so the drain waits
+  // for them too, with NO cap: past RESTART_DRAIN_CAP_MS the logging group is told (once per cap) and
+  // the wait goes on. `force` (/restart force) skips it; turns are still waited for. Work a turn
+  // starts mid-drain is not blocked, only marked.
   function liveBackground(since) {
     const now = clock.now();
     return (backgroundWork?.() ?? []).map((b) => ({ ...b, running: elapsed(now - b.since), duringDrain: b.since >= since }));

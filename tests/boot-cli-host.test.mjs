@@ -138,4 +138,17 @@ describe('boot — the daemon holds the sessions across a spine restart', () => 
     expect(d.lines.some((l) => /\[cli-host\] adopted egpt:ccode:whatsapp:/.test(l))).toBe(true);
     two.app.stop();
   });
+
+  it('step C no longer holds a SPINE restart for background work the daemon keeps: /restart leaves at once', async () => {
+    const d = daemon();
+    const one = await d.spine();
+    await one.say('e, bg: run the audit');
+    await vi.waitFor(() => expect(finals(one.spy)).toHaveLength(1), { timeout: 5000 });
+    expect(one.app.pool.background(one.app.pool.stats().keys[0])).toHaveLength(1);
+    await one.say('/restart', SELF_DM);
+    await vi.waitFor(() => expect(d.exits).toEqual([43]), { timeout: 5000 });
+    expect(d.lines.some((l) => l.includes('drain: waiting for'))).toBe(false);
+    expect(d.spawns[0].child.killed).toBe(false);
+    one.app.stop();
+  });
 });
