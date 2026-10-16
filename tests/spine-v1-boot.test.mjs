@@ -320,6 +320,27 @@ describe('boot()', () => {
     app.stop();
   });
 
+  it('the tick is sized to the liveness cadence: 5 s by default, liveness.every_ms when set', async () => {
+    for (const [liveness, want] of [[undefined, 5_000], [{ every_ms: 10_000 }, 10_000]]) {
+      const { start } = fakeStart();
+      let state = seedMode(emptyState(), 'on');
+      const config = { whatsapp: {}, node_name: 'kg', agents: { egpt: { configuration: 'egpt', handles: ['e', 'egpt'], default: true } }, ...(liveness ? { liveness } : {}) };
+      const intervals = [];
+      const app = await boot({
+        readConfig: () => config, startBridge: start, makeSession: fakeSession,
+        loadState: async () => state, writeState: async (s) => { state = s; },
+        io: memIo(), ingest: false,
+        now: () => Date.UTC(2026, 5, 29, 14, 5),
+        spawn: () => ({ on(ev, cb) { if (ev === 'exit') cb(0); return this; } }),
+        setInterval: (fn, ms) => { intervals.push(ms); return 0; },
+        clearInterval: () => {},
+        log: { line: () => {} },
+      });
+      expect(Math.min(...intervals)).toBe(want);
+      app.stop();
+    }
+  });
+
   it('the readonly view has NO internal row; a NEW entity heartbeat is picked up on the VERY NEXT inbound message — no tick, no timer', async () => {
     const { start, spy } = fakeStart();
     let state = seedMode(emptyState(), 'on');

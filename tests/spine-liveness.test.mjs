@@ -11,7 +11,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createSpine } from '../src/spine/spine.mjs';
 import { createSender, THINKING, LIVE_EDIT_MS } from '../src/spine/sender.mjs';
-import { ASK_AFTER_MS, ASK_ANSWER_MS } from '../src/spine/liveness.mjs';
+import { ASK_AFTER_MS, ASK_ANSWER_MS, LIVENESS_EVERY_MS } from '../src/spine/liveness.mjs';
 import { editAction, isLiveStreamFrame } from '../src/dispatch-line.mjs';
 
 const T0 = Date.UTC(2026, 9, 15, 12, 0, 0);
@@ -51,17 +51,17 @@ function heldBrain() {
 
 // `mouth`: the chat is said by a second connection on this node (boot's local mouth): every reply,
 // placeholder and status goes out from ITS bridge in ITS room — never from the ear (`bridge`).
-function build({ stop = { present: false }, mouth = null } = {}) {
+function build({ stop = { present: false }, mouth = null, livenessEveryMs, publicOf } = {}) {
   const bridge = fakeBridge();
   const brain = heldBrain();
   const peerMouth = mouth ? { route: async () => ({ bridge: mouth, chatId: 'mouth-room', connection: 'rodz' }) } : null;
   const logged = [], streamed = [], notes = [], group = [];
   const spine = createSpine({
-    bridge, brain,
+    bridge, brain, livenessEveryMs,
     identity: { build: (m) => ({ ...m, line: m.body }) },
     router: { resolve: () => ({ being: 'egpt', mention: { atEStart: true, atEAnywhere: true } }) },
     gating: { async decide() { return { mode: 'mention', receives: true, mayReply: true, sendToEgpt: 'mode' }; }, surfaces: (d) => d.mayReply },
-    sender: createSender({ bridge, peerMouth, bodyEmojiOf: () => '🐶', labelOf: () => 'E' }),
+    sender: createSender({ bridge, peerMouth, publicOf, bodyEmojiOf: () => '🐶', labelOf: () => 'E' }),
     transcript: { async log(ev, reply) { logged.push(reply ? reply.text : ev.body); }, logStream(ev, before, after) { streamed.push(after); } },
     heartbeats: { runDue() {} },
     stopSwitch: { present: () => stop.present, pull: async () => {} },
@@ -83,29 +83,58 @@ beforeEach(() => { vi.useFakeTimers({ toFake: ['Date'] }); at(0); });
 afterEach(() => { vi.useRealTimers(); });
 
 describe('liveness — a running turn', () => {
-  it('(a) the ⏳ placeholder is re-edited with the elapsed time, every 30 s at most, while the turn runs', async () => {
+  it('(a) the ⏳ placeholder is re-edited every 5 s (the default), alternating ⤴️ / ↪️ before the elapsed time', async () => {
+    expect(LIVENESS_EVERY_MS).toBe(5 * sec);
     const b = build();
     const done = b.bridge.emit(mention('@e long job'));
     await flush();
     const ph = b.bridge.streams[0];
     expect(ph.init).toBe(THINKING);
 
-    at(20 * sec); b.spine.tick();
+    at(4 * sec); b.spine.tick();
     expect(ph.frames).toEqual([]);                                   // nothing before the cadence
-    at(30 * sec); b.spine.tick();
-    at(45 * sec); b.spine.tick();                                    // 15 s later: no second edit
-    at(80 * sec); b.spine.tick();
-    expect(ph.frames).toEqual(['⏳ Thinking… 30s', '⏳ Thinking… 1m20s']);
+    at(5 * sec); b.spine.tick();
+    at(7 * sec); b.spine.tick();                                     // 2 s later: no second edit
+    at(10 * sec); b.spine.tick();
+    at(15 * sec); b.spine.tick();
+    expect(ph.frames).toEqual(['⏳ Thinking… ⤴️ 5s', '⏳ Thinking… ↪️ 10s', '⏳ Thinking… ⤴️ 15s']);
 
-    b.brain.calls[0].onPartial('Let me check');                      // streamed text stays; the time rides after it
-    at(115 * sec); b.spine.tick();
-    expect(ph.frames.slice(2)).toEqual(['Let me check ⏳', 'Let me check ⏳ 1m55s']);
+    b.brain.calls[0].onPartial('Let me check');                      // streamed text stays; the tick rides after it
+    at(80 * sec); b.spine.tick();
+    expect(ph.frames.slice(3)).toEqual(['Let me check ⏳', 'Let me check ⏳ ↪️ 1m20s']);
 
     b.brain.calls[0].release('Let me check, done');
     await done;
     expect(ph.finals).toEqual(['Let me check, done']);
     at(10 * min); b.spine.tick();
-    expect(ph.frames).toHaveLength(4);                               // nothing after the turn ended
+    expect(ph.frames).toHaveLength(5);                               // nothing after the turn ended
+  });
+
+  it('(a) the cadence is config-driven (liveness.every_ms → livenessEveryMs)', async () => {
+    const b = build({ livenessEveryMs: 20 * sec });
+    b.bridge.emit(mention('@e long job'));
+    await flush();
+    const ph = b.bridge.streams[0];
+    for (const t of [5, 10, 15]) { at(t * sec); b.spine.tick(); }
+    expect(ph.frames).toEqual([]);
+    for (const t of [20, 25, 35, 40]) { at(t * sec); b.spine.tick(); }
+    expect(ph.frames).toEqual(['⏳ Thinking… ⤴️ 20s', '⏳ Thinking… ↪️ 40s']);
+  });
+
+  it('(d) at the 5 s cadence nothing edits the placeholder at or past LIVE_EDIT_MS; the rolled status ticks on', async () => {
+    const b = build();
+    b.bridge.emit(mention('@e very long job'));
+    await flush();
+    const ph = b.bridge.streams[0];
+    for (let t = 5 * sec; t <= 20 * min; t += 5 * sec) { at(t); b.spine.tick(); }
+    expect(ph.frames).toHaveLength(LIVE_EDIT_MS / (5 * sec) - 1);   // 5 s … 12m55s
+    expect(ph.frames.at(-1)).toBe('⏳ Thinking… ⤴️ 12m55s');
+    expect(ph.finals).toEqual([]);
+    const st = b.bridge.streams[1];
+    expect(st.init).toBe('⏳ still thinking…');
+    expect(st.frames.slice(0, 2)).toEqual(['⏳ still thinking… ⤴️ 13m05s', '⏳ still thinking… ↪️ 13m10s']);
+    expect(st.frames.at(-1)).toBe('⏳ still thinking… ↪️ 20m00s');
+    expect(b.bridge.streams).toHaveLength(2);
   });
 
   it('(d) no edit past the edit window: the placeholder freezes, a status message takes over, the late reply goes out fresh', async () => {
@@ -115,12 +144,12 @@ describe('liveness — a running turn', () => {
     const ph = b.bridge.streams[0];
     for (let t = 30 * sec; t <= 20 * min; t += 30 * sec) { at(t); b.spine.tick(); }
     expect(ph.frames.length).toBeGreaterThan(20);
-    expect(ph.frames.at(-1)).toBe('⏳ Thinking… 12m30s');            // the last edit inside LIVE_EDIT_MS
+    expect(ph.frames.at(-1)).toBe('⏳ Thinking… ⤴️ 12m30s');            // the last edit inside LIVE_EDIT_MS
     expect(b.bridge.streams).toHaveLength(2);
     const st = b.bridge.streams[1];
     expect(st.chat).toBe(CHAT);
     expect(st.init).toBe('⏳ still thinking…');
-    expect(st.frames.at(-1)).toBe('⏳ still thinking… 20m00s');
+    expect(st.frames.at(-1)).toBe('⏳ still thinking… ↪️ 20m00s');
 
     b.brain.calls[0].release('done');
     await done;
@@ -198,9 +227,22 @@ describe('liveness — a running turn', () => {
     for (let t = 30 * sec; t <= 13 * min + LIVE_EDIT_MS + min; t += 30 * sec) { at(t); b.spine.tick(); }
     const [, first, second] = b.bridge.streams;
     expect(second).toBeTruthy();
-    expect(first.frames.at(-1)).toBe('⏳ still thinking… 25m30s');   // its last edit, 12m30s after its post
+    expect(first.frames.at(-1)).toBe('⏳ still thinking… ⤴️ 25m30s');   // its last edit, 12m30s after its post
     expect(first.finals).toEqual([]);                                 // frozen there, never edited again
     expect(b.bridge.streams).toHaveLength(3);
+  });
+
+  it('(f) a PUBLIC being has no placeholder, so nothing ticks: no stream, no status, only its reply', async () => {
+    const b = build({ publicOf: () => true });
+    const done = b.bridge.emit(mention('@e long job'));
+    await flush();
+    for (let t = 5 * sec; t <= 20 * min; t += 5 * sec) { at(t); b.spine.tick(); }
+    b.brain.tasks = [{ description: 'Run the audit', since: T0 }];
+    b.brain.calls[0].release('the answer');
+    await done;
+    for (let t = 20 * min; t <= 25 * min; t += 5 * sec) { at(t); b.spine.tick(); }
+    expect(b.bridge.streams).toEqual([]);
+    expect(b.bridge.sent.map((s) => s.text)).toEqual(['the answer']);
   });
 
   it('(e) STOP: no animation edit and no status message while the STOP file exists', async () => {
@@ -237,7 +279,7 @@ describe('liveness — background work with no turn in flight', () => {
     expect(st.opts).toMatchObject({ bodyEmoji: '🐶', persona: 'egpt', replyTo: null });
 
     at(4 * min + 5 * sec); b.spine.tick();
-    expect(st.frames).toEqual(['⚙️ working in background: Run the audit ⏳ 4m00s']);
+    expect(st.frames).toEqual(['⚙️ working in background: Run the audit ⏳ ⤴️ 4m00s']);
 
     b.brain.tasks = [];
     const woke = b.spine.wakeOnBackground({ being: 'egpt', surface: 'whatsapp', chatId: CHAT, summaries: ['Run the audit — completed'] });
@@ -264,6 +306,23 @@ describe('liveness — background work with no turn in flight', () => {
     b.spine.wakeOnBackground({ being: 'egpt', surface: 'whatsapp', chatId: CHAT, summaries: ['x'] });
     await flush();
     expect(b.bridge.streams).toHaveLength(3);                         // a fresh placeholder, not the ended status
+  });
+
+  it('(b) on a 5 s tick the background status keeps its 30 s cadence and its one quiet interval', async () => {
+    const b = build();
+    await dispatchBackground(b);
+    const st = b.bridge.streams[1];
+    for (let t = 5 * sec; t <= 90 * sec; t += 5 * sec) { at(t); b.spine.tick(); }
+    expect(st.frames).toEqual([
+      '⚙️ working in background: Run the audit ⏳ ⤴️ 25s',
+      '⚙️ working in background: Run the audit ⏳ ↪️ 55s',
+      '⚙️ working in background: Run the audit ⏳ ⤴️ 1m25s',
+    ]);
+    b.brain.tasks = [];
+    for (let t = 95 * sec; t <= 145 * sec; t += 5 * sec) { at(t); b.spine.tick(); }
+    expect(st.finals).toEqual([]);                                    // quiet at 2m00s: a wake may be on its way
+    at(150 * sec); b.spine.tick();
+    expect(st.finals).toEqual(['✓ background work ended: Run the audit']);
   });
 
   it('(c) animation frames are never recorded: no transcript line, no stream bytes, and each one is a live frame the bridge drops before the spine', async () => {

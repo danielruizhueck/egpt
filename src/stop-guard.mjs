@@ -66,7 +66,7 @@ import { EGPT_HOME } from './egpt-home.mjs';
 // THE codec, imported — never a second copy of the frame regex here (src/node-signature.mjs
 // is the one definition the outbound wrap, the inbound envelope and this gate all share).
 import { hasNodeSignature, stripNodeSignature, stripRenderedNodeSignature } from './node-signature.mjs';
-import { THINKING, QUEUED } from './spine/sender.mjs';
+import { THINKING, QUEUED, LIVE_TICK_SUFFIX } from './spine/sender.mjs';
 
 // THE KILL SWITCH, as a file. Profile ROOT — beside config/ and state/, deliberately
 // visible — so `ls ~/.egpt` shows a stopped node at a glance and `rm ~/.egpt/STOP` is the
@@ -234,8 +234,9 @@ export function normalizeLine(text) {
 
 // sender.mjs's THINKING / QUEUED(n), alone or with only the visible signature decoration around
 // them (no letter, no digit). Live 2026-10-11: three ordinary E turns read as “⏳ Thinking… 🏰” 3×.
+// A liveness pulse's tick + elapsed time (sender liveFrame) is part of the placeholder.
 const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const STATUS = new RegExp([THINKING, QUEUED('\0')].map(escRe).join('|').replace('\0', '\\d+'), 'u');
+const STATUS = new RegExp(`(?:${[THINKING, QUEUED('\0')].map(escRe).join('|').replace('\0', '\\d+')})(?:${LIVE_TICK_SUFFIX})?`, 'u');
 const isStatusLine = (line) => STATUS.test(line) && !/[\p{L}\p{N}]/u.test(line.replace(STATUS, ''));
 
 // A line, clipped for a chat notice / a log line.

@@ -188,6 +188,7 @@ export function createSpine({
   clock = { now: () => Date.now() },
   log = {},
   tickMs = 0,
+  livenessEveryMs,                     // a running turn's liveness pulse (config liveness.every_ms); undefined → liveness.mjs default
   // DEFECT 2 (operator 2026-07-04, "there should be a bridge timeout?"): a per-turn
   // backstop. 10 min — a genuinely wedged/hung CLI, never a legitimately long
   // tool-heavy turn (WebSearch+WebFetch+deep reasoning finish well under it). On
@@ -228,7 +229,7 @@ export function createSpine({
   const turns = injectedTurns ?? createTurns({ brain, bridge, bridgeOf, log });
   // LIVENESS (src/spine/liveness.mjs): a running turn and a being's background work stay visibly
   // alive in the chat; long background work is asked about through the wake path below.
-  const liveness = createLiveness({ sender, brain, now: () => clock.now(), stopped: () => !!stopSwitch?.present(), labelOf, note, ask: (o) => wakeOnBackground(o), report: logToGroup });
+  const liveness = createLiveness({ sender, brain, now: () => clock.now(), everyMs: livenessEveryMs, stopped: () => !!stopSwitch?.present(), labelOf, note, ask: (o) => wakeOnBackground(o), report: logToGroup });
 
   // --- GUARD (C7.7): the SINGLE per-channel loop-breaker + human STOP/RESUME, wired at
   //     THIS chokepoint (handleFast) through which every inbound turn flows. Injected, so

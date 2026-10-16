@@ -2668,6 +2668,18 @@ export const CONFIG_SCHEMA = {
     backstop, NOT the warm pool's own timeout-free design (left untouched).
   `,
 
+  liveness: `
+    A running turn's "⏳ Thinking…" placeholder stays visibly alive
+    (src/spine/liveness.mjs): re-edited with ⤴️ / ↪️ alternating and the elapsed
+    time, never past the 13-min edit window (sender LIVE_EDIT_MS).
+
+    KEYS:
+      every_ms
+        DEFAULT: 5000 (operator 2026-10-15: "add a ⤴️ ↪️ every 5 s").
+        The spine tick is sized down to it (boot effectiveTickMs). Read at boot.
+        Background status lines keep their own 30 s cadence.
+  `,
+
   auto_restart_on_config_change: `
     Auto-apply a config.yaml edit by restarting (operator 2026-10-09;
     src/spine/spine.mjs maybeRestartOnConfigChange, wired at boot's createSpine).

@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { spawnSync, spawn } from 'node:child_process';
 
 import { createSpine } from './spine.mjs';
+import { LIVENESS_EVERY_MS } from './liveness.mjs';
 import { EGPT_HOME } from '../egpt-home.mjs';
 import { createBeeperBridgePort } from '../bridges/beeper-port.mjs';
 import { createShellPort, shellPortFrom } from '../bridges/shell-port.mjs';
@@ -3456,8 +3457,10 @@ export async function boot({
   // cadence finer than the tick can't be honored. Tighten tickMs down to finestMs
   // (floored at 500ms — the registry can't beat finer than the tick anyway).
   // tickMs<=0 (tests drive tick() by hand) stays 0 = no auto-timer.
+  // The running-turn liveness pulse (config liveness.every_ms) rides the tick too.
   const { finestMs } = await heartbeatLoader.collect();
-  const effectiveTickMs = tickMs > 0 ? Math.max(500, Math.min(tickMs, finestMs ?? tickMs)) : tickMs;
+  const livenessEveryMs = cfg.liveness?.every_ms > 0 ? cfg.liveness.every_ms : LIVENESS_EVERY_MS;
+  const effectiveTickMs = tickMs > 0 ? Math.max(500, Math.min(tickMs, finestMs ?? tickMs, livenessEveryMs)) : tickMs;
 
   // The SINGLE guard (C7.7, plans/260722-COMMAND-SURFACE-ROADMAP.md phase 3), ONE guard with TWO
   // TRIGGERS since 2026-09-20: a RATE (`turns` non-human turns inside `window` MINUTES) and
@@ -3537,7 +3540,7 @@ export async function boot({
   // seam = announceAndExit(43), the SAME exit-43 drain the ingest /restart runs (not duplicated).
   const autoRestartOnConfigChange = cfg.auto_restart_on_config_change === true;
   const configBootHash = configContentHashSync();
-  const spine = createSpine({ bridge, bridgeOf: rawBridgeOf, peerMouth, brain, turns, ...services, commands, mesh, actions, advice, guard, guardOverride, fromThisNode, say: sayOnce, logToGroup: (text) => logToGroup(`${getConfig()?.node_name ?? '?'} · ${text}`), stopSwitch, isSelfChat, isTransit: (ev) => isRelayChannelChat(getConfig(), ev), roomRelay, readTranscript, refreshConfig: heartbeatLoader.reload, autoRestartOnConfigChange, configBootHash, readConfigHash: configContentHashSync, requestRestart: () => announceAndExit(43), radioRelay: radioRelay.relay, synthesize: vx.synthesize, voice: vx.voice, defaultBeing: defaultKey, labelOf, timeZone: transcriptTimeZone, clock: { now }, log, turnTimeoutMs, tickMs: effectiveTickMs, setInterval: setIntervalFn, clearInterval: clearIntervalFn });
+  const spine = createSpine({ bridge, bridgeOf: rawBridgeOf, peerMouth, brain, turns, ...services, commands, mesh, actions, advice, guard, guardOverride, fromThisNode, say: sayOnce, logToGroup: (text) => logToGroup(`${getConfig()?.node_name ?? '?'} · ${text}`), stopSwitch, isSelfChat, isTransit: (ev) => isRelayChannelChat(getConfig(), ev), roomRelay, readTranscript, refreshConfig: heartbeatLoader.reload, autoRestartOnConfigChange, configBootHash, readConfigHash: configContentHashSync, requestRestart: () => announceAndExit(43), radioRelay: radioRelay.relay, synthesize: vx.synthesize, voice: vx.voice, defaultBeing: defaultKey, labelOf, timeZone: transcriptTimeZone, clock: { now }, log, turnTimeoutMs, livenessEveryMs, tickMs: effectiveTickMs, setInterval: setIntervalFn, clearInterval: clearIntervalFn });
   // Bind the advice service's answer-routing dispatch now that the spine exists: an
   // operator answer in the advice channel re-enters the pipe as a turn in the origin chat.
   advice.useDispatch(spine.handleInbound);

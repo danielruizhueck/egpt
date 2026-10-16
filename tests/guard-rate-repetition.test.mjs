@@ -19,7 +19,9 @@
 //   3. "if the bridge pauses, it must emit warning in the channel with instructions on how to
 //      recover, instead of leaving everybody hanging."
 import { describe, it, expect } from 'vitest';
-import { createStopGuard, turnKind } from '../src/stop-guard.mjs';
+import { createStopGuard, turnKind, normalizeLine } from '../src/stop-guard.mjs';
+import { THINKING, liveFrame } from '../src/spine/sender.mjs';
+import { editAction, isLiveStreamFrame } from '../src/dispatch-line.mjs';
 import { createSpine } from '../src/spine/spine.mjs';
 import { createIdentity } from '../src/spine/identity.mjs';
 import { encodeNodeSignature } from '../src/node-signature.mjs';
@@ -195,6 +197,21 @@ describe('5 — eGPT\'s own STATUS placeholders are not a repeated LINE (dolly 2
       actions.push(g.noteBeing('A', null, { body: peer(core), author: 'Rodz' }));
     }
     expect(actions).not.toContain('stop');
+  });
+
+  it('a TICKING placeholder (liveness ⤴️/↪️ + elapsed) is status too: no line, never a repeat; the ear drops it as a live frame', () => {
+    const frames = [liveFrame(THINKING, 5_000, 0), liveFrame(THINKING, 65_000, 1), liveFrame(THINKING, 3_725_000, 0)];
+    expect(frames).toEqual(['⏳ Thinking… ⤴️ 5s', '⏳ Thinking… ↪️ 1m05s', '⏳ Thinking… ⤴️ 1h02m']);
+    for (const f of frames) {
+      expect(normalizeLine(peer(f))).toBe('');
+      expect(isLiveStreamFrame(editAction({ targetId: '1', oldText: THINKING, newText: f }))).toBe(true);
+    }
+    let t = 0;
+    const g = createStopGuard({ now: () => t });
+    const actions = [];
+    for (let i = 0; i < 4; i++) { t += 3 * MIN; actions.push(g.noteBeing('A', null, { body: peer(frames[i % 2]), author: 'Rodz' })); }
+    expect(actions).not.toContain('stop');
+    expect(normalizeLine(peer(`${frames[0]} hola`))).not.toBe('');   // a word after the tick is a real line
   });
 
   it('three identical REAL lines still stop it — including one that only starts like a placeholder', () => {

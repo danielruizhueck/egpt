@@ -4586,6 +4586,7 @@ describe('a node that SLEPT is not a node that just started — the backlog cuto
         node_name: 'do', user_name: 'An',
         beeper: { use: 'main', main: { account: 'an@example.com', token: 'TOK-do', base_url: `http://127.0.0.1:${fake.port}` } },
         agents: { egpt: { configuration: 'egpt', handles: ['e', 'egpt'], default: true } },
+        liveness: { every_ms: TICK },   // the liveness pulse would otherwise size the tick down to 5 s
       }),
       makeSession, probeEndpoint: async () => ({ ok: false, status: 0 }),
       loadState: async () => convState, writeState: async (s) => { convState = s; },

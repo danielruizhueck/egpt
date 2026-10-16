@@ -90,7 +90,11 @@ export function elapsed(ms) {
 }
 // The ⏳ is what keeps a pulse off the record and out of the spine (dispatch-line.isLiveStreamFrame).
 const withMark = (s) => (String(s).includes(LIVE_FRAME_MARK) ? String(s) : `${s} ${LIVE_FRAME_MARK}`);
-export const liveFrame = (base, ms) => `${withMark(base)} ${elapsed(ms)}`;
+// Pulse n shows LIVE_TICKS[n % 2] (operator 2026-10-15: "add a ⤴️ ↪️ every 5 s").
+export const LIVE_TICKS = ['⤴️', '↪️'];
+export const liveFrame = (base, ms, n = 0) => `${withMark(base)} ${LIVE_TICKS[n % 2]} ${elapsed(ms)}`;
+// What liveFrame appends to its base, as a regex source (stop-guard's status line).
+export const LIVE_TICK_SUFFIX = ` (?:${LIVE_TICKS.join('|')}) \\d+(?:s|m\\d{2}s|h\\d{2}m)`;
 
 // THE MESSAGE IS APPEND-ONLY (operator 2026-08-28: "the message is replaced for a 'final'
 // message, and the in-transit thinking is deleted … sometimes it is writing something and
@@ -487,7 +491,7 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
       let stream = null;
       let streamOpened = false;
       let streamMouth = null;                          // the LOCAL mouth's route answer, when the stream was opened in its room (confirmedIn)
-      let openedAt = 0, ended = false, lastFrame = null;   // liveness: the post time (edit window), done, last frame shown
+      let openedAt = 0, ended = false, lastFrame = null, pulses = 0;   // liveness: the post time (edit window), done, last frame shown, pulses shown
       const editable = () => now() - openedAt < LIVE_EDIT_MS;
       // Past the edit window: `text` as a fresh message from the mouth that posted the placeholder.
       const postFresh = async (text) => { const h = mint(streamVia, text); await h?.finish?.(text); return h; };
@@ -556,7 +560,7 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
           if (ended || !stream) return true;
           if (!editable()) return false;
           if (label && status) status = label;
-          push(liveFrame(shown() || placeholderText(), ms));
+          push(liveFrame(shown() || placeholderText(), ms, pulses++));
           return true;
         },
         // Settle a status, on `text` or its last frame. Never a fallback send.
