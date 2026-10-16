@@ -14,8 +14,7 @@
 import { LIVE_FRAME_MARK } from '../dispatch-line.mjs';
 import { elapsed } from './sender.mjs';
 
-export const LIVENESS_EVERY_MS = 5_000;        // a running turn's pulse, default of config liveness.every_ms
-export const BACKGROUND_EVERY_MS = 30_000;     // a background status's pulse (and its one quiet interval)
+export const LIVENESS_EVERY_MS = 15_000;       // every live message's pulse (operator 2026-10-16); config liveness.every_ms overrides
 export const ASK_AFTER_MS = 2 * 3_600_000;     // continuous background work this long → ask, then once per interval
 export const ASK_ANSWER_MS = 30 * 60_000;      // an ask with no answer by then → the logging group
 
@@ -69,7 +68,7 @@ export function createLiveness({ sender, brain, now, everyMs = LIVENESS_EVERY_MS
       x.status = roll(x.status, x, STILL_THINKING, t - x.since);
     }
     for (const [k, s] of bg) {
-      if (t - s.last < BACKGROUND_EVERY_MS) continue;
+      if (t - s.last < everyMs) continue;
       s.last = t;
       const tasks = brain.background?.(s.being, s.ev) ?? [];
       if (!tasks.length) {

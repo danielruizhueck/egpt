@@ -3457,7 +3457,7 @@ export async function boot({
   // cadence finer than the tick can't be honored. Tighten tickMs down to finestMs
   // (floored at 500ms — the registry can't beat finer than the tick anyway).
   // tickMs<=0 (tests drive tick() by hand) stays 0 = no auto-timer.
-  // The running-turn liveness pulse (config liveness.every_ms) rides the tick too.
+  // The liveness pulse (config liveness.every_ms) rides the tick too.
   const { finestMs } = await heartbeatLoader.collect();
   const livenessEveryMs = cfg.liveness?.every_ms > 0 ? cfg.liveness.every_ms : LIVENESS_EVERY_MS;
   const effectiveTickMs = tickMs > 0 ? Math.max(500, Math.min(tickMs, finestMs ?? tickMs, livenessEveryMs)) : tickMs;

@@ -83,31 +83,32 @@ beforeEach(() => { vi.useFakeTimers({ toFake: ['Date'] }); at(0); });
 afterEach(() => { vi.useRealTimers(); });
 
 describe('liveness — a running turn', () => {
-  it('(a) the ⏳ placeholder is re-edited every 5 s (the default), alternating ⤴️ / ↪️ before the elapsed time', async () => {
-    expect(LIVENESS_EVERY_MS).toBe(5 * sec);
+  it('(a) the ⏳ placeholder is re-edited every 15 s (the default), alternating ⤴️ / ↪️ before the elapsed time', async () => {
+    expect(LIVENESS_EVERY_MS).toBe(15 * sec);
     const b = build();
     const done = b.bridge.emit(mention('@e long job'));
     await flush();
     const ph = b.bridge.streams[0];
     expect(ph.init).toBe(THINKING);
 
-    at(4 * sec); b.spine.tick();
+    at(14 * sec); b.spine.tick();
     expect(ph.frames).toEqual([]);                                   // nothing before the cadence
-    at(5 * sec); b.spine.tick();
-    at(7 * sec); b.spine.tick();                                     // 2 s later: no second edit
-    at(10 * sec); b.spine.tick();
     at(15 * sec); b.spine.tick();
-    expect(ph.frames).toEqual(['⏳ Thinking… ⤴️ 5s', '⏳ Thinking… ↪️ 10s', '⏳ Thinking… ⤴️ 15s']);
+    at(20 * sec); b.spine.tick();                                    // 5 s later: no second edit
+    at(30 * sec); b.spine.tick();
+    at(45 * sec); b.spine.tick();
+    expect(ph.frames).toEqual(['⏳ Thinking… ⤴️ 15s', '⏳ Thinking… ↪️ 30s', '⏳ Thinking… ⤴️ 45s']);
 
-    b.brain.calls[0].onPartial('Let me check');                      // streamed text stays; the tick rides after it
+    b.brain.calls[0].onPartial('Let me check');                      // writing: the tick rides after the streamed text
     at(80 * sec); b.spine.tick();
-    expect(ph.frames.slice(3)).toEqual(['Let me check ⏳', 'Let me check ⏳ ↪️ 1m20s']);
+    at(95 * sec); b.spine.tick();
+    expect(ph.frames.slice(3)).toEqual(['Let me check ⏳', 'Let me check ⏳ ↪️ 1m20s', 'Let me check ⏳ ⤴️ 1m35s']);
 
     b.brain.calls[0].release('Let me check, done');
     await done;
     expect(ph.finals).toEqual(['Let me check, done']);
     at(10 * min); b.spine.tick();
-    expect(ph.frames).toHaveLength(5);                               // nothing after the turn ended
+    expect(ph.frames).toHaveLength(6);                               // nothing after the turn ended
   });
 
   it('(a) the cadence is config-driven (liveness.every_ms → livenessEveryMs)', async () => {
@@ -116,23 +117,23 @@ describe('liveness — a running turn', () => {
     await flush();
     const ph = b.bridge.streams[0];
     for (const t of [5, 10, 15]) { at(t * sec); b.spine.tick(); }
-    expect(ph.frames).toEqual([]);
+    expect(ph.frames).toEqual([]);                                   // not on the 15 s default
     for (const t of [20, 25, 35, 40]) { at(t * sec); b.spine.tick(); }
     expect(ph.frames).toEqual(['⏳ Thinking… ⤴️ 20s', '⏳ Thinking… ↪️ 40s']);
   });
 
-  it('(d) at the 5 s cadence nothing edits the placeholder at or past LIVE_EDIT_MS; the rolled status ticks on', async () => {
+  it('(d) at the 15 s cadence nothing edits the placeholder at or past LIVE_EDIT_MS; the rolled status ticks on', async () => {
     const b = build();
     b.bridge.emit(mention('@e very long job'));
     await flush();
     const ph = b.bridge.streams[0];
     for (let t = 5 * sec; t <= 20 * min; t += 5 * sec) { at(t); b.spine.tick(); }
-    expect(ph.frames).toHaveLength(LIVE_EDIT_MS / (5 * sec) - 1);   // 5 s … 12m55s
-    expect(ph.frames.at(-1)).toBe('⏳ Thinking… ⤴️ 12m55s');
+    expect(ph.frames).toHaveLength(LIVE_EDIT_MS / (15 * sec) - 1);  // 15 s … 12m45s
+    expect(ph.frames.at(-1)).toBe('⏳ Thinking… ⤴️ 12m45s');
     expect(ph.finals).toEqual([]);
     const st = b.bridge.streams[1];
     expect(st.init).toBe('⏳ still thinking…');
-    expect(st.frames.slice(0, 2)).toEqual(['⏳ still thinking… ⤴️ 13m05s', '⏳ still thinking… ↪️ 13m10s']);
+    expect(st.frames.slice(0, 2)).toEqual(['⏳ still thinking… ⤴️ 13m15s', '⏳ still thinking… ↪️ 13m30s']);
     expect(st.frames.at(-1)).toBe('⏳ still thinking… ↪️ 20m00s');
     expect(b.bridge.streams).toHaveLength(2);
   });
@@ -308,21 +309,34 @@ describe('liveness — background work with no turn in flight', () => {
     expect(b.bridge.streams).toHaveLength(3);                         // a fresh placeholder, not the ended status
   });
 
-  it('(b) on a 5 s tick the background status keeps its 30 s cadence and its one quiet interval', async () => {
+  it('(b) on a 5 s tick the background status pulses every 15 s, alternating ⤴️ / ↪️, with one quiet interval', async () => {
     const b = build();
     await dispatchBackground(b);
     const st = b.bridge.streams[1];
-    for (let t = 5 * sec; t <= 90 * sec; t += 5 * sec) { at(t); b.spine.tick(); }
+    for (let t = 5 * sec; t <= 60 * sec; t += 5 * sec) { at(t); b.spine.tick(); }
     expect(st.frames).toEqual([
-      '⚙️ working in background: Run the audit ⏳ ⤴️ 25s',
+      '⚙️ working in background: Run the audit ⏳ ⤴️ 10s',
+      '⚙️ working in background: Run the audit ⏳ ↪️ 25s',
+      '⚙️ working in background: Run the audit ⏳ ⤴️ 40s',
       '⚙️ working in background: Run the audit ⏳ ↪️ 55s',
-      '⚙️ working in background: Run the audit ⏳ ⤴️ 1m25s',
     ]);
     b.brain.tasks = [];
-    for (let t = 95 * sec; t <= 145 * sec; t += 5 * sec) { at(t); b.spine.tick(); }
-    expect(st.finals).toEqual([]);                                    // quiet at 2m00s: a wake may be on its way
-    at(150 * sec); b.spine.tick();
+    for (let t = 65 * sec; t <= 85 * sec; t += 5 * sec) { at(t); b.spine.tick(); }
+    expect(st.finals).toEqual([]);                                    // quiet at 1m15s: a wake may be on its way
+    at(90 * sec); b.spine.tick();
     expect(st.finals).toEqual(['✓ background work ended: Run the audit']);
+  });
+
+  it('(b) config liveness.every_ms sets the background cadence too', async () => {
+    const b = build({ livenessEveryMs: 20 * sec });
+    await dispatchBackground(b);
+    const st = b.bridge.streams[1];
+    for (let t = 5 * sec; t <= 60 * sec; t += 5 * sec) { at(t); b.spine.tick(); }
+    expect(st.frames).toEqual([
+      '⚙️ working in background: Run the audit ⏳ ⤴️ 15s',
+      '⚙️ working in background: Run the audit ⏳ ↪️ 35s',
+      '⚙️ working in background: Run the audit ⏳ ⤴️ 55s',
+    ]);
   });
 
   it('(c) animation frames are never recorded: no transcript line, no stream bytes, and each one is a live frame the bridge drops before the spine', async () => {

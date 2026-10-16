@@ -320,8 +320,8 @@ describe('boot()', () => {
     app.stop();
   });
 
-  it('the tick is sized to the liveness cadence: 5 s by default, liveness.every_ms when set', async () => {
-    for (const [liveness, want] of [[undefined, 5_000], [{ every_ms: 10_000 }, 10_000]]) {
+  it('the tick is sized to the liveness cadence: 15 s by default, liveness.every_ms when set', async () => {
+    for (const [liveness, want] of [[undefined, 15_000], [{ every_ms: 10_000 }, 10_000]]) {
       const { start } = fakeStart();
       let state = seedMode(emptyState(), 'on');
       const config = { whatsapp: {}, node_name: 'kg', agents: { egpt: { configuration: 'egpt', handles: ['e', 'egpt'], default: true } }, ...(liveness ? { liveness } : {}) };

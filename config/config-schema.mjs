@@ -2675,9 +2675,9 @@ export const CONFIG_SCHEMA = {
 
     KEYS:
       every_ms
-        DEFAULT: 5000 (operator 2026-10-15: "add a ⤴️ ↪️ every 5 s").
+        DEFAULT: 15000 (operator 2026-10-16: "all updates every 15s").
         The spine tick is sized down to it (boot effectiveTickMs). Read at boot.
-        Background status lines keep their own 30 s cadence.
+        Background status lines share it.
   `,
 
   auto_restart_on_config_change: `

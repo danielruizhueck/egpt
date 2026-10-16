@@ -90,7 +90,7 @@ export function elapsed(ms) {
 }
 // The ⏳ is what keeps a pulse off the record and out of the spine (dispatch-line.isLiveStreamFrame).
 const withMark = (s) => (String(s).includes(LIVE_FRAME_MARK) ? String(s) : `${s} ${LIVE_FRAME_MARK}`);
-// Pulse n shows LIVE_TICKS[n % 2] (operator 2026-10-15: "add a ⤴️ ↪️ every 5 s").
+// Pulse n shows LIVE_TICKS[n % 2] on every live message (operator 2026-10-15/16).
 export const LIVE_TICKS = ['⤴️', '↪️'];
 export const liveFrame = (base, ms, n = 0) => `${withMark(base)} ${LIVE_TICKS[n % 2]} ${elapsed(ms)}`;
 // What liveFrame appends to its base, as a regex source (stop-guard's status line).

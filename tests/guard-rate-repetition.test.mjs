@@ -200,8 +200,8 @@ describe('5 — eGPT\'s own STATUS placeholders are not a repeated LINE (dolly 2
   });
 
   it('a TICKING placeholder (liveness ⤴️/↪️ + elapsed) is status too: no line, never a repeat; the ear drops it as a live frame', () => {
-    const frames = [liveFrame(THINKING, 5_000, 0), liveFrame(THINKING, 65_000, 1), liveFrame(THINKING, 3_725_000, 0)];
-    expect(frames).toEqual(['⏳ Thinking… ⤴️ 5s', '⏳ Thinking… ↪️ 1m05s', '⏳ Thinking… ⤴️ 1h02m']);
+    const frames = [liveFrame(THINKING, 15_000, 0), liveFrame(THINKING, 65_000, 1), liveFrame(THINKING, 3_725_000, 0)];
+    expect(frames).toEqual(['⏳ Thinking… ⤴️ 15s', '⏳ Thinking… ↪️ 1m05s', '⏳ Thinking… ⤴️ 1h02m']);
     for (const f of frames) {
       expect(normalizeLine(peer(f))).toBe('');
       expect(isLiveStreamFrame(editAction({ targetId: '1', oldText: THINKING, newText: f }))).toBe(true);

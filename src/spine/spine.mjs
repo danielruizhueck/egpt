@@ -188,7 +188,7 @@ export function createSpine({
   clock = { now: () => Date.now() },
   log = {},
   tickMs = 0,
-  livenessEveryMs,                     // a running turn's liveness pulse (config liveness.every_ms); undefined → liveness.mjs default
+  livenessEveryMs,                     // every live message's pulse (config liveness.every_ms); undefined → liveness.mjs default
   // DEFECT 2 (operator 2026-07-04, "there should be a bridge timeout?"): a per-turn
   // backstop. 10 min — a genuinely wedged/hung CLI, never a legitimately long
   // tool-heavy turn (WebSearch+WebFetch+deep reasoning finish well under it). On
