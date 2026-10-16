@@ -51,7 +51,7 @@
 //     gates cover edit/receipt re-fires and crash replays.
 import WebSocket from 'ws';
 import { transcribeAudioFile } from '../tools/transcribe.mjs';
-import { transcribeVoiceNote, voiceTranscriptBody, POSTS_BACK_DELAY_MS, ECHO_MARKER } from '../incoming-media.mjs';
+import { transcribeVoiceNote, voiceTranscriptBody, voiceArrivalBody, voiceFailedBody, VOICE_ARRIVAL_MARK, VOICE_FAILED_MARK, POSTS_BACK_DELAY_MS, ECHO_MARKER } from '../incoming-media.mjs';
 import { makeSerialByKey } from '../serial-by-key.mjs';
 import { htmlToMarkdown } from '../html-to-markdown.mjs';
 import { normalizeTokens, similarity } from '../text-similarity.mjs';
@@ -163,11 +163,12 @@ export function newerMsgId(a, b) {
 }
 
 // REUSE the ALREADY-MADE arrival transcription (operator 2026-07-20). A received
-// voice note is transcribed ONCE when it lands (dispatchMessage, ~L1096) and written
-// to transcript.md as ONE entry whose header carries the message id and whose body
-// is the marked transcript:
-//   Sender@[chat].node (HH:MM) #<id>[ re #<rid>]: (voice transcription, Ns) <text…>
-// (dispatch-line.formatDispatchLine + incoming-media.voiceTranscriptBody). The bare-@e
+// voice note is transcribed ONCE when it lands (dispatchMessage) and, since 2026-10-16,
+// recorded as TWO lines — its arrival under its id, then the marked transcript answering it:
+//   Sender@[chat].node (HH:MM) #<id>: (voice note, Ns — being transcribed…)
+//   Sender@[chat].node (HH:MM): [re #<id>] (voice transcription, Ns) <text…>
+// (bodyForMessageId resolves #<id> to the second; notes recorded earlier are one
+// `#<id>: (voice transcription, Ns) …` line, read the same way). The bare-@e
 // reply branch looks THAT text up by the quoted id instead of re-transcribing the audio
 // (which was a wasteful DOUBLE transcription).
 //
@@ -178,7 +179,7 @@ export function newerMsgId(a, b) {
 // test — so that is all that stayed behind. Returns the transcription text, or null when the id
 // has no VOICE-transcription entry (→ the branch falls through to @e→E; it never re-transcribes).
 const _VOICE_MARK = /^\(voice transcription(?:,[^)]*)?\)\s*/;
-// MEDIA-ANNOUNCEMENT line (operator 2026-08-10): the exact shape logged by _mediaLines
+// MEDIA-ANNOUNCEMENT line (operator 2026-08-10): the exact shape logged by withMedia
 // (~L1352) for a saved non-voice attachment — `(image foo.png) [saved: media/...]` — so the
 // bare-@e TEXT-mirror branch below can tell a real quoted PROSE reply apart from a quoted
 // image/video/audio/document announcement (which must never be synthesized to audio verbatim).
@@ -195,11 +196,14 @@ const _MEDIA_MARK = MEDIA_LINE;
 // be read aloud as if it were plain text"). A quoted placeholder IS a voice note with no
 // transcript, so it falls through to the normal @e→E turn on the existing "no voice-transcript
 // entry" line, the same way a quoted id with no entry at all does.
+// Since 2026-10-16 a failure is the note's outcome line (voiceFailedBody) and a note still being
+// transcribed reads as its arrival (voiceArrivalBody); the old failed placeholder is only READ now,
+// from history.
 const VOICE_NOTE_PLACEHOLDER = '[voice note]';
 const VOICE_NOTE_FAILED_PLACEHOLDER = '[voice note — transcription failed]';
 const _isVoicePlaceholder = (body) => {
   const t = String(body ?? '').trim();
-  return t === VOICE_NOTE_PLACEHOLDER || t === VOICE_NOTE_FAILED_PLACEHOLDER;
+  return t === VOICE_NOTE_PLACEHOLDER || t === VOICE_NOTE_FAILED_PLACEHOLDER || VOICE_ARRIVAL_MARK.test(t) || VOICE_FAILED_MARK.test(t);
 };
 
 export function transcriptionForNoteId(doc, noteId) {
@@ -2104,7 +2108,7 @@ export async function startBeeperBridge(opts = {}) {
       if (justBanned) return;   // this message tipped the flood → drop it too (floodBan logged the notice)
     }
 
-    let _voiceAtt = null, _voicePath = null, _voiceCaption = null;
+    let _voiceAtt = null, _voicePath = null, _voicePending = null;
     if ((msg.type === 'VOICE' || msg.type === 'AUDIO') && Array.isArray(msg.attachments) && msg.attachments.length) {
       // OUR OWN VOICE OUTPUT (operator 2026-10-13): an incoming audio from a MOUTH identity is a
       // being's synthesized reply echoing back — DROP it before whisper (don't transcribe, don't
@@ -2226,54 +2230,65 @@ export async function startBeeperBridge(opts = {}) {
                     onLog: (m) => onLog(`beeper: ${m}`),
           meta: vmeta,
         }));
-        const transcript = await _transcription;
-        if (transcript) {
-          // Mark the body AS audio (GENOME §4 / C7.6) so the model + reader can
-          // tell a voice note arrived — not an ordinary message. Duration comes
-          // from the ffmpeg WAV the transcriber already made (vmeta.durationSec),
-          // omitted when unknown. The bare transcript still feeds the 👂 ack + the
-          // media sidecar caption.
-          text = voiceTranscriptBody(transcript, { durationSec: vmeta.durationSec });
-          _voiceCaption = transcript;
-          onLog(`beeper: voice transcribed [${chatID}] → ${JSON.stringify(transcript.slice(0, 80))}`);
-        } else { text = svc.enabled ? VOICE_NOTE_FAILED_PLACEHOLDER : VOICE_NOTE_PLACEHOLDER; }
+        // A VOICE NOTE IS TWO LINES (operator 2026-10-16): its ARRIVAL is delivered now (Beeper's
+        // attachment duration is in seconds), and the transcription — or why there is none —
+        // follows as its own line once whisper is done (the end of this function). A chat with
+        // transcription off has nothing pending: one `[voice note]` line, as before.
+        if (svc.enabled) {
+          _voicePending = _transcription.catch((e) => { vmeta.error ??= String(e?.message ?? e); return null; }).then((transcript) => {
+            if (!transcript) return { body: voiceFailedBody(vmeta.error ?? 'no transcript'), caption: null };
+            onLog(`beeper: voice transcribed [${chatID}] → ${JSON.stringify(transcript.slice(0, 80))}`);
+            // Mark the body AS audio (GENOME §4 / C7.6) so the model + reader can
+            // tell a voice note arrived — not an ordinary message. Duration comes
+            // from the ffmpeg WAV the transcriber already made (vmeta.durationSec),
+            // omitted when unknown. The bare transcript still feeds the 👂 ack + the
+            // media sidecar caption.
+            return { body: voiceTranscriptBody(transcript, { durationSec: vmeta.durationSec }), caption: transcript };
+          });
+          text = voiceArrivalBody({ durationSec: att?.duration });
+        } else { await _transcription; text = VOICE_NOTE_PLACEHOLDER; }
       } else { text = VOICE_NOTE_PLACEHOLDER; }
     }
 
     // CONTRACT C2: persist EVERY attachment to the chat's media/ folder BEFORE
     // the non-text early-return below — a photo / sticker / document must be
     // saved even though it doesn't route to a brain in v1. Logging/saving is
-    // independent of surfacing, same as transcripts.
-    const _savedMedia = await persistMedia(msg, info, { voiceAtt: _voiceAtt, voicePath: _voicePath, voiceCaption: _voiceCaption });
+    // independent of surfacing, same as transcripts. A voice note still being
+    // transcribed is persisted with its outcome line (its sidecar caption IS the
+    // transcription), at the end of this function.
+    const withMedia = async (body, voiceCaption) => {
+      const saved = await persistMedia(msg, info, { voiceAtt: _voiceAtt, voicePath: _voicePath, voiceCaption });
 
-    // Surface non-voice media to the model (operator 2026-06-16 regression): a
-    // photo / gif / video / document must be ANNOUNCED so E sees it arrived and a
-    // vision brain can Read the saved file. Voice is already in `text` (the
-    // transcript), and audio is the transcribe path — skip both here. Without
-    // this, media was saved to disk but the bridge returned before onIncoming, so
-    // E never knew (e.g. "puedes ver lo que posteó ron?").
-    // Surface media paths RELATIVE to the chat's conversation folder
-    // (`media/<file>`), NEVER the absolute host path (GENOME §2.5; shared
-    // `relMediaPath`). Applies to the saved attachment AND the Route-A frames.
-    const _mediaLines = _savedMedia
-      // Announce every saved attachment EXCEPT the voice note already in `text`.
-      // (Was: `m.kind !== 'audio'` — which silently dropped a shared AUDIO FILE
-      // like an .mp3 that wasn't a voice note, so E never knew it arrived and it
-      // wasn't even logged — operator 2026-06-16. `inText` now excludes only the
-      // transcribed voice note, so non-voice audio files surface like any media.)
-      .filter((m) => m.savedPath && !m.isVoiceNote && !m.inText)
-      .map((m) => {
-        let line = `(${m.kind}${m.fileName ? ` ${m.fileName}` : ''}) [saved: ${relMediaPath(m.savedPath)}]`;
-        // ROUTE A: a video is handed to E on a silver platter — keyframes the
-        // host already extracted (Read them with your vision) + the audio
-        // transcript. E never had to run anything.
-        if (m.kind === 'video') {
-          if (Array.isArray(m.framePaths) && m.framePaths.length) line += `\nframes (Read these): ${m.framePaths.map(relMediaPath).join('  ')}`;
-          if (m.transcript) line += `\n(video transcription) ${m.transcript}`;
-        }
-        return line;
-      });
-    if (_mediaLines.length) text = [text, ..._mediaLines].filter(Boolean).join('\n');
+      // Surface non-voice media to the model (operator 2026-06-16 regression): a
+      // photo / gif / video / document must be ANNOUNCED so E sees it arrived and a
+      // vision brain can Read the saved file. Voice is already in `text` (the
+      // transcript), and audio is the transcribe path — skip both here. Without
+      // this, media was saved to disk but the bridge returned before onIncoming, so
+      // E never knew (e.g. "puedes ver lo que posteó ron?").
+      // Surface media paths RELATIVE to the chat's conversation folder
+      // (`media/<file>`), NEVER the absolute host path (GENOME §2.5; shared
+      // `relMediaPath`). Applies to the saved attachment AND the Route-A frames.
+      const lines = saved
+        // Announce every saved attachment EXCEPT the voice note already in `text`.
+        // (Was: `m.kind !== 'audio'` — which silently dropped a shared AUDIO FILE
+        // like an .mp3 that wasn't a voice note, so E never knew it arrived and it
+        // wasn't even logged — operator 2026-06-16. `inText` now excludes only the
+        // transcribed voice note, so non-voice audio files surface like any media.)
+        .filter((m) => m.savedPath && !m.isVoiceNote && !m.inText)
+        .map((m) => {
+          let line = `(${m.kind}${m.fileName ? ` ${m.fileName}` : ''}) [saved: ${relMediaPath(m.savedPath)}]`;
+          // ROUTE A: a video is handed to E on a silver platter — keyframes the
+          // host already extracted (Read them with your vision) + the audio
+          // transcript. E never had to run anything.
+          if (m.kind === 'video') {
+            if (Array.isArray(m.framePaths) && m.framePaths.length) line += `\nframes (Read these): ${m.framePaths.map(relMediaPath).join('  ')}`;
+            if (m.transcript) line += `\n(video transcription) ${m.transcript}`;
+          }
+          return line;
+        });
+      return lines.length ? [body, ...lines].filter(Boolean).join('\n') : body;
+    };
+    if (!_voicePending) text = await withMedia(text, null);
 
     if (text == null) return;   // nothing to route — no text, no announceable media
 
@@ -2445,16 +2460,12 @@ export async function startBeeperBridge(opts = {}) {
             onLog(`beeper: 🔊 ack send FAILED to confirm ↩${replyToId} [${info.title}] — falling through to @e→E`);
           }
         }
-        // No transcript entry for the quoted id (voice OR text). The arrival transcription is
-        // awaited inside dispatch (the voice branch above) and its transcript.md write rides the
-        // fire-and-forget onIncoming — but since 2026-09-10 this reply NO LONGER queues behind
-        // that transcription (see `_transcribing`), so the miss window is now as long as the note
-        // still being transcribed, not sub-second: reply @e to a note whisper is still chewing on
-        // and you land HERE. There is no clean seam to force/await that SAME pending arrival
-        // transcription from the bridge WITHOUT re-transcribing (which this rework exists to
-        // remove), so a miss falls through to normal @e→E. FOLLOW-UP: a transcription store keyed
-        // by message id (or awaiting the pending arrival) would close the race.
-        onLog(`beeper: 👂 no voice-transcript entry for ↩${replyToId} [${info.title}] — falling through to @e→E`);
+        // No transcript for the quoted id (voice OR text) → normal @e→E. A note whisper is still
+        // chewing on is no longer a silent miss (2026-10-16): its arrival line is on the record and
+        // reads "being transcribed", which is what E is quoted and what this says.
+        onLog(VOICE_ARRIVAL_MARK.test(String(quotedText ?? '').trim())
+          ? `beeper: 👂 ↩${replyToId} is still being transcribed [${info.title}] — falling through to @e→E`
+          : `beeper: 👂 no voice-transcript entry for ↩${replyToId} [${info.title}] — falling through to @e→E`);
       }
     }
     const from = {
@@ -2495,7 +2506,9 @@ export async function startBeeperBridge(opts = {}) {
       replyToId,                            // the quoted message id (→ `↩#<id>` in the dispatch line), null when not a reply
       replyToBeing,                         // the being key in the quoted message's frame (this node's), null otherwise — the router addresses it
       isReaction: false,
-      isTranscriptFromVoice: isVoice,
+      // a voice note's ARRIVAL carries no transcript (yet); its outcome line, below, does
+      isTranscriptFromVoice: isVoice && !_voicePending,
+      ...(_voicePending ? { voiceLine: 'arrival' } : {}),
       msgKey: msg.id || null,
       // THE CROSS-ACCOUNT IDENTITY of this message (crossAccountMsgKey, above): the content hash
       // and the message's OWN timestamp — the only two fields the co-account node's view of this
@@ -2514,8 +2527,19 @@ export async function startBeeperBridge(opts = {}) {
     // Awaiting the turn here would chain every conversation's turn behind this dispatch
     // (a mid-train mention's placeholder would not appear until the prior turn finished).
     // The returned promise settles, never rejects; log any rejection.
-    try { Promise.resolve(onIncoming?.(text, from)).catch((e) => onLog(`beeper: onIncoming threw — ${e?.message ?? e}`)); }
-    catch (e) { onLog(`beeper: onIncoming threw — ${e?.message ?? e}`); }
+    const deliver = (body, f) => {
+      try { Promise.resolve(onIncoming?.(body, f)).catch((e) => onLog(`beeper: onIncoming threw — ${e?.message ?? e}`)); }
+      catch (e) { onLog(`beeper: onIncoming threw — ${e?.message ?? e}`); }
+    };
+    deliver(text, from);
+    if (!_voicePending) return;
+    // …AND THE VOICE NOTE'S SECOND LINE: its transcription (or why there is none), answering the
+    // arrival — this is the line that prompts. Same sender, same note id, its own time.
+    const { body, caption } = await _voicePending;
+    const heard = await withMedia(body, caption);
+    const vst = mentionStatus(heard, wakeWords, { addressWithoutAt, voiceWake: voiceWakeWords });
+    onLog(`beeper: incoming [${info.title}] ${msg.senderName}: ${JSON.stringify(heard.slice(0, 60))} (atE=${vst.atEAnywhere} voice ↩#${msg.id ?? '?'})`);
+    deliver(heard, { ...from, isTranscriptFromVoice: true, voiceLine: 'outcome', atEStart: vst.atEStart, atEAnywhere: vst.atEAnywhere });
   }
 
   // --- WebSocket afferent (subscribe '*', handle message.upserted) ---

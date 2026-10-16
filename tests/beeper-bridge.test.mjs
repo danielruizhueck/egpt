@@ -27,6 +27,7 @@ import { EGPT_HOME } from '../src/egpt-home.mjs';
 import { encodeMesh } from '../src/mesh/relay.mjs';
 import { surfaceOf, createIdentity } from '../src/spine/identity.mjs';
 import { createSpine } from '../src/spine/spine.mjs';
+import { createTranscript } from '../src/spine/transcript.mjs';
 import { fromOtherNode } from '../src/spine/node-names.mjs';
 import { encodeNodeSignature, stripNodeSignature } from '../src/node-signature.mjs';
 import { hhmm } from '../src/dispatch-line.mjs';
@@ -318,6 +319,7 @@ afterEach(async () => {
 
 async function startBridge(extra = {}) {
   const incoming = [];
+  const arrivals = [];   // a voice note's ARRIVAL line (2026-10-16) — a record that prompts nobody; `incoming` keeps what dispatches
   const media = [];
   const base = fake.subscribed();   // wait for THIS bridge's subscription, not a predecessor's
   const bridge = await startBeeperBridge({
@@ -325,7 +327,7 @@ async function startBridge(extra = {}) {
     baseUrl: `http://127.0.0.1:${fake.port}`,
     wsUrl: `ws://127.0.0.1:${fake.port}/v1/ws`,
     stateDir,
-    onIncoming: (text, from) => incoming.push({ text, from }),
+    onIncoming: (text, from) => (from?.voiceLine === 'arrival' ? arrivals : incoming).push({ text, from }),
     onMedia: (m) => media.push(m),
     transcribe: async () => 'fake transcript',
     onLog: (m) => { if (/failed|DROPPED|error/i.test(m)) console.error('[BRIDGELOG]', m); },
@@ -341,7 +343,7 @@ async function startBridge(extra = {}) {
   // per-test budget, which is what made this whole FILE flake under full parallel load.
   // One await here, and no test in the file races the bridge's own startup any more.
   await bridge.startupReady;
-  return { bridge, incoming, media };
+  return { bridge, incoming, arrivals, media };
 }
 
 // A local file standing in for an already-downloaded attachment (srcURL file://
@@ -3106,6 +3108,38 @@ describe('stale-twin placeholder landmine — pre-send id floor', () => {
     });
   }
 
+  // TWO LINES (operator 2026-10-16): a note is on the record from its arrival. While it is being
+  // transcribed its id resolves to "being transcribed" — read aloud by nobody, and SAID in the log
+  // (was: no entry at all, a silent miss). A failed note resolves to its failure line, also not prose.
+  const outcomeLine = (id, body, { sender = 'Bea', chat = 'Bea', ts = '14:35' } = {}) => `${sender}@[${chat}].wa (${ts}): [re #${id}] ${body}`;
+  for (const [id, entries, said] of [
+    ['vn-pending', [textLine('vn-pending', '(voice note, 11s — being transcribed…)')], '👂 ↩vn-pending is still being transcribed'],
+    ['vn-lost', [textLine('vn-lost', '(voice note, 11s — being transcribed…)'), outcomeLine('vn-lost', '(voice note not transcribed: no transcript)')], '👂 no voice-transcript entry for ↩vn-lost'],
+  ]) {
+    it(`a bare @e reply to ${id} does NOT synthesize — it falls through to a normal @e→E turn`, async () => {
+      const synthesize = countingSynthesize();
+      const logs = [];
+      const doc = transcriptDoc(...entries);
+      const { incoming } = await startBridge({ readTranscript: async () => doc, synthesize, voice: 'ona', onLog: (m) => logs.push(m) });
+      fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: `reply-${id}`, text: '@e', isSender: true, linkedMessageID: id })] });
+      await waitFor(() => synthesize.calls > 0 || incoming.some((i) => i.from.msgKey === `reply-${id}`));
+      expect(synthesize.calls).toBe(0);
+      expect(fake.posts.find((p) => p.text === '🔊 reading…')).toBeFalsy();
+      expect(incoming.find((i) => i.from.msgKey === `reply-${id}`).text).toBe('@e');
+      expect(logs.some((m) => m.includes(said))).toBe(true);
+    });
+  }
+
+  it('a bare @e reply to a TWO-LINE note reuses its transcription line (👂 <text>), not its arrival', async () => {
+    const doc = transcriptDoc(textLine('vn-2l', '(voice note, 11s — being transcribed…)'), textLine('chat-x', 'jaja'), outcomeLine('vn-2l', '(voice transcription, 11s) hola que tal'));
+    const transcribe = countingTranscribe();
+    await startBridge({ readTranscript: async () => doc, transcribe });
+    fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: 'reply-2l', text: '@e', isSender: true, linkedMessageID: 'vn-2l' })] });
+    const reveal = await waitFor(() => fake.posts.find((p) => p.text === '👂 hola que tal'));
+    expect(reveal.replyToMessageID).toBe('vn-2l');
+    expect(transcribe.calls).toBe(0);
+  });
+
   // BARE FORM ACCEPTED TOO (operator 2026-08-10): unlike @ev voice-out (which needs '@' to avoid
   // matching "ev" inside ordinary prose), this gate already requires the WHOLE reply to be
   // nothing but the wake-word, so a bare 'e' (no '@') carries the same negligible false-positive
@@ -4168,7 +4202,7 @@ describe('beeper bridge — 🎧 listening mark: placed where the decode runs, t
     const { incoming } = await ear({ tx, mouth });
     emitNote('note-throw');
     await waitFor(() => incoming.length === 1, 3000);
-    expect(incoming[0].text).toBe('[voice note — transcription failed]');
+    expect(incoming[0].text).toBe('(voice note not transcribed: no transcript)');   // the note's outcome line (the chain swallows the throw)
     await waitFor(() => mouth.unreactions.length === 1, 3000);
     expect(mouth.reactions).toHaveLength(1);
     expect(fake.reactions).toEqual([]);
@@ -4222,8 +4256,9 @@ describe('beeper bridge — 🎧 listening mark: placed where the decode runs, t
     expect(fake.unreactions[0]).toMatchObject({ chatID: CHAT('chat-1'), messageID: 'note-solo', reactionKey: LISTENING_REACTION });
   });
 
-  // A failure AFTER the decode (the echo's debounce arm throws, abandoning this message's dispatch)
-  // leaves no mark behind: the mark came down when the decode ended.
+  // A failure AFTER the decode (the echo's debounce arm throws) leaves no mark behind: the mark came
+  // down when the decode ended. Since 2026-10-16 the note's arrival is already on the record, so the
+  // failure closes it with an outcome line instead of abandoning the dispatch.
   it('a failure after the decode leaves no mark behind', async () => {
     const logs = [];
     const { incoming } = await ear({
@@ -4236,8 +4271,9 @@ describe('beeper bridge — 🎧 listening mark: placed where the decode runs, t
       },
     });
     emitNote('note-after');
-    await waitFor(() => logs.some((m) => /dispatch error/.test(m)), 3000);
-    expect(incoming).toHaveLength(0);
+    await waitFor(() => incoming.length === 1, 3000);
+    expect(incoming[0].text).toBe('(voice note not transcribed: scheduler exploded)');
+    expect(logs.some((m) => /dispatch error/.test(m))).toBe(false);
     await waitFor(() => fake.unreactions.length === 1, 3000);
     expect(fake.reactions).toHaveLength(1);
   });
@@ -4377,8 +4413,8 @@ describe('the whole node — replying `e` reads the message back (ear, mouth, re
     const node = await bootKg();
     try {
       upsert(fake, voiceNote(I('fv-note-1'), FAVEL_CHAT, voiceAtt('bytes of the favel note'), Date.now()));
-      await waitFor(() => node.transcriptWith(`#${I('fv-note-1')}:`));
-      expect(node.transcriptWith(`#${I('fv-note-1')}:`)).toContain(`#${I('fv-note-1')}: (voice transcription`);
+      await waitFor(() => node.transcriptWith(`[re #${I('fv-note-1')}] (voice transcription`));
+      expect(node.transcriptWith(`#${I('fv-note-1')}:`)).toContain(`#${I('fv-note-1')}: (voice note`);   // its arrival, then its transcription (2026-10-16)
       upsert(fake, replyE(I('fv-reply-1'), FAVEL_CHAT, I('fv-note-1')));
       await waitFor(() => fake.posts.some(isReveal));
       const reveal = fake.posts.filter(isReveal);
@@ -4413,7 +4449,7 @@ describe('the whole node — replying `e` reads the message back (ear, mouth, re
       const att = voiceAtt('bytes of the shared note');
       upsert(fake, voiceNote(I('sh-note-ear'), SHARED_ON_EAR, att, ts));
       upsert(node.mouth, voiceNote(I('sh-note-mouth'), SHARED_ON_MOUTH, att, ts, { senderID: 'favel-as-rodz-sees-her' }));
-      await waitFor(() => node.transcriptWith(`#${I('sh-note-ear')}:`));
+      await waitFor(() => node.transcriptWith(`[re #${I('sh-note-ear')}] (voice transcription`));
       await waitFor(() => node.lines.some((l) => /voice transcribed \[shared-as-rodz-sees-it\]/.test(l)));
       // The operator's `e`, as each account sees it: his own send on the ear, a member's message on the
       // mouth — under an id on allowed_users, so the mouth's own bridge runs the reply gate too.
@@ -4723,5 +4759,129 @@ describe('createGroup (Beeper async group-create)', () => {
     const r = await bridge.createGroup(OPTS);
     expect(r).toBeNull();
     expect(fake.chatGets.length).toBe(before);   // it never polled a chat GET
+  });
+});
+
+// ── A VOICE NOTE IS TWO LINES (operator 2026-10-16: "transcript is addition only; so, 1. received
+// audio note from X id N, the voice note is being transcribed... lines of chatter later,
+// transcription of audio note N: bla bla"). Was: ONE line, delivered only when whisper finished and
+// stamped with THAT time; while transcribing, the record held no trace of the note. ──
+describe('beeper bridge — a voice note is two lines: its arrival now, its transcription when ready', () => {
+  const deferred = () => { let resolve; const p = new Promise((r) => { resolve = r; }); return { p, resolve }; };
+  const note = (over = {}) => liveMsg({ id: '31503', isSender: false, senderName: 'Diego Pérez', senderPushName: 'Diego Pérez', text: null, type: 'VOICE', attachments: [{ ...voiceAtt(), duration: 11 }], ...over });
+
+  it('REPRODUCE: the arrival is delivered at once — its own id, its duration — before whisper returns; the transcription follows under the same id', async () => {
+    const heard = deferred();
+    const { incoming, arrivals } = await startBridge({ transcribe: () => heard.p });
+    fake.emit({ type: 'message.upserted', entries: [note()] });
+    await waitFor(() => arrivals.length === 1, 3000);
+    expect(arrivals[0].text).toBe('(voice note, 11s — being transcribed…)');
+    expect(arrivals[0].from).toMatchObject({ msgKey: '31503', voiceLine: 'arrival', isTranscriptFromVoice: false });
+    expect(incoming).toHaveLength(0);                                   // whisper still running
+    heard.resolve('Mira marico');
+    await waitFor(() => incoming.length === 1);
+    expect(incoming[0].text).toBe('(voice transcription) Mira marico');
+    expect(incoming[0].from).toMatchObject({ msgKey: '31503', voiceLine: 'outcome', isTranscriptFromVoice: true });
+  });
+
+  for (const [why, transcribe, reason] of [
+    ['throws', async () => { throw new Error('worker timed out'); }, 'worker timed out'],
+    ['returns nothing', async () => null, 'no transcript'],
+  ]) {
+    it(`a transcriber that ${why} still closes the note with an outcome line — never a dangling "being transcribed"`, async () => {
+      const { incoming, arrivals } = await startBridge({ transcribe });
+      fake.emit({ type: 'message.upserted', entries: [note()] });
+      await waitFor(() => incoming.length === 1, 3000);
+      expect(arrivals).toHaveLength(1);
+      expect(incoming[0].text).toBe(`(voice note not transcribed: ${reason})`);
+      expect(incoming[0].from).toMatchObject({ msgKey: '31503', voiceLine: 'outcome' });
+    });
+  }
+
+  it('transcription OFF for the chat: nothing is pending — one `[voice note]` line, as before', async () => {
+    const { incoming, arrivals } = await startBridge({ resolveTranscriptionService: async () => ({ enabled: false, postsBack: false }) });
+    fake.emit({ type: 'message.upserted', entries: [note()] });
+    await waitFor(() => incoming.length === 1);
+    expect(incoming[0].text).toBe('[voice note]');
+    expect(incoming[0].from.voiceLine).toBeUndefined();
+    expect(arrivals).toHaveLength(0);
+  });
+
+  // The whole node: bridge → real identity → spine → real transcript service (in-memory fs).
+  function recordingSpine() {
+    const files = new Map();
+    const io = {
+      appendFile: async (p, d) => { files.set(p, (files.get(p) ?? '') + d); }, mkdir: async () => {}, existsSync: (p) => files.has(p),
+      readFile: async (p) => { if (!files.has(p)) throw new Error('ENOENT'); return files.get(p); }, writeFile: async (p, d) => { files.set(p, d); }, readdir: async () => [],
+    };
+    let now = Date.UTC(2026, 9, 16, 16, 12);
+    const brain = { lines: [], async turn(b, ev) { this.lines.push(ev.line); return { text: 'ok' }; } };
+    const spine = createSpine({
+      bridge: { onMessage() {}, send() {}, stop() {}, wasSentByUs: () => false },
+      brain, identity: createIdentity({ now: () => now }), router: { resolve: () => 'e' },
+      gating: { async decide() { return { mode: 'on', receives: true, mayReply: true, sendToEgpt: 'mode' }; }, surfaces: () => true },
+      sender: { open() { return { activate() {}, update() {}, async finish() {}, fail() {} }; } },
+      transcript: createTranscript({ contacts: { resolve: async () => 'diego' }, io }),
+      heartbeats: { runDue() {} }, mesh: { isEnvelope: () => false, async handle() {} }, clock: { now: () => 1000 }, turnTimeoutMs: 0,
+    });
+    const pending = [];
+    return {
+      brain, at: (hh, mm) => { now = Date.UTC(2026, 9, 16, hh, mm); },
+      feed: (body, from) => { pending.push(spine.handleInbound({ body, from })); },
+      text: () => [...files.entries()].find(([p]) => p.endsWith('transcript.md'))?.[1] ?? '',
+      settled: () => Promise.all(pending),
+    };
+  }
+  const ARRIVAL = 'Diego Pérez@[Diego Pérez].wa (16:12) #31503: (voice note, 11s — being transcribed…)';
+  const CHATTER = 'Bea@[Diego Pérez].wa (16:13) #31504: jaja';
+  const OUTCOME = 'Diego Pérez@[Diego Pérez].wa (16:15): [re #31503] (voice transcription) Mira marico';
+
+  it('end to end: the record gets the arrival at arrival time, then the chatter, then the transcription — appended, nothing rewritten, only the transcription prompts', async () => {
+    fake.chats.set(CHAT('chat-1'), { title: 'Diego Pérez', type: 'single', isMuted: false, accountID: 'whatsapp' });
+    const s = recordingSpine();
+    const heard = deferred();
+    await startBridge({ transcribe: () => heard.p, onIncoming: s.feed });
+    fake.emit({ type: 'message.upserted', entries: [note()] });
+    await waitFor(() => s.text().includes(ARRIVAL), 3000);
+    const afterArrival = s.text();
+    s.at(16, 13);
+    fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: '31504', isSender: false, senderName: 'Bea', senderPushName: 'Bea', text: 'jaja' })] });
+    await waitFor(() => s.text().includes(CHATTER));
+    const afterChatter = s.text();
+    expect(afterChatter.startsWith(afterArrival)).toBe(true);
+    s.at(16, 15);
+    heard.resolve('Mira marico');
+    await waitFor(() => s.text().includes(OUTCOME));
+    await s.settled();
+    const text = s.text();
+    expect(text.startsWith(afterChatter)).toBe(true);                               // append-only: every earlier byte intact
+    expect(text.indexOf(ARRIVAL)).toBeLessThan(text.indexOf(CHATTER));
+    expect(text.indexOf(CHATTER)).toBeLessThan(text.indexOf(OUTCOME));
+    expect(s.brain.lines).toEqual([CHATTER, OUTCOME]);                              // the arrival prompted nobody
+  });
+
+  // Only one node DECODES a note (decode-once; the peer's request is served the same text by the
+  // shared worker), but each node hears the note on its own account and writes its own record.
+  it('the node that does NOT decode writes the same two lines as the one that does', async () => {
+    fake.chats.set(CHAT('chat-1'), { title: 'Diego Pérez', type: 'single', isMuted: false, accountID: 'whatsapp' });
+    const lines = {};
+    const identity = createIdentity({ now: () => Date.UTC(2026, 9, 16, 16, 12) });
+    const run = async (name, id, transcribe) => {
+      const n = await startBridge({ transcribe });
+      fake.emit({ type: 'message.upserted', entries: [note({ id })] });
+      await waitFor(() => n.incoming.length === 1, 3000);
+      lines[name] = [...n.arrivals, ...n.incoming].map((m) => identity.build({ body: m.text, from: m.from }).line.replace(`#${id}`, '#N'));
+      n.bridge.stop();
+      fake.dropSockets();
+    };
+    const decoded = [];
+    await run('kg', '1118', async (p, c, l, m, onDecodeHere) => { await onDecodeHere?.(); decoded.push('kg'); return 'Mira marico'; });
+    await run('do', '2901', async () => 'Mira marico');   // served by the peer's decode — its hook is never called
+    expect(decoded).toEqual(['kg']);
+    expect(lines.kg).toEqual([
+      'Diego Pérez@[Diego Pérez].wa (16:12) #N: (voice note, 11s — being transcribed…)',
+      'Diego Pérez@[Diego Pérez].wa (16:12): [re #N] (voice transcription) Mira marico',
+    ]);
+    expect(lines.do).toEqual(lines.kg);
   });
 });

@@ -900,6 +900,15 @@ export function createSpine({
   // to the transcript. Returns the action to run once the message is on the record, or null
   // when the message is not received at all ('off').
   async function classify(ev, channel) {
+    // A VOICE NOTE'S ARRIVAL (operator 2026-10-16) is a RECORD: its transcription follows as its
+    // own line and is the message every branch below sees. Counted nowhere, prompts nobody, and
+    // recorded only where that line will be — an 'off' gate records neither. The gate is read as
+    // backlog, which creates nothing (wouldReachABeing's read).
+    if (ev.voiceLine === 'arrival') {
+      if (!ev.backlog && !(await gateOf((await targetsOf(ev))[0], { ...ev, backlog: true })).d.receives) return null;
+      return () => { note(`voice: ${guardChannel(ev)} #${ev.msgId ?? '?'} arrived — recorded, being transcribed`); };
+    }
+
     // BACKLOG BACKFILL (operator 2026-07-08, S3 wake): a message older than bridge start —
     // the node slept and woke to a replay — is transcript-logged (the record stays complete)
     // but NEVER dispatched: no command, no mesh, no gate, no mode:on (the woken node backfills,

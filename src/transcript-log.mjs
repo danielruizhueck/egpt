@@ -14,6 +14,7 @@
 // out of transcript.md keys on THAT definition rather than on a copy of it.
 import { renderFrontMatter, stripFrontMatter } from './transcript-meta.mjs';
 import { formatDispatchLine, isDayBoundary } from './dispatch-line.mjs';
+import { VOICE_MARK, VOICE_ARRIVAL_MARK, VOICE_FAILED_MARK } from './incoming-media.mjs';
 
 /**
  * Bytes to append for one transcript line. Prepends the YAML front matter when
@@ -270,7 +271,10 @@ const _TS_RE = new RegExp(_TS);                            // the `(HH:MM)` alon
 // text, beeper.transcriptionForNoteId's `(voice transcription, Ns)` marker test) gets exactly the
 // bytes it got when the reference lived before the colon. Anchored + `[^\]\s]+`, so an ordinary
 // body that merely starts with a bracket is untouched.
-const _REPLY_REF = /^\s*\[re #[^\]\s]+\]\s*/;
+const _REPLY_REF = /^\s*\[re #([^\]\s]+)\]\s*/;
+// A voice note's OUTCOME line (operator 2026-10-16): no id of its own, `[re #<note>]`, then the
+// transcription or its failure. Read back as the note's body once its arrival line is found.
+const _isVoiceOutcome = (body) => VOICE_MARK.test(body) || VOICE_FAILED_MARK.test(body);
 
 /**
  * The recorded body of the entry whose OWN message id is `msgId`: the text after the header's
@@ -296,24 +300,26 @@ export function bodyForMessageId(text, msgId) {
   // NEW (`+`) side of the LAST `edited #<id>` block, which is the message's current text.
   let entryBody = null;
   let editBody = null;
+  let voiceBody = null;   // the outcome line answering a voice note's arrival (`[re #<id>]`, no id of its own)
+  // The body that starts on line i with `first`: …up to the next entry OR the next DAY BOUNDARY
+  // (operator 2026-09-01). The walk collects every headerless line as body, and a boundary is
+  // deliberately headerless — so without this the marker (and the blank line before it) would be
+  // appended to the body of the last entry of the previous day, and every caller asking this
+  // module for "the recorded body" would get it: promptWithQuotedMessage would quote it back to
+  // the model, and beeper.transcriptionForNoteId would hand the 👂 echo a transcription with
+  // `[ 2026-09-01 ]` stuck on the end. The marker terminates a body; it is never part of one.
+  const bodyFrom = (i, first) => {
+    const parts = [first];
+    for (let j = i + 1; j < lines.length && !_ENTRY_HEAD.test(lines[j]) && !isDayBoundary(lines[j]); j++) parts.push(lines[j]);
+    return parts.join('\n').trim() || null;
+  };
   for (let i = 0; i < lines.length; i++) {
     const head = lines[i];
     if (!_ENTRY_HEAD.test(head)) continue;                            // only a real entry header
     const idm = head.match(_ID_AFTER_TS);
     if (idm && idm[1] === want && entryBody === null) {               // the entry whose OWN id is msgId
       const colon = head.indexOf(':', idm.index + idm[0].length);     // the separator after `#<id>` (or, on pre-2026-09-01 lines, after `#<id> re #<rid>`)
-      if (colon >= 0) {
-        const parts = [head.slice(colon + 1).replace(_REPLY_REF, '')];   // see _REPLY_REF: the reply reference is head, not body
-        // …up to the next entry OR the next DAY BOUNDARY (operator 2026-09-01). The walk collects
-        // every headerless line as body, and a boundary is deliberately headerless — so without
-        // this the marker (and the blank line before it) would be appended to the body of the last
-        // entry of the previous day, and every caller asking this module for "the recorded body"
-        // would get it: promptWithQuotedMessage would quote it back to the model, and
-        // beeper.transcriptionForNoteId would hand the 👂 echo a transcription with `[ 2026-09-01 ]`
-        // stuck on the end. The marker terminates a body; it is never part of one.
-        for (let j = i + 1; j < lines.length && !_ENTRY_HEAD.test(lines[j]) && !isDayBoundary(lines[j]); j++) parts.push(lines[j]);
-        entryBody = parts.join('\n').trim() || null;
-      }
+      if (colon >= 0) entryBody = bodyFrom(i, head.slice(colon + 1).replace(_REPLY_REF, ''));   // see _REPLY_REF: the reply reference is head, not body
       continue;
     }
     // An `edited #<id>` stage-direction for the SAME id. Its head body (after the `: ` separator,
@@ -325,6 +331,11 @@ export function bodyForMessageId(text, msgId) {
     const tsm = _TS_RE.exec(head);
     const sep = tsm ? head.indexOf(':', tsm.index + tsm[0].length) : -1;
     if (sep < 0) continue;
+    const ref = idm ? null : _REPLY_REF.exec(head.slice(sep + 1));
+    if (ref && ref[1] === want) {
+      const body = head.slice(sep + 1 + ref[0].length);
+      if (_isVoiceOutcome(body)) { voiceBody = bodyFrom(i, body); continue; }
+    }
     const em = /^edited #(\S+)$/.exec(head.slice(sep + 1).replace(_REPLY_REF, '').trim());
     if (!em || em[1] !== want) continue;
     let plus = null;
@@ -336,6 +347,8 @@ export function bodyForMessageId(text, msgId) {
       if (v) editBody = v;
     }
   }
+  // A voice note's arrival says "being transcribed" until its outcome is on the record.
+  if (voiceBody != null && VOICE_ARRIVAL_MARK.test(entryBody ?? '')) return voiceBody;
   return editBody ?? entryBody;
 }
 

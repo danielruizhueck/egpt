@@ -827,6 +827,16 @@ describe('spine — resume observation (a slept process is not a live one)', () 
     expect(s.spine.backlogOf({ surface: MSG.surface, chatId: A })).toEqual([]);
   });
 
+  // A voice note is two lines (2026-10-16): its arrival is a record, never a backlog MESSAGE — the
+  // note is counted once, by its transcription line.
+  it('a slept voice note is ONE backlog message: its arrival line is recorded, not listed', async () => {
+    const s = buildTicking();
+    const at = wake(s);
+    await slept(s, { chatId: A, msgId: 'v1', body: '(voice note, 11s — being transcribed…)', msgTs: at(60), voiceLine: 'arrival' });
+    await slept(s, { chatId: A, msgId: 'v1', body: '(voice transcription, 11s) hola', msgTs: at(60), voiceLine: 'outcome', isVoice: true });
+    expect(s.spine.backlogOf({ surface: MSG.surface, chatId: A })).toEqual([{ sender: 'An', ts: at(60), body: '(voice transcription, 11s) hola' }]);
+  });
+
   it('/recap\'s list: every chat keeps its own backlog, told or not — and the next wake replaces it', async () => {
     const s = buildTicking();
     const at = wake(s);

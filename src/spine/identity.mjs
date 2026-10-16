@@ -127,6 +127,9 @@ export function createIdentity({ formatLine = formatDispatchLine, now = () => Da
         // 2026-07-08: a waking node backfills, never re-answers stale traffic).
         backlog: !!f.backlog,
         authorized: !!f.authorized, isSender: !!f.isSender, isVoice: !!f.isTranscriptFromVoice,
+        // A voice note is TWO lines (operator 2026-10-16): 'arrival' (recorded, prompts nobody) and
+        // 'outcome' (its transcription or failure, answering the arrival). null = any other message.
+        voiceLine: f.voiceLine ?? null,
         // Provenance for a turn the ROOM RELAY re-entered (design B, phase 4): { id, kind } —
         // WHICH roster member it came from, and what kind of member that is. ONE field, two
         // readers asking different questions of it: the relay reads the ID so a turn is never fed
@@ -182,11 +185,13 @@ export function createIdentity({ formatLine = formatDispatchLine, now = () => Da
       };
       // The one dispatch line, built once (C7.6e). A reaction/edit is a
       // stage-direction (bracket-wrapped, no #id tag — the body references its own).
+      // A voice note's outcome line answers its arrival: `[re #<id>]`, never the id again.
+      const outcome = ev.voiceLine === 'outcome' && ev.msgId != null;
       ev.line = formatLine({
-        senderName, chatName: f.chatName, node, body, ts, msgId: ev.msgId,
+        senderName, chatName: f.chatName, node, body, ts, msgId: outcome ? null : ev.msgId,
         // a reply reference rides only a real message line (a reaction/edit stage-
         // direction references its own target in the body, no `↩#` tag)
-        replyToId: kind === 'text' ? ev.replyToId : null,
+        replyToId: kind !== 'text' ? null : outcome ? ev.msgId : ev.replyToId,
         stageDirection: kind !== 'text',
         timeZone,
       });

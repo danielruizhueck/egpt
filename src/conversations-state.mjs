@@ -592,9 +592,10 @@ const LINK = /https?:\/\/|\bwww\./i;
 const MEDIA_LINES = new RegExp(MEDIA_LINE.source, 'gm');
 
 // What one event says about the message, off the event alone (pure). null = not a message
-// (a reaction or an edit: those still bump `count`, as before).
+// (a reaction or an edit: those still bump `count`, as before; a voice note's arrival line:
+// the note is counted once, by its transcription line).
 export function messageFacts(ev) {
-  if (!ev || ev.kind === 'reaction' || ev.kind === 'edit') return null;
+  if (!ev || ev.kind === 'reaction' || ev.kind === 'edit' || ev.voiceLine === 'arrival') return null;
   const body = typeof ev.body === 'string' ? ev.body : '';
   const media = {};
   let typedEnd = body.length;

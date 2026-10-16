@@ -192,7 +192,8 @@ export const ECHO_MARKER = '👂';
  * @param {object}   [o.meta]      out-param: the transcriber fills `durationSec`
  *                                 (from the ffmpeg WAV) so the limb can mark the
  *                                 body "(voice transcription, Ns)". String return
- *                                 is unchanged — duration rides the out-param.
+ *                                 is unchanged — duration rides the out-param, and
+ *                                 so does `error` when the transcriber threw.
  */
 export async function transcribeVoiceNote({
   localPath,
@@ -218,7 +219,7 @@ export async function transcribeVoiceNote({
   let transcript = null;
   const innerMeta = {};
   try { transcript = await transcribe(localPath, audioCfg, onLog, innerMeta); }
-  catch (e) { onLog(`transcribe threw: ${e?.message ?? e}`); }
+  catch (e) { onLog(`transcribe threw: ${e?.message ?? e}`); if (meta) meta.error = String(e?.message ?? e); }
   if (!transcript) return null;
   if (meta && Number.isFinite(innerMeta.durationSec)) meta.durationSec = innerMeta.durationSec;
   // Fidelity post-pass: collapse a degenerate whisper repetition loop
@@ -289,3 +290,17 @@ export function voiceTranscriptBody(transcript, { durationSec } = {}) {
 // bare-@e branch, and router.addressed (the spoken-wake scan, which must anchor to the start of
 // the TRANSCRIPT, not to the start of the marked body). Anchored, no /g — safe to share.
 export const VOICE_MARK = /^\(voice transcription(?:,[^)]*)?\)\s*/;
+
+// A VOICE NOTE IS TWO LINES (operator 2026-10-16). Its ARRIVAL is recorded at once, under its own
+// #id; the transcription (or its failure) follows as a second line answering it (`[re #id]`).
+//   "(voice note, 11s — being transcribed…)"     the arrival (duration when the payload has it)
+//   "(voice note not transcribed: <reason>)"     the outcome when no text came back
+export function voiceArrivalBody({ durationSec } = {}) {
+  const dur = (Number.isFinite(durationSec) && durationSec > 0) ? `, ${Math.round(durationSec)}s` : '';
+  return `(voice note${dur} — being transcribed…)`;
+}
+export function voiceFailedBody(reason) {
+  return `(voice note not transcribed: ${String(reason ?? '').replace(/\s+/g, ' ').trim() || 'unknown'})`;
+}
+export const VOICE_ARRIVAL_MARK = /^\(voice note(?:, \d+s)? — being transcribed…\)$/;
+export const VOICE_FAILED_MARK = /^\(voice note not transcribed: /;
