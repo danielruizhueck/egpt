@@ -1118,8 +1118,7 @@ export function createCommands({
         return;
       }
       if (slug && agentsMatch[1]) { await send?.(ev.chatId, `/agents: conversation named twice (=${agentsMatch[1]} and ${slug}) — name it once`); return; }
-      await agentsCmd(ev, agentsMatch[1] || slug || null, args);
-      return;
+      return await agentsCmd(ev, agentsMatch[1] || slug || null, args);   // an outcome for the audit line when this node does not host the being
     }
 
     // /status [<target>] — bare: one compact ops line with live node health (unchanged
@@ -1728,8 +1727,9 @@ export function createCommands({
       if (!key) {
         // NOT MINE, SO NOT MY ANSWER (operator 2026-10-11: "if agent doesn't reside on a node, it
         // says nothing"): the host node answers; a name no node hosts gets no chat reply at all.
+        // Each other node says so on the logging group, as its audit outcome (operator 2026-10-17).
         onLog(`/agents: no being on this node answers to "${handleArg}" — silent (addressable here: ${[...new Set(addressableTokens(agentsMap))].join(', ')})`);
-        return;
+        return `no ${handleArg} in node ${cfg()?.node_name ?? '?'}`;
       }
       handles = [key];
       named = typed === String(key).toLowerCase() ? key : `${handleArg} (${key})`;

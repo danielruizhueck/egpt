@@ -1991,14 +1991,15 @@ describe('/agents across two nodes — only the host answers; `all` refused, `fo
     { agents: Object.fromEntries(beings.map((b) => [b, { mode: 'mention', threadId: `thr-${b}` }])) });
   const node = (config, beings) => {
     let st = seed(beings);
-    const sent = [], writes = [], logs = [];
+    const sent = [], writes = [], logs = [], audit = [];
     const cmds = createCommands({
       getConfig: () => config, defaultKey: 'egpt',
       send: async (chatId, text) => sent.push({ chatId, text }),
       loadState: async () => st, writeState: async (s) => { writes.push(s); st = s; },
+      logToGroup: async (text) => { audit.push(text); return true; },
       onLog: (m) => logs.push(m),
     });
-    return { cmds, sent, writes, logs, getState: () => st };
+    return { cmds, sent, writes, logs, audit, getState: () => st };
   };
   const both = async (body) => {
     const kg = node(KG_CFG, KG_BEINGS), dn = node(DO_CFG, DO_BEINGS);
@@ -2019,6 +2020,20 @@ describe('/agents across two nodes — only the host answers; `all` refused, `fo
   it('a name nobody hosts: no chat reply on either node, nothing written', async () => {
     const { kg, dn } = await both('/agents rethread zzz');
     for (const n of [kg, dn]) { expect(n.sent).toEqual([]); expect(n.writes).toHaveLength(0); }
+  });
+
+  // Operator 2026-10-17: the silence becomes one logging-group line per node that does not host it.
+  it('a node that does not host the being logs ONE line "no <agent> in node <node>"; the host is unchanged', async () => {
+    const { kg, dn } = await both('/agents mode accum e');
+    expect(dn.audit).toEqual([`/agents in ${CHAT} by someone → no e in node do`]);
+    expect(kg.audit).toEqual([`/agents in ${CHAT} by someone`]);
+    expect(kg.sent.map((s) => s.text)).toEqual(['✅ e (egpt) mode here → accum']);
+  });
+
+  it('a name nobody hosts: each node logs its own line', async () => {
+    const { kg, dn } = await both('/agents rethread zzz');
+    expect(kg.audit).toEqual([`/agents in ${CHAT} by someone → no zzz in node kg`]);
+    expect(dn.audit).toEqual([`/agents in ${CHAT} by someone → no zzz in node do`]);
   });
 
   it('`/agents mode accum all`: ONE refusal, from the primary only, naming `force all`; nothing changes anywhere', async () => {
