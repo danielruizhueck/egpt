@@ -1428,7 +1428,7 @@ describe('/agents access_level all|regular <handle>|all — points access_level 
     expect(AGENTS_USAGE).toMatch(/access_level <regular\|all\|sandbox>/);
     const state = seedAccessState('whatsapp', '1234@s.whatsapp.net', { pushedName: 'diego', slugHint: 'diego' });
     const { cmds, sent } = harness({ state });
-    await cmds.run({ chatId: '1234@s.whatsapp.net', surface: 'whatsapp', body: '/agents' });
+    await cmds.run({ chatId: '1234@s.whatsapp.net', surface: 'whatsapp', body: '/agents', authorized: true });   // the operator's; anyone else's bare /agents is the public list
     expect(sent[0].text).toBe(AGENTS_USAGE);
     expect(sent[0].text).toMatch(/sandbox/);
   });

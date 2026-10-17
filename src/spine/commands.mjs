@@ -23,8 +23,8 @@ import { loadPermissionLevel, ACCESS_LEVELS, isAccessLevel } from './permission-
 // over a single already-extracted token is the house single-token lookup (src/spine/mesh.mjs's
 // findAgentByToken, src/spine/heartbeat-loader.mjs's `agent:`); `addressableTokens` LISTS the
 // valid handles in the not-hosted log line. See agentsCmd's HANDLE → KEY block.
-import { addressed, addressableTokens, isKnownSender } from './router.mjs';
-import { superChannelAlive } from './gating.mjs';
+import { addressed, addressableTokens, isKnownSender, wakeTokens, voiceWakeTokens } from './router.mjs';
+import { superChannelAlive, resolveMode } from './gating.mjs';
 import { stat as fsStat, readFile as fsReadFile, writeFile as fsWriteFile, mkdir as fsMkdir, readdir as fsReaddir, rm as fsRm, rename as fsRename } from 'node:fs/promises';
 import { readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -39,7 +39,7 @@ import { shortChatId } from '../bridges/chat-id.mjs';
 import { closestNames } from '../text-similarity.mjs';
 import { ownNodeNamesOf, knownNodeNames } from './node-names.mjs';
 import { Room, ROOMS_ROOT } from '../room-core.mjs';
-import { SHELL_SURFACE } from './identity.mjs';
+import { SHELL_SURFACE, surfaceOf as surfaceOfNetwork } from './identity.mjs';
 // The room slug rule (fixedSlugFor, surface `room`) applied to a READ, which must not mint —
 // see roomOnDisk. NOT for the /rooms verbs: they pass the operator's raw string through.
 import { sanitizeName, sanitizeSlug } from '../sanitize.mjs';
@@ -257,6 +257,15 @@ const quoteLeadingCommand = (text) => String(text ?? '').replace(/^\/([a-z0-9_-]
 const RECAP_CMD = /^\/recap\b/i;
 // /join (operator 2026-10-16) — admitted from any sender too; joinGroup decides who may run it.
 const JOIN_CMD = /^\/join\b/i;
+// Bare /agents (operator 2026-10-16) — admitted from any sender; a non-operator gets agentsPublic.
+const AGENTS_BARE_CMD = /^\/agents\s*$/i;
+// The public list's words for a reply mode; 'off' has none (that being is not listed).
+const PUBLIC_MODE_WORDS = {
+  on: 'answers everything', auto: 'answers everything',
+  mention: 'answers only when called', accum: 'answers only when called',
+  'mention-direct': 'answers only when called at the start of a message',
+  mute: 'reads but stays silent',
+};
 
 // /recap's listing: one line per message the chat sent while the node slept — sender, local time,
 // the first ~100 characters — in stamp order, whitespace folded so a message is one line. The clock
@@ -943,13 +952,14 @@ export function createCommands({
   // Fall back to the whatsapp block when ev.surface is absent (safety). Authorized
   // senders (per-surface allowed_users / isSender) can command from anywhere.
   // …EXCEPT /recap, which anybody may type (RECAP_CMD, above — operator 2026-09-27), and /join, which
-  // joinGroup gates itself (JOIN_CMD, operator 2026-10-16). Every other command, lifecycle and
-  // /agents included, still needs the operator.
+  // joinGroup gates itself (JOIN_CMD, operator 2026-10-16), and bare /agents, which a non-operator
+  // gets as the public list (AGENTS_BARE_CMD). Every other command, lifecycle and every /agents verb
+  // included, still needs the operator.
   function isCommand(ev) {
     const body = String(ev?.body ?? '').trim();
     if (isOperator(ev) && isRadioQuickReply(ev)) return true;
     if (!body.startsWith('/')) return false;
-    return isOperator(ev) || RECAP_CMD.test(body) || JOIN_CMD.test(body);
+    return isOperator(ev) || RECAP_CMD.test(body) || JOIN_CMD.test(body) || AGENTS_BARE_CMD.test(body);
   }
 
   // Run a command and CAPTURE its reply instead of sending it. Routes through the ONE run()
@@ -1090,6 +1100,7 @@ export function createCommands({
     // that conversation's entry (bare `all` is refused). See agentsCmd() for the full dispatch.
     const agentsMatch = /^\/agents(?:=(\S+))?(?:\s+(.+?))?\s*$/i.exec(line);
     if (agentsMatch) {
+      if (!isOperator(ev) && AGENTS_BARE_CMD.test(line)) return await agentsPublic(ev);
       const raw = (agentsMatch[2] ?? '').trim().split(/\s+/).filter(Boolean);
       const { args, slug, retired } = normalizeAgentsArgs(raw);
       // The retired object-first order gets its own line back, rebuilt into the new one —
@@ -1245,7 +1256,7 @@ export function createCommands({
     // reply /send to a message in either group to relay it back to the original chat; /end — reply
     // /end in either group to archive it and drop its mapping (operator 2026-10-03). They sit
     // pre-catch-all like the rest. Operator-only automatically: isCommand gates every '/'-verb except
-    // /recap and /join behind isOperator, so no handler re-checks it (same as chrome/radio); joinGroup
+    // /recap, /join and bare /agents behind isOperator, so no handler re-checks it (same as chrome/radio); joinGroup
     // runs its own member gate (operator 2026-10-16). NOT in
     // NODE_ADDRESSABLE: a /join/split node override is parsed by the handler itself (`/join do` or
     // `/join=do`). Each handler STANDS DOWN SILENTLY on the node that is not the right one (not the
@@ -3550,18 +3561,87 @@ export function createCommands({
   // Who besides the operator may /join: a member of a GROUP C whom a being resident in C would wake,
   // by router.resolve's allowed_users test (the conversation's block, else the agent's
   // conversation_defaults; a stranger reaches only the conversation's own agent). The room is C's
-  // alias, so it grants nothing C does not. /agents and every other verb keep isOperator.
-  const mayJoinHere = (state, surface, chatId, ev) => {
-    if (ev?.raw?.chatType !== 'group') return false;
-    const entry = getContact(state, surface, chatId)?.entry;
-    const owner = defaultBeingOf(entry);
-    const beings = (owner && !isKnownSender(ev.senderId, cfg())) ? [owner] : residentsOf(entry);
-    return beings.some((b) => {
-      const conv = getBeing(state, surface, chatId, b)?.allowedUsers;
-      const global = cfg().agents?.[b]?.conversation_defaults?.allowed_users;
-      return allowedUsersPermits(Array.isArray(conv) ? conv : (Array.isArray(global) ? global : null), ev.senderId);
-    });
+  // alias, so it grants nothing C does not. Every /agents verb and every other command keep isOperator.
+  // senderMayWake is that test for ONE being; bare /agents' public list reads it too.
+  const senderMayWake = (state, surface, chatId, ev, being) => {
+    const owner = defaultBeingOf(getContact(state, surface, chatId)?.entry);
+    if (owner && being !== owner && !isKnownSender(ev?.senderId, cfg())) return false;
+    const conv = getBeing(state, surface, chatId, being)?.allowedUsers;
+    const global = cfg().agents?.[being]?.conversation_defaults?.allowed_users;
+    return allowedUsersPermits(Array.isArray(conv) ? conv : (Array.isArray(global) ? global : null), ev?.senderId);
   };
+  const mayJoinHere = (state, surface, chatId, ev) => ev?.raw?.chatType === 'group'
+    && residentsOf(getContact(state, surface, chatId)?.entry).some((b) => senderMayWake(state, surface, chatId, ev, b));
+
+  // ── bare /agents from a non-operator (operator 2026-10-16) ──
+  // One public list per chat per agents_list.every_ms; calls inside the window are ignored, and a
+  // sender with ban_after ignored calls inside ban_window_ms is muted through floodBan.
+  const agentsListAt = new Map();        // surface\0chatId -> when the last list was allowed
+  const agentsListIgnored = new Map();   // surface\0chatId\0senderId -> times of ignored calls
+  const msOr = (v, d) => (Number.isFinite(v) && v >= 0 ? v : d);
+  async function agentsPublic(ev) {
+    const o = cfg().agents_list ?? {};
+    const t = now();
+    const chat = `${surfaceOf(ev)}\u0000${ev.chatId}`;
+    const last = agentsListAt.get(chat);
+    if (last != null && t - last < msOr(o.every_ms, 60_000)) {
+      const who = `${chat}\u0000${ev.senderId}`;
+      const recent = [...(agentsListIgnored.get(who) ?? []).filter((x) => t - x < msOr(o.ban_window_ms, 600_000)), t];
+      const banAfter = o.ban_after ?? 5;
+      if (Number.isInteger(banAfter) && banAfter >= 1 && recent.length >= banAfter
+          && floodBan?.ban(surfaceOf(ev), ev.chatId, ev.senderId, { reason: '/agents flood', senderName: ev.senderName, chatName: ev.chatName })) {
+        agentsListIgnored.delete(who);
+        return 'banned — /agents flood';
+      }
+      agentsListIgnored.set(who, recent);
+      return NO_AUDIT;
+    }
+    agentsListAt.set(chat, t);
+    const text = await agentsPublicText(ev);
+    if (text) await send?.(ev.chatId, text);
+  }
+
+  // The resident beings that read this chat: emoji + name, handles, voice handles, the mode in plain
+  // words, and whether THIS sender can call them (senderMayWake). Left out: relays (another node's
+  // being), public beings (shown without eGPT machinery), surface-pinned elsewhere, mode 'off'. A
+  // conversation whose own agent is public gets nothing. null = nothing to say.
+  async function agentsPublicText(ev) {
+    if (!loadState) return null;
+    let state;
+    try { state = await loadState(); } catch { return null; }
+    const c = cfg();
+    const surface = surfaceOf(ev);
+    const entry = getContact(state, surface, ev.chatId)?.entry;
+    const agentOf = (b) => {
+      const k = Object.keys(c.agents ?? {}).find((n) => !n.startsWith('_') && n.toLowerCase() === String(b).toLowerCase());
+      const a = k ? c.agents[k] : (b === defaultKey ? {} : null);
+      return a && typeof a === 'object' && !Array.isArray(a) ? a : null;
+    };
+    if (agentOf(defaultBeingOf(entry))?.public === true) return null;
+    const arrived = String((ev.origin ?? ev).surface ?? '').toLowerCase();
+    const bare = c.dispatch?.address_without_at !== false;
+    const inSuper = isSuperChannel(state, surface, ev.chatId);
+    let beings = residentsOf(entry);
+    if (beings.includes(defaultKey)) beings = [defaultKey, ...beings.filter((b) => b !== defaultKey)];
+    const lines = [];
+    for (const b of beings) {
+      const a = agentOf(b);
+      if (!a || a.public === true || a.relay_channel || Array.isArray(a.paths) || String(a.configuration ?? '').toLowerCase() === 'relay') continue;
+      if (a.surface != null && surfaceOfNetwork(String(a.surface).toLowerCase()) !== arrived) continue;
+      let { mode, source } = resolveMode(getBeing(state, surface, ev.chatId, b), b, c);
+      if (source !== 'conversation' && inSuper) mode = superMode();
+      if (!PUBLIC_MODE_WORDS[mode]) continue;
+      const hs = wakeTokens(b, a);
+      const voice = voiceWakeTokens(a);
+      lines.push([
+        `${a.body_emoji || '🐶'} ${a.name || hs[0] || b} — ${hs.length ? `call: ${hs.map((h) => `@${h}`).join(', ')}${bare ? ` (or start a message with "${hs[0]}")` : ''}` : 'no handle'}`,
+        ...(voice.length ? [`voice: ${voice.map((v) => `"${v}"`).join(', ')}`] : []),
+        PUBLIC_MODE_WORDS[mode],
+        `you can call it: ${senderMayWake(state, surface, ev.chatId, ev, b) ? 'yes' : 'no'}`,
+      ].join(' · '));
+    }
+    return lines.length ? ['Agents in this chat:', ...lines].join('\n') : null;
+  }
 
   // /join (operator types /join [<name>|<node>] in chat C): create the side-group and ALIAS it to C.
   // Every precondition resolves BEFORE any bridge/state mutation (an unresolvable Rodz STOPS, nothing
@@ -4169,7 +4249,7 @@ export function createCommands({
     const bans = floodBan.list();
     if (!bans.length) return 'no active flood bans';
     const now = Date.now();
-    const lines = bans.map((b) => `${b.senderName} in ${b.chatName} — ${Math.max(1, Math.ceil((b.until - now) / 60_000))}m left`);
+    const lines = bans.map((b) => `${b.senderName} in ${b.chatName}${b.reason ? ` (${b.reason})` : ''} — ${Math.max(1, Math.ceil((b.until - now) / 60_000))}m left`);
     return [`${bans.length} active flood ban${bans.length === 1 ? '' : 's'}:`, ...lines].join('\n');
   }
   function unbanHere(ev, name) {

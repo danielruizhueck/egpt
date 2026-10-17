@@ -2830,6 +2830,26 @@ export const CONFIG_SCHEMA = {
         DEFAULT: [] — senders that can NEVER be banned, each matched against the
         sender's id OR display name (case-insensitive). Add the operator here to be
         safe from a self-ban on a legitimate media burst.
+
+    The same mute serves agents_list's /agents flood ban (reason shown in /bans); count
+    does not switch that one off.
+  `,
+
+  agents_list: `
+    Bare /agents from a NON-operator (operator 2026-10-16): a short public list of this
+    node's beings resident in the chat — emoji + name, handles, voice handles, the reply
+    mode in plain words, and whether THAT sender can call it (its allowed_users). Relays,
+    public agents and 'off' beings are not listed. The operator's /agents is unchanged
+    and never throttled. Read live.
+    KEYS:
+      every_ms
+        DEFAULT: 60000 — at most one public list per chat per node in this window;
+        calls inside it get no reply.
+      ban_after
+        DEFAULT: 5 — a sender with this many ignored calls within ban_window_ms is
+        muted through the media_flood ban (its cooldown_ms, /bans, /unban). 0 = never.
+      ban_window_ms
+        DEFAULT: 600000 (10 min).
   `,
 
   warm: `

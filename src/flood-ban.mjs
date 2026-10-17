@@ -59,6 +59,18 @@ export function createFloodBan({
       return { banned: false, justBanned: false };
     },
 
+    // A ban decided by a caller rather than the media counter (commands.mjs: the /agents flood).
+    // Same mute, cooldown, never_ban, /bans and /unban. Returns whether the sender is banned now.
+    ban(surface, chatId, senderId, { reason = 'flood', senderName = '', chatName = '' } = {}) {
+      if (isNever(senderId, senderName)) return false;
+      const key = KEY(surface, chatId, senderId);
+      if (live(key)) return true;
+      hits.delete(key);
+      bans.set(key, { until: now() + cooldownMs, senderName: String(senderName || senderId), chatName: String(chatName || chatId), reason });
+      onLog(`flood-ban: ${senderName || senderId} in ${chatName || chatId} — ${reason}, muted ${Math.round(cooldownMs / 60_000)}m`);
+      return true;
+    },
+
     // Clear active ban(s) in a (surface, chatId); optional name filter matches senderId OR
     // display name (case-insensitive). Returns how many were cleared.
     unban(surface, chatId, senderName) {
@@ -81,7 +93,7 @@ export function createFloodBan({
         if (!live(key)) continue;
         const b = bans.get(key);
         const [surface, chatId, senderId] = key.split(SEP);
-        out.push({ surface, chatId, senderId, senderName: b.senderName, chatName: b.chatName, until: b.until });
+        out.push({ surface, chatId, senderId, senderName: b.senderName, chatName: b.chatName, until: b.until, ...(b.reason ? { reason: b.reason } : {}) });
       }
       return out;
     },

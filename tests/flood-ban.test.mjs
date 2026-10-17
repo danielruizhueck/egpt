@@ -109,3 +109,28 @@ describe('flood-ban: a media burst from one sender auto-mutes them', () => {
     expect(off.isBanned(S, CH, 'A')).toBe(false);
   });
 });
+
+describe('flood-ban: ban() — a ban decided outside the media counter (the /agents flood)', () => {
+  it('mutes the sender for the same cooldown, logs the reason once, lifts lazily', () => {
+    let t = 0;
+    const notices = [];
+    const fb = createFloodBan({ count: 5, windowMs: 20_000, cooldownMs: 600_000, now: () => t, onLog: (m) => notices.push(m) });
+    expect(fb.ban(S, CH, 'A', { reason: '/agents flood', senderName: 'Emely', chatName: 'C' })).toBe(true);
+    expect(fb.isBanned(S, CH, 'A')).toBe(true);
+    expect(fb.observe(S, CH, 'A', text('Emely', 'C')).banned).toBe(true);
+    expect(fb.ban(S, CH, 'A', { reason: '/agents flood' })).toBe(true);             // already banned: no second notice
+    expect(notices).toEqual(['flood-ban: Emely in C — /agents flood, muted 10m']);
+    expect(fb.list()).toEqual([{ surface: S, chatId: CH, senderId: 'A', senderName: 'Emely', chatName: 'C', until: 600_000, reason: '/agents flood' }]);
+    t += 600_001;
+    expect(fb.isBanned(S, CH, 'A')).toBe(false);
+  });
+
+  it('never_ban is honoured; unban() clears it like a media ban', () => {
+    const fb = createFloodBan({ neverBan: ['Operator'], now: () => 0 });
+    expect(fb.ban(S, CH, 'op', { reason: '/agents flood', senderName: 'Operator' })).toBe(false);
+    expect(fb.isBanned(S, CH, 'op')).toBe(false);
+    expect(fb.ban(S, CH, 'B', { reason: '/agents flood', senderName: 'Bob' })).toBe(true);
+    expect(fb.unban(S, CH, 'Bob')).toBe(1);
+    expect(fb.isBanned(S, CH, 'B')).toBe(false);
+  });
+});
