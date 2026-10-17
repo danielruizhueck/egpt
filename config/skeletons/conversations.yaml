@@ -40,9 +40,8 @@ contacts:
       # the WHOLE guard off here, repetition included. window -1 = pure consecutive count.
       #guard: { turns: -1 }
 
-      # boxed beings may attach files from THIS conversation's folder to web forms
-      #browser_uploads: true
-      # boxed beings get the unfiltered browser (file:, any upload); wins over browser_uploads
+      # boxed beings get the unfiltered browser (file:, any upload). Folder uploads are per
+      # browser group: browsers.yaml uploads:
       #privileged_browser: true
 
       # one block per resident agent, keyed by its config.yaml agents: name.

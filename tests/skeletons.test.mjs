@@ -17,12 +17,14 @@ import { ACTION_VERBS, parseReplyActions } from '../src/spine/reply-actions.mjs'
 import { parseTranscriptionConfig } from '../src/transcription-service.mjs';
 import { parse as parseConvState, getContact, getBeing, residentsOf } from '../src/conversations-state.mjs';
 import { nodesOf } from '../src/tools/beeper-whoami.mjs';
+import { browserUploadsOn } from '../src/rooms-file.mjs';
 
 const SKELETON = fileURLToPath(new URL('../config/skeletons/heartbeats.yaml', import.meta.url));
 const CONFIG_SKELETON = fileURLToPath(new URL('../config/skeletons/config.yaml', import.meta.url));
 const ACTIONS_CARD   = fileURLToPath(new URL('../config/skeletons/room/10-actions.md', import.meta.url));
 const CONV_SKELETON = fileURLToPath(new URL('../config/skeletons/conversations.yaml', import.meta.url));
 const CONVCFG_SKELETON = fileURLToPath(new URL('../config/skeletons/room/config.yaml', import.meta.url));
+const BROWSERS_SKELETON = fileURLToPath(new URL('../config/skeletons/browsers.yaml', import.meta.url));
 
 describe('config/skeletons/heartbeats.yaml', () => {
   const text = readFileSync(SKELETON, 'utf8');
@@ -253,16 +255,16 @@ describe('config/skeletons/conversations.yaml (the registry)', () => {
     // start with '#'. Strip the '#' from the option lines an operator would.
     const on = (t, key) => t.replace(new RegExp(`^(\\s*)#(${key}:.*)$`, 'm'), '$1$2');
     let t = text;
-    for (const k of ['posts_back_delay_ms', 'guard', 'browser_uploads', 'privileged_browser', 'mode', 'send_to_egpt']) t = on(t, k);
+    for (const k of ['posts_back_delay_ms', 'guard', 'privileged_browser', 'mode', 'send_to_egpt']) t = on(t, k);
 
     const state = parseConvState(t);
     const entry = getContact(state, 'whatsapp', 'EXAMPLE_CHAT_ID').entry;
     // the flat pair — read by src/spine/transcription.mjs and src/spine/boot.mjs
     expect(entry.posts_back_delay_ms).toBe(-1);
     expect(entry.guard).toEqual({ turns: -1 });
-    // the browser pair — read by src/spine/being-link.mjs through the config resolver
-    expect(entry.browser_uploads).toBe(true);
+    // read by src/spine/being-link.mjs through the config resolver; uploads are per browser group (browsers.yaml)
     expect(entry.privileged_browser).toBe(true);
+    expect(text).not.toMatch(/browser_uploads/);
 
     // the per-agent pair — read by getBeing → src/spine/gating.mjs
     const b = getBeing(state, 'whatsapp', 'EXAMPLE_CHAT_ID', 'egpt');
@@ -286,6 +288,21 @@ describe('config/skeletons/conversations.yaml (the registry)', () => {
     expect(text).toContain('conversations/<surface>/<slug>/config.yaml');
     expect(text).toContain('config/skeletons/room/config.yaml');
     expect(text).toMatch(/COMMENTS YOU ADD HERE DO NOT SURVIVE/);
+  });
+});
+
+describe('config/skeletons/browsers.yaml', () => {
+  const text = readFileSync(BROWSERS_SKELETON, 'utf8');
+  const at = (t) => ({ path: 'browsers.yaml', read: () => t });
+
+  it('as shipped every group uploads; uncommenting uploads: turns its group off', () => {
+    expect(browserUploadsOn('brain', at(text))).toBe(true);
+    expect(browserUploadsOn('shared', at(text))).toBe(true);
+    const t = text.replace(/^# (uploads:)$/m, '$1').replace(/^# ( {2}\w+: false)$/m, '$1');
+    expect(YAML.parse(t).uploads).toBeTypeOf('object');
+    const [group] = Object.keys(YAML.parse(t).uploads);
+    expect(browserUploadsOn(group, at(t))).toBe(false);
+    expect(browserUploadsOn('shared', at(t))).toBe(true);
   });
 });
 

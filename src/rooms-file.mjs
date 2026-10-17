@@ -13,6 +13,7 @@
 // Writes go through the YAML Document API so an operator's comments and their
 // other rows survive a single-block edit.
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import * as YAML from 'yaml';
 import { EGPT_HOME } from './egpt-home.mjs';
@@ -75,6 +76,14 @@ export const readBrowserGroups = (deps = {}) => readRoomsFile({ reg: BROWSERS, .
 // Its optional `colors: { <group>: "#RRGGBB" }` (chrome-launcher.groupColor). {} when absent. Never throws.
 export async function readBrowserColors({ path = registryPath(BROWSERS), read = readFile } = {}) {
   try { const c = YAML.parse(await read(path, 'utf8'))?.colors; return isPlainObject(c) ? c : {}; } catch { return {}; }
+}
+// Its optional `uploads: { <group>: false }` (being-link): may a boxed being in this group attach files
+// from its conversation folder. On unless the group is set to anything but true. Fails closed: a file
+// that will not parse, or an `uploads:` that is not a map, turns every group off. Sync: the CDP guard is.
+export function browserUploadsOn(group, { path = registryPath(BROWSERS), read = readFileSync } = {}) {
+  let u;
+  try { u = YAML.parse(read(path, 'utf8'))?.uploads; } catch (e) { return e?.code === 'ENOENT'; }
+  return u == null || (isPlainObject(u) && (!Object.hasOwn(u, group) || u[group] === true));
 }
 
 /** The whole file as a plain object: { "<surface>/<slug>": {...} }. Never throws. */

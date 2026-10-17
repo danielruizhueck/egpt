@@ -39,7 +39,7 @@ import { pathToFileURL } from 'node:url';
 import { authMac, macMatches } from '../shell/auth.mjs';
 import { SPINE_PORT_ENV, BEING_TOKEN_ENV, ASK_SPINE_ENV, CDP_MODULE_ENV } from '../shell/being.mjs';
 import { chromeConversationOf } from './chrome-pool.mjs';
-import { readBrowserGroups } from '../rooms-file.mjs';
+import { readBrowserGroups, browserUploadsOn } from '../rooms-file.mjs';
 import { slugDir } from '../conversations-state.mjs';
 import { createCdpMux } from '../tools/cdp.mjs';
 import { EGPT_HOME } from '../egpt-home.mjs';
@@ -73,9 +73,10 @@ const privileged = (v) => (typeof v === 'string'
 const realOf = (p) => { try { return realpathSync.native(p); } catch { const up = dirname(p); return up === p ? p : join(realOf(up), basename(p)); } };
 const inside = (p, dir) => { if (!p || !dir) return false; const rel = relative(realOf(dir), realOf(resolve(p))); return !rel.startsWith('..') && !isAbsolute(rel); };
 
-// UPLOADS (operator 2026-10-17, `browser_uploads: true`): plain files really inside the conversation
-// folder. Chrome reads the path later, as the operator, and the being can swap a folder for a
-// junction meanwhile — so Chrome gets a checked copy under uploadStage, never the being's path.
+// UPLOADS (operator 2026-10-17): on in every browser group unless browsers.yaml sets
+// `uploads: { <group>: false }`; only plain files really inside the conversation folder. Chrome
+// reads the path later, as the operator, and the being can swap a folder for a junction
+// meanwhile — so Chrome gets a checked copy under uploadStage, never the being's path.
 const WIN = process.platform === 'win32';
 const samePath = (a, b) => (WIN ? a.toLowerCase() === b.toLowerCase() : a === b);
 function stageUpload(p, convDir, stageDir) {
@@ -106,13 +107,14 @@ function stageUpload(p, convDir, stageDir) {
   }
 }
 
+// `uploads`: true, or a function asked only when an upload is.
 export function boxedCdpRefusal({ method, params = {} }, url, convDir, { uploads = false, stageDir = null } = {}) {
   if (NOT_SERVED.test(method)) return `${method} is not served to a boxed being`;
   if (privileged(url)) return `that session is on a ${url.split(':')[0]}: page`;
   if (privileged(params)) return 'file:, chrome:, devtools:, extension and view-source: URLs are not served to a boxed being';
   const dragged = method === 'Input.dispatchDragEvent' && !!params.data?.files?.length;
   if (UPLOADS.test(method) || dragged) {
-    if (!uploads || !convDir || !stageDir) return dragged ? 'dragging local files is not served to a boxed being' : `${method} is not served to a boxed being`;
+    if (!(typeof uploads === 'function' ? uploads() : uploads === true) || !convDir || !stageDir) return dragged ? 'dragging local files is not served to a boxed being' : `${method} is not served to a boxed being`;
     const files = dragged ? params.data.files : (params.files ?? []);
     if (!Array.isArray(files)) return 'files must be a list';
     const staged = files.map((f) => stageUpload(f, convDir, stageDir));
@@ -135,13 +137,14 @@ const quoted = (v) => JSON.stringify(String(v ?? '').slice(0, 40));
  * @param {(c: object) => Promise<object>} [opts.chromeClientFor] commands.chromeClientFor — the conversation's group CDP client ({ client: { channel() } })
  * @param {(site: string, o: { conversation: object, client: object }) => Promise<string>} [opts.requestLogin] boot's EXISTING auto-login limb, the SAME one /login calls (boot.requestLogin → src/spine/login.mjs). Reads Chrome's own saved credential for the group's profile, types it, returns an OUTCOME TOKEN only — never the credential.
  * @param {() => Promise<object>} [opts.readGroups] config/browsers.yaml's groups (default rooms-file.readBrowserGroups, read fresh per ask)
- * @param {(convDir: string) => object} [opts.resolveConfig] the conversation's resolved config (config-resolver configFor): browser_uploads, privileged_browser
+ * @param {(convDir: string) => object} [opts.resolveConfig] the conversation's resolved config (config-resolver configFor): privileged_browser
+ * @param {(group: string) => boolean} [opts.uploadsOn] browsers.yaml uploads: for that group (default rooms-file.browserUploadsOn, read fresh per upload)
  * @param {string} [opts.uploadStage]              where checked upload copies go; the being cannot write here
  * @param {string} [opts.clientPath]               the client script handed in ASK_SPINE_ENV (default askSpineClientPath()); being-cdp.mjs sits beside it
  * @param {(m: string) => void} [opts.onLog]       the AUDIT line, one per request
  * @param {typeof nodeRandomBytes} [opts.randomBytes]
  */
-export function createBeingLink({ port, startBrowser, chromeClientFor = null, requestLogin = null, readGroups = readBrowserGroups, resolveConfig = () => ({}), uploadStage = join(EGPT_HOME, 'state', 'uploads'), clientPath = askSpineClientPath(), onLog = () => {}, randomBytes = nodeRandomBytes } = {}) {
+export function createBeingLink({ port, startBrowser, chromeClientFor = null, requestLogin = null, readGroups = readBrowserGroups, resolveConfig = () => ({}), uploadsOn = browserUploadsOn, uploadStage = join(EGPT_HOME, 'state', 'uploads'), clientPath = askSpineClientPath(), onLog = () => {}, randomBytes = nodeRandomBytes } = {}) {
   const live = new Map();       // secret -> { being, surface, slug, boxed }
   const tunnels = new Map();    // who -> its open CDP tunnels, closed when its secret is revoked
   const muxes = new WeakMap();  // a group's CDP channel -> its mux
@@ -162,14 +165,13 @@ export function createBeingLink({ port, startBrowser, chromeClientFor = null, re
     if (!muxes.has(channel)) muxes.set(channel, createCdpMux(channel));
     let convDir = null;
     try { convDir = slugDir(who.surface, who.slug); } catch { /* no folder → no download dir */ }
-    // Per-conversation keys, read per message so an edit applies to open tunnels. privileged_browser
-    // (operator 2026-10-17) serves a boxed being the unboxed CDP: no filter at all.
+    // Read per message so an edit applies to open tunnels. privileged_browser (per conversation, operator
+    // 2026-10-17) serves a boxed being the unboxed CDP: no filter at all. Uploads are per group.
     const flags = () => (convDir ? resolveConfig(convDir) ?? {} : {});
     if (who.boxed && flags().privileged_browser === true) onLog(`${tag} privileged browser — no CDP filter`);
     const guard = who.boxed ? (m, url) => {
-      const f = flags();
-      if (f.privileged_browser === true) return null;
-      const why = boxedCdpRefusal(m, url, convDir, { uploads: f.browser_uploads === true, stageDir: uploadStage });
+      if (flags().privileged_browser === true) return null;
+      const why = boxedCdpRefusal(m, url, convDir, { uploads: () => uploadsOn(c.group), stageDir: uploadStage });
       if (why) onLog(`${tag} cdp ${quoted(m.method)} → REFUSED: ${why}`);
       return why;
     } : null;

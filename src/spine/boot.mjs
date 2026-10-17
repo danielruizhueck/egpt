@@ -2607,7 +2607,7 @@ export async function boot({
     // browser login → the SAME auto-login limb /login calls (requestLogin, defined below); read at
     // call time, like startBrowser above, since no being can dial before boot finishes.
     requestLogin: (site, o) => requestLogin(site, o),
-    resolveConfig: configResolver.configFor,   // browser_uploads / privileged_browser, per conversation
+    resolveConfig: configResolver.configFor,   // privileged_browser, per conversation
     onLog: (m) => log.line?.(`[being] ${m}`),
   });
 

@@ -14,6 +14,11 @@
 # The profile also gets a theme color. Name and color are written into the profile just before its
 # Chrome starts, so a change shows at the next launch of that group's Chrome. The color is picked
 # from a fixed palette by the group name; `colors:` overrides it per group ("#RRGGBB").
+#
+# Uploads: in every group (shared too) a boxed being may attach files to web forms, but only plain
+# files inside its own conversation's folder; Chrome gets a checked copy. `uploads:` turns a group
+# off with `false` (any value but true is off; a file that will not parse turns every group off).
+# A conversation's privileged_browser (conversations.yaml) still wins. Read per upload.
 
 groups:
   brain: [ "eGPT Admin", "eGPT Rodz Lulu An" ]
@@ -21,3 +26,6 @@ groups:
 
 # colors:
 #   brain: "#1a73e8"
+
+# uploads:
+#   work: false

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   readRoomsFile, readRoomConfig, setRoomConfigBlock, setRoomConfigKey, removeRoomRow,
-  roomsFilePath, agentsFilePath, readBrowserGroups,
+  roomsFilePath, agentsFilePath, readBrowserGroups, browserUploadsOn,
   mergeRoomBeings, persistRoomBeings, mergeAgentBeings, persistAgentBeings,
 } from '../src/rooms-file.mjs';
 
@@ -215,5 +215,51 @@ describe('config/browsers.yaml — the browser-group map, same reader as rooms.y
 
   it('an unparseable file reads as no groups, like the other registries', async () => {
     expect(await readBrowserGroups(mkIO('groups: [ unclosed'))).toEqual({});
+  });
+});
+
+describe('config/browsers.yaml uploads: — per browser group, on unless set', () => {
+  const at = (text) => ({
+    path: 'browsers.yaml',
+    read: () => { if (text == null) throw Object.assign(new Error('no file'), { code: 'ENOENT' }); return text; },
+  });
+
+  it('no file, no uploads: key, or a group it does not name → on, shared included', () => {
+    expect(browserUploadsOn('shared', at(null))).toBe(true);
+    expect(browserUploadsOn('shared', at(''))).toBe(true);
+    expect(browserUploadsOn('brain', at('groups:\n  brain: [ "eGPT Admin" ]\n'))).toBe(true);
+    expect(browserUploadsOn('brain', at('uploads:\n  work: false\n'))).toBe(true);
+    expect(browserUploadsOn('brain', at('uploads:\n  brain: true\n'))).toBe(true);
+  });
+
+  it('a group set to false, or to anything but true, is off; only that group', () => {
+    for (const v of ['false', 'no', '0', '"false"', '']) {
+      expect(browserUploadsOn('work', at(`uploads:\n  work: ${v}\n`)), v).toBe(false);
+    }
+    expect(browserUploadsOn('shared', at('uploads:\n  shared: false\n'))).toBe(false);
+    expect(browserUploadsOn('brain', at('uploads:\n  shared: false\n'))).toBe(true);
+  });
+
+  it('fails closed: a file that will not parse, or an uploads: that is not a map, turns every group off', () => {
+    expect(browserUploadsOn('brain', at('uploads: [ unclosed'))).toBe(false);
+    expect(browserUploadsOn('brain', at('uploads: false\n'))).toBe(false);
+    expect(browserUploadsOn('brain', at('uploads: [ brain ]\n'))).toBe(false);
+  });
+
+  it('reads <EGPT_HOME>/config/browsers.yaml fresh on every call — an edit needs no restart', () => {
+    const home = mkdtempSync(join(tmpdir(), 'egpt-uploads-'));
+    const saved = process.env.EGPT_HOME;
+    try {
+      process.env.EGPT_HOME = home;
+      mkdirSync(join(home, 'config'));
+      const file = join(home, 'config', 'browsers.yaml');
+      writeFileSync(file, 'groups:\n  work: [ "Diego" ]\n');
+      expect(browserUploadsOn('work')).toBe(true);
+      writeFileSync(file, 'groups:\n  work: [ "Diego" ]\nuploads:\n  work: false\n');
+      expect(browserUploadsOn('work')).toBe(false);
+    } finally {
+      process.env.EGPT_HOME = saved;
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });
