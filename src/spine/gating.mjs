@@ -4,7 +4,7 @@
 // mode→decision LOGIC is the kept, test-locked auto-mode.mjs; this service only
 // resolves WHICH mode/policy applies and packages the per-message decision:
 //
-//   decide(being, ev, mention?)  -> { mode, receives, mayReply, sendToEgpt }   (ONE conv-state read)
+//   decide(being, ev, mention?, { denied? }) -> { mode, receives, mayReply, sendToEgpt }   (ONE conv-state read)
 //   surfaces(decision, replyText)-> boolean    POST-brain: mayReply + the 'on'-'...' silence cosmetic
 //
 // `mode` resolves down ONE chain, most specific first (operator 2026-07-25):
@@ -71,7 +71,9 @@ export function createGating({ getConfig = () => ({}), loadState = null, default
   // is still exactly one state load per message. `mention` is passed explicitly by the loop (it's
   // the ROUTED being's mention — a sibling routed by its own @name is mentioned for ITS gate, not
   // @e's); default to ev.mention for direct callers.
-  async function decide(being, ev, mention = ev.mention) {
+  // `denied` is the router's allowed_users answer for this target (router.resolve): a denied
+  // sender is recorded but runs no turn, in any mode.
+  async function decide(being, ev, mention = ev.mention, { denied = false } = {}) {
     const c = cfg();
     let state = null;
     if (loadState) { try { state = await loadState(); } catch { state = null; } }
@@ -88,11 +90,12 @@ export function createGating({ getConfig = () => ({}), loadState = null, default
     if (source !== 'conversation' && inSuper) mode = superModeOf(c.super_chats?.mode);
     const paused = !!(c.dispatch?.auto_paused ?? c.whatsapp?.auto_e_paused);
     const allowed = replyAllowed(mode, mention ?? {});
-    const mayReply = mayEmitChat({ paused, mode, replyAllowed: allowed, isReaction: ev.kind === 'reaction' });
+    const mayReply = !denied && mayEmitChat({ paused, mode, replyAllowed: allowed, isReaction: ev.kind === 'reaction' });
     // send_to_egpt keeps the persona in a chat's context even when it won't reply — that's a
     // persona concern. A sibling is an engineer, not a context-follower: it runs ONLY when it
-    // may reply, so force 'mode' for any non-persona being (never 'always').
-    const sendToEgpt = being !== defaultKey
+    // may reply, so force 'mode' for any non-persona being (never 'always'). A denied sender
+    // runs no context turn either.
+    const sendToEgpt = (being !== defaultKey || denied)
       ? 'mode'
       : (_send(bv?.send_to_egpt) ?? _send(c.dispatch?.send_to_egpt) ?? _send(c.whatsapp?.send_to_egpt) ?? 'mode');
     // REPLY ROUTING (operator 2026-10-08, CHUNK 2): when this conversation HAS a super channel

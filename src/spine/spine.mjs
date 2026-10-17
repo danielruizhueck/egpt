@@ -95,7 +95,7 @@ import { cleanForSpeech } from '../speech-clean.mjs';
  * @typedef {object} Services
  * @property {{ build: (msg: any) => InboundEvent }} identity            classify + build the dispatch line
  * @property {{ resolve: (ev: InboundEvent) => { being: string, mention?: object } }} router   @being → { local being target, mention ride-along } (a sibling routed by its own @name rides a synthetic mention for its gate)
- * @property {{ decide: (being: string, ev: InboundEvent, mention?: object) => Promise<{mode: string, receives: boolean, mayReply: boolean, sendToEgpt: 'always'|'mode'}>,
+ * @property {{ decide: (being: string, ev: InboundEvent, mention?: object, opts?: { denied?: boolean }) => Promise<{mode: string, receives: boolean, mayReply: boolean, sendToEgpt: 'always'|'mode'}>,
  *             surfaces: (decision: object, replyText: string) => boolean }} gating   per-conversation mode + send_to_egpt → run/surface decisions
  * @property {{ open: (chatId: string) => { update: (partial: any) => void, finish: (reply: any) => Promise<void>, fail?: (e: any) => void } }} sender   live-stream delivery (open → update* → finish)
  * @property {{ log: (ev: InboundEvent, reply?: any) => void }} transcript   "file is the conversation"
@@ -876,7 +876,7 @@ export function createSpine({
   async function gateOf(target, ev) {
     const to = target.being ?? defaultBeing;
     const mention = target.mention ?? ev.mention;
-    return { meshTarget: target.mesh ?? null, to, mention, d: await gating.decide(gateAs(target, to), ev, mention) };
+    return { meshTarget: target.mesh ?? null, to, mention, d: await gating.decide(gateAs(target, to), ev, mention, { denied: !!target.denied }) };
   }
 
   // WOULD THIS MESSAGE HAVE REACHED A BEING, HAD IT BEEN LIVE? — the wake notice's question

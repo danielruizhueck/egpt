@@ -506,6 +506,15 @@ export function createRouter({ getAgents = () => ({}), getConfig = () => ({}), d
         : (localAgentKey(agents, defaultBeingOf(getContact(state, ev?.surface, ev?.chatId)?.entry))
           ?? (getContact(state, ev?.surface, ev?.chatId) ? null : strangerAgentFor(ev, cfg)));
       const ownerOnly = !!owner && !ev?.isSender && !isKnownSender(ev?.senderId, cfg);
+      // THE allowed_users test for one being here (see the ALLOWED_USERS GATE below). Every target
+      // that can wake a being passes it, the fall-through included (operator 2026-10-16: "no mode
+      // is above allowed_users").
+      const permits = (name, agent) => {
+        const conv = state ? (() => { try { return getBeing(state, ev.surface, ev.chatId, name); } catch { return null; } })() : null;
+        const convAllowed = Array.isArray(conv?.allowedUsers) ? conv.allowedUsers : null;
+        const globalAllowed = Array.isArray(agent?.conversation_defaults?.allowed_users) ? agent.conversation_defaults.allowed_users : null;
+        return allowedUsersPermits(convAllowed ?? globalAllowed, ev?.senderId);
+      };
       // ONE membership answer per identity per resolve() call (never per hit) — same discipline as
       // the conv-state read above. Only ever consulted for a hit that actually carries a guard, so
       // a message addressing nobody, or addressing an ordinary handle, costs nothing.
@@ -589,12 +598,9 @@ export function createRouter({ getAgents = () => ({}), getConfig = () => ({}), d
           // allowed_users/isSender concept) — a being's own allowed_users is a narrower, different
           // check and never reuses that field. A hit failing it is dropped SILENTLY, same
           // convention as the surface-pin mismatch above: it falls through exactly as if the
-          // @token had never matched (to another target, the persona, or "nobody addressed").
-          const conv = state ? (() => { try { return getBeing(state, ev.surface, ev.chatId, hit.name); } catch { return null; } })() : null;
-          const convAllowed = Array.isArray(conv?.allowedUsers) ? conv.allowedUsers : null;
-          const globalAllowed = Array.isArray(hit.agent.conversation_defaults?.allowed_users) ? hit.agent.conversation_defaults.allowed_users : null;
-          const allowedUsers = convAllowed ?? globalAllowed;
-          if (!allowedUsersPermits(allowedUsers, ev?.senderId)) continue;
+          // @token had never matched (to another target, or to the fall-through below, which
+          // faces its own being's list).
+          if (!permits(hit.name, hit.agent)) continue;
           // THE CONNECTION GATE (operator 2026-09-08) — another post-match filter, same shape as
           // the two above and placed before the fallback guard so that guard keeps being the last
           // thing to run and the only one that can cost a lookup. The ONE matcher decided the
@@ -710,7 +716,12 @@ export function createRouter({ getAgents = () => ({}), getConfig = () => ({}), d
       // `fallthrough: true` — NOBODY was explicitly addressed; this is the persona default, not a
       // real @mention. The per-being echo gate (spine.mjs) reads it so a being's own plain signed
       // line never wakes the persona by default (only an explicit cross-being address does).
-      if (!targets.length) targets.push({ being: owner ?? defaultBeing, mention: ev?.mention, address: null, fallthrough: true });
+      // `denied: true` — that being's allowed_users refuses this sender: the line is recorded, and
+      // the gate (gating.decide) wakes nobody, whatever the mode or mention.
+      if (!targets.length) {
+        const being = owner ?? defaultBeing;
+        targets.push({ being, mention: ev?.mention, address: null, fallthrough: true, ...(permits(being, agents[being]) ? {} : { denied: true }) });
+      }
       return { ...targets[0], targets };
     },
   };
