@@ -226,6 +226,12 @@ export function seatbeltProfile({
   L.push('; unsandboxed rc=0 lists keys; boxed rc=2 "no agent"). NETWORK IS OTHERWISE UNRESTRICTED —');
   L.push('; this names the launchd socket dir only, and a real TLS round-trip to the API still works.');
   L.push('(deny network-outbound (regex #"/com\\.apple\\.launchd\\."))');
+  L.push('; signals: (allow default) let a boxed process signal ANY process of the operator\'s uid, so');
+  L.push('; `kill <daemon pid>` took the node down from inside a turn (MEASURED 2026-10-17: kill -0 on an');
+  L.push('; unrelated process rc=0). Only the box\'s own process tree may be signalled — claude ending its');
+  L.push('; own tools still works (MEASURED: own child killed, the outside process untouched).');
+  L.push('(deny signal)');
+  L.push('(allow signal (target same-sandbox))');
   L.push('');
   return L.join('\n') + '\n';
 }
