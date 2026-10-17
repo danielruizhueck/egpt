@@ -566,10 +566,10 @@ describe('writeStopFile — the file explains itself, and never clobbers an exis
 });
 
 // === (E) THE CLICKABLE STOP ICON (operator 2026-07-26: "probably we can prepare a clickable
-//     script to just stop the egpt-service. an autoelevating clickable icon"). setup/stop-egpt.cmd
-//     self-elevates and runs setup/stop-egpt.ps1, which writes THIS SAME FILE and then stops the
-//     service. Two writers of one format is a drift hazard — the node must be able to read a file
-//     the script wrote — so the shared skeleton is asserted against BOTH sides here. ============
+//     script to just stop the egpt-service"). setup/stop-egpt.cmd runs setup/stop-egpt.ps1, which
+//     writes THIS SAME FILE and then stops the Session 1 task and its daemon tree (2026-10-17: the
+//     Session 0 service is retired). Two writers of one format is a drift hazard — the node must be
+//     able to read a file the script wrote — so the shared skeleton is asserted against BOTH sides. =
 describe('(E) setup/stop-egpt.ps1 writes the same STOP file the spine does', () => {
   const readSetup = (name) => fs.readFile(new URL(`../setup/${name}`, import.meta.url), 'utf8');
 
@@ -597,23 +597,26 @@ describe('(E) setup/stop-egpt.ps1 writes the same STOP file the spine does', () 
     }
   });
 
-  it('it derives the service name exactly as the installer does, and never clobbers an existing file', async () => {
-    const [ps1, installer] = await Promise.all([readSetup('stop-egpt.ps1'), readSetup('install-nssm-service.ps1')]);
-    for (const line of ["(Split-Path $EgptHome -Leaf) -replace '^\\.', ''", '$ServiceName = "$base-daemon"']) {
-      expect(installer, line).toContain(line);
+  it('it derives the task name exactly as the registrar does, and never clobbers an existing file', async () => {
+    const [ps1, startPs1, registrar] = await Promise.all([readSetup('stop-egpt.ps1'), readSetup('start-egpt.ps1'), readSetup('register-session1-daemon-task.ps1')]);
+    for (const line of ["(Split-Path $EgptHome -Leaf) -replace '^\\.', ''", '$TaskName = "$base-daemon"']) {
+      expect(registrar, line).toContain(line);
       expect(ps1, line).toContain(line);
+      expect(startPs1, line).toContain(line);
     }
     expect(ps1).toContain('if (Test-Path $stopFile)');          // idempotent: an existing STOP file is left alone
-    expect(ps1).toContain('IsInRole');                          // …and it refuses to run un-elevated
   });
 
-  it('the .cmd auto-elevates and there is a documented way back', async () => {
-    const [cmd, startCmd, startPs1] = await Promise.all([readSetup('stop-egpt.cmd'), readSetup('start-egpt.cmd'), readSetup('start-egpt.ps1')]);
-    expect(cmd).toContain('-Verb RunAs');                       // the UAC self-elevation the installers use
+  it('stop drives the Session 1 task and kills the daemon tree; start starts the task', async () => {
+    const [cmd, startPs1, ps1] = await Promise.all([readSetup('stop-egpt.cmd'), readSetup('start-egpt.ps1'), readSetup('stop-egpt.ps1')]);
     expect(cmd).toContain('stop-egpt.ps1');
     expect(cmd).toContain('start-egpt.cmd');                    // the way back is named in the way off
-    expect(startCmd).toContain('-Verb RunAs');
+    // the STOP file is written before anything is stopped
+    expect(ps1.indexOf('[IO.File]::WriteAllText($stopFile')).toBeLessThan(ps1.indexOf('Stop-ScheduledTask -TaskName $TaskName'));
+    expect(ps1).toContain("'daemon-s1.pid', 'egpt-daemon.mjs'");   // Stop-ScheduledTask does not kill the tree
+    expect(ps1).toContain('& taskkill.exe /PID $procId /T /F');
     expect(startPs1).toContain('Remove-Item $stopFile -Force'); // …and the way back actually clears the switch
-    expect(startPs1).toContain('Start-Service -Name $ServiceName');
+    expect(startPs1).toContain('Start-ScheduledTask -TaskName $TaskName');
+    for (const src of [ps1, startPs1]) expect(src).not.toMatch(/Start-Service|Stop-Service/);
   });
 });

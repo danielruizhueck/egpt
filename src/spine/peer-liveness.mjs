@@ -14,15 +14,6 @@
 // `fallback_handle`'s `unless_present` (same rule, different predicate) and as
 // whisper-server.mjs's adoption probe (look at the port, believe what answers).
 //
-// THE OBSERVATION IS THE CALLER'S, not this module's — `probe` is injected and this module only
-// owns the hysteresis over it. tcpProbe below is the one the fallback-handle watcher uses, and
-// "does anything serve there" is the right question for it: a spine that would refuse our token
-// is still a spine that will answer the chat. It is the WRONG question for the daemon's
-// stand-down watch, which asks "is this profile HELD" — a spine that is alive but could not bind
-// its console port holds the profile and answers nothing, and a squatter that took the port
-// holds nothing and answers — so that caller passes in a probe over state/spine.pid instead, and
-// uses the port only to say what is on it (src/daemon-runtime.mjs's standDownAndWatch).
-//
 // ASYMMETRIC HYSTERESIS, and this is the whole safety argument. The two directions are NOT
 // equally dangerous:
 //   - Believing the peer is alive when it is dead costs SILENCE. Nobody answers for a moment.
@@ -37,9 +28,7 @@
 // not yet looked must not speak on a handle that might not be its own; the cost is one probe
 // interval of silence on a cold start, which is the cheap direction.
 
-// Exported so a caller that drives `tick()` on its own timer (the daemon's stand-down watch)
-// uses THIS cadence rather than inventing a second one. Value and behaviour unchanged.
-export const DEFAULT_EVERY_MS = 5_000;
+const DEFAULT_EVERY_MS = 5_000;
 const DEFAULT_CLAIM_AFTER = 3;
 
 /**
@@ -50,9 +39,6 @@ const DEFAULT_CLAIM_AFTER = 3;
  * @param {number} [deps.everyMs]      probe interval. Default 5s.
  * @param {number} [deps.claimAfter]   consecutive DEAD probes before claiming the handle.
  *   Yielding always takes exactly ONE live probe — see the asymmetry above.
- * @param {string} [deps.subject]      what is yielded and claimed, named in the log lines. The
- *   default is the fallback handle this was written for; the daemon's stand-down watch claims
- *   THE PROFILE, and a line telling it that it had claimed a handle would be a lie.
  * @param {typeof setInterval} [deps.setIntervalFn]   test seams; real timers by default.
  * @param {typeof clearInterval} [deps.clearIntervalFn]
  * @param {(m: string) => void} [deps.onLog]
@@ -65,7 +51,6 @@ export function createPeerLiveness({
   probe,
   everyMs = DEFAULT_EVERY_MS,
   claimAfter = DEFAULT_CLAIM_AFTER,
-  subject = 'its fallback handle',
   setIntervalFn = setInterval,
   clearIntervalFn = clearInterval,
   onLog = () => {},
@@ -88,14 +73,14 @@ export function createPeerLiveness({
     if (up) {
       deadStreak = 0;
       // YIELD EAGERLY: one live probe is enough to hand the handle straight back.
-      if (!alive) { alive = true; onLog(`peer is back — yielding ${subject}`); }
+      if (!alive) { alive = true; onLog('peer is back — yielding its fallback handle'); }
       return;
     }
 
     deadStreak += 1;
     if (alive && deadStreak >= needed) {
       alive = false;
-      onLog(`peer has not answered ${deadStreak} consecutive probes — claiming ${subject}`);
+      onLog(`peer has not answered ${deadStreak} consecutive probes — claiming its fallback handle`);
     }
   };
 
@@ -118,17 +103,11 @@ export function createPeerLiveness({
 }
 
 /**
- * ONE real observation: does anything answer on the peer's console port?
+ * The real observation: does anything answer on the peer's console port?
  *
- * A bare TCP connect, NOT the console handshake — this asks "is a spine SERVING there", and a
+ * A bare TCP connect, NOT the console handshake — this asks "is a spine serving there", and a
  * spine that is up but would refuse our token is still a spine that will answer the chat. It
  * also means the probe needs no secret, so a liveness check can never leak one.
- *
- * It does NOT ask "is this profile held", and it cannot be made to: a spine whose port was
- * squatted before it could bind holds its profile and serves nothing here, and a squatter that
- * took the port answers while holding nothing. A caller that needs the second question asks
- * state/spine.pid instead — see standDownAndWatch in src/daemon-runtime.mjs, which keeps this
- * probe only to REPORT what is on the port.
  *
  * @param {object} o
  * @param {number} o.port                  the peer's console port (its `shell.port`)

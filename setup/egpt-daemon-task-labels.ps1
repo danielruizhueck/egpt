@@ -5,8 +5,7 @@
 #
 # WHY IT EXISTS (2026-09-16). On both nodes the `egpt-daemon` task had an empty Description, so
 # Task Scheduler said nothing about what it runs or what turning it off costs - part of why the
-# operator could not tell what runs where. The Windows service of the same name already said so
-# (install-nssm-service.ps1); the task now says it in the same voice.
+# operator could not tell what runs where.
 #
 # ONE LINE, what it is first and what disabling it costs last - the same order as the service's
 # Description. DISABLE, not stop: disabling has one measurable consequence at the next logon,

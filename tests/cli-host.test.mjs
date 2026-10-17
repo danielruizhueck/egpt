@@ -281,7 +281,7 @@ describe('the host, across more than one restart', () => {
     expect((await cli3.adopt(h.hid)).orphan).toEqual({ opener: 'informe' });
   });
 
-  it('what /rewind or /standdown ended is not offered for adoption', async () => {
+  it('what /rewind ended is not offered for adoption', async () => {
     const slow = () => Object.assign(fakeClaude(1), { kill: () => true });   // still exiting when the next spine asks
     const host = createCliHost({ log: () => {}, setPriority: () => {}, spawn: slow });
     const p1 = ipcPair();

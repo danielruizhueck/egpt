@@ -89,13 +89,9 @@ import { BEING_PATH, isBeingDial, parseAskFrame, askResultFrame } from '../shell
 // 23375 UNTIL 2026-09-11, AND IT WAS INSIDE BEEPER'S SCAN RANGE. Beeper Desktop takes the next
 // free port from 23373 upward (src/tools/beeper-whoami.mjs scans 23373..23385), so this default
 // sat four ports into a range another program helps itself to. At the S0→S1 logon that night
-// Beeper grabbed 23375 the instant the departing spine released it, the arriving spine could not
-// bind its console at all, and the daemon's stand-down watch — which read that port as "is the
-// profile held" — put a second spine on a held profile. The watch no longer trusts a port for
-// that question (src/daemon-runtime.mjs), but a default that collides with a program on every
-// one of these machines is still wrong. 23475 is the number the live nodes were moved to that
-// night (kg 23475, kg2 23477), so the code default and the deployment now say the same thing —
-// including when config.yaml is unreadable and the daemon falls back to this number.
+// Beeper grabbed 23375 the instant the departing spine released it, and the arriving spine could
+// not bind its console at all. 23475 is the number the live nodes were moved to that night
+// (kg 23475, kg2 23477), so the code default and the deployment now say the same thing.
 export const SHELL_WS_PORT = 23475;
 // ...but the number is no longer FIXED (operator 2026-09-02). Two spines can now run on one
 // machine — one in Session 0 holding the agent's Beeper, one in Session 1 holding the
@@ -546,7 +542,7 @@ export function createShellPort({
   }
 
   // --- A BIND THAT FAILS IS A STANDING STATE, NOT A TRANSIENT ERROR ------------------------
-  // (reve, the night of 2026-09-11 — the silent half of the stand-down bug.)
+  // (reve, the night of 2026-09-11.)
   //
   // WHAT HAPPENED. Beeper Desktop claims the first free port upward from 23373 and took this
   // spine's console number. The limb did the right thing — it retried, and it kept retrying —
@@ -556,10 +552,8 @@ export function createShellPort({
   // regardless, and WHAT is holding the port. A forever-loop that never states its own
   // condition is indistinguishable from a hang.
   //
-  // AND IT IS NOW A NORMAL OUTCOME. The daemon's stand-down watch no longer lets a squatted
-  // console port veto a respawn (src/daemon-runtime.mjs — spine.pid decides), so a spine being
-  // started deliberately INTO a squatted port is the expected case, not a fault. This line is
-  // the spine's half of that decision: it is a loud statement of fact, not an alarm.
+  // A squatted console port is not a fault — the spine serves messages without it — so this line
+  // is a loud statement of fact, not an alarm.
   //
   // THE HOLDER LOOKUP is the read-only half of the reap the limb already does at start(), and
   // it runs only on a FAILED bind — never on a schedule — so at steady state it costs one

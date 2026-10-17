@@ -1,6 +1,7 @@
-# uninstall-nssm-service.ps1 - remove one egpt v2 node's NSSM service.
+# uninstall-nssm-service.ps1 - remove one egpt v2 node's NSSM service (the retired Session 0
+# egpt-daemon service, 2026-10-17: the node runs from the Session 1 task).
 #
-# Removes only the named service (default 'egpt-daemon'). Never kills stray
+# Removes only the named service. Never kills stray
 # node.exe and never touches other nodes - independent profiles are independent.
 # No egpt code, config, or auth state is touched; service logs are preserved.
 #
@@ -24,7 +25,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # --- 1. ensure elevated -----------------------------------------------------------------------
-# SELF-ELEVATES rather than refusing (operator 2026-09-11), matching install-nssm-service.ps1.
+# SELF-ELEVATES rather than refusing (operator 2026-09-11).
 # Refusing made this a two-step dance from an ordinary shell, and the retype is where the
 # mistakes happen: an MSYS/git-bash prompt eats backslashes out of a Windows path.
 #

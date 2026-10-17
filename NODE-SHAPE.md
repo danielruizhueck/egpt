@@ -53,13 +53,12 @@ is named for its **role** — the same word as its config key:
 
 | name | kind | job |
 |---|---|---|
-| `egpt-daemon` | Windows service (nssm, Auto) | keeps the node loop alive in **session 0** |
-| `egpt-daemon` | scheduled task (at logon) | keeps the node loop alive in **session 1** |
+| `egpt-daemon` | scheduled task (at logon) | keeps the node loop alive in **session 1** — the node's one runner |
 | `egpt-beeper-primary` | Windows service (nssm, Auto) | Beeper for the primary account — the ear |
 | `egpt-beeper-secondary` | Windows service (nssm, Auto) | Beeper for the secondary account — the mouth; two-number nodes only |
 
-The service and the task share `egpt-daemon`: Windows keeps services and
-scheduled tasks in separate namespaces, and there is only one of each.
+The Session 0 `egpt-daemon` service is **retired** (2026-10-17: stopped and Disabled on
+both nodes; `setup\uninstall-nssm-service.cmd` removes it).
 
 **Never an account name in a service name.** The role is what the spine reads,
 so `egpt-beeper-primary` is the install behind `beeper.primary` on every node,
@@ -71,13 +70,8 @@ during an incident, exactly when the services list gets read.
 
 | state | node processes |
 |---|---|
-| before anyone logs in | **2** — the session 0 daemon, and the spine it supervises |
-| logged in | **3** — the session 1 daemon and its spine doing the work, plus the session 0 daemon, stood down, waiting |
-
-The third one is on purpose. At logoff session 1 dies with everything in it, and
-the stood-down session 0 daemon is the only thing that brings the spine back.
-nssm cannot do that job alone: it restarts a process that EXITS, and has no way
-to know whether session 1 is holding the spine.
+| before anyone logs in | **0** — the node is down until logon |
+| logged in | **2** — the session 1 daemon and the spine it supervises |
 
 In Task Manager none of these is called "egpt". Node shows as *Node.js
 JavaScript Runtime* and nssm as *The non-sucking service manager* — both labels
@@ -109,35 +103,17 @@ not a loopback socket** — measured on 2026-09-06, a real Chrome and two
 to you, not reachability for the spine. (The Beepers serve no CDP since 2026-10-11.)
 
 
-## One node, two sessions, one live
+## One node, one runner
 
-The session 0 and session 1 loops are **one node in two sessions**, not two
-nodes. Same config, same `EGPT_HOME`, same tokens — which is why they take turns
-instead of coexisting. Both live at once would open two connections per token
-(every message ingested twice, answered twice), race
-`config/conversations.yaml` and `state/ingest/`, and collide on the console port
-(23475 by default).
+Since 2026-10-17 each node runs from **one** loop, in session 1: a spine there can
+**spawn and supervise a browser as an ordinary child process**, and a session 0
+browser is invisible to you. The S0→S1 handover (`/standdown`, exit 45) is gone.
 
-Session 1 exists for one reason: a spine there can **spawn and supervise a
-browser as an ordinary child process**. A session 0 browser is invisible to you
-— it cannot be seen, clicked, or shown a login prompt.
-
-**The S0→S1 flip** is the handover. After a restart the spine runs in session 0.
-At logon the `egpt-daemon` scheduled task starts the session 1 daemon, whose
-spine asks the incumbent for the profile; the incumbent finishes the turn it is
-writing and exits (`STANDDOWN_EXIT_CODE = 45`), and its daemon respawns only once
-**nothing holds the profile** — `state/spine.pid` names no live process (paired
-with a fresh `state/alive.txt` beat) and the console port is quiet. The pid is
-the mutex; the port is a second witness, not the answer. Reading the port alone
-put two spines on one profile on 2026-09-11: Beeper takes the next free port
-from 23373 up, grabbed the console the instant the departing spine released it,
-and the arriving spine — alive and holding the profile — could not bind and so
-was invisible.
-
-Exercised in the logon direction: kg booted on 2026-09-16 07:25, the session 1
-spine took the profile, and the session 0 daemon stood down with no spine child.
-The logoff direction — session 1 dying and session 0 taking back over — is not
-yet exercised; see `plans/2609061200-SESSION-0-TO-1-HANDOVER-PLAN.md`.
+Two spines on one `EGPT_HOME` would open two connections per token (every message
+ingested twice, answered twice), race `config/conversations.yaml` and
+`state/ingest/`, and collide on the console port (23475 by default). So a daemon
+refuses to start while `state/spine.pid` names a live process with a fresh
+`state/alive.txt` beat, and says which pid.
 
 
 ## The config shape
@@ -181,9 +157,8 @@ Run it before saying yes.
 
 1. One Beeper service per account, named for its role (`egpt-beeper-primary`,
    `egpt-beeper-secondary`), **Running** and **Auto**
-2. One `egpt-daemon` Windows service (Auto) and one `egpt-daemon` logon task
-3. Exactly **one** spine live, in whichever session — two live is the failure,
-   not the goal
+2. One `egpt-daemon` logon task, and no running `egpt-daemon` service
+3. Exactly **one** spine live — two live is the failure, not the goal
 4. One `config.yaml`, one block per account under `primary` / `secondary`,
    `account` + `token` — **no Beeper ports**. The console port IS pinned, and
    must be: Beeper claims the first free port upward from 23373 and will take an
@@ -202,7 +177,8 @@ Run it before saying yes.
 ## What is deployed today
 
 As of 2026-09-16, `kg` and `do` are each one spine holding two accounts, and
-**they match on everything this document names**:
+**they match on everything this document names** (2026-10-17: the `egpt-daemon`
+service is stopped and Disabled on both):
 
 | | `kg` | `do` |
 |---|---|---|

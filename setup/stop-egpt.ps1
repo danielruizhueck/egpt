@@ -1,64 +1,56 @@
 # stop-egpt.ps1 - THE STOP BUTTON: take this node down, and keep it down.
 #
-# Normally you do not run this by hand - double-click setup\stop-egpt.cmd, which
-# auto-elevates (stopping a service needs admin) and runs this.
+# Normally you do not run this by hand - double-click setup\stop-egpt.cmd.
 #
-# TWO actions, in THIS order:
+# THREE actions, in THIS order:
 #   1. write  EGPT_HOME\STOP  - the kill-switch FILE (src/stop-guard.mjs). While it
 #      exists boot REFUSES to start and a RUNNING spine halts on its next tick, so
-#      the node stays down even if the service is restarted or the machine reboots.
-#   2. stop the NSSM service  - so nothing is running right now either.
-# The FILE comes first on purpose: if the service respawns while we are stopping it,
-# the file is already there and the fresh spine refuses to start. Stopping the
-# service alone would only last until the next boot.
+#      the node stays down even if the task restarts or the machine reboots.
+#   2. Stop-ScheduledTask the Session 1 task (setup/register-session1-daemon-task.ps1).
+#   3. taskkill the daemon tree - Stop-ScheduledTask does not kill it. The daemon is
+#      found by state\daemon-s1.pid, an orphan spine by state\spine.pid; each pid is
+#      killed only if its command line still runs egpt-daemon.mjs / egpt-spine.mjs.
+# The FILE comes first on purpose: anything that respawns meanwhile refuses to start.
 #
-# UNDO: double-click setup\start-egpt.cmd (deletes the file, starts the service), or
-# by hand:  Remove-Item <EGPT_HOME>\STOP ; Start-Service <service>
+# UNDO: double-click setup\start-egpt.cmd (deletes the file, starts the task).
 #
 # Idempotent: an existing STOP file is left exactly as it is (whoever stopped the
-# node first owns the explanation) and an already-stopped service is left alone.
+# node first owns the explanation) and an already-stopped node is left alone.
+# No elevation: the task and its processes are the operator's own.
 #
 # WARNING - THE FILE FORMAT BELOW IS A SECOND COPY of writeStopFile() in
 # src/stop-guard.mjs. The node reads files this script writes and vice versa, so the
 # two MUST NOT DRIFT; tests/stop-file.test.mjs asserts they still agree.
 #
-# Run from an ELEVATED PowerShell if you prefer the command line:
 #   powershell -ExecutionPolicy Bypass -File .\setup\stop-egpt.ps1
 #   powershell -ExecutionPolicy Bypass -File .\setup\stop-egpt.ps1 -EgptHome "$env:USERPROFILE\.egpt-secondary"
 
 param(
-  [string]$EgptHome    = $(if ($env:EGPT_HOME) { $env:EGPT_HOME } else { Join-Path $env:USERPROFILE '.egpt' }),
-  [string]$ServiceName = '',
-  [string]$Reason      = 'setup\stop-egpt.cmd (operator clicked the STOP button)'
+  [string]$EgptHome = $(if ($env:EGPT_HOME) { $env:EGPT_HOME } else { Join-Path $env:USERPROFILE '.egpt' }),
+  [string]$TaskName = '',
+  [string]$Reason   = 'setup\stop-egpt.cmd (operator clicked the STOP button)'
 )
 
 $ErrorActionPreference = 'Stop'
 
-# --- 1. ensure elevated (the .cmd wrapper already does this; this is the belt) ---
-$me = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
-if (-not $me.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-  Write-Host "This script must be run from an ELEVATED PowerShell (or double-click setup\stop-egpt.cmd)." -ForegroundColor Red
-  exit 1
-}
-
-# --- 2. same profile -> service-name derivation the installer uses ---
-#     ~/.egpt -> egpt-daemon, ~/.egpt-secondary -> egpt-secondary-daemon (setup/install-nssm-service.ps1).
-if (-not $ServiceName) {
-  $base = (Split-Path $EgptHome -Leaf) -replace '^\.', ''   # ".egpt-secondary" -> "egpt-secondary"
+# --- 1. same profile -> task-name derivation the registrar uses ---
+#     ~/.egpt -> egpt-daemon, ~/.egpt-secondary -> egpt-secondary-daemon (setup/register-session1-daemon-task.ps1).
+$base = (Split-Path $EgptHome -Leaf) -replace '^\.', ''   # ".egpt-secondary" -> "egpt-secondary"
+if (-not $TaskName) {
   # THROW, never fall back to 'egpt' (2026-09-11): an empty leaf means EgptHome arrived
-  # empty or mangled, and silently resolving that to the PRIMARY node's service is how
-  # `uninstall -EgptHome <mangled>` removed egpt-daemon instead of the node it named.
-  if (-not $base) { throw "cannot derive a service name: -EgptHome is empty or has no leaf ('$EgptHome'). Pass -ServiceName explicitly." }
-  $ServiceName = "$base-daemon"
+  # empty or mangled, and silently resolving that to the PRIMARY node is how a stop aimed
+  # at one node lands on another.
+  if (-not $base) { throw "cannot derive a task name: -EgptHome is empty or has no leaf ('$EgptHome'). Pass -TaskName explicitly." }
+  $TaskName = "$base-daemon"
 }
 
 Write-Host ""
 Write-Host "Stopping egpt:" -ForegroundColor Cyan
 Write-Host "  profile : $EgptHome   (EGPT_HOME)"
-Write-Host "  service : $ServiceName"
+Write-Host "  task    : $TaskName"
 Write-Host ""
 
-# --- 3. the kill-switch FILE (first - see the header) ---
+# --- 2. the kill-switch FILE (first - see the header) ---
 $stopFile = Join-Path $EgptHome 'STOP'
 if (-not (Test-Path $EgptHome)) {
   Write-Host "WARNING: profile folder $EgptHome does not exist - is that the right EGPT_HOME?" -ForegroundColor Yellow
@@ -91,42 +83,43 @@ if (Test-Path $stopFile) {
   Write-Host "Wrote the kill switch: $stopFile" -ForegroundColor Green
 }
 
-# --- 4. stop the service ---
-$svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-if (-not $svc) {
-  Write-Host "No service named '$ServiceName' on this machine." -ForegroundColor Yellow
-  $others = @(Get-Service | Where-Object { $_.Name -like '*egpt*' })
-  if ($others.Count) {
-    Write-Host ("  egpt services that DO exist: " + (($others | ForEach-Object { "$($_.Name) [$($_.Status)]" }) -join ', '))
-    Write-Host "  Re-run with -ServiceName <name> (or -EgptHome <that node's profile>) to stop one of those."
-  }
-  Write-Host "  The STOP file is written regardless: a node on this profile halts on its next tick and refuses to restart."
-} elseif ($svc.Status -eq 'Stopped') {
-  Write-Host "$ServiceName was already stopped." -ForegroundColor DarkGray
+# --- 3. stop the task ---
+$task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+if (-not $task) {
+  Write-Host "No scheduled task named '$TaskName' on this machine." -ForegroundColor Yellow
+} elseif ("$($task.State)" -eq 'Running') {
+  try { Stop-ScheduledTask -TaskName $TaskName -ErrorAction Stop; Write-Host "Stopped task $TaskName." -ForegroundColor Green }
+  catch { Write-Host "  Stop-ScheduledTask said: $($_.Exception.Message)" -ForegroundColor DarkYellow }
 } else {
-  Write-Host "Stopping $ServiceName..." -ForegroundColor Yellow
-  try { Stop-Service -Name $ServiceName -Force -ErrorAction Stop }
-  catch { Write-Host "  Stop-Service said: $($_.Exception.Message)" -ForegroundColor DarkYellow }
-  $sw = [Diagnostics.Stopwatch]::StartNew()
-  while ($sw.Elapsed.TotalSeconds -lt 20 -and (Get-Service $ServiceName).Status -ne 'Stopped') { Start-Sleep -Milliseconds 500 }
-  $final = (Get-Service $ServiceName).Status
-  if ($final -eq 'Stopped') {
-    Write-Host "$ServiceName is Stopped." -ForegroundColor Green
-  } else {
-    # NSSM's graceful stop can hang while the bridge holds its WebSocket (see
-    # setup/restart-egpt-service.ps1). Not fatal here: the STOP file is already on
-    # disk, so whatever is still up halts on its next tick and cannot come back.
-    Write-Host "$ServiceName is still '$final' after 20s - NSSM's graceful stop can hang on the bridge socket." -ForegroundColor Red
-    Write-Host "  The STOP file is written, so the spine halts on its next tick and refuses to restart." -ForegroundColor Yellow
-    Write-Host "  To clear the wrapper too:  taskkill /F /IM egpt-service.exe" -ForegroundColor Yellow
-  }
+  Write-Host "Task $TaskName is $($task.State)." -ForegroundColor DarkGray
 }
+
+# --- 4. kill the daemon tree (and an orphan spine) ---
+# The pid in <file>, if it is alive AND still runs <script>; else $null (pids are reused).
+function Get-LivePid([string]$file, [string]$script) {
+  $path = Join-Path (Join-Path $EgptHome 'state') $file
+  if (-not (Test-Path -LiteralPath $path)) { return $null }
+  $n = 0
+  if (-not [int]::TryParse("$(Get-Content -LiteralPath $path -Raw)".Trim(), [ref]$n) -or $n -le 0) { return $null }
+  $p = Get-CimInstance Win32_Process -Filter "ProcessId=$n" -ErrorAction SilentlyContinue
+  if ($p -and $p.CommandLine -match [regex]::Escape($script)) { return $n }
+  return $null
+}
+$killed = 0
+foreach ($t in @(@('daemon-s1.pid', 'egpt-daemon.mjs'), @('spine.pid', 'egpt-spine.mjs'))) {
+  $procId = Get-LivePid $t[0] $t[1]
+  if (-not $procId) { continue }
+  & taskkill.exe /PID $procId /T /F | Out-Null
+  if ($LASTEXITCODE -eq 0) { Write-Host "Killed $($t[1]) pid $procId and its tree." -ForegroundColor Green; $killed++ }
+  else { Write-Host "taskkill /PID $procId /T /F exited $LASTEXITCODE - the STOP file still halts it on its next tick." -ForegroundColor Red }
+}
+if (-not $killed) { Write-Host "No live daemon or spine on this profile." -ForegroundColor DarkGray }
 
 # --- 5. say what happened and how to undo it ---
 Write-Host ""
 Write-Host "=== egpt is stopped ===" -ForegroundColor Green
 Write-Host "  kill switch : $stopFile"
-Write-Host "  service     : $ServiceName"
+Write-Host "  task        : $TaskName"
 Write-Host ""
 Write-Host "TO START IT AGAIN: double-click  setup\start-egpt.cmd" -ForegroundColor Cyan
-Write-Host "  or by hand:  Remove-Item `"$stopFile`" ; Start-Service $ServiceName"
+Write-Host "  or by hand:  Remove-Item `"$stopFile`" ; Start-ScheduledTask -TaskName $TaskName"

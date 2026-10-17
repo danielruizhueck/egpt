@@ -31,11 +31,6 @@ Describe 'Get-EgptDaemonTaskDescription' {
     $d -match "[\r\n]" | Should Be $false
     $d -match "[<>&`"']" | Should Be $false
   }
-  It 'opens in the voice of the service Description install-nssm-service.ps1 stamps' {
-    $installer = Get-Content (Join-Path $script:SetupDir 'install-nssm-service.ps1') -Raw
-    $installer | Should Match ([regex]::Escape('"eGPT spine supervisor (egpt-daemon.mjs) for profile(s)'))
-    (Get-EgptDaemonTaskDescription -Name 'egpt-daemon').StartsWith('eGPT spine supervisor (egpt-daemon.mjs) ') | Should Be $true
-  }
   It 'says what disabling it costs' {
     Get-EgptDaemonTaskDescription -Name 'egpt-daemon' | Should Match 'Disable it and the spine stays in session 0'
   }

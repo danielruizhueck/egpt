@@ -13,8 +13,8 @@
 //
 //   EGPT_HOMES=C:\Users\an\.egpt;C:\Users\an\.egpt-secondary
 //
-// EGPT_SESSION1=1 marks this daemon (and the spines it spawns) as the SESSION 1
-// one, which is what keeps its singleton apart from the service's.
+// EGPT_SESSION1=1 (setup/session1-daemon-launcher.vbs) marks the Session 1 daemon,
+// the node's one runner: it holds the browsers and the claude sessions.
 
 import { startProfileDaemons } from './src/daemon-runtime.mjs';
 

@@ -12,23 +12,16 @@
 # =====================================================================================
 # WHAT THIS IS FOR
 # =====================================================================================
-# After a restart this node runs in session 0 under NSSM. At logon the SESSION 1 spine takes
-# the primary profile and the session 0 primary spine stands down (STANDDOWN_EXIT_CODE = 45);
-# the SECONDARY profile never moves and stays in session 0 throughout. A session 1 spine can
-# spawn and supervise a browser as an ordinary child process, which is the whole reason the
-# handover exists.
-#
-# The session 1 spine needs a supervisor of its own, and "an s1 can only be monitored by an
-# s1" (operator 2026-09-11): the session 0 daemon is a service, it cannot put a process on the
-# interactive desktop. So a second daemon runs in session 1, and Task Scheduler keeps IT up -
-# trigger At log on, action the daemon, settings restart on failure.
+# This task is the node's ONE runner (operator 2026-10-17: the Session 0 service is retired).
+# It starts egpt-daemon.mjs at logon in session 1, where the daemon can hold the browsers and
+# the claude sessions as ordinary children, and Task Scheduler keeps it up - trigger At log on,
+# action the daemon, settings restart on failure. setup\start-egpt.cmd / stop-egpt.cmd drive it.
 #
 # =====================================================================================
 # WHY A TASK AND NOT THE HKCU RUN KEY
 # =====================================================================================
-# setup/register-session1-autostart.ps1 registers a Run entry that starts a bare SPINE. It
-# still works and is kept as the no-supervisor fallback. Two things make the task the better
-# seam once there is a daemon to launch:
+# setup/register-session1-autostart.ps1 registers a Run entry that starts a bare SPINE. Two
+# things make the task the better seam once there is a daemon to launch:
 #
 #   - THE RUN KEY NEVER LOOKS BACK. It starts a process at logon and forgets it. If the
 #     session 1 daemon dies mid-session, nothing brings it back until the next logon. A task
@@ -46,20 +39,15 @@
 # THE TWO SETTINGS THAT DECIDE WHETHER THIS WORKS AT ALL
 # =====================================================================================
 #   1. LogonType INTERACTIVE, never S4U/Password. A task registered to "run whether the user
-#      is logged on or not" runs in SESSION 0 - which is where the daemon already is, so the
-#      handover would never happen and the browser would land on a desktop nobody can see.
-#      Interactive also means no password is stored anywhere.
+#      is logged on or not" runs in SESSION 0, where the browser would land on a desktop
+#      nobody can see. Interactive also means no password is stored anywhere.
 #   2. ExecutionTimeLimit ZERO (unlimited). The default is 3 days, after which Task Scheduler
 #      STOPS the task. A supervisor that is killed on a timer is not a supervisor - and the
 #      failure would arrive three days into an uptime, which is the worst time to find it.
 #
 # And one that decides how it fails: RestartCount. Task Scheduler restarts a FAILED task
-# (nonzero exit) up to N times, N below. When it gives up, the node is not down: the session 1
-# spine dies with its daemon, state/spine.pid stops naming a live process and the console port
-# goes quiet, and the session 0 daemon - which has been watching BOTH since it stood down, and
-# claims only when neither says anybody is there - brings the session 0 spine back. What is lost is
-# the browser until the next logon. That is the safety net, and it is worth knowing it is
-# there rather than assuming the restart count is the last line of defence.
+# (nonzero exit) up to N times, N below. When it gives up, the node is down until the next
+# logon or setup\start-egpt.cmd.
 
 param(
   [string] $Repo      = '',
@@ -86,10 +74,8 @@ if (-not $EgptHome) {
   if ($env:EGPT_HOME) { $EgptHome = $env:EGPT_HOME }
   else { $EgptHome = Join-Path $env:USERPROFILE '.egpt' }
 }
-# Derived from the profile folder exactly like install-nssm-service.ps1 derives its service
-# name: ~/.egpt -> egpt-daemon. One machine can carry several nodes; they must not collide on
-# one task name. The task and the service share the name (NODE-SHAPE.md): Task Scheduler and
-# the SCM are separate namespaces, and nothing carries a session in its name.
+# Derived from the profile folder: ~/.egpt -> egpt-daemon. One machine can carry several nodes;
+# they must not collide on one task name. setup/start-egpt.ps1 and stop-egpt.ps1 derive it the same way.
 $base = (Split-Path $EgptHome -Leaf) -replace '^\.', ''
 if (-not $TaskName) {
   if (-not $base) { throw "cannot derive a task name: -EgptHome is empty or has no leaf ('$EgptHome'). Pass -TaskName explicitly." }
@@ -104,13 +90,12 @@ if (-not $LogPath) { $LogPath = Join-Path $EgptHome 'config\logs\session1-daemon
 if (-not $Node) {
   $found = Get-Command node.exe -ErrorAction SilentlyContinue
   if ($found) { $Node = $found.Source }
-  else { $Node = 'C:\Program Files\nodejs\node.exe' }   # the same fallback install-nssm-service.ps1 hardcodes
+  else { $Node = 'C:\Program Files\nodejs\node.exe' }
 }
 
 # The shim comes from -Repo, NOT from $PSScriptRoot. Running this script out of an editable
 # checkout to register a task against the DEPLOYED one is the ordinary case, and a task whose
-# shim lives in the tree you edit is the same footgun install-nssm-service.ps1 now refuses:
-# the shim is what sets EGPT_SESSION1 and names egpt-daemon.mjs, so it must ship with the code
+# shim lives in the tree you edit is a footgun: the shim is what sets EGPT_SESSION1 and names egpt-daemon.mjs, so it must ship with the code
 # it launches.
 $Shim    = Join-Path (Join-Path $Repo 'setup') 'session1-daemon-launcher.vbs'
 $Daemon  = Join-Path $Repo 'egpt-daemon.mjs'
@@ -149,7 +134,7 @@ function Show-Status {
   $p = $t.Principal
   Write-Host "  principal    : $($p.UserId)  LogonType=$($p.LogonType)  RunLevel=$($p.RunLevel)"
   if ("$($p.LogonType)" -ne 'Interactive') {
-    Write-Warning "LogonType is $($p.LogonType), not Interactive. A non-interactive task runs in SESSION 0, where the daemon already is - there would be no handover and no visible browser."
+    Write-Warning "LogonType is $($p.LogonType), not Interactive. A non-interactive task runs in SESSION 0, where no browser it starts is visible."
   }
   $s = $t.Settings
   Write-Host "  time limit   : $($s.ExecutionTimeLimit)   (PT0S / empty = unlimited, which is what a supervisor needs)"
@@ -165,44 +150,6 @@ function Show-Status {
     Write-Host "  NOTE: the registered action differs from what this script would write now:" -ForegroundColor Yellow
     Write-Host "        would be : $expected"
     Write-Host "        re-run without -Status to bring it up to date."
-  }
-}
-
-function Test-Alignment {
-  # The session 1 daemon and the session 0 service must agree on BOTH the profile and the
-  # code, because they share the profile and hand it back and forth. A mismatch is not a
-  # degraded handover, it is two independent nodes - so this reads the service's own NSSM
-  # registration (readable unelevated) and says so.
-  $svcBase = (Split-Path $EgptHome -Leaf) -replace '^\.', ''
-  if (-not $svcBase) { return }
-  $svcName = "$svcBase-daemon"
-  $params  = "HKLM:\SYSTEM\CurrentControlSet\Services\$svcName\Parameters"
-  $sp = $null
-  try { $sp = Get-ItemProperty -Path $params -ErrorAction Stop } catch { }
-  if (-not $sp) {
-    Write-Host "note: no readable NSSM registration for service '$svcName' - skipping the session 0 cross-check."
-    return
-  }
-  $svcHome  = $null
-  $svcHomes = $null
-  foreach ($e in @($sp.AppEnvironmentExtra)) {
-    if ($e -like 'EGPT_HOME=*')  { $svcHome  = $e.Substring('EGPT_HOME='.Length) }
-    if ($e -like 'EGPT_HOMES=*') { $svcHomes = $e.Substring('EGPT_HOMES='.Length) }
-  }
-  # Compare with separators normalised: the service is registered with EGPT_HOME=C:/Users/...
-  # (forward slashes) and this script builds C:\Users\... - the same directory, and warning
-  # that they differ would be a false alarm on the ONE thing this check exists to catch.
-  $norm = { param($p) ($p -replace '/', '\').TrimEnd('\').ToLowerInvariant() }
-  $carried = @()
-  if ($svcHomes) { $carried = @($svcHomes.Split(';') | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
-  elseif ($svcHome) { $carried = @($svcHome) }
-  $mine = & $norm $EgptHome
-  $hit  = @($carried | Where-Object { (& $norm $_) -eq $mine })
-  if ($carried.Count -and -not $hit.Count) {
-    Write-Warning "profile mismatch: service '$svcName' supervises $($carried -join ', '), this task would serve $EgptHome. Different profiles means there is NO handover - the task would start a second, independent node."
-  }
-  if ($sp.AppDirectory -and (& $norm $sp.AppDirectory) -ne (& $norm $Repo)) {
-    Write-Warning "checkout mismatch: service '$svcName' runs from $($sp.AppDirectory), this task would run from $Repo. Both daemons share one profile, so they must agree on the stand-down token format and the config schema. Pass -Repo '$($sp.AppDirectory)' unless you are deliberately testing a second checkout."
   }
 }
 
@@ -223,10 +170,9 @@ if ($Remove) {
     Write-Host "Removed scheduled task '$TaskName'." -ForegroundColor Green
   }
   # The task is the ONLY thing this script ever creates. The shim is a tracked file in the
-  # checkout and the log is the operator's record of past handovers; neither is ours to delete.
+  # checkout and the log is the operator's record; neither is ours to delete.
   Write-Host "Left alone (never created by this script): the shim $Shim, and the log $LogPath."
-  Write-Host "NOTE: removing this task does NOT stop a session 1 daemon that is running right now."
-  Write-Host "      Log off, or kill it - the session 0 daemon takes the profile back once state/spine.pid names no live spine and the console port is quiet."
+  Write-Host "NOTE: removing this task does NOT stop a session 1 daemon that is running right now - setup\stop-egpt.cmd does."
   return
 }
 
@@ -261,8 +207,6 @@ if (-not (Test-Path -LiteralPath $logDir)) {
   if ($DryRun) { Write-Host "[dry run] would create log directory $logDir" }
   else { New-Item -ItemType Directory -Path $logDir -Force | Out-Null; Write-Host "created log directory $logDir" }
 }
-
-Test-Alignment
 
 $action    = New-ScheduledTaskAction -Execute $WScript -Argument $Arguments -WorkingDirectory $Repo
 $trigger   = New-ScheduledTaskTrigger -AtLogOn -User $User
@@ -310,9 +254,7 @@ if ($existing) { Write-Host "Updated scheduled task '$TaskName'." -ForegroundCol
 else { Write-Host "Registered scheduled task '$TaskName'." -ForegroundColor Green }
 
 Write-Host ""
-Write-Host "Takes effect at the NEXT LOGON. Nothing starts now, and nothing should:"
-Write-Host "  the session 0 spine is holding $EgptHome right now, and two spines on one profile"
-Write-Host "  is the failure this whole design exists to avoid."
+Write-Host "Takes effect at the NEXT LOGON. To start it now: setup\start-egpt.cmd"
 Write-Host "  check   : .\setup\register-session1-daemon-task.ps1 -Status"
 Write-Host "  log     : Get-Content `"$LogPath`" -Tail 40 -Wait"
 Write-Host "  remove  : .\setup\register-session1-daemon-task.ps1 -Remove"

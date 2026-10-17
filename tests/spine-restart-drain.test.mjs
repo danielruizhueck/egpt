@@ -7,7 +7,7 @@
 //
 // So /restart (43) and /upgrade (42) now go through spine.drainForRestart: the spine KEEPS SERVING,
 // and leaves at the first moment turns.mjs's `trains` is empty — or at the 30-minute cap. /rewind
-// (44), STOP and the daemon's wedge-kill stay immediate; /standdown (45) keeps its own drain.
+// (44), STOP and the daemon's wedge-kill stay immediate.
 //
 // Two halves. The SPINE half drives createSpine directly with an injected interval + clock, so the
 // poll, the 30 s line and the cap are exercised without waiting. The BOOT half is the reproduction:
@@ -35,8 +35,8 @@ const CAP_MS = 30 * 60_000;
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
 // ── THE SPINE HALF ──────────────────────────────────────────────────────────────────────────────
-// Fakes in the shape tests/spine-standdown.test.mjs uses, except that EVERY turn is held open until
-// the test releases it by body, so several conversations can be in flight at once.
+// Fakes where EVERY turn is held open until the test releases it by body, so several conversations
+// can be in flight at once.
 function fakeBridge() {
   let cb = null;
   return { onMessage(fn) { cb = fn; }, emit(msg) { return cb(msg); }, send() {}, stop() {} };
@@ -233,34 +233,6 @@ describe('spine.drainForRestart — /restart and /upgrade wait for the turns in 
     timers.fire();
     timers.fire();
     expect(exits).toEqual(['first']);
-  });
-
-  it('a /restart during a STAND-DOWN leaves at once — it is the way out of a wedged stand-down', async () => {
-    const { spine, bridge, brain } = build();
-    const p1 = bridge.emit(msg('one', A, 'm1'));
-    await flush();
-    const exits = [];
-    spine.standdown(() => exits.push('standdown'));
-    spine.drainForRestart(() => exits.push('restart'));
-    expect(exits).toEqual(['restart']);
-    brain.release('one');
-    await p1;
-  });
-
-  it('a /standdown during a restart drain takes it over — one exit, the 45', async () => {
-    const { spine, bridge, brain, timers } = build();
-    const p1 = bridge.emit(msg('one', A, 'm1'));
-    await flush();
-    const exits = [];
-    spine.drainForRestart(() => exits.push('restart'));
-    spine.standdown(() => exits.push('standdown'));
-    expect(timers.armed()).toEqual([]);                           // the restart's poll is gone
-
-    brain.release('one');
-    await p1;
-    await flush();
-    timers.fire();
-    expect(exits).toEqual(['standdown']);
   });
 });
 

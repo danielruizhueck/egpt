@@ -73,10 +73,6 @@ import { fanoutInbound } from './bridge-fanout.mjs';
 // node's spine. Both derive from the SAME agents block / node identity every other gate reads.
 import { fromOtherNode, isRelayChannelChat, ownNodeNamesOf } from './node-names.mjs';
 import { createIngest, lifecycleExit, lifecycleForce, isShellConnectMarker } from './ingest.mjs';
-// THE SESSION 1 SUCCESSOR'S ANNOUNCE (chunk 3 of plans/2609061200-SESSION-0-TO-1-HANDOVER-PLAN.md).
-// Absent EGPT_SESSION1 this is one `false` and nothing else runs — every Session 0 spine, every
-// test and every other node take the identical path they took before it existed.
-import { isSession1Successor, announceStanddown, SESSION1_ENV } from './successor-announce.mjs';
 import { createCommands, loginProfilePathOf } from './commands.mjs';
 import { createLoginLimb } from './login.mjs';
 import { readChromeCredential } from '../tools/chrome-creds.mjs';
@@ -1090,14 +1086,6 @@ export async function boot({
   startSynthesizerServer: startSynthesizerServerFn = startSynthesizerServer,
 
   ingest = true,                      // watch EGPT_HOME/state/ingest for /restart, /upgrade, /rewind (tests pass false)
-  // THE SUCCESSOR FLAG, read from the environment ONCE, here, like every other config-fed option
-  // — the announce module never reads process.env at a call site. setup/session1-logon-launcher.vbs
-  // sets EGPT_SESSION1=1 for the spine it starts at logon; it cannot be a config key because both
-  // spines read the SAME config file. Injected in tests so no test has to mutate process.env.
-  session1 = isSession1Successor(),
-  // The dial itself, injected the same way probeEndpoint / reapPort / startWhisperServer are, so a
-  // test can observe the announce WITHOUT opening a real socket. Only ever called when session1.
-  announceStanddown: announceStanddownFn = announceStanddown,
   exit = (code) => process.exit(code),// how a lifecycle command leaves (the daemon respawns on 42/43/44)
   setInterval: setIntervalFn = globalThis.setInterval,       // the spine tick-timer seam; injected so a test can observe the effective cadence
   clearInterval: clearIntervalFn = globalThis.clearInterval,
@@ -1187,30 +1175,6 @@ export async function boot({
   const transcriptTimeZone = cfg.default_time_zone
     ? resolveTimeZone(cfg.default_time_zone, { onLog: (m) => log.line?.(`[boot] ${m}`) })
     : null;
-
-  // === THE SUCCESSOR'S ANNOUNCE (chunk 3, plans/2609061200-SESSION-0-TO-1-HANDOVER-PLAN.md) ====
-  // A spine started with EGPT_SESSION1=1 is the arriving Session 1 spine and the profile it wants is
-  // already held. It says so HERE — before the first line below writes state/spine.pid, and long
-  // before the Beeper bridge dials — because everything under this EGPT_HOME is shared, and the
-  // sooner the incumbent knows, the shorter the window in which both are awake on one profile.
-  //
-  // IT SAYS ONLY *THAT*, NEVER *WHEN*. The departing spine owns the timing (the operator's ruling):
-  // it stops admitting turns, drains the one it is writing, and leaves with 45. So this is one
-  // sentence and no wait — the waiting is shell-port's own re-listen backoff, below, which already
-  // exists and already backs off on a failed bind.
-  //
-  // NO INCUMBENT IS AN ORDINARY STARTUP, not an error: nothing answers the dial, nothing was
-  // written anywhere, and the bind below simply succeeds. Ingest-gated like every other real-node
-  // side effect (whisper-reap, seedSkeletons, the port bind itself) — with ingest:false no spine
-  // binds the console port at all, so there is nothing to contend for and nothing to announce.
-  if (session1 && ingest) {
-    const { outcome, detail } = await announceStanddownFn({
-      port: shellPortFrom(cfg),
-      token: shellTokenFrom(cfg),
-      onLog: (m) => log.line?.(`[standdown] ${m}`),
-    });
-    log.line?.(`[standdown] successor (${SESSION1_ENV}=1): ${outcome} — ${detail}`);
-  }
 
   // Identity vs liveness are SEPARATE files now (operator 2026-07-02): state/
   // spine.pid holds the long-lived spine pid — written ONCE here because it never
@@ -2664,18 +2628,6 @@ export async function boot({
     // It exists so a SECOND spine can run on this machine — Session 0 and Session 1 cannot
     // both bind one port, and that collision was the only thing making two spines impossible.
     port: shellPortFrom(cfg),
-    // THE ONE GUARD (chunk 3). start() REAPS the port before binding it — netstat + `taskkill /F /T`
-    // (src/tools/reap-port.mjs) — which is right for a Session 0 spine clearing its own orphan or a
-    // squatter, and catastrophic for the successor: the thing holding this port is the INCUMBENT,
-    // mid-turn, and killing it is precisely the abrupt death the deferred stand-down exists to
-    // prevent (`interrupted — the link to the spine writing this reply dropped`, observed live
-    // 2026-09-05). Worse, the reap would SUCCEED, so the bind would succeed too and the plan's
-    // "wait for the port" would never happen. Suppressed, the failed bind takes shell-port's own
-    // re-listen backoff and the successor waits — which is the whole sequencing this chunk is.
-    // STATED COST: a successor therefore never clears a genuine ORPHAN on this port either; it
-    // waits, and the Session 0 spine (which still reaps) is what clears one on its next boot.
-    // Spread, so a non-successor's options object is byte-for-byte the one it was before.
-    ...(session1 ? { reapPort: (p, onLog) => { onLog(`shell: the Session 1 successor does NOT reap :${p} — whatever holds it is the incumbent, and it is draining, not stale`); return 0; } } : {}),
     header: shellHeader,
     // THE MOUTH HANDLER (above). Null on every node with no peer_spine, which is what makes the
     // limb refuse a /peer dial outright — exactly as it did before this feature existed.
@@ -2758,7 +2710,7 @@ export async function boot({
   // --- lifecycle announce: "restarting…" to Self before exit, "back up! <commit>"
   //     on the next boot. The bounce is otherwise invisible to the operator. ---
   const sidecar = join(EGPT_HOME, 'state', 'restart-announce.json');
-  const KIND_OF = { 43: '/restart', 42: '/upgrade', 44: '/rewind', 45: '/standdown' };
+  const KIND_OF = { 43: '/restart', 42: '/upgrade', 44: '/rewind' };
   const gitOut = (args) => { try { return spawnSync('git', args, { cwd: process.cwd() }).stdout?.toString().trim() || ''; } catch { return ''; } };
   const shortSha = () => gitOut(['rev-parse', '--short', 'HEAD']) || '?';
   // The going-down half, unchanged: the sidecar the NEXT boot reads back, the capped "↻ …" line,
@@ -2778,21 +2730,14 @@ export async function boot({
     try { await unlink(drainingFile); } catch { /* no drain was published — the usual case */ }
     exit(code);
   }
-  // THE STAND-DOWN IS DEFERRED, NEVER ABRUPT (operator's ruling, plans/2609061200-SESSION-0-TO-1-
-  // HANDOVER-PLAN.md): 43/42/44 leave the moment they are read, but 45 (daemon-runtime.mjs's
-  // STANDDOWN_EXIT_CODE) hands the decision to the spine — which stops admitting turns, drains
-  // the ones already in flight, and calls back. goDown then runs exactly as it does for every
-  // other code, so "↻ /standdown… (pid …)" is truthful about the moment it is posted.
-  //
   // ONE BRANCH, HERE, because this is where BOTH ways a lifecycle command arrives converge: the
-  // ingest box below, and a /standdown typed in Self (commands.mjs dispatches on the same
+  // ingest box below, and a command typed in Self (commands.mjs dispatches on the same
   // lifecycleExit and leaves through this same injected `exit` seam).
   //
-  // …AND 43/42 NOW WAIT TOO (operator 2026-09-28, verbatim: "yes, restart should wait for turns in
-  // progress" — after a deploy killed being Ken's live turn on kg). The same shape, one branch
-  // beside 45's: the spine's restart drain (spine.mjs drainForRestart) keeps SERVING while it
-  // waits, calls back at the first moment no turn is in flight — at once when none is — or at its
-  // cap, and goDown then runs unchanged. What it publishes while waiting goes to state/draining.json
+  // 43/42 WAIT (operator 2026-09-28, verbatim: "yes, restart should wait for turns in
+  // progress" — after a deploy killed being Ken's live turn on kg): the spine's restart drain
+  // (spine.mjs drainForRestart) keeps SERVING while it waits, calls back at the first moment no
+  // turn is in flight — at once when none is — or at its cap, and goDown then runs unchanged. What it publishes while waiting goes to state/draining.json
   // for setup/upgrade.ps1. A second /restart or /upgrade during the drain starts no second one, but
   // an /upgrade arriving during a /restart's drain makes it leave as the /upgrade (42 outranks 43):
   // otherwise the pull that deploy is waiting for would silently never happen. 44 still leaves on
@@ -2800,7 +2745,6 @@ export async function boot({
   // would defeat it.
   let restartCode = null;   // the code a pending restart drain leaves with
   async function announceAndExit(code, { force = false } = {}) {
-    if (code === 45) { return spine.standdown(() => { goDown(code).catch((e) => log.line?.(`[standdown] ${e?.message ?? e}`)); }); }
     if (code === 42 || code === 43) {
       restartCode = restartCode === 42 ? 42 : code;
       spine.drainForRestart(() => { goDown(restartCode).catch((e) => log.line?.(`[drain] ${e?.message ?? e}`)); }, {
@@ -3179,13 +3123,6 @@ export async function boot({
     send: commandTranscript.send,
     exit: announceAndExit,
     writeRewindTarget: (ref) => writeFile(join(EGPT_HOME, 'rewind-target.txt'), ref, 'utf8'),
-    // The SAME writer the ingest handle passes below (:1945) — `/standdown <port>` reaches this
-    // node by TWO doors, the ingest box and a line typed at the console or in Self, and the port
-    // argument has to survive both. Without it commands.mjs parsed the port and dropped it, and
-    // the daemon fell back to this profile's own console port; harmless while the two agree, wrong
-    // the moment they do not. It is also the door the successor's announce comes in through.
-    writeStanddownTarget: (port) => writeFile(join(EGPT_HOME, 'standdown-target.txt'), port, 'utf8'),
-    session1,                                         // the /standdown audit names who asked from this
     loadState: _loadState, writeState: _writeState,   // /agents … auto/reset/access_level persist into conversations.yaml
     logTranscript: (ev, reply) => services.transcript.log(ev, reply),   // THE reply writer — the same service commandTranscript wraps above; /agents rethread's accum boundary rides it instead of assembling a line of its own
     resolveConvRoom,                                  // (surface, chatId) → the conversation's Room — the SAME resolver the phase-4 relay reads members from, so /members writes where the relay reads (bug fix 2026-07-23)
@@ -3694,7 +3631,7 @@ export async function boot({
   // line already lands — through the same one placement.
   if (ingest) Promise.resolve().then(() => outboxDrain.atBoot({ chatId: selfChatId() })).catch((e) => log.line?.(`[outbox] boot sweep: ${e?.message ?? e}`));
 
-  // Command ingest: drop /restart, /upgrade, /rewind <ref> or /standdown [port] into
+  // Command ingest: drop /restart, /upgrade or /rewind <ref> into
   // EGPT_HOME/state/ingest (operator 2026-07-03: the ingest box lives under state/ now).
   let ingestWatcher = null;
   if (ingest) {
@@ -3710,10 +3647,6 @@ export async function boot({
         if (isShellConnectMarker(line)) { shellPort.poke(); return; }
         const code = lifecycleExit(line, {
           writeRewindTarget: (ref) => writeFile(join(EGPT_HOME, 'rewind-target.txt'), ref, 'utf8'),
-          // The stand-down's port, written the SAME way and read the same way — daemon-runtime's
-          // standdownPort() consumes it on exit 45 and falls back to this profile's own console
-          // port when it is absent, which is why no port means nothing is written.
-          writeStanddownTarget: (port) => writeFile(join(EGPT_HOME, 'standdown-target.txt'), port, 'utf8'),
         });
         if (code != null) { log.line?.(`[ingest] ${line} -> exit ${code}`); await announceAndExit(code, { force: lifecycleForce(line) }); }
         else log.line?.(`[ingest] ignored: ${JSON.stringify(line)}`);

@@ -571,14 +571,6 @@ export function createCommands({
   send: rawSend,                         // (chatId, text) -> deliver a plain system reply
   exit = (code) => process.exit(code),
   writeRewindTarget,
-  // /standdown's port, the same shape writeRewindTarget has and injected by the same call in
-  // boot.mjs. It was MISSING here while the ingest box already had it, so a `/standdown <port>`
-  // typed at the console or in Self parsed its port and then dropped it on the floor: the exit
-  // code was right, the sidecar was never written, and the daemon silently fell back to this
-  // profile's own console port. Harmless while the two agree — wrong the moment they do not, and
-  // this is the door the Session 1 successor's announce comes in through (successor-announce.mjs).
-  writeStanddownTarget,
-  session1 = false,                      // this spine is the Session 1 one (boot's EGPT_SESSION1) — the /standdown audit reads it
   loadState = null, writeState = null,   // conv-state IO — lets /agents mode persist a mode
   brains = null,                         // the brain registry (createBrains) — /agents' status + access_level, and /status's own preview, resolve a being's live def through it (brainpool.mjs's resolveBeingDef / resolveDefaultBrainDef)
   defaultKey = 'e',                      // the persona being-id (its map key), injected by boot from the single `default:true` agent — the persona's per-conversation mode/state reads+writes and its warm-key prefix all key off this, never a hardcoded 'e' (operator 2026-07-10)
@@ -992,18 +984,6 @@ export function createCommands({
     try { await logToGroup(`/${cmd} in ${chat} by ${who}${outcome ? ` → ${outcome}` : ''}`, { key: ev?.msgHash ?? null }); }
     catch { /* fail-closed: a broken audit never breaks the command */ }
   };
-  // /standdown's <outcome>: who asked and why. Only the successor's announce sends `/standdown <port>`
-  // over the console (successor-announce.mjs standdownLine); anything else was typed by hand.
-  // `inFlight` is spine.standdown's count, which includes this /standdown message itself.
-  const standdownWhy = (ev, line, inFlight) => {
-    const bySuccessor = !session1 && surfaceOf(ev) === SHELL_SURFACE && /^\/standdown\s+\d+$/.test(line);
-    const why = bySuccessor
-      ? 'the Session 1 spine is back up and asked over the console to take the profile back; this background (Session 0) spine steps aside'
-      : 'typed by hand; this node stays parked until another spine takes the profile';
-    if (typeof inFlight !== 'number') return why;
-    const others = Math.max(0, inFlight - 1);
-    return `${why} — ${others === 0 ? 'no other turn in flight' : `${others} turn${others === 1 ? '' : 's'} finishing first`}`;
-  };
   // THE WRAPPER around the dispatch: run the command, then emit the ONE audit line. A '/'-command the
   // dispatch handled on THIS node is audited (outcome inline when the handler returned one); NO_AUDIT
   // (a command addressed to ANOTHER node — it audits there) and a non-'/'-message (the rs radio quick
@@ -1023,11 +1003,10 @@ export function createCommands({
     // (see isCommand above) — every other non-slash line never reaches run() at all.
     if (isRadioQuickReply(ev)) { await radioQuickReply(ev); return; }
 
-    const code = lifecycleExit(line, { writeRewindTarget, writeStanddownTarget });
+    const code = lifecycleExit(line, { writeRewindTarget });
     if (code != null) {
       onLog(`${line} -> exit ${code}`);
-      const inFlight = await exit(code, { force: lifecycleForce(line) });   // process leaves (after the bridge's "restarting…" announce); the daemon respawns
-      if (code === 45) return standdownWhy(ev, line, inFlight);
+      await exit(code, { force: lifecycleForce(line) });   // process leaves (after the bridge's "restarting…" announce); the daemon respawns
       return;
     }
 

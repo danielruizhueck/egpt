@@ -230,15 +230,6 @@ describe('0004 derives the profile list the way install-nssm-service.ps1 builds 
   it('a blank EGPT_HOMES is no list - EGPT_HOME, as the daemon itself falls back', () => {
     expect(profileListOf(['EGPT_HOME=C:/x', 'EGPT_HOMES=']).list).toEqual(['C:/x']);
   });
-
-  it('install-nssm-service.ps1 still stamps exactly these two templates, and splits -EgptHomes the same way', () => {
-    const src = readFileSync(join(import.meta.dirname, '..', 'setup', 'install-nssm-service.ps1'), 'utf8');
-    const dn = src.match(/nssm set \$ServiceName DisplayName\s+"([^"]+)"/)[1];
-    const d = src.match(/nssm set \$ServiceName Description\s+"([^"]+)"/)[1];
-    expect(dn.replace('$ServiceName', 'egpt-x-daemon')).toBe(displayNameFor('egpt-x-daemon'));
-    expect(d.replace("$($profileList -join ', ')", 'C:/a, C:/b')).toBe(descriptionFor(['C:/a', 'C:/b']));
-    expect(src).toContain("$EgptHomes.Split(@(';', ','), [StringSplitOptions]::RemoveEmptyEntries) | ForEach-Object { $_.Trim() } | Where-Object { $_ }");
-  });
 });
 
 describe('0004 PowerShell scripts', () => {

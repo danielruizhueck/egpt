@@ -68,11 +68,11 @@ default `~/.egpt`).
    flow). Skeletons seed the rest of the profile (agent types, identities,
    heartbeats, room template) copy-if-missing on first boot.
 
-3. **Install the service.** On Windows, double-click
-   `setup\install-nssm-service.cmd` (auto-elevates, registers `egpt-daemon` as an
-   NSSM Windows Service, starts it). macOS/Linux: `./setup/install-service.sh`
-   (launchd / systemd user service). The daemon keeps the node running and
-   respawns it on the lifecycle exit codes below.
+3. **Install the runner.** On Windows, register the Session 1 logon task
+   `egpt-daemon`: `powershell -ExecutionPolicy Bypass -File setup\register-session1-daemon-task.ps1`,
+   then start it with `setup\start-egpt.cmd` (`setup\stop-egpt.cmd` stops it).
+   macOS/Linux: `./setup/install-service.sh` (launchd / systemd user service). The
+   daemon keeps the node running and respawns it on the lifecycle exit codes below.
 
 4. **Verify the install:**
 

@@ -10,10 +10,8 @@
 '      daemon-runtime.mjs's singleton was scoped to the PROFILE, so a daemon launched at
 '      logon met the session 0 spine's fresh beat and exited before spawning anything (the
 '      long DECISION 1 block in register-session1-autostart.ps1 is about exactly that).
-'      The singleton is scoped to the SESSION now - state/daemon-s0.pid vs
-'      state/daemon-s1.pid - so the logon daemon is an ordinary, allowed second daemon,
-'      and the session 1 spine finally gets a supervisor that can act on its 42/43/44
-'      lifecycle exits instead of letting each one become a handback to session 0.
+'      The singleton is scoped to the SESSION now - state/daemon-s1.pid - and since
+'      2026-10-17 this daemon is the node's one runner (the session 0 service is retired).
 '
 '   2. IT WAITS: sh.Run(cmd, 0, True), and quits with the child's exit code. The spine
 '      shim uses False (fire and forget) because the HKCU Run key never looks back. A
@@ -23,26 +21,18 @@
 '      one resident wscript.exe and one resident cmd.exe for the life of the daemon.
 '
 ' EGPT_SESSION1=1 IS SET HERE AND ONLY HERE, per process. The daemon reads it to key its
-' singleton to the logon session, and the spine it spawns inherits it and reads it to know
-' it is the successor (src/spine/successor-announce.mjs). One flag, one meaning, and the two
-' can never disagree about which session they are in. It must NEVER be set in
-' HKCU\Environment: that leaks into every process the operator starts and, because the NSSM
-' service runs as the operator, potentially into the session 0 daemon as well - telling the
-' incumbent that it is its own successor.
+' singleton to the logon session and to hold the browsers and claude sessions. It must NEVER
+' be set in HKCU\Environment: that leaks into every process the operator starts.
 '
 ' The quoted `set "VAR=1"` form is deliberate: cmd takes everything between the `=` and the
-' `&&` as the value, trailing space included (measured on reve 2026-09-06), and a spine that
-' read EGPT_SESSION1 as "1 " would decide it is NOT the successor and boot as a second spine
-' on a shared profile.
+' `&&` as the value, trailing space included (measured on reve 2026-09-06).
 '
 ' ARGUMENTS - four, each one plain path, none containing a quote:
 '   0  node.exe   ABSOLUTE path. Not bare `node`: a scheduled task's PATH is not a terminal's.
 '   1  repo       the eGPT checkout. Becomes the process cwd.
-'   2  EGPT_HOME  the profile. Passed EXPLICITLY, never left to default: the session 0
-'                 service carries EGPT_HOME in its own service environment and the
-'                 interactive logon environment does not have to agree. Two different
-'                 profiles is not a degraded handover, it is no handover at all.
-'   3  log        stdout+stderr are APPENDED here. Without it a failed handover is invisible.
+'   2  EGPT_HOME  the profile. Passed EXPLICITLY, never left to default: the interactive
+'                 logon environment does not have to name the profile this task serves.
+'   3  log        stdout+stderr are APPENDED here. Without it a failed start is invisible.
 
 Option Explicit
 Dim sh, args, nodeExe, repoDir, egptHome, logPath, cmdLine, rc

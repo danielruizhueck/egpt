@@ -7,13 +7,8 @@
 //   /restart        -> exit 43  (daemon respawns this checkout — picks up commits)
 //   /upgrade        -> exit 42  (daemon git pull + npm + build, then respawn)
 //   /rewind <ref>   -> exit 44  (daemon checks out <ref>, then respawn)
-//   /standdown [p]  -> exit 45  (the Session 0 → Session 1 handover: the daemon does NOT
-//                                respawn — it watches state/spine.pid AND port p, and comes
-//                                back only once neither holds the profile. DEFERRED: boot
-//                                routes 45 through spine.standdown(), which stops admitting
-//                                turns, drains the ones in flight and only THEN exits.)
 //
-// 43 and 42 are deferred too since 2026-09-28 (operator: "yes, restart should wait for turns in
+// 43 and 42 are deferred since 2026-09-28 (operator: "yes, restart should wait for turns in
 // progress"): boot routes them through spine.drainForRestart(), which KEEPS SERVING and exits at
 // the first moment no turn is in flight (capped) — see spine.mjs. Only 44 leaves immediately.
 //
@@ -76,7 +71,7 @@ export function isShellConnectMarker(line) { return String(line ?? '').trim() ==
 // Map a command line to the daemon exit code (+ side effect). Returns the exit
 // code to call, or null for an unknown command. Pure + exported so the mapping is
 // test-locked separately from the fs sweep.
-export function lifecycleExit(line, { writeRewindTarget, writeStanddownTarget } = {}) {
+export function lifecycleExit(line, { writeRewindTarget } = {}) {
   const cmd = String(line ?? '').trim();
   const tok = cmd.split(/\s+/)[0];
   if (tok === '/restart') return 43;
@@ -85,28 +80,6 @@ export function lifecycleExit(line, { writeRewindTarget, writeStanddownTarget } 
     const ref = cmd.slice(tok.length).trim();
     if (ref) writeRewindTarget?.(ref);
     return 44;
-  }
-  // /standdown [port] — the successor announcing that it is taking this profile. The PORT is
-  // the console port it will serve on, and it reaches the daemon the SAME way /rewind's ref
-  // does: a caller-injected writer drops it in EGPT_HOME (standdown-target.txt), the daemon
-  // reads-and-consumes it on the exit code (daemon-runtime.mjs's standdownPort). No second
-  // mechanism, and nothing is written when no port is named — the daemon already answers that
-  // case with the profile's OWN console port, which is the whole point of one port per profile.
-  //
-  // A MALFORMED PORT IS NOT A STAND-DOWN. `null` here means "unknown command" (boot logs it and
-  // ignores it) — deliberately stricter than /rewind's "any ref rewinds", because standing down
-  // on a port nobody will hold leaves the profile UNHELD: the daemon would watch a port that
-  // never answers and respawn on the first tick, which is a restart wearing a handover's name.
-  // The range is validPort's (daemon-runtime.mjs:55), the same one the watcher accepts; the
-  // digits-only test is stricter than the daemon's Number() on purpose (see the line).
-  if (tok === '/standdown') {
-    const arg = cmd.slice(tok.length).trim();
-    if (arg) {
-      const port = /^\d+$/.test(arg) ? Number(arg) : NaN;   // DIGITS ONLY — bare Number() would read '0x5b57' and '2e4' as ports
-      if (!(port > 0 && port < 65536)) return null;
-      writeStanddownTarget?.(String(port));
-    }
-    return 45;
   }
   return null;
 }

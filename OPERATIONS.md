@@ -17,19 +17,23 @@ heartbeat and shell port. No "kg2": both reve profiles declare `node_name: kg`.
 
 reve's `172.25.64.1` / `172.19.160.1` are Hyper-V/WSL switches — never deploy there.
 
-`Get-Service *egpt*` lists **one spine service and two Beeper Desktops**. The name
-says which is which:
+**Each node has ONE runner: the Session 1 scheduled task `egpt-daemon`** (`node
+egpt-daemon.mjs` → `egpt-spine.mjs`, started at logon by
+`setup/register-session1-daemon-task.ps1`). Stopping it, this node goes silent. The
+Session 0 NSSM service of the same name is **retired** (2026-10-17: stopped and
+Disabled on both nodes; remove it with `setup\uninstall-nssm-service.cmd`, name
+`egpt-daemon`). `/standdown` and the S0↔S1 handover are gone with it.
+
+`Get-Service *egpt*` lists **two Beeper Desktops** (and the disabled service):
 
 | service | what it is | stopping it |
 |---|---|---|
-| `egpt-daemon` | the spine supervisor — `node egpt-daemon.mjs` → `egpt-spine.mjs` | this node goes silent |
 | `egpt-beeper-primary` | Beeper Desktop, primary account (the ear) | that account goes offline |
 | `egpt-beeper-secondary` | Beeper Desktop, secondary account (the mouth) | the agents cannot reply |
 
 A Beeper Desktop is **not** a spine — it is one nssm-wrapped Electron app per
 connection, with its own `--user-data-dir` and **no CDP port** (closed 2026-10-11:
-loopback CDP has no auth, so any boxed being could drive it). reve's second spine
-comes from the `egpt-daemon` scheduled task, not a service.
+loopback CDP has no auth, so any boxed being could drive it).
 
 **Renaming, once per node.** The two Beeper services were hand-created and still
 carry the old names `egpt-primary`/`egpt-secondary` on a node that has not been
@@ -66,7 +70,7 @@ Check `<profile>/STOP` and `alive.txt` before believing the three-spine table ab
 not ship. It drops `/upgrade` into `EGPT_HOME/state/ingest`; the spine sweeps that
 every second, exits **42**, and the daemon pulls, builds, respawns — then verifies
 prod SHA and a heartbeat that advanced. Exit codes: **42** `/upgrade`, **43**
-`/restart`, **44** `/rewind`, **45** `/standdown`.
+`/restart`, **44** `/rewind`.
 
 **A deploy waits for turns in progress (since 2026-09-28).** `/upgrade` and `/restart`
 no longer exit on the spot: the spine keeps answering and exits the moment no turn is
@@ -74,12 +78,11 @@ running, or after **30 minutes** regardless (logged loudly). While it waits it w
 `state/draining.json`, and `upgrade.ps1` prints who it is waiting for every ~30 s
 instead of counting down. `/rewind`, `STOP` and the daemon's wedge-restart stay immediate.
 
-`setup/deploy.ps1` is only for changes to what the **supervisor spawns** (entry
-point rename, `daemon-runtime` appPath), since an `/upgrade` respawns through the
-already-running supervisor. It restarts the service, needs admin, self-elevates
-through UAC — unusable over ssh unless already elevated. Since 2026-09-14 it
-refuses a half-applied tree: prod HEAD must equal `origin/main`, no tracked file
-may differ.
+A change to the **supervisor itself** (`daemon-runtime`, entry point, appPath) needs
+a daemon restart, since an `/upgrade` respawns through the already-running
+supervisor: after the `/upgrade` lands, `setup\stop-egpt.cmd` then
+`setup\start-egpt.cmd` in the node's logged-on session. `setup/deploy.ps1` still
+restarts the retired `egpt-daemon` **service** — do not use it.
 
 ### The Session 1 daemon holds the browsers
 
@@ -87,28 +90,18 @@ Since 2026-10-11 (`feat/daemon-holds-chrome`) the **Session 1 daemon** — the `
 scheduled task, not the service — launches and holds every browser group's Chrome and its CDP
 pipe (`src/chrome-host.mjs`). `/upgrade`, `/restart` and a config restart respawn only the
 spine; the new spine re-attaches to the Chromes the daemon still holds. A spine with no such
-daemon (Session 0, run by hand) has **no browser**: `/chrome` answers "no daemon chrome-host".
+daemon (run by hand) has **no browser**: `/chrome` answers "no daemon chrome-host".
 
 `/upgrade` never reloads daemon code: a daemon imports its modules once, at start. Chrome exits
 the moment the process holding its pipe exits (measured 2026-10-11), so a daemon restart
 restarts every group Chrome; `--restore-last-session` reopens their tabs.
 
-**One-time, on each node, right after the `/upgrade` that ships this change** — until it runs,
-that node has no browser (the new spine finds no host under the old daemon). In the node's
-logged-on session, as the operator (no elevation; the task is the operator's):
-
-```
-Stop-ScheduledTask -TaskName egpt-daemon
-Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -match 'egpt-daemon\.mjs' -and $_.SessionId -ne 0 } | Select-Object ProcessId,CommandLine
-Start-ScheduledTask -TaskName egpt-daemon
-```
-
-The middle line must list nothing — the task is `MultipleInstances=IgnoreNew`, so a daemon still
-running makes the start a no-op; `taskkill /PID <pid> /T /F` it first. The spine is down for the
-few seconds between stop and start. Not measured: whether the old Session 1 spine dies with its
-daemon. If it does, a turn in progress is cut and the stood-down Session 0 daemon may claim the
-profile for a moment; if it survives, the new spine takes the profile from it through the ordinary
-stand-down handover (it drains its turn). Either way the new Session 1 spine ends up holding it.
+**Restarting the Session 1 daemon** (needed once after an `/upgrade` that changes daemon code):
+in the node's logged-on session, as the operator (no elevation; the task is the operator's),
+`setup\stop-egpt.cmd` then `setup\start-egpt.cmd`. Stop writes `STOP`, stops the task and
+`taskkill /T /F`s the daemon tree (`Stop-ScheduledTask` alone does not); start removes `STOP` and
+starts the task. A daemon refuses to start while a live spine still holds the profile
+(`state/spine.pid` + a fresh `alive.txt`) and says which pid. A turn in progress is cut.
 Done when `<profile>/config/logs/session1-daemon.log` shows a fresh
 `egpt-daemon up` with no `no chrome-host` line after it, and `/chrome <node>` logs
 `launched "brain" Chrome … held by the daemon`. At start the new daemon kills any
@@ -127,14 +120,12 @@ no longer for background work. A config change reaches a live session as a contr
 effort, verbose_thinking); anything else reopens it by resume, never while its background work runs.
 
 Still ended, resumed by thread id on the next turn: a daemon restart or reboot (the daemon's
-children die with it, measured), `/rewind`, `/standdown`. Session 0 holds none of them: its spine
-spawns its own, and its restarts still wait for background work.
+children die with it, measured) and `/rewind`. A spine with no daemon (run by hand) spawns its
+own, and its restarts still wait for background work.
 
-**One-time, on each node, after the `/upgrade` that ships this:** restart the Session 1 daemon —
-the three lines in the section above. Until then the new spine finds no cli-host and spawns its
-own sessions, exactly as before. The restart ends today's sessions, their background agents and
-the Chromes once: pick a moment with no background work (a chat that has some shows the being's
-status message).
+A daemon restart (section above) ends today's sessions, their background agents and the Chromes
+once: pick a moment with no background work (a chat that has some shows the being's status
+message).
 
 **A deploy that died partway** leaves prod HEAD unchanged, some files already new
 (one truncated), a stale lock, service never restarted. Confirm nothing holds the
@@ -219,7 +210,8 @@ for i in 1 2 3; do date +%H:%M:%S; stat -c %y ~/.egpt/state/alive.txt ~/.egpt-se
 
 `touch <profile>/STOP` — boot checks it first and exits clean, and `upgrade.ps1`
 REFUSES while it exists rather than dropping an `/upgrade` nothing will read. Per
-profile. `setup/stop-egpt.cmd` is the same with a launcher.
+profile. `setup/stop-egpt.cmd` writes it, stops the `egpt-daemon` task and kills the
+daemon tree; `setup/start-egpt.cmd` removes it and starts the task.
 
 | path | what |
 |---|---|

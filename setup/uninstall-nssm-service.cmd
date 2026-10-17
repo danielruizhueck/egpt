@@ -1,8 +1,8 @@
 @echo off
 REM uninstall-nssm-service.cmd — double-clickable wrapper that auto-elevates
-REM and runs uninstall-nssm-service.ps1. Stops + removes the NSSM-wrapped
-REM egpt-daemon service, re-enables the egpt-spine Task Scheduler task,
-REM and restarts it. Clean rollback of install-nssm-service.cmd.
+REM and runs uninstall-nssm-service.ps1, which asks for the service name and
+REM stops + removes that NSSM-wrapped service. The Session 0 egpt-daemon service
+REM is retired (2026-10-17): the node runs from the Session 1 task.
 
 setlocal
 set "SCRIPT_DIR=%~dp0"

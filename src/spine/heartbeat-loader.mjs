@@ -65,8 +65,8 @@
 // /usr/bin's — a command that needs bash again should say "$BASH", not `bash`.
 // LIVENESS IS EXEMPT (operator 2026-09-16): a beat running BOOT'S DEFAULT alive command keeps
 // `shell: true` even with a bash resolved — the one boot injects, and a declared `alive:` with no
-// `command:` of its own (it falls back to that same command). alive.txt is what the watchdog and
-// the stand-down handover read, and msys is documented to fail to start under other
+// `command:` of its own (it falls back to that same command). alive.txt is what the watchdog
+// reads, and msys is documented to fail to start under other
 // accounts/sessions (sandbox-cli-session.mjs, the \Sessions\BNOLINKS object directory) — a
 // Session 0 service or a Session 1 task must never lose its heartbeat to that. Keyed on boot having SUPPLIED the command (`nativeShell` on the action),
 // never on the name: a command the operator writes, under `alive` or any name, runs under the bash.

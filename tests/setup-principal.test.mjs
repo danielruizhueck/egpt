@@ -37,7 +37,6 @@ const read = (name) => readFileSync(join(SETUP, name), 'utf8');
 // real source line rather than a copy of it.
 const SITES = [
   { file: 'register-session1-daemon-task.ps1', re: /^\$User\s+=\s+(.+)$/m, used: 'New-ScheduledTaskPrincipal -UserId / New-ScheduledTaskTrigger -User' },
-  { file: 'install-nssm-service.ps1', re: /^\$svcUser\s+=\s+(.+)$/m, used: "Get-Credential -UserName, then NSSM's ObjectName" },
   { file: 'stop-egpt.ps1', re: /^\s+\$who\s+=\s+(.+)$/m, used: 'the "who:" provenance line in the STOP file' },
 ];
 

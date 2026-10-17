@@ -478,7 +478,7 @@ export function createSpine({
         while (queue.length) {
           const entry = queue.shift();
           let r;
-          try { r = await handleFastCounted(entry.msg); }
+          try { r = await handleFast(entry.msg); }
           catch (e) { note(`inbound: ${e?.message ?? e}`); }
           // settle the caller's promise when this message's turn (if any) finishes;
           // a message that runs no turn (logged-only / command / off) settles now.
@@ -498,79 +498,8 @@ export function createSpine({
   // Process a message end-to-end (fast phase + its turn). Bridge inbound flows
   // through enqueue/pump; direct callers (tests, the mesh seam) use this.
   async function handleInbound(msg) {
-    const r = await handleFastCounted(msg);
+    const r = await handleFast(msg);
     if (r?.turn) await r.turn;
-  }
-
-  // --- STAND-DOWN: THE DEFERRED EXIT (plans/2609061200-SESSION-0-TO-1-HANDOVER-PLAN.md) ---
-  //
-  //     /restart, /upgrade and /rewind leave IMMEDIATELY (2026-09-28: /restart and /upgrade no
-  //     longer do — they wait too, but KEEP SERVING while they wait; see THE RESTART DRAIN below.
-  //     Only /rewind still leaves on the spot). This one must NOT. The operator's
-  //     ruling: "the departing spine finishes the turn it is writing, then stands down. The
-  //     arriving spine says only THAT, never WHEN." A spine that dies mid-reply leaves the other
-  //     end of the chat reading `interrupted — the link to the spine writing this reply dropped`
-  //     (observed live, 2026-09-05), and a LOGON must not do that to every conversation on the
-  //     node. So the token sets a PENDING stand-down: stop admitting new turns, let the ones in
-  //     flight finish, and only then call back (boot passes announceAndExit(45)).
-  //
-  //     THE IN-FLIGHT MEASUREMENT IS NEW, AND ONLY BECAUSE NOTHING ALREADY ANSWERS IT. The three
-  //     candidates were read first. turns.mjs's `trains` is a per-key count of in-flight+queued
-  //     turns, but it is closure-private, per-key (no total), and only openAndRunReply-shaped
-  //     turns bump it — a command turn or a mesh responder turn never does. serial-by-key's
-  //     `chains` map IS "work outstanding on this key" and drops idle keys, but it is private too
-  //     and exposing it would change shared code beyond this chunk. stats().queueDepth counts
-  //     only messages NOT YET STARTED. So: ONE counter, in ONE place — handleFastCounted, the
-  //     accounting shell around the chokepoint — and nothing else in this file touches it. ---
-  let standingDown = false;   // stand-down pending: new turns refused, the rest draining
-  let onDrained = null;       // what runs when the last in-flight turn settles (boot: exit 45)
-  let inFlight = 0;           // messages inside the chokepoint + the turns they dispatched
-  function drained() {
-    const done = onDrained; onDrained = null;
-    if (done) { note('standdown: drained — the last in-flight turn finished'); done(); }
-  }
-  function releaseTurn() { inFlight--; if (standingDown && inFlight === 0) drained(); }
-  // Count a message from the moment it enters the chokepoint until the turn it dispatched
-  // SETTLES — the fast phase and its turn are ONE unit of in-flight work, because the token can
-  // land in either. A thin shell rather than a try/finally inside handleFast itself, so the
-  // chokepoint's body (and every comment written about it) is untouched.
-  async function handleFastCounted(msg) {
-    inFlight++;
-    let r;
-    try { r = await handleFast(msg); }
-    finally {
-      // Hand the count to the dispatched turn BEFORE releasing the fast phase, so it can never
-      // dip to 0 while a reply is still being written. `{ turn }` is the only thing that outlives
-      // handleFast (see its return note below). A throw releases too — a leaked count would hang
-      // the drain forever, which is worse than any message it could protect.
-      if (r?.turn) Promise.resolve(r.turn).then(releaseTurn, releaseTurn);
-      else releaseTurn();
-    }
-    return r;
-  }
-  // Mark the stand-down PENDING. Idempotent: a second token while one is already pending changes
-  // nothing (the successor retries the PORT with backoff — it does not re-announce into a new
-  // state). Exits promptly when nothing is in flight, which is the common case.
-  function standdown(done) {
-    if (standingDown) { note('standdown: already pending — ignored'); return; }
-    // A RESTART DRAIN ALREADY PENDING (2026-09-28): the stand-down takes it over. One exit, never
-    // two goDowns racing to process.exit, and 45 is the one the successor is waiting on. The turns
-    // the restart was waiting for are not abandoned: the stand-down drains what is in flight too.
-    if (restartDrain) { clearIntervalFn(restartDrain.timer); restartDrain = null; note('standdown: takes over the pending restart drain'); }
-    standingDown = true;
-    onDrained = done ?? null;
-    // Pending DWELLS are disarmed here rather than gated in fireDwell, so there is still exactly
-    // one admission gate. A dwell is a timer armed by messages that were already admitted and
-    // already recorded — not a turn being written — and "pending dwells are IN-MEMORY: a restart
-    // loses them (the next message re-arms — acceptable)" is this file's own standing ruling for
-    // every other exit. It is also what keeps the count honest: a dwell firing mid-drain would
-    // start a turn OUTSIDE the chokepoint that the counter never saw, and then the exit could
-    // land in the middle of it — the exact death this whole deferral exists to prevent.
-    for (const d of dwellBy.values()) if (d.timer) clearTimeoutFn(d.timer);
-    dwellBy.clear();
-    note(`standdown: PENDING — ${inFlight} turn(s) in flight; no new turns will be admitted`);
-    if (inFlight === 0) drained();
-    return inFlight;   // for the /standdown audit line (commands.mjs)
   }
 
   // --- THE RESTART DRAIN (operator 2026-09-28, verbatim: "yes, restart should wait for turns in
@@ -582,8 +511,7 @@ export function createSpine({
   //     and Ken was running a WebSearch. /upgrade left the moment it was read, the turn died with
   //     the process, and the operator's question was never answered.
   //
-  //     SO /restart AND /upgrade WAIT NOW — but NOT the way a stand-down waits. A stand-down hands
-  //     the profile to another spine and refuses new turns; a restart comes straight back, so this
+  //     SO /restart AND /upgrade WAIT NOW. A restart comes straight back, so this
   //     spine KEEPS SERVING while it waits: every new message is received, recorded and answered as
   //     before. Refusing or holding them would only widen the window in which a message lands on a
   //     spine about to die and comes back after the restart as backlog, which is never dispatched.
@@ -591,12 +519,10 @@ export function createSpine({
   //     that starts DURING the drain extends it; nothing in flight at the start means no wait at
   //     all — `done` runs synchronously, exactly as fast as before.
   //
-  //     "IN FLIGHT" IS turns.mjs's `trains` (turns.busy()), not handleFastCounted's `inFlight`
-  //     above. trains is the instance boot shares with the mesh, so it also sees what `inFlight`
-  //     cannot — a fired auto-mode dwell and a relayed turn this node is answering for another —
-  //     and it NAMES the conversations, which is what the log and state/draining.json report.
-  //     `inFlight` is not added to it because it also counts the very message that asked for the
-  //     restart when that was typed in a chat, so a typed /restart would always wait for itself.
+  //     "IN FLIGHT" IS turns.mjs's `trains` (turns.busy()). trains is the instance boot shares with
+  //     the mesh, so it also sees a fired auto-mode dwell and a relayed turn this node is answering
+  //     for another — and it NAMES the conversations, which is what the log and state/draining.json
+  //     report.
   //     What this does NOT see, said here rather than tracked twice: a heartbeat `agent:` turn
   //     (boot calls brain.turn directly), a room-relay brain-member capture (room-relay.mjs keeps
   //     its own per-tab chain), and a message still in its fast phase — the restart window every
@@ -644,10 +570,6 @@ export function createSpine({
     Promise.resolve().then(() => d.onWait?.(rec)).catch((e) => note(`drain: could not publish the drain state — ${e?.message ?? e}`));
   }
   function drainForRestart(done, { onWait = null, force = false } = {}) {
-    // A STAND-DOWN ALREADY DRAINING: leave now. A /restart is the operator's way out of a
-    // stand-down whose drain has wedged — its admission gate lets lifecycle commands through for
-    // exactly that — so it must not queue behind the same wedge.
-    if (standingDown) { note('drain: a stand-down is already draining — restarting now, without waiting'); done(); return; }
     if (restartDrain) {
       if (!force || restartDrain.force) { note('drain: already waiting for turns in flight — no second drain'); return; }
       restartDrain.force = true;   // the operator's override reaches the drain already waiting
@@ -818,38 +740,6 @@ export function createSpine({
     // branch would kill mesh routing outright. That ordering is what keeps "skipping the record"
     // from ever becoming "skipping the routing".
     if (!isTransit(ev) && !isEnvelope(ev)) await transcript.log(ev);   // ←── THE INGESTION POINT (C1.2). The only one.
-    // STAND-DOWN'S ONE ADMISSION GATE (see the block above). A pending stand-down stops NEW turns
-    // HERE — at the chokepoint every inbound turn already flows through — and nowhere else.
-    //
-    // AFTER THE INGESTION POINT ON PURPOSE. The message is still RECORDED, in arrival order, so
-    // it is refused rather than lost: the successor's being reads transcript.md as back-context
-    // and sees the line. What it costs is the immediate reply, for the length of the one turn
-    // still being written.
-    //
-    // WHY NOT ANSWER IT WITH A NOTICE: this point does not yet know whether the message would
-    // have been answered at all — the router and the gate run inside `act` — so a notice here
-    // would post "standing down" into every ambient group message that arrived in the window,
-    // chats this node was never going to speak in. WHY NOT LEAVE IT FOR THE SUCCESSOR: the
-    // successor cannot take it. Its bridge flags everything older than its own start as
-    // `backlog` (beeper.mjs's gate, 5s grace) and a backlog message is transcript-logged and
-    // NEVER dispatched (classify's first branch), so "leave it unconsumed" is silence with extra
-    // steps. This file's own precedent for a refused turn is exactly this shape: a guard-stopped
-    // channel records the message, notes the refusal, and says nothing in the chat.
-    //
-    // THE OPERATOR'S TWO RECOVERY PATHS ARE EXEMPT, through the SAME predicates that already
-    // exempt them from the guard: an admitted lifecycle command, or a STOP/RESUME word that
-    // actually acts as a control here. Outside Self, "stop" is text and cannot start a new turn
-    // during the drain. A stand-down whose drain wedges must still accept /restart.
-    if (standingDown) {
-      const word = ev.authorized ? parseStopWord(ev.body) : null;
-      const lifecycle = isLifecycle(ev) && commands?.isCommand?.(ev);
-      const control = (word === 'stop' && stopSwitch && humanTurn(ev) && isSelfChat(ev))
-        || (guard && (word === 'resume' || word === 'resume_all'));
-      if (!lifecycle && !control) {
-        note(`standdown: refusing ${ev.surface}/${ev.chatId} — recorded, not dispatched`);
-        return;
-      }
-    }
     // Radio relay: a genuine inbound voice note, in a room joined to a radio, airs on the
     // station (createRadioNoteRelay owns the rest of the gate — joined+enabled, sender→speaker,
     // dedupe). Fire-and-forget with its own catch, the SAME shape transcript.log uses for its
@@ -1514,7 +1404,6 @@ export function createSpine({
     const ev = { surface, chatId, body: line, line, cause: 'background' };   // cause: agent stats' system bucket
     const where = `${being}/${chatId}`;
     if (stopSwitch?.present()) { note(`wake ${where}: STOP file present — not woken`); return false; }
-    if (standingDown) { note(`wake ${where}: standing down — not woken`); return false; }
     const channel = guard ? guardChannel(ev) : null;
     if (guard?.blocked(channel)) { note(`guard: ${channel} stopped — background wake suppressed`); return false; }
     const d = await gating.decide(being, ev, WAKE_MENTION);
@@ -1523,10 +1412,7 @@ export function createSpine({
     const { key: turnKey, pinned } = await turns.keyOf(being, ev);
     note(`wake ${where}: ${what}`);
     if (finished) liveness.endStatus(being, chatId, `✓ background work done: ${what}`);
-    inFlight++;
-    const turn = openAndRunReply({ to: being, ev, d, turnKey, pinned });
-    Promise.resolve(turn).then(releaseTurn, releaseTurn);
-    return turn;
+    return openAndRunReply({ to: being, ev, d, turnKey, pinned });
   }
   // The being's own thread continuing — gated as a reply to it, so mute/off/paused still hold.
   const WAKE_MENTION = { replyToBot: true };
@@ -1993,5 +1879,5 @@ export function createSpine({
     note('spine: stopped');
   }
 
-  return { start, stop, tick, handleInbound, stats, standdown, drainForRestart, resumedAt, backlogOf, wakeOnBackground };
+  return { start, stop, tick, handleInbound, stats, drainForRestart, resumedAt, backlogOf, wakeOnBackground };
 }

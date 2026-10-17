@@ -168,8 +168,8 @@ export function createCliHost({ spawn = nodeSpawn, setPriority, log = () => {}, 
         helloTimer?.unref?.();
       }
     },
-    // A spine leaving with 44 (/rewind) or 45 (/standdown): nothing will adopt these, so they end, as
-    // they did when the spine held them.
+    // A spine leaving with 44 (/rewind): nothing will adopt these, so they end, as they did when the
+    // spine held them.
     endAll,
     get size() { return procs.size; },
   };
