@@ -237,40 +237,45 @@ describe('sandbox-cli-session — wraps warm-cli-session with the OS-isolation l
     s.close();
   });
 
-  // ── PLATFORM GUARD (operator 2026-09-04). Every test above pins `platform: 'win32'`: they lock
-  //    the WINDOWS path, which must stay byte-identical, and pinning it is what lets them keep
-  //    doing that on a POSIX runner. The seam still DEFAULTS to the real process.platform (last
-  //    test below).
-  //
-  //    A DEFAULT may be platform-aware — brainpool.mjs's `sandboxed` fallback is (unset at both
-  //    tiers = true on win32, false elsewhere). AN EXPLICIT REQUEST MAY NOT BE: reaching this
-  //    factory at all means some tier said `sandboxed: true`, so on a non-Windows node it must
-  //    fail LOUDLY and BEFORE the spawn — never run the being unsandboxed behind a config key
-  //    that claims otherwise, and never leak the bare ENOENT naming a shell binary that an
-  //    unguarded spawn used to produce. ──
-  for (const platform of ['linux', 'darwin']) {
-    it(`REPRODUCE-FIRST: an explicit sandboxed:true on ${platform} throws, naming the feature and the fix, WITHOUT spawning`, () => {
+  // ── PLATFORM DISPATCH (operator An 2026-10-15/10-17, the POSIX box). Every test above pins
+  //    `platform: 'win32'`: they lock the WINDOWS path, which stays byte-identical, and pinning it
+  //    is what lets them keep doing that on any runner. The box now has TWO enforcers — win32
+  //    (logon launcher) and darwin (sandbox-exec) — so this factory admits exactly those two and
+  //    throws loudly for any OTHER platform (linux included: it is a later PR), BEFORE the inner
+  //    session exists and so before any spawn (never the bare ENOENT an unguarded spawn used to
+  //    leak). The darwin dispatch itself — the box dir, the Seatbelt profile — is locked in
+  //    tests/posix-box.test.mjs (unit) and its darwin-only live tests. ──
+  for (const platform of ['linux', 'freebsd', 'aix', 'sunos']) {
+    it(`an explicit sandboxed:true on ${platform} (no box there) throws, naming the enforcers and the fix, WITHOUT spawning`, () => {
       const f = fakeLauncherSpawn();
       let err = null;
-      try { createSandboxCliSession({ spawn: f.spawn, cwd: process.cwd(), platform }); } catch (e) { err = e; }
-      expect(err, `a sandboxed session was created on ${platform}, which has no launcher to run`).toBeTruthy();
-      expect(err.message).toContain('sandboxed: true');    // the feature, named by its config key
-      expect(err.message).toContain(platform);             // ...and why it cannot run here
-      expect(err.message).toContain('Windows-only');
-      expect(err.message).toContain('sandboxed: false');   // THE FIX, named in the message itself
-      expect(f.spawnCount()).toBe(0);                      // and no ENOENT is possible: nothing was spawned
+      try { createSandboxCliSession({ spawn: f.spawn, cwd: process.cwd(), platform, sandboxOauthToken: TOKEN, jsonlStoreRoot: STORE }); } catch (e) { err = e; }
+      expect(err, `a sandboxed session was created on ${platform}, which has no box`).toBeTruthy();
+      expect(err.message).toContain(platform);                   // why it cannot run here
+      expect(err.message).toMatch(/win32.*darwin/);              // the two that CAN
+      expect(err.message).toContain('access_level');             // THE FIX, named in the message
+      expect(f.spawnCount()).toBe(0);                            // nothing was spawned
     });
   }
+
+  it('darwin does NOT throw at the platform guard — it builds a box session, lazily (no spawn at create)', () => {
+    const f = fakeLauncherSpawn();
+    const s = createSandboxCliSession({ spawn: f.spawn, cwd: process.cwd(), platform: 'darwin', sandboxOauthToken: TOKEN, jsonlStoreRoot: STORE });
+    expect(f.spawnCount(), 'darwin spawned at create time — the box must be lazy like win32').toBe(0);
+    s.close();
+  });
 
   it('the platform seam DEFAULTS to the real process.platform (injection is for tests, not a requirement)', () => {
     const f = fakeLauncherSpawn();
     const make = () => createSandboxCliSession({ spawn: f.spawn, cwd: process.cwd(), sandboxOauthToken: TOKEN, jsonlStoreRoot: STORE });
-    if (process.platform === 'win32') {
-      const s = make();                 // the operator's own node: created exactly as before...
-      expect(f.spawnCount()).toBe(0);   // ...and still lazy — the launcher spawns on the first turn()
+    // win32 and darwin both build a box session lazily; any other platform throws. This runner is
+    // one of the two (the operator's node is darwin, reve is win32), or else a "no box" platform.
+    if (process.platform === 'win32' || process.platform === 'darwin') {
+      const s = make();                 // created exactly as before...
+      expect(f.spawnCount()).toBe(0);   // ...and still lazy — the box is built on the first turn()
       s.close();
     } else {
-      expect(make).toThrow(/Windows-only/);
+      expect(make).toThrow(/win32.*darwin/);
       expect(f.spawnCount()).toBe(0);
     }
   });
@@ -801,7 +806,9 @@ describe('sandbox-cli-session — a missing or rejected sandbox_oauth_token tell
   it('the guard runs AFTER the engine and platform guards, so those keep their own diagnosis', () => {
     const f = fakeLauncherSpawn();
     expect(() => createSandboxCliSession({ spawn: f.spawn, cwd: process.cwd(), platform: 'win32', engine: 'llama' })).toThrow(/engine=llama/);
-    expect(() => createSandboxCliSession({ spawn: f.spawn, cwd: process.cwd(), platform: 'linux' })).toThrow(/Windows-only/);
+    // A platform with no box (not win32/darwin — linux is a later PR) is refused by the platform
+    // guard, ahead of this credential guard — so it keeps its own diagnosis, not the "no token" one.
+    expect(() => createSandboxCliSession({ spawn: f.spawn, cwd: process.cwd(), platform: 'freebsd' })).toThrow(/win32.*darwin/);
     expect(f.spawnCount()).toBe(0);
   });
 
@@ -1053,9 +1060,11 @@ describe('sandbox-cli-session — spawnBoxedCommand: a being\'s heartbeat comman
     expect(innerArgvOf(run('"'.repeat(n + 1)).args)).toEqual(['heartbeats/primo.command.sh']);
   });
 
-  it('REFUSED, before any spawn, off win32 and with no POSIX bash to run it', () => {
+  it('REFUSED, before any spawn, on a platform with no box and (on win32) with no POSIX bash to run it', () => {
     const f = fakeLauncherSpawn();
-    expect(() => spawnBoxedCommand({ targetFolder: ROOM, command: 'date', commandFile: 'x.sh', spawn: f.spawn, platform: 'linux', gitBashCandidates: BASH_CANDIDATES })).toThrow(/runs in its box, and the box is Windows-only.*platform=linux/);
+    // A platform with no box (not win32/darwin — linux is a later PR) is refused outright. (darwin
+    // DOES run a boxed command — that path is covered in tests/posix-box.test.mjs.)
+    expect(() => spawnBoxedCommand({ targetFolder: ROOM, command: 'date', commandFile: 'x.sh', spawn: f.spawn, platform: 'freebsd', gitBashCandidates: BASH_CANDIDATES })).toThrow(/runs in its box, and the OS box runs on win32\/darwin only.*platform=freebsd/);
     expect(() => spawnBoxedCommand({ targetFolder: ROOM, command: 'date', commandFile: 'x.sh', spawn: f.spawn, platform: 'win32', gitBashCandidates: [join(STORE, 'no-such-bash.exe')] })).toThrow(/no POSIX bash for the box/);
     expect(f.spawnCount()).toBe(0);
   });

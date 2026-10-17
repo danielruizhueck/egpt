@@ -509,8 +509,14 @@ export function globalReadPathsOf(value, onLog = () => {}) {
     if (GLOBAL_READ_RESERVED.includes(name.toLowerCase())) return skip(`\`${name}\` is reserved - the built-in ${GLOBAL_READ_RESERVED.join(' and ')} mounts`);
     if (mounts.some((m) => m.name.toLowerCase() === name.toLowerCase())) return skip(`\`${name}\` is already listed above`);
     const path = typeof raw === 'string' ? normalizeCwd(raw.trim()) : '';
-    if (!/^[A-Za-z]:[\\/]/.test(path)) return skip('not an absolute path (<drive>:/... or /<drive>/...)');
-    if (/['"]/.test(path)) return skip('a path with a quote in it cannot ride the launcher\'s scrub command');
+    // ABSOLUTE on ANY node (2026-10-15, the posix box): a Windows drive path (<drive>:/…, or the msys
+    // /c/… form normalizeCwd just folded to C:/), OR a posix absolute path (/…). The mount is a
+    // read-only junction (win32) or symlink (darwin); either way it must target a known root, and a
+    // relative path has none.
+    if (!/^([A-Za-z]:[\\/]|\/)/.test(path)) return skip('not an absolute path (/… , <drive>:/… , or /<drive>/…)');
+    // No quote: on win32 it cannot ride the launcher's single-quoted scrub command; on darwin it is
+    // refused for the same reason (a quote in a mount target is almost always a typo), kept uniform.
+    if (/['"]/.test(path)) return skip('a path with a quote in it is not accepted as a mount target');
     mounts.push({ name, path });
   });
   return mounts;

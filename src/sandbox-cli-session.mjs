@@ -39,6 +39,7 @@ import { createWarmCliSession } from './warm-cli-session.mjs';
 import { createCodexCliSession } from './codex-cli-session.mjs';
 import { createPiCliSession } from './pi-cli-session.mjs';
 import { lowerChild } from './process-priority.mjs';
+import { preparePosixBox, isPosixBoxPlatform } from './posix-box.mjs';
 
 const LAUNCHER_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'setup', 'sandbox-logon-launcher.ps1');
 
@@ -197,19 +198,27 @@ export function resolveSandboxGitBash(candidates = GIT_BASH_CANDIDATES) {
 // reads this at 2am, in a chat reply or a log line, so it carries the commands themselves rather
 // than pointing at a doc. NEVER the token VALUE: presence and LENGTH only (see brainpool.mjs's
 // "NEVER LOGGED" note on the same value).
+// PLATFORM-NEUTRAL since 2026-10-15 (the POSIX box, An): the same credential, the same config key,
+// the same "mint as the operator, never as a boxed identity" rule on every OS — only HOW the daemon
+// re-reads it differs. The Windows steps stay word for word (the ps1 /upgrade path); a darwin node
+// gets its own line beside them. On darwin there is no pool account, but a boxed being still runs as
+// a confined view of the operator and is DENIED ~/.claude by the Seatbelt policy, so it needs this
+// token exactly as the Windows pool account does.
 const OAUTH_REMEDY = [
   'It is STATIC and cannot refresh itself — your own ~/.claude login rotates every ~12h, this one never does —',
   'so it takes every sandboxed being on the node down at once. To replace it:',
-  '  1. Mint one AS THE OPERATOR: the `an` Windows account, the one holding the Claude subscription login.',
-  '     NEVER as a pool account (egpt-sbx-NN) — those profiles are empty and have no login, by design.',
+  '  1. Mint one AS THE OPERATOR: on Windows the `an` account, on macOS your own user — the one',
+  '     holding the Claude subscription login. NEVER as a boxed identity (the Windows pool account',
+  '     egpt-sbx-NN; on darwin the Seatbelt box is denied your ~/.claude by design) — those have no login.',
   '       claude setup-token',
   '     That is a SUBSCRIPTION token. An `sk-ant-api...` API key will NOT work here.',
   "  2. Paste it as the TOP-LEVEL `sandbox_oauth_token:` key of THIS node's own config",
   '     (~/.egpt/config/config.yaml). It is PER NODE: kg and do each hold their own, and one',
   "     node's token does nothing for the other.",
-  '  3. Make it take effect, from the repo. setup/upgrade.ps1 drops an /upgrade the running',
-  '     spine consumes; the daemon then pulls, rebuilds and respawns it, and the new config is read on the way up:',
-  '       powershell -ExecutionPolicy Bypass -File setup/upgrade.ps1',
+  '  3. Make it take effect, so the daemon re-reads config on the way back up:',
+  '       - Windows: setup/upgrade.ps1 drops an /upgrade the running spine consumes (pull, rebuild, respawn):',
+  '           powershell -ExecutionPolicy Bypass -File setup/upgrade.ps1',
+  '       - macOS: restart the daemon (it reads config.yaml on startup).',
 ].join('\n');
 
 // CASE B — THE CREDENTIAL IS THERE AND THE API REFUSED IT. MEASURED on 2026-09-06 against
@@ -240,25 +249,23 @@ export function createSandboxCliSession(options = {}) {
     throw new Error(`sandboxed: true does not support engine=${engine} (supported: ccode/claude-code, codex, pi)`);
   }
 
-  // ...and the SAME loud-failure rule for the PLATFORM (operator 2026-09-04). The launcher this
-  // module wraps is Windows machinery (LogonUser + CreateProcessWithTokenW + a per-folder ACE),
-  // so off win32 there is simply nothing to run: before this guard we spawned it anyway and the
-  // caller got a bare ENOENT naming a shell binary rather than the feature that failed.
+  // ...and the SAME loud-failure rule for the PLATFORM. The box has TWO enforcers now — the Windows
+  // logon launcher (win32) and Seatbelt via sandbox-exec (darwin) — and this factory admits exactly
+  // those two (operator An 2026-10-15: "un verdadero sandbox ... los demás em corren en el sandbox";
+  // 2026-10-17: linux can wait, macOS only — so a boxed linux node is still refused here, by the
+  // same loud throw, until the Linux PR lands). ANY OTHER platform throws loudly and BEFORE the
+  // inner session exists — therefore before any spawn, exactly like the engine check above — rather
+  // than spawning and letting the caller get a bare ENOENT naming a shell binary.
   //
-  // Note the ASYMMETRY with brainpool.mjs's `sandboxed` resolution, which IS platform-aware
-  // (unset at both tiers => true on win32, false elsewhere). A DEFAULT may be platform-aware
-  // because nobody asked for it. AN EXPLICIT REQUEST MAY NOT BE SILENTLY DOWNGRADED: reaching
-  // this factory at all means some tier said `sandboxed: true`, so we refuse rather than quietly
-  // run the being unsandboxed behind a config key that claims otherwise. Thrown BEFORE the inner
-  // session exists — and therefore before any spawn — exactly like the engine check above.
-  // AND THE REMEDY DEPENDS ON WHICH RUNG ASKED (2026-09-23). Since the access-level default
-  // became 'sandbox', a being that declares NOTHING reaches here on a posix node — and for that
-  // being `sandboxed: false` is DEAD config, because access_level 'sandbox' forces the box ahead
-  // of it (resolveSandboxed rung 1). Naming only that remedy would send the operator to a line
-  // that changes nothing, so both are named and the message says which is which.
+  // Note the (now smaller) ASYMMETRY with brainpool.mjs's `sandboxed` resolution, which is still
+  // platform-aware at its DEFAULT rung (unset everywhere => true on win32, false elsewhere — the
+  // operator's call to change, left as is). A DEFAULT may be platform-aware because nobody asked
+  // for it; AN EXPLICIT REQUEST MAY NOT BE SILENTLY DOWNGRADED — on win32/darwin it now runs the
+  // real box, and on any other platform it refuses rather than quietly running the being unsandboxed
+  // behind a config key that claims otherwise.
   const platform = options.platform ?? process.platform;   // injectable for tests, same DI convention as `spawn` below
-  if (platform !== 'win32') {
-    throw new Error(`sandboxed: true does not support platform=${platform} — OS-level sandboxing is Windows-only on this build. Run this node on Windows, or give this agent an explicit \`access_level: regular\` (the default level is now 'sandbox', which FORCES the box on — under it a \`sandboxed: false\` is dead config, not an override).`);
+  if (platform !== 'win32' && !isPosixBoxPlatform(platform)) {
+    throw new Error(`sandboxed: true does not support platform=${platform} — the OS sandbox runs on win32 (logon launcher) and darwin (sandbox-exec) only; linux is a later PR. Run this node on one of those, or give this agent an explicit \`access_level: regular\` (the default level is 'sandbox', which FORCES the box on — under it a \`sandboxed: false\` is dead config, not an override).`);
   }
 
   const _spawn = options.spawn || nodeSpawn;   // injectable for tests, same DI convention as warm-cli-session.mjs
@@ -399,7 +406,13 @@ export function createSandboxCliSession(options = {}) {
   // provision-sandbox-account.ps1's PI_CODING_AGENT_DIR comment records the cost of the other way
   // ("redirects EVERY pi on the box, including the operator's own terminal. Not eGPT's call to
   // make"). It had no per-spawn channel; this one does.
-  const gitBash = isCcode ? resolveSandboxGitBash(options.gitBashCandidates) : null;
+  //
+  // WIN32 ONLY, EXPLICITLY (2026-10-15, the posix box). CLAUDE_CODE_GIT_BASH_PATH and
+  // MSYS2_PATH_TYPE are a Windows story end to end — Claude Code resolves `bash` from PATH on darwin,
+  // and there is no msys runtime to point at — so on darwin this stays null and the setEnv the box is
+  // handed carries neither. (It would be null anyway, since GIT_BASH_CANDIDATES are Windows paths
+  // that existsSync cannot find on darwin; the explicit gate states the intent.)
+  const gitBash = (isCcode && platform === 'win32') ? resolveSandboxGitBash(options.gitBashCandidates) : null;
 
   // THE BEING'S WAY TO ASK ITS SPINE FOR THE BROWSER (operator 2026-09-26: "for now only the
   // browser") — a secret minted for THIS session, plus the port to dial and the client to dial it
@@ -434,8 +447,31 @@ export function createSandboxCliSession(options = {}) {
     // options.cwd only for the (untested-in-practice) case spawnProc ran
     // with no cwd at all.
     const targetFolder = spawnOpts?.cwd ?? options.cwd;
-    const proc = _spawn('powershell.exe', launcherArgv({ targetFolder, sharePaths, sharePathsReadOnly, setEnv, readMounts, bin, args }), spawnOpts);
-    if (onLog) tapLaunchLine(proc?.stderr, onLog);
+    // WIN32: the Windows logon launcher, BYTE-IDENTICAL argv to before — every existing test pins
+    // `platform: 'win32'` and locks this path.
+    if (platform === 'win32') {
+      const proc = _spawn('powershell.exe', launcherArgv({ targetFolder, sharePaths, sharePathsReadOnly, setEnv, readMounts, bin, args }), spawnOpts);
+      if (onLog) tapLaunchLine(proc?.stderr, onLog);
+      return proc;
+    }
+    // DARWIN: the POSIX box (src/posix-box.mjs). It prepares a per-spawn box dir and hands back the
+    // real command/argv (sandbox-exec -f <profile> <bin> …) and the MINIMAL env — the daemon's
+    // process.env is NOT inherited. spawnOpts is forwarded for stdio/cwd (the cwd stays the real
+    // Room, as on win32), with env REPLACED by the box's: that env is what cli-host.mjs forwards to
+    // the daemon that actually spawns the process (opts.env). The share lists reach the profile as
+    // Seatbelt allow rules — writable (sharePaths) and read-only (sharePathsReadOnly) — exactly as
+    // brainpool's allowed_paths split arrives on Windows (An 2026-10-17). cleanup removes the box dir
+    // when the process ends; the warm pool closes/kills on eviction, so this fires on the normal
+    // path too.
+    const box = preparePosixBox({
+      platform, targetFolder,
+      sharePaths, sharePathsReadOnly,
+      readMounts: Array.isArray(options.sandboxReadMounts) ? options.sandboxReadMounts : [],
+      setEnv, bin, args,
+    });
+    const proc = _spawn(box.command, box.argv, { ...spawnOpts, env: box.env });
+    proc?.once?.('close', box.cleanup);
+    proc?.once?.('error', box.cleanup);
     return proc;
   }
 
@@ -536,11 +572,46 @@ function readMountEntriesOf(list) {
 // the launcher grants reads it; the argv then carries only a short path. Not stdin: a command that
 // reads stdin itself would eat its own script.
 //
-// THROWS, before any spawn, off win32 (there is no box) and with no POSIX bash — the caller's run
-// then FAILS, loudly, and nothing runs anywhere else.
+// THROWS, before any spawn, on a platform with no box (not win32/darwin) and — on win32 — with no
+// POSIX bash. The caller's run then FAILS, loudly, and nothing runs anywhere else.
+//
+// WIN32 vs DARWIN, 2026-10-15. On Windows the inner bin is an msys/Git bash and the command rides
+// CreateProcessWithLogonW's 1024-character command line (the file fallback below). On darwin the box
+// runs `/bin/bash -c <command>` under sandbox-exec with NO such ceiling (preparePosixBox does not go
+// through a logon call), so the command is always inline and there is no command file. The ENV rule
+// matches a darwin TURN's: the token if the caller hands one, the being-link vars if it hands one,
+// and NOTHING of a turn's own (no CLI store, no share path) — and, on darwin, not the Windows-only
+// bash pair.
 const LOGON_CMDLINE_MAX = 1024;
 export function spawnBoxedCommand({ targetFolder, command, commandFile, readMounts, sandboxOauthToken, beingLink = null, spawn = nodeSpawn, setPriority, platform = process.platform, gitBashCandidates, writeFile = writeFileSync, onLog = null } = {}) {
-  if (platform !== 'win32') throw new Error(`refused — a command a being wrote runs in its box, and the box is Windows-only on this build (platform=${platform})`);
+  if (platform !== 'win32' && !isPosixBoxPlatform(platform)) {
+    throw new Error(`refused — a command a being wrote runs in its box, and the OS box runs on win32/darwin only (platform=${platform}); linux is a later PR`);
+  }
+  const oauthToken = typeof sandboxOauthToken === 'string' ? sandboxOauthToken.trim() : '';   // createSandboxCliSession's normalisation
+  const link = typeof beingLink?.mint === 'function' ? beingLink.mint() : null;   // one credential per run, revoked when it ends
+
+  if (platform !== 'win32') {
+    // DARWIN: `/bin/bash -c <command>` in the same Seatbelt box a turn gets, cwd the room. The box
+    // carries the node's read mounts (and the standing ~/src, ~/repos) exactly as a turn's does.
+    const setEnv = [
+      ...(oauthToken ? [`${OAUTH_ENV_NAME}=${oauthToken}`] : []),
+      ...(link ? link.env : []),
+    ];
+    const box = preparePosixBox({
+      platform, targetFolder, setEnv,
+      readMounts: Array.isArray(readMounts) ? readMounts : [],
+      bin: '/bin/bash', args: ['-c', command],
+    });
+    const proc = spawn(box.command, box.argv, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, cwd: targetFolder, env: box.env });
+    lowerChild(proc?.pid, { onLog, setPriority });
+    const done = () => { box.cleanup(); link?.revoke(); };
+    proc?.once?.('close', done);
+    proc?.once?.('error', done);
+    proc?.stdin?.end?.();   // a beat has no input: a command that reads stdin gets EOF, not a wait
+    return proc;
+  }
+
+  // WIN32: the Windows logon launcher with an msys/Git bash as the inner bin — unchanged.
   const bash = resolveSandboxGitBash(gitBashCandidates);
   if (!bash) throw new Error(`refused — no POSIX bash for the box: none of ${GIT_BASH_CANDIDATES.join(', ')} exists`);
   let args = ['-c', command];
@@ -548,8 +619,6 @@ export function spawnBoxedCommand({ targetFolder, command, commandFile, readMoun
     writeFile(join(targetFolder, commandFile), `${command}\n`, 'utf8');
     args = [commandFile.replaceAll('\\', '/')];
   }
-  const oauthToken = typeof sandboxOauthToken === 'string' ? sandboxOauthToken.trim() : '';   // createSandboxCliSession's normalisation
-  const link = typeof beingLink?.mint === 'function' ? beingLink.mint() : null;   // one credential per run, revoked when it ends
   const setEnv = [
     ...(oauthToken ? [`${OAUTH_ENV_NAME}=${oauthToken}`] : []),
     `${GIT_BASH_ENV}=${bash}`, MSYS2_PATH_TYPE_ENTRY,
