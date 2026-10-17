@@ -1,5 +1,5 @@
-// agents-public-list.test.mjs — a non-operator's bare `/agents` (operator 2026-10-16): the beings
-// resident here, how to call them, their reply mode in plain words, and whether THIS sender can call
+// agents-public-list.test.mjs — a non-operator's bare `/agents` (operator 2026-10-16): this node's
+// local beings that read this chat, how to call them, their reply mode in plain words, and whether THIS sender can call
 // them. Safe fields only. The operator's bare /agents is unchanged; every verb stays operator-only.
 // Throttled per chat; hammering it inside the window bans through the media-flood ban.
 import { describe, it, expect, vi } from 'vitest';
@@ -75,7 +75,7 @@ describe('bare /agents from a non-operator: the public list', () => {
     }
   });
 
-  it('lists the resident beings with exactly the safe fields; relays and public beings are left out', async () => {
+  it('lists the local beings with exactly the safe fields; relays and public beings are left out', async () => {
     const { cmds, sent } = harness();
     await cmds.run(msg('/agents'));
     expect(sent).toEqual([{ chatId: GROUP, text: LIST_C }]);
@@ -110,11 +110,19 @@ describe('bare /agents from a non-operator: the public list', () => {
     expect(sent[0].text).not.toContain('Wren');
   });
 
-  it('a chat with nothing to list stays silent', async () => {
-    const st = ensureContact({ contacts: {} }, 'whatsapp', GROUP, { pushedName: 'C' }).state;
-    const { cmds, sent } = harness({ st });
-    await cmds.run(msg('/agents'));
-    expect(sent).toEqual([]);
+  it('a fresh chat (no entry, nobody has spoken) lists E plus the other local beings', async () => {
+    const { cmds, sent } = harness({ st: { contacts: {} } });
+    await cmds.run(msg('/agents', { chatId: '!fresh', chatName: 'F' }));
+    expect(sent).toEqual([{ chatId: '!fresh', text: LIST_C }]);
+  });
+
+  it('a being whose mode is off in this chat is omitted; every being off → silent', async () => {
+    const one = harness({ st: patchBeing(seed(), 'whatsapp', GROUP, 'wren', { mode: 'off' }) });
+    await one.cmds.run(msg('/agents'));
+    expect(one.sent[0].text.split('\n')).toEqual(LIST_C.split('\n').slice(0, 2));
+    const all = harness({ st: patchBeing(patchBeing(seed(), 'whatsapp', GROUP, 'wren', { mode: 'off' }), 'whatsapp', GROUP, 'e', { mode: 'off' }) });
+    await all.cmds.run(msg('/agents'));
+    expect(all.sent).toEqual([]);
   });
 
   it('a stranger in a 1:1 reaches only that conversation\'s own agent; a public own agent keeps the chat silent', async () => {

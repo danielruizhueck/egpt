@@ -3601,7 +3601,8 @@ export function createCommands({
     if (text) await send?.(ev.chatId, text);
   }
 
-  // The resident beings that read this chat: emoji + name, handles, voice handles, the mode in plain
+  // This node's local agents (any of them can be woken in any chat; the persona first) that read
+  // this chat: emoji + name, handles, voice handles, the mode in plain
   // words, and whether THIS sender can call them (senderMayWake). Left out: relays (another node's
   // being), public beings (shown without eGPT machinery), surface-pinned elsewhere, mode 'off'. A
   // conversation whose own agent is public gets nothing. null = nothing to say.
@@ -3621,8 +3622,7 @@ export function createCommands({
     const arrived = String((ev.origin ?? ev).surface ?? '').toLowerCase();
     const bare = c.dispatch?.address_without_at !== false;
     const inSuper = isSuperChannel(state, surface, ev.chatId);
-    let beings = residentsOf(entry);
-    if (beings.includes(defaultKey)) beings = [defaultKey, ...beings.filter((b) => b !== defaultKey)];
+    const beings = [defaultKey, ...Object.keys(c.agents ?? {}).filter((n) => !n.startsWith('_') && n.toLowerCase() !== defaultKey)];
     const lines = [];
     for (const b of beings) {
       const a = agentOf(b);

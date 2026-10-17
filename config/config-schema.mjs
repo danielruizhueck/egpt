@@ -2837,7 +2837,7 @@ export const CONFIG_SCHEMA = {
 
   agents_list: `
     Bare /agents from a NON-operator (operator 2026-10-16): a short public list of this
-    node's beings resident in the chat — emoji + name, handles, voice handles, the reply
+    node's local agents (the persona first) that read the chat — emoji + name, handles, voice handles, the reply
     mode in plain words, and whether THAT sender can call it (its allowed_users). Relays,
     public agents and 'off' beings are not listed. The operator's /agents is unchanged
     and never throttled. Read live.
