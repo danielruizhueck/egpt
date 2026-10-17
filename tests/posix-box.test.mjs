@@ -14,7 +14,7 @@
 //     removed after exit, and a granted path whose NAME carries spaces/parens/@/& works (An
 //     2026-10-17).
 import { describe, it, expect, afterAll } from 'vitest';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -169,6 +169,7 @@ describe('posix-box — seatbeltProfile (SBPL): the darwin policy', () => {
     expect(p).toContain('(global-name "com.apple.coreservices.launchservicesd")');
     expect(p).toContain('(global-name "com.apple.xpc.launchd.domain.user")');
     expect(p).toContain('(deny network-outbound (regex #"/com\\.apple\\.launchd\\."))');
+    expect(p).toContain('(deny signal)\n(allow signal (target same-sandbox))');
   });
 
   it('a read-only node (node under the operator home) adds its install dir to the read allows', () => {
@@ -331,6 +332,16 @@ describe.skipIf(process.platform !== 'darwin')('posix-box — DARWIN LIVE: sandb
     expect(r.stdout).not.toContain('SSH_AUTH_SOCK');
     expect(r.stdout).not.toContain('AWS_SECRET_ACCESS_KEY');
     expect(r.stdout).not.toContain('LEAK');
+  });
+
+  it('signals: an outside process of the same user cannot be signalled; the box\'s own child can', () => {
+    const outside = spawn('/bin/sleep', ['30'], { stdio: 'ignore' });
+    try {
+      const r = boxed(`kill -0 ${outside.pid} 2>/dev/null; echo other=$?; /bin/sleep 30 & c=$!; kill $c 2>/dev/null; echo child=$?`);
+      expect(r.stdout).toMatch(/other=[^0]/);   // denied: the daemon, the spine, other beings are out of reach
+      expect(r.stdout).toContain('child=0');    // its own tree still works
+      expect(outside.exitCode).toBe(null);      // and the outside process is still alive
+    } finally { outside.kill(); }
   });
 
   it('the box dir is removed after the process exits (cleanup wired to the real proc in sandbox-cli-session)', () => {
