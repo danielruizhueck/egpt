@@ -126,7 +126,8 @@ answered by the persona:
                               survive the reset, reseed a pristine tree at the
                               same path
 /agents[=<slug>] auto <mode> <handle>|all
-                              set a chat's reply mode. modes: on · mute ·
+                              set a chat's reply mode. modes: on · mute (log only,
+                              never a turn) ·
                               mention-direct · mention · accum (mention + the turn
                               is prompted with what was said since the being's
                               last turn) · off

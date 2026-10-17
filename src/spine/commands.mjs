@@ -264,7 +264,7 @@ const PUBLIC_MODE_WORDS = {
   on: 'answers everything', auto: 'answers everything',
   mention: 'answers only when called', accum: 'answers only when called',
   'mention-direct': 'answers only when called at the start of a message',
-  mute: 'reads but stays silent',
+  mute: 'only logs the chat, never answers',
 };
 
 // /recap's listing: one line per message the chat sent while the node slept — sender, local time,
@@ -3637,7 +3637,7 @@ export function createCommands({
         `${a.body_emoji || '🐶'} ${a.name || hs[0] || b} — ${hs.length ? `call: ${hs.map((h) => `@${h}`).join(', ')}${bare ? ` (or start a message with "${hs[0]}")` : ''}` : 'no handle'}`,
         ...(voice.length ? [`voice: ${voice.map((v) => `"${v}"`).join(', ')}`] : []),
         PUBLIC_MODE_WORDS[mode],
-        `you can call it: ${senderMayWake(state, surface, ev.chatId, ev, b) ? 'yes' : 'no'}`,
+        `you can call it: ${mode !== 'mute' && senderMayWake(state, surface, ev.chatId, ev, b) ? 'yes' : 'no'}`,
       ].join(' · '));
     }
     return lines.length ? ['Agents in this chat:', ...lines].join('\n') : null;

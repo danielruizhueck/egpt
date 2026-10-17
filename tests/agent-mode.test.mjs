@@ -93,10 +93,10 @@ describe('REPRODUCE-FIRST 2 — conversations.yaml `agents:` block overrides the
   it('the `agents:` block carries every per-conversation field flat, side by side (phase 1: one block, not a merge)', async () => {
     const g = mk(
       { agents: { e: { default: true, mode: 'on' } } },
-      convState({ agents: { e: { mode: 'mute', send_to_egpt: 'always' } } }),
+      convState({ agents: { e: { mode: 'mention-direct', send_to_egpt: 'always' } } }),
     );
     const d = await g.decide('e', ev);
-    expect(d.mode).toBe('mute');
+    expect(d.mode).toBe('mention-direct');
     expect(d.sendToEgpt).toBe('always');
   });
 

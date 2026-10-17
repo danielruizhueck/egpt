@@ -94,8 +94,8 @@ export function createGating({ getConfig = () => ({}), loadState = null, default
     // send_to_egpt keeps the persona in a chat's context even when it won't reply — that's a
     // persona concern. A sibling is an engineer, not a context-follower: it runs ONLY when it
     // may reply, so force 'mode' for any non-persona being (never 'always'). A denied sender
-    // runs no context turn either.
-    const sendToEgpt = (being !== defaultKey || denied)
+    // runs no context turn either, nor does 'mute' (log only, operator 2026-10-16).
+    const sendToEgpt = (being !== defaultKey || denied || mode === 'mute')
       ? 'mode'
       : (_send(bv?.send_to_egpt) ?? _send(c.dispatch?.send_to_egpt) ?? _send(c.whatsapp?.send_to_egpt) ?? 'mode');
     // REPLY ROUTING (operator 2026-10-08, CHUNK 2): when this conversation HAS a super channel

@@ -10,7 +10,9 @@
 //                  gate; the operator-role instruction layer is an identity-feed
 //                  layer wired in the brainpool (config/skeletons/auto-mode.md),
 //                  NOT here. Per-conversation opt-in only (never a default).
-//   mute           receive every burst; never reply
+//   mute           LOG ONLY (operator 2026-10-16): recorded like any non-off mode (transcript,
+//                  media, voice), but no turn at all — not even an allowed user's handle call,
+//                  nor a send_to_egpt: always context turn (gating.decide)
 //   mention-direct receive; reply only when @e is at the START, or it's a reply to E
 //   mention        receive; reply only when @e appears anywhere, or a reply to E
 //   accum          gates EXACTLY like 'mention' — and the turn it allows is PROMPTED
@@ -95,7 +97,7 @@ export function resolveBeingMode({ autoModes = {}, autoEModes = {}, chatId, bein
   return isAutoMode(defaultMode) ? defaultMode : DEFAULT_AUTO_MODE;
 }
 
-// E sees the chat at all? (everything except 'off')
+// Is the chat RECORDED? (everything except 'off'; 'mute' is recorded but never runs a turn)
 export function receives(mode) { return mode !== 'off'; }
 
 // THE mention matcher — ONE definition of "this text addresses <token>" (operator 2026-07-25:

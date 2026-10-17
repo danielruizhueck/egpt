@@ -101,7 +101,12 @@ describe('bare /agents from a non-operator: the public list', () => {
     sent.length = 0;
     await cmds.run(msg('/agents'));
     expect(sent[0].text).toContain('🐶 E — call: @e, @egpt (or start a message with "e") · voice: "perro" · answers everything · you can call it: yes');
-    expect(sent[0].text).toContain('· reads but stays silent · you can call it: no');
+    expect(sent[0].text).toContain('· only logs the chat, never answers · you can call it: no');
+    await cmds.run(op('/agents mode mute e'));
+    clock.t += 60_001;
+    sent.length = 0;
+    await cmds.run(msg('/agents'));
+    expect(sent[0].text).toContain('🐶 E — call: @e, @egpt (or start a message with "e") · voice: "perro" · only logs the chat, never answers · you can call it: no');   // mute: nobody wakes it
     await cmds.run(op('/agents mode off wren'));
     clock.t += 60_001;
     sent.length = 0;

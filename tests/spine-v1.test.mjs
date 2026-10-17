@@ -130,15 +130,16 @@ describe('v1 pipe — gated receive → brain → reply → send, per mode', () 
     expect(files.size).toBe(0);   // 'off' is not received at all
   });
 
-  it("send_to_egpt=always in a mute chat: E RUNS for context, reply recorded NOT surfaced, NO send", async () => {
+  // mute = log only (operator 2026-10-16): send_to_egpt=always no longer runs a context turn there.
+  it("send_to_egpt=always in a mute chat: logged, E does NOT run, NO send", async () => {
     const { bridge, brain, files } = harness({ whatsapp: { send_to_egpt: 'always' } }, 'mute');
     await bridge.emit(msg());
-    expect(brain.calls).toHaveLength(1);              // E ran despite mute
-    expect(bridge.sent).toHaveLength(0);              // nothing surfaced
-    expect(bridge.streams).toHaveLength(0);           // no train for a non-surfacing turn
+    expect(brain.calls).toHaveLength(0);
+    expect(bridge.sent).toHaveLength(0);
+    expect(bridge.streams).toHaveLength(0);
     const t = onlyFile(files);
-    expect(t).toContain('#m1: hola');                                  // inbound logged
-    expect(t).toContain('e@[fam].wa (14:05): (not surfaced) ↩ hola');        // reply recorded, withheld
+    expect(t).toContain('#m1: hola');                 // inbound logged
+    expect(t).not.toContain('e@[fam].wa (14:05):');   // no reply line
   });
 
   it("'mention' without @e: logged, withheld (no brain, no send)", async () => {

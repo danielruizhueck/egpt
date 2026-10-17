@@ -72,7 +72,7 @@ not answered by the persona. Authorization = the surface's own `chat_id`
 ```
 
 **Reply modes** (`/agents … auto <mode>`): `on` (receive every burst, reply per
-personality) · `mute` (receive, never reply) · `mention-direct` (reply only when
+personality) · `mute` (log only: recorded, never a turn, even when called) · `mention-direct` (reply only when
 `@e` starts the message or it replies to E) · `mention` (reply when `@e` appears
 anywhere, or a reply to E — the default) · `accum` (the `mention` gate, and each
 reply is prompted with everything said here since the being's own last turn) ·

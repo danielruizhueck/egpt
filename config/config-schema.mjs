@@ -1733,6 +1733,11 @@ export const CONFIG_SCHEMA = {
         OPTIONAL (operator 2026-07-25) — THIS agent's own default reply-mode.
         ENUM: on | auto | mute | mention-direct | mention | accum | off
 
+        'mute' (operator 2026-10-16) is LOG ONLY: the chat is recorded like
+        any non-off mode (transcript, media, voice), but the agent runs no
+        turn at all - not even when an allowed user calls it by handle, and
+        send_to_egpt: always does not apply. 'off' records nothing.
+
         'accum' (operator 2026-07-26) GATES EXACTLY LIKE 'mention' — same
         answer for every mention state — and additionally PROMPTS the turn it
         allows with everything this conversation recorded SINCE THIS AGENT'S
@@ -1792,6 +1797,9 @@ export const CONFIG_SCHEMA = {
             plain agent). Set = ONLY a sender whose id is in the list can
             reach it; every other sender's @mention falls through exactly as
             if it never matched (silent, same convention as the surface pin).
+            No mode is above it (operator 2026-10-16): such a sender never
+            wakes this agent, not by handle, quote-reply, the persona
+            fall-through or an 'on' chat; the line is still recorded.
 
             Replaces the retired TYPE-FILE dangerous: true reachability
             mechanism (meta-engineer.yaml, evicted 2026-08-15 - "i think the
