@@ -2446,7 +2446,8 @@ export const CONFIG_SCHEMA = {
     NOTE: which Chrome a CHAT uses is not a chrome key. It is config/browsers.yaml
     (skeleton: config/skeletons/browsers.yaml): groups of chat names; group
     brain = profile_dir, any other group = chrome/profiles/<group>, unlisted =
-    shared. chrome.dedicated is retired.
+    shared. chrome.dedicated is retired. Its optional colors: { <group>: "#RRGGBB" }
+    overrides the palette color each group's profile is themed with at launch.
   `,
 
   browser_uploads: `

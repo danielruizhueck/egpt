@@ -72,6 +72,10 @@ const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 // so it is read fresh on every call and an edit needs no restart. Consumer: chrome-pool.chromeConversationOf.
 const BROWSERS = { file: 'browsers.yaml', root: 'groups' };
 export const readBrowserGroups = (deps = {}) => readRoomsFile({ reg: BROWSERS, ...deps });
+// Its optional `colors: { <group>: "#RRGGBB" }` (chrome-launcher.groupColor). {} when absent. Never throws.
+export async function readBrowserColors({ path = registryPath(BROWSERS), read = readFile } = {}) {
+  try { const c = YAML.parse(await read(path, 'utf8'))?.colors; return isPlainObject(c) ? c : {}; } catch { return {}; }
+}
 
 /** The whole file as a plain object: { "<surface>/<slug>": {...} }. Never throws. */
 export async function readRoomsFile({ reg = ROOM, path = registryPath(reg), read = readFile } = {}) {

@@ -17,7 +17,7 @@ const MB = 1024 * 1024;
 const SHARED = { key: 'Reinie-2607150057', name: 'Reinie', group: 'shared' };
 const ROOT = dirname(CHROME_BRAIN_PROFILE);
 // What the spine sends for group `g` (commands.mjs ensureGroupChrome).
-const launchOf = (group, bin = 'chrome') => ({ group, profileDir: join(ROOT, group), bin, argv: chromePipeArgs({ userDataDir: join(ROOT, group) }) });
+const launchOf = (group, bin = 'chrome') => ({ group, profileDir: join(ROOT, group), bin, argv: chromePipeArgs({ userDataDir: join(ROOT, group), windowName: group }) });
 const TABS = [{ id: 'T1', title: 'kept', url: 'https://x/' }];
 const until = async (ok) => { for (let i = 0; i < 200 && !ok(); i++) await new Promise((r) => setImmediate(r)); expect(ok()).toBe(true); };
 
@@ -277,7 +277,18 @@ describe('the daemon refuses a launch that is not a pipe Chrome on our profile',
     const spaced = join(ROOT, 'with space');
     await chromeHost.launch({ group: 'with space', profileDir: spaced, bin: 'chrome', argv: chromePipeArgs({ userDataDir: spaced }) });
     await chromeHost.launch(launchOf('g'));
-    expect(w.spawns.map((s) => s.argv)).toEqual([chromePipeArgs({ userDataDir: spaced }), pipeArgs]);
+    expect(w.spawns.map((s) => s.argv)).toEqual([chromePipeArgs({ userDataDir: spaced }), launchOf('g').argv]);
     expect(w.logs.filter((l) => /refused/.test(l))).toEqual([]);
+  });
+
+  it('--window-name=<group> passes, a group name with a space too, and still no port slips in with it', async () => {
+    const w = world();
+    const { chromeHost } = w.connect();
+    const spaced = join(ROOT, 'with space');
+    const argv = chromePipeArgs({ userDataDir: spaced, windowName: 'with space' });
+    await chromeHost.launch({ group: 'with space', profileDir: spaced, bin: 'chrome', argv });
+    expect(w.spawns[0].argv).toContain('--window-name=with space');
+    expect(w.logs.filter((l) => /refused/.test(l))).toEqual([]);
+    await refused([...chromePipeArgs({ userDataDir: dir, windowName: 'g' }), '--remote-debugging-port=9222'], dir, /remote-debugging-port/);
   });
 });

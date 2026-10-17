@@ -52,7 +52,7 @@ import { CONFIG_YAML_PATH, writeConfigKey } from '../tools/config-io.mjs';
 import { isRestartKey } from './config-swap.mjs';
 import { resolveConfigKey } from '../../config/config-schema.mjs';
 import { createCdpClient, createChannelTransport } from '../tools/cdp.mjs';
-import { resolveBrainProfile, chromePipeArgs, profileHolder as defaultProfileHolder } from '../tools/chrome-launcher.mjs';
+import { resolveBrainProfile, chromePipeArgs, stampGroupProfile, profileHolder as defaultProfileHolder } from '../tools/chrome-launcher.mjs';
 import { connectChromeHost } from '../chrome-host.mjs';
 import { admitLaunch, estimateChromeBytes, BRAIN_GROUP, SHARED_GROUP, isSafeGroupName, chromeConversationOf } from './chrome-pool.mjs';
 import { freemem } from 'node:os';
@@ -61,7 +61,7 @@ import { uploadNote, radioNoteFilename, pickSpeaker } from '../radio-relay.mjs';
 import { stripNodeSignature, stripRenderedNodeSignature } from '../node-signature.mjs';
 import { bodyForMessageId } from '../transcript-log.mjs';
 import { htmlToMarkdown } from '../html-to-markdown.mjs';
-import { readRoomConfig, readBrowserGroups } from '../rooms-file.mjs';
+import { readRoomConfig, readBrowserGroups, readBrowserColors } from '../rooms-file.mjs';
 import { hhmm, dayBoundary } from '../dispatch-line.mjs';
 
 // Where a manually-launched Chrome should keep its profile. v1's shell hardcoded
@@ -656,6 +656,7 @@ export function createCommands({
   rssOf = defaultRssOf,
   onChromeLog = () => {},
   browserGroups = readBrowserGroups,     // config/browsers.yaml's groups, read fresh (rooms-file.readBrowserGroups)
+  browserColors = readBrowserColors,     // its optional colors: map, read at each launch
   // git probe for /status (short sha + subject). Mirrors boot's gitOut so it's
   // fakeable in tests without threading spawnSync through createCommands.
   gitOut = (args) => { try { return spawnSync('git', args, { cwd: process.cwd() }).stdout?.toString().trim() || ''; } catch { return ''; } },
@@ -1369,9 +1370,10 @@ export function createCommands({
           return { group, profileDir, client: null, launched: false, running: false, declined: true, why: d.reason };
         }
       }
+      stampGroupProfile({ userDataDir: profileDir, group, colors: await browserColors(), log: onChromeLog });   // no Chrome holds it (above)
       let spawned;
       try {
-        spawned = await chromeHost.launch({ group, profileDir, bin: chromeBinOf(cfg()), argv: chromePipeArgs({ userDataDir: profileDir }) });
+        spawned = await chromeHost.launch({ group, profileDir, bin: chromeBinOf(cfg()), argv: chromePipeArgs({ userDataDir: profileDir, windowName: group }) });
       } catch (e) {
         onChromeLog(`group Chrome ${profileDir} launch failed — ${e?.message ?? e}`);
         return { group, profileDir, client: null, launched: false, running: false, why: String(e?.message ?? e) };

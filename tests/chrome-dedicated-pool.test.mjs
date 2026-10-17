@@ -119,6 +119,12 @@ describe('chromePipeArgs — pipe, non-default profile, no port/origins', () => 
     expect(args).toContain('--disable-background-timer-throttling');
     expect(args).toContain('--disable-backgrounding-occluded-windows');
   });
+  it('--window-name only when a name is given, before the trailing url', () => {
+    expect(args.some((a) => a.startsWith('--window-name'))).toBe(false);
+    const named = chromePipeArgs({ userDataDir: 'C:/x/p', windowName: 'eduweb-si' });
+    expect(named).toContain('--window-name=eduweb-si');
+    expect(named.at(-1)).toBe('about:blank');
+  });
 });
 
 describe('a non-brain GROUP → its group pipe Chrome + a pipe cdpClient', () => {
@@ -130,6 +136,7 @@ describe('a non-brain GROUP → its group pipe Chrome + a pipe cdpClient', () =>
     expect(calls[0].profileDir).toBe(sharedDir);
     expect(calls[0].profileDir).not.toBe(CHROME_BRAIN_PROFILE);   // non-default (Chrome 136 requires it)
     expect(calls[0].bin).toBe('C:/x/chrome.exe');
+    expect(calls[0].argv).toEqual(chromePipeArgs({ userDataDir: sharedDir, windowName: 'shared' }));
     // the client speaks CDP over the pipe against the scripted peer
     const tabs = await r.client.listTabs();
     expect(tabs).toEqual([{ id: 'T1', type: 'page', url: 'https://x/', title: 'x' }]);
@@ -139,6 +146,7 @@ describe('a non-brain GROUP → its group pipe Chrome + a pipe cdpClient', () =>
     const { cmds, calls } = build({ config: { chrome: { profile_dir: 'C:/x/brain' } }, mem: { free: 8192 * MB } });
     const r = await cmds.chromeClientFor(BRAIN);
     expect(calls.map((c) => c.profileDir)).toEqual(['C:/x/brain']);
+    expect(calls[0].argv).toContain('--window-name=brain');
     expect(r.profileDir).toBe('C:/x/brain');
     expect(await r.client.listTabs()).toEqual([{ id: 'T1', type: 'page', url: 'https://x/', title: 'x' }]);
   });

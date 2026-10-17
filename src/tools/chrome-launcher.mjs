@@ -1,9 +1,10 @@
 // tools/chrome-launcher.mjs — locate Chrome, find the brain profile, the args a browser group's
-// Chrome is launched with over --remote-debugging-pipe (by the S1 daemon, src/chrome-host.mjs), and
-// the OS process probes its orphan sweep uses. Nothing here launches a Chrome on a debug port.
+// Chrome is launched with over --remote-debugging-pipe (by the S1 daemon, src/chrome-host.mjs), the
+// group's name and color stamped into its profile, and the OS process probes its orphan sweep uses.
+// Nothing here launches a Chrome on a debug port.
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, statSync, readFileSync, openSync, closeSync, readlinkSync } from 'node:fs';
+import { existsSync, readdirSync, statSync, readFileSync, writeFileSync, renameSync, rmSync, openSync, closeSync, readlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { EGPT_HOME } from '../egpt-home.mjs';
 
@@ -136,7 +137,8 @@ export function resolveBrainProfile({ egptHome = EGPT_HOME, fs = defaultFs, read
 // (that is port/WS-only). Keeps the non-default --user-data-dir (Chrome 136 requires it), --no-first-run,
 // the no-banner --silent-debugger-extension-api, and the renderer-alive flags. --load-extension still opts.
 // --restore-last-session: a relaunch (an eviction, a crash, a daemon restart) reopens the group's tabs.
-export function chromePipeArgs({ userDataDir, extensionDir, url = 'about:blank' }) {
+// --window-name: the title of the window Chrome opens at startup (a restored window keeps its saved one).
+export function chromePipeArgs({ userDataDir, extensionDir, url = 'about:blank', windowName }) {
   const args = [
     '--remote-debugging-pipe',
     `--user-data-dir=${userDataDir}`,
@@ -149,9 +151,67 @@ export function chromePipeArgs({ userDataDir, extensionDir, url = 'about:blank' 
     '--disable-renderer-backgrounding',
     '--new-window',
   ];
+  if (windowName) args.push(`--window-name=${windowName}`);
   if (extensionDir) args.push(`--load-extension=${extensionDir}`);
   args.push(url);
   return args;
+}
+
+// A group's color: browsers.yaml `colors.<group>` when it is "#RRGGBB", else a fixed pick by name hash.
+export const GROUP_PALETTE = ['#1a73e8', '#d93025', '#188038', '#e8710a', '#9334e6', '#12b5cb', '#e52592', '#795548'];
+const HEX_COLOR = /^#[0-9a-f]{6}$/i;
+export function groupColor(group, colors = {}) {
+  const set = colors?.[group];
+  if (typeof set === 'string' && HEX_COLOR.test(set)) return set.toLowerCase();
+  let h = 0x811c9dc5;   // FNV-1a
+  for (let i = 0; i < group.length; i++) h = Math.imul(h ^ group.charCodeAt(i), 0x01000193);
+  return GROUP_PALETTE[(h >>> 0) % GROUP_PALETTE.length];
+}
+
+// Chrome 155's keys for the profile's name and its theme color (what Settings > Customize profile and
+// Customize Chrome > color write). Chrome rewrites both files on exit: call only while no Chrome holds
+// the profile. A missing or unparsable file is skipped and logged; never throws.
+export function stampGroupProfile({ userDataDir, group, colors = {}, log = () => {} }) {
+  const color = groupColor(group, colors);
+  if (colors?.[group] !== undefined && colors[group]?.toLowerCase?.() !== color) {
+    log(`browsers.yaml colors.${group} ${JSON.stringify(colors[group])} is not "#RRGGBB"; using ${color}`);
+  }
+  const argb = (0xff000000 | parseInt(color.slice(1), 16)) | 0;   // SkColor as Chrome stores it
+  const done = [
+    editProfileJson(join(userDataDir, 'Local State'), log, (doc) => {
+      const entry = doc.profile?.info_cache?.Default;
+      if (!entry) throw new Error('no profile.info_cache.Default');
+      return [put(entry, 'name', group), put(entry, 'is_using_default_name', false)];
+    }),
+    editProfileJson(join(userDataDir, 'Default', 'Preferences'), log, (doc) => [
+      put(dict(doc, 'profile'), 'name', group),
+      put(dict(doc, 'profile'), 'using_default_name', false),
+      put(dict(doc, 'extensions', 'theme'), 'id', 'user_color_theme_id'),
+      put(dict(doc, 'browser', 'theme'), 'user_color2', argb),
+    ]),
+  ];
+  if (done.includes(true)) log(`stamped "${group}" profile ${userDataDir}: name "${group}", color ${color}`);
+}
+
+const put = (o, k, v) => (JSON.stringify(o[k]) === JSON.stringify(v) ? false : ((o[k] = v), true));
+const dict = (o, ...keys) => keys.reduce((d, k) => (d[k] && typeof d[k] === 'object' ? d[k] : (d[k] = {})), o);
+// Numbers keep their source text, so a double Chrome wrote as 1.0 is not read back as an int.
+const keepNumbers = (k, v, ctx) => (typeof v === 'number' ? JSON.rawJSON(ctx.source) : v);
+
+// Parse, apply, write via tmp+rename only if something changed. True when the file was rewritten.
+function editProfileJson(file, log, apply) {
+  const tmp = `${file}.egpt-tmp`;
+  try {
+    const doc = JSON.parse(readFileSync(file, 'utf8'), keepNumbers);
+    if (!apply(doc).includes(true)) return false;
+    writeFileSync(tmp, JSON.stringify(doc));
+    renameSync(tmp, file);
+    return true;
+  } catch (e) {
+    log(`profile stamp skipped ${file}: ${e.code === 'ENOENT' ? 'not there yet' : e.message}`);
+    try { rmSync(tmp, { force: true }); } catch { /* best effort */ }
+    return false;
+  }
 }
 
 // Who already runs a Chrome on this --user-data-dir, or null. A running Chrome holds <dir>/lockfile
