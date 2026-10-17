@@ -24,7 +24,6 @@ function L($m){ Add-Content -Path $log -Value ("{0} {1}" -f ((Get-Date).ToUniver
 
 $MAXMIN        = 15            # hard ceiling on awake time - the safety net now that there is no scheduler cap
 $QUIETSEC      = 90            # the spine is "caught up" after this long with no new beeper ingest
-$DaemonService = 'egpt-daemon' # the primary spine's service; the same literal on every node (each primary profile is .egpt)
 
 # Keep the machine awake for the whole duty (ES_CONTINUOUS|ES_SYSTEM_REQUIRED = 0x80000001); released in finally.
 $ste = Add-Type -Name Pwr -Namespace W -PassThru -MemberDefinition '[DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint f);'
@@ -38,9 +37,17 @@ try {
     Start-Sleep -Milliseconds 500
   }
 
-  # 2) revive the spine if the daemon died (best-effort; starting a service may need elevation)
-  $svc = Get-Service $DaemonService
-  if($svc -and $svc.Status -ne 'Running'){ try { Start-Service $DaemonService -ErrorAction Stop; L "daemon was $($svc.Status) -> start issued" } catch { L "daemon was $($svc.Status) -> start FAILED: $($_.Exception.Message)" } }
+  # 2) revive the Session 1 daemon if it died: start-egpt.ps1 starts the egpt-daemon task only when
+  #    no daemon is live. Never past a STOP file - start-egpt would delete the operator's stop.
+  $egptHome = Join-Path $prof '.egpt'
+  $daemon = 'not revived (STOP file)'
+  if (-not (Test-Path -LiteralPath (Join-Path $egptHome 'STOP'))) {
+    try {
+      $global:LASTEXITCODE = 0
+      $o = ((& (Join-Path $PSScriptRoot 'start-egpt.ps1') -EgptHome $egptHome 6>&1 | Out-String) -replace '\s+', ' ').Trim()
+      if ($o -match 'already running') { $daemon = 'running' } else { $daemon = "start-egpt exit $LASTEXITCODE"; L "revive: $o" }
+    } catch { $daemon = 'start-egpt FAILED'; L "revive: start-egpt FAILED: $($_.Exception.Message)" }
+  }
 
   # 3) HOLD awake while the spine works - until no new beeper ingest for QUIETSEC, or MAXMIN
   function OutboxCount { (Get-ChildItem (Join-Path $prof '.egpt\conversations') -Recurse -Directory -Filter outbox | ForEach-Object { Get-ChildItem $_.FullName -File } | Measure-Object).Count }
@@ -64,7 +71,7 @@ try {
   $beeper  = $false; try { Invoke-WebRequest 'http://127.0.0.1:23373/v1/accounts' -TimeoutSec 3 -UseBasicParsing -ErrorAction Stop | Out-Null; $beeper=$true } catch { if($_.Exception.Response){ $beeper=$true } }
   $pending = OutboxCount
   $awake   = [Math]::Round(((Get-Date) - $start).TotalSeconds, 0)
-  L ("duty: net(inet=$inet) spinePid=$spid alive=$alive beeperApi=$beeper outboxPending=$pending awakeSecs=$awake")
+  L ("duty: net(inet=$inet) daemon=$daemon spinePid=$spid alive=$alive beeperApi=$beeper outboxPending=$pending awakeSecs=$awake")
   if($pending -gt 0){ L "WARN: $pending outbox file(s) still pending after the cycle (stuck destination? a boot-drain or a turn in that chat clears it)" }
 }
 finally {

@@ -13,7 +13,7 @@ import { describe, it, expect } from 'vitest';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { plan, probeScript, updateScript } from '../migrations/0005-daemon-task-has-description.mjs';
+import { plan, probeScript, updateScript, sessionZeroDescription } from '../migrations/0005-daemon-task-has-description.mjs';
 import { runMigrations, runPowerShell } from '../setup/migrate.mjs';
 
 const REPO = join(import.meta.dirname, '..');
@@ -23,7 +23,7 @@ const NODES = {
 };
 const daclOf = (sid) => `D:(A;ID;0x1f019f;;;BA)(A;ID;0x1f019f;;;SY)(A;ID;FA;;;${sid})(A;;FR;;;${sid})`;
 // What setup/egpt-daemon-task-labels.ps1 returns - checked against the real module below, on Windows.
-const TARGET = (name) => `eGPT spine supervisor (egpt-daemon.mjs) in session 1, started at logon. Disable it and the spine stays in session 0 (the ${name} service), where any browser it starts is invisible.`;
+const TARGET = 'eGPT spine supervisor (egpt-daemon.mjs) in session 1, started at logon - the only eGPT runner on this node. Disable it and the node stays silent.';
 
 const taskXml = ({ name = 'egpt-daemon', node = 'kg', description } = {}) => [
   '<?xml version="1.0" encoding="UTF-16"?>',
@@ -71,7 +71,7 @@ const taskXml = ({ name = 'egpt-daemon', node = 'kg', description } = {}) => [
 ].join('\r\n');
 
 // A fake Task Scheduler. `onUpdate(name, xml, store)` decides what Windows would store.
-function fakeScheduler(tasks, { target = TARGET, onUpdate = (name, xml, prev) => ({ ...prev, xml }) } = {}) {
+function fakeScheduler(tasks, { target = () => TARGET, onUpdate = (name, xml, prev) => ({ ...prev, xml }) } = {}) {
   const store = new Map(Object.entries(tasks));
   const calls = [];
   const ps = (script) => {
@@ -103,7 +103,7 @@ describe('0005 on kg and do - both tasks measured with an empty Description', ()
       expect(p.satisfied).toBe(false);
       expect(p.changes).toEqual([
         're-register scheduled task egpt-daemon from its own exported XML, with one line added in <RegistrationInfo>:',
-        `  +     <Description>${TARGET('egpt-daemon')}</Description>`,
+        `  +     <Description>${TARGET}</Description>`,
         `verify: the re-export equals that byte for byte and the DACL is unchanged (${daclOf(NODES[node].sid)}) - else re-register the original export and refuse`,
         "egpt-daemon is not running by Task Scheduler's count (state 3) - a session 1 daemon started under its old name, before 0002 renamed it, is not counted; nothing is started or stopped either way",
       ]);
@@ -116,7 +116,7 @@ describe('0005 on kg and do - both tasks measured with an empty Description', ()
       await (await plan(ctx)).apply();
       expect(sched.calls).toEqual(['# egpt-0005:probe', '# egpt-0005:probe', '# egpt-0005:update egpt-daemon', '# egpt-0005:probe']);
       const after = sched.store.get('egpt-daemon');
-      expect(after.xml).toBe(taskXml({ node, description: TARGET('egpt-daemon') }));
+      expect(after.xml).toBe(taskXml({ node, description: TARGET }));
       // Every line but the one added is the export as it was: principal, trigger, action, settings.
       expect(after.xml.split('\r\n').filter((l) => !l.includes('<Description>'))).toEqual(taskXml({ node }).split('\r\n'));
       expect(after.dacl).toBe(daclOf(NODES[node].sid));
@@ -132,10 +132,10 @@ describe('0005 on kg and do - both tasks measured with an empty Description', ()
     expect(sched.store.get('egpt-daemon').state).toBe(4);
   });
 
-  it('a second profile folder derives its own task, and its Description names its own service', async () => {
+  it('a second profile folder derives its own task', async () => {
     const sched = fakeScheduler({ 'egpt-secondary-daemon': { xml: taskXml({ name: 'egpt-secondary-daemon' }), dacl: daclOf(NODES.kg.sid), state: 3 } });
     const p = await plan(ctxWith(sched, { egptHome: 'C:\\Users\\an\\.egpt-secondary' }));
-    expect(p.changes[1]).toContain('(the egpt-secondary-daemon service)');
+    expect(p.changes[0]).toContain('re-register scheduled task egpt-secondary-daemon ');
   });
 });
 
@@ -181,8 +181,8 @@ describe('0005 apply - lossless or put back', () => {
 
 describe('0005 idempotency and refusals', () => {
   it('a task the registrar registered (Description already there): satisfied, nothing registered', async () => {
-    const sched = fakeScheduler({ 'egpt-daemon': { xml: taskXml({ description: TARGET('egpt-daemon') }), dacl: daclOf(NODES.kg.sid), state: 4 } });
-    expect(await plan(ctxWith(sched))).toEqual({ satisfied: true, notes: [`egpt-daemon: "${TARGET('egpt-daemon')}"`] });
+    const sched = fakeScheduler({ 'egpt-daemon': { xml: taskXml({ description: TARGET }), dacl: daclOf(NODES.kg.sid), state: 4 } });
+    expect(await plan(ctxWith(sched))).toEqual({ satisfied: true, notes: [`egpt-daemon: "${TARGET}"`] });
     expect(sched.calls).toEqual(['# egpt-0005:probe']);
   });
 
@@ -191,6 +191,12 @@ describe('0005 idempotency and refusals', () => {
     const sched = fakeScheduler(LIVE('kg'));
     expect((await plan(ctxWith(sched, { platform: 'darwin' }))).satisfied).toBe(true);
     expect(sched.calls).toEqual([]);
+  });
+
+  it('the session 0 era Description (a lost ledger): satisfied here - 0043 replaces it', async () => {
+    const sched = fakeScheduler({ 'egpt-daemon': { xml: taskXml({ description: sessionZeroDescription('egpt-daemon') }), dacl: daclOf(NODES.kg.sid), state: 4 } });
+    expect(await plan(ctxWith(sched))).toEqual({ satisfied: true, notes: ['egpt-daemon: carries the session 0 era Description - 0043 replaces it'] });
+    expect(sched.calls).toEqual(['# egpt-0005:probe']);
   });
 
   it('some OTHER Description: refused, not overwritten', async () => {
@@ -221,26 +227,26 @@ describe('0005 and the registrar stamp the same Description', () => {
     const s = probeScript('C:\\Users\\an\\bin\\egpt', 'egpt-daemon');
     expect(s).toContain(". 'C:\\Users\\an\\bin\\egpt\\setup\\egpt-daemon-task-labels.ps1'");
     expect(s).toContain("$name = 'egpt-daemon'");
-    expect(s).toContain('Get-EgptDaemonTaskDescription -Name $name');
+    expect(s).toContain('target = (Get-EgptDaemonTaskDescription)');
   });
 
   it('the registrar dot-sources the same module and registers with its text for the same name', () => {
     expect(registrar).toContain(". (Join-Path $PSScriptRoot 'egpt-daemon-task-labels.ps1')");
     expect(registrar).toContain('$TaskName = "$base-daemon"');
-    expect(registrar).toContain('$Description = Get-EgptDaemonTaskDescription -Name $TaskName');
+    expect(registrar).toMatch(/^\$Description = Get-EgptDaemonTaskDescription\r?$/m);
     expect(registrar).toMatch(/Register-ScheduledTask -TaskName \$TaskName [^\n]*`\r?\n[^\n]*-Description \$Description [^\n]*-Force/);
     expect(registrar).not.toMatch(/-Description\s+['"]/);
   });
 
   it.skipIf(process.platform !== 'win32')('the module, run for real, gives the text these fixtures use', () => {
-    const out = runPowerShell(`. '${join(REPO, 'setup', 'egpt-daemon-task-labels.ps1')}'\nGet-EgptDaemonTaskDescription -Name 'egpt-daemon'\nGet-EgptDaemonTaskDescription -Name 'egpt-secondary-daemon'\n`);
-    expect(out.split(/\r?\n/).filter(Boolean)).toEqual([TARGET('egpt-daemon'), TARGET('egpt-secondary-daemon')]);
+    const out = runPowerShell(`. '${join(REPO, 'setup', 'egpt-daemon-task-labels.ps1')}'\nGet-EgptDaemonTaskDescription\n`);
+    expect(out.split(/\r?\n/).filter(Boolean)).toEqual([TARGET]);
   }, 20000);
 });
 
 describe('0005 PowerShell scripts', () => {
   it('the update is an in-place -Force registration from the XML, -ErrorAction Stop, carrying the XML exactly', () => {
-    const xml = taskXml({ description: TARGET('egpt-daemon') });
+    const xml = taskXml({ description: TARGET });
     const s = updateScript('egpt-daemon', xml);
     expect(s).toContain("Register-ScheduledTask -Xml $xml -TaskName 'egpt-daemon' -TaskPath '\\' -Force -ErrorAction Stop");
     expect(Buffer.from(s.match(/FromBase64String\('([^']+)'\)/)[1], 'base64').toString('utf8')).toBe(xml);
@@ -265,7 +271,7 @@ describe('0005 through the runner', () => {
     const { exitCode, results } = await runMigrations({ dir: join(REPO, 'migrations'), egptHome: h, dryRun: true, elevated: false, platform: 'win32', ctx: { ps }, log: (l) => lines.push(l) });
     expect(exitCode).toBe(0);
     expect(results.find((r) => r.id === '0005-daemon-task-has-description').outcome).toBe('would-apply');
-    expect(lines.join('\n')).toContain(`<Description>${TARGET('egpt-daemon')}</Description>`);
+    expect(lines.join('\n')).toContain(`<Description>${TARGET}</Description>`);
     expect(sched.calls.filter((c) => c.includes('update'))).toEqual([]);
     expect(sched.store.get('egpt-daemon').xml).toBe(taskXml({ node: 'do' }));
     expect(existsSync(join(h, 'state'))).toBe(false);

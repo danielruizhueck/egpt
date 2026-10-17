@@ -10,7 +10,7 @@
 // baggage"). They come back only if the old spine does — which is a separate deletion.
 
 import { describe, it, expect } from 'vitest';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { execSync, spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -655,5 +655,25 @@ describe('the retired session 1 task name is gone from the tree', () => {
   it('every allowlisted file still actually needs to be allowlisted', () => {
     const stale = [...MAY_NAME_THE_OLD_TASK].filter((f) => !OLD_TASK_NAME.test(readFileSync(join(ROOT, f), 'utf8')));
     expect(stale, 'these no longer name the old task - drop them from MAY_NAME_THE_OLD_TASK').toEqual([]);
+  });
+});
+
+// One runner per node: the Session 1 task (operator 2026-10-17). Nothing in setup/ starts the
+// retired egpt-daemon service; a restart is setup/stop-egpt.ps1 then start-egpt.ps1.
+describe('the retired session 0 daemon service is never started', () => {
+  const code = (f) => readFileSync(join(ROOT, f), 'utf8').split('\n').filter((l) => !l.trim().startsWith('#')).join('\n');
+
+  it('deploy.ps1 and egpt-wake-duty.ps1 go through start-egpt.ps1, never the SCM', () => {
+    for (const f of ['setup/deploy.ps1', 'setup/egpt-wake-duty.ps1']) {
+      expect(code(f), f).not.toMatch(/\b(Start|Restart)-Service\b|\bsc(\.exe)?\s+start\b/i);
+      expect(code(f), f).toMatch(/start-egpt\.ps1'\)/);
+    }
+    expect(code('setup/deploy.ps1')).toMatch(/stop-egpt\.ps1'\)/);
+  });
+
+  it('the service restart script and the Run-key spine launcher are gone', () => {
+    for (const f of ['restart-egpt-service.ps1', 'restart-egpt-service.cmd', 'register-session1-autostart.ps1', 'session1-logon-launcher.vbs']) {
+      expect(existsSync(join(ROOT, 'setup', f)), f).toBe(false);
+    }
   });
 });

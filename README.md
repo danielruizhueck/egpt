@@ -70,7 +70,8 @@ default `~/.egpt`).
 
 3. **Install the runner.** On Windows, register the Session 1 logon task
    `egpt-daemon`: `powershell -ExecutionPolicy Bypass -File setup\register-session1-daemon-task.ps1`,
-   then start it with `setup\start-egpt.cmd` (`setup\stop-egpt.cmd` stops it).
+   then start it with `setup\start-egpt.cmd` (`setup\stop-egpt.cmd` stops it). It
+   triggers at logon: after a reboot nothing runs until you log on.
    macOS/Linux: `./setup/install-service.sh` (launchd / systemd user service). The
    daemon keeps the node running and respawns it on the lifecycle exit codes below.
 
@@ -80,7 +81,8 @@ default `~/.egpt`).
    node setup/verify-install.mjs
    ```
 
-   Read-only. Checks the live node — service log paths, profile shape, liveness
+   Read-only. Checks the live node — the Session 1 task (and that the retired
+   `egpt-daemon` service is absent or Disabled), profile shape, liveness
    (`state/spine.pid` + `state/alive.txt`), `claude` on PATH. Exit 0 = all good.
 
 ## Operating the node

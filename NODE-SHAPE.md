@@ -171,7 +171,8 @@ Run it before saying yes.
    chat they share it stays silent, and that is not a fault to chase.
 7. Handles disjoint between accounts, and no other node claiming them
 8. **It survives a reboot** — services come back, discovery finds the installs
-   cold, the spine subscribes untouched
+   cold, the spine subscribes untouched once the operator logs on (the task's only
+   trigger; `egpt-wake-duty` runs only while logged on too)
 
 
 ## What is deployed today

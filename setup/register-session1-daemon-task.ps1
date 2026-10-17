@@ -20,16 +20,15 @@
 # =====================================================================================
 # WHY A TASK AND NOT THE HKCU RUN KEY
 # =====================================================================================
-# setup/register-session1-autostart.ps1 registers a Run entry that starts a bare SPINE. Two
-# things make the task the better seam once there is a daemon to launch:
+# The HKCU Run entry that started a bare SPINE is retired (2026-10-17). Two things made the
+# task the better seam:
 #
 #   - THE RUN KEY NEVER LOOKS BACK. It starts a process at logon and forgets it. If the
 #     session 1 daemon dies mid-session, nothing brings it back until the next logon. A task
 #     with "restart the task if it fails" does, which is the operator's stated reason for
 #     accepting Task Scheduler here at all.
 #   - A TASK CAN BE INSPECTED. Get-ScheduledTaskInfo reports LastRunTime, LastTaskResult and
-#     NumberOfMissedRuns. A Run entry that silently did not fire leaves no trace anywhere -
-#     the failure mode the shim's header already warns about.
+#     NumberOfMissedRuns. A Run entry that silently did not fire leaves no trace anywhere.
 #
 # What is NOT better: a task is one more thing to keep in sync, and the schtasks family is
 # exactly the seam this repo's integrity scan files under KNOWN_PLATFORM_DEBT. It stays in
@@ -64,7 +63,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# The task's one-line Description lives in ONE file, shared with migrations\0005.
+# The task's one-line Description lives in ONE file, shared with migrations\0005 and 0043.
 . (Join-Path $PSScriptRoot 'egpt-daemon-task-labels.ps1')
 
 # --- resolve every input once, then print it; nothing below guesses twice ------------
@@ -81,7 +80,7 @@ if (-not $TaskName) {
   if (-not $base) { throw "cannot derive a task name: -EgptHome is empty or has no leaf ('$EgptHome'). Pass -TaskName explicitly." }
   $TaskName = "$base-daemon"
 }
-$Description = Get-EgptDaemonTaskDescription -Name $TaskName
+$Description = Get-EgptDaemonTaskDescription
 # The name this task carried until migrations\0002 renamed it. A node that has not run 0002
 # still has it, and registering the new name beside it would put TWO logon tasks on the node -
 # two session 1 daemons at every logon. So registering refuses while it exists.

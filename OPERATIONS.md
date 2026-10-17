@@ -23,6 +23,13 @@ egpt-daemon.mjs` → `egpt-spine.mjs`, started at logon by
 Session 0 NSSM service of the same name is **retired** (2026-10-17: stopped and
 Disabled on both nodes; remove it with `setup\uninstall-nssm-service.cmd`, name
 `egpt-daemon`). `/standdown` and the S0↔S1 handover are gone with it.
+`node setup\verify-install.mjs` checks both.
+
+**After a reboot nothing runs until the operator logs on** — the task's only trigger is
+logon. `egpt-wake-duty` (also an interactive task, so also only while logged on) wakes a
+sleeping machine every 30 min and, if the daemon died, revives it through
+`setup\start-egpt.ps1` — never past a `STOP` file. It cannot start a node nobody is
+logged on to.
 
 `Get-Service *egpt*` lists **two Beeper Desktops** (and the disabled service):
 
@@ -81,8 +88,10 @@ instead of counting down. `/rewind`, `STOP` and the daemon's wedge-restart stay 
 A change to the **supervisor itself** (`daemon-runtime`, entry point, appPath) needs
 a daemon restart, since an `/upgrade` respawns through the already-running
 supervisor: after the `/upgrade` lands, `setup\stop-egpt.cmd` then
-`setup\start-egpt.cmd` in the node's logged-on session. `setup/deploy.ps1` still
-restarts the retired `egpt-daemon` **service** — do not use it.
+`setup\start-egpt.cmd` in the node's logged-on session — that pair IS the restart; there
+is no separate restart script. `setup/deploy.ps1` does it in one go: fast-forwards prod,
+then runs the same stop and start (no elevation; not from a being's shell — the stop kills
+the daemon's tree; a node with a `STOP` file is left stopped).
 
 ### The Session 1 daemon holds the browsers
 
@@ -128,7 +137,7 @@ once: pick a moment with no background work (a chat that has some shows the bein
 message).
 
 **A deploy that died partway** leaves prod HEAD unchanged, some files already new
-(one truncated), a stale lock, service never restarted. Confirm nothing holds the
+(one truncated), a stale lock, daemon never restarted. Confirm nothing holds the
 lock (`Get-Process git`), then reset:
 
 ```

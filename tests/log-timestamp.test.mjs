@@ -17,7 +17,7 @@
 // file drives the REAL sink, and drives it through a REAL boot(), so "the default is the stamping
 // one" is asserted rather than assumed.
 //
-// NOTHING PARSES THIS FILE. setup/verify-install.mjs checks the NSSM AppStdout/AppStderr PATHS
+// NOTHING PARSES THIS FILE. setup/verify-install.mjs checks the Session 1 task's log PATH
 // (never the contents), setup/start-egpt.ps1 and setup/upgrade.ps1 only print the path for the
 // operator to `Get-Content`, and setup/install-nssm-service.ps1 configures rotation. The single
 // occurrence in the suite (tests/spine-pipe.test.mjs) quotes a line inside a COMMENT.

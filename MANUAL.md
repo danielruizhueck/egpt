@@ -292,8 +292,8 @@ A change of *winning* engine posts one `⚠️`/`✅` to the operator Self-DM
 - **Liveness** = the mtime of `state/alive.txt` (the alive heartbeat rewrites it
   each tick); the daemon's deadman respawns a wedged spine. The spine pid lives
   in `state/spine.pid` (singleton guard).
-- **Install sanity check:** `node setup/verify-install.mjs [service] [egptHome]`
-  (read-only) probes the live node — service-log paths, profile shape, liveness,
-  `claude` on PATH.
+- **Install sanity check:** `node setup/verify-install.mjs [egptHome]`
+  (read-only) probes the live node — the Session 1 task and the retired service,
+  profile shape, liveness, `claude` on PATH.
 - **Two nodes on one Beeper double-answer every `@e`** — only run one spine
   against a given Beeper Desktop login.

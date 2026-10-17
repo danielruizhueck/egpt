@@ -4,18 +4,14 @@
 '
 ' ASCII ONLY, same house rule as the .ps1 scripts beside it.
 '
-' IT IS session1-logon-launcher.vbs WITH TWO DIFFERENCES, and both matter:
+' Two things matter:
 '
-'   1. IT STARTS egpt-daemon.mjs, NOT egpt-spine.mjs. Until 2026-09-11 it could not:
-'      daemon-runtime.mjs's singleton was scoped to the PROFILE, so a daemon launched at
-'      logon met the session 0 spine's fresh beat and exited before spawning anything (the
-'      long DECISION 1 block in register-session1-autostart.ps1 is about exactly that).
-'      The singleton is scoped to the SESSION now - state/daemon-s1.pid - and since
-'      2026-10-17 this daemon is the node's one runner (the session 0 service is retired).
+'   1. IT STARTS egpt-daemon.mjs, NOT egpt-spine.mjs. The daemon's singleton is scoped to
+'      the SESSION - state/daemon-s1.pid - and since 2026-10-17 this daemon is the node's
+'      one runner (the session 0 service is retired).
 '
-'   2. IT WAITS: sh.Run(cmd, 0, True), and quits with the child's exit code. The spine
-'      shim uses False (fire and forget) because the HKCU Run key never looks back. A
-'      SCHEDULED TASK does: "restart the task if it fails" is measured on the exit code of
+'   2. IT WAITS: sh.Run(cmd, 0, True), and quits with the child's exit code. A
+'      SCHEDULED TASK looks back: "restart the task if it fails" is measured on the exit code of
 '      the process the action started, so a shim that returned 0 immediately would tell
 '      Task Scheduler the task had succeeded and no restart would ever fire. The cost is
 '      one resident wscript.exe and one resident cmd.exe for the life of the daemon.

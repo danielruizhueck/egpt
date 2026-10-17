@@ -23,7 +23,9 @@
 // the XML given byte for byte, DACL unchanged. Nothing here stops or starts a task.
 //
 // A DESCRIPTION THAT IS SOME OTHER TEXT is refused, not overwritten: both nodes measured empty,
-// so any other text was put there by someone, and replacing it is a human decision.
+// so any other text was put there by someone, and replacing it is a human decision. The one
+// exception is the line this migration stamped until 2026-10-17 (sessionZeroDescription): it
+// counts as satisfied here, and 0043 replaces it with the labels module's current line.
 //
 // NOT ELEVATED: that same measurement ran in reve's UAC-filtered shell. The live task's DACL on
 // both nodes is the default one a freshly registered task gets, in which the owning user has full
@@ -37,12 +39,15 @@ export const summary = 'the session 1 logon task egpt-daemon carries a Descripti
 const refuse = (why) => { throw new Error(`0005 refuses: ${why}`); };
 const q = (s) => `'${String(s).replace(/'/g, "''")}'`;
 
+// What the labels module said until the session 0 service was retired (2026-10-17).
+export const sessionZeroDescription = (name) => `eGPT spine supervisor (egpt-daemon.mjs) in session 1, started at logon. Disable it and the spine stays in session 0 (the ${name} service), where any browser it starts is invisible.`;
+
 // Read-only. The Description the labels module gives this task, and - if the task exists in the
 // root folder - its exported XML, its state (4 = running) and its DACL.
 export const probeScript = (repo, name) => `# egpt-0005:probe
 . ${q(join(repo, 'setup', 'egpt-daemon-task-labels.ps1'))}
 $name = ${q(name)}
-$out = @{ target = (Get-EgptDaemonTaskDescription -Name $name) }
+$out = @{ target = (Get-EgptDaemonTaskDescription) }
 $scheduler = New-Object -ComObject Schedule.Service
 $scheduler.Connect()
 $t = $null
@@ -63,9 +68,9 @@ $xml = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.fro
 Register-ScheduledTask -Xml $xml -TaskName ${q(name)} -TaskPath '\\' -Force -ErrorAction Stop | Out-Null
 `;
 
-export async function plan(ctx) {
-  if (ctx.platform !== 'win32') return { satisfied: true, notes: [`no scheduled tasks on ${ctx.platform}`] };
-
+// The task this profile derives, probed: { name, probe, facts, reg, current } - `current` is its
+// Description(s) in <RegistrationInfo>. Refuses what is not the session 1 daemon task. Shared with 0043.
+export function readTask(ctx, refuse) {
   // Derived from the profile folder exactly as register-session1-daemon-task.ps1 derives it.
   const base = basename(ctx.egptHome).replace(/^\./, '');
   if (!base) refuse(`cannot derive a task name from the profile folder ${ctx.egptHome}`);
@@ -73,8 +78,8 @@ export async function plan(ctx) {
   const probe = () => JSON.parse(ctx.ps(probeScript(ctx.repo, name)));
 
   const facts = probe();
-  if (!facts.exists) return { satisfied: true, notes: [`no ${name} scheduled task on this node`] };
-  const { xml, dacl, target } = facts;
+  if (!facts.exists) return { name, facts };
+  const { xml, target } = facts;
   if (typeof target !== 'string' || !target || /[<>&"'\r\n]/.test(target)) {
     refuse(`setup/egpt-daemon-task-labels.ps1 gives ${JSON.stringify(target)} - it must be one non-empty line with no XML metacharacters, or the re-export cannot match byte for byte`);
   }
@@ -83,7 +88,46 @@ export async function plan(ctx) {
   const reg = xml.match(/<RegistrationInfo>([\s\S]*?)<\/RegistrationInfo>/);
   if (!reg) refuse(`the exported XML of ${name} has no <RegistrationInfo>`);
   const current = [...reg[1].matchAll(/<Description>([\s\S]*?)<\/Description>|<Description\s*\/>/g)].map((m) => m[1] ?? '');
+  return { name, probe, facts, reg, current };
+}
+
+// Re-register `name` from `next` (its export `xml` with the Description changed): the re-export
+// must equal `next` byte for byte with `dacl` unchanged, else the original is put back. Shared with 0043.
+export function reRegisterLossless(ctx, { name, xml, dacl, next, probe, refuse }) {
+  const now = probe();
+  if (!now.exists || now.xml !== xml || now.dacl !== dacl) refuse(`${name} changed since it was planned - re-run`);
+
+  ctx.log(`re-registering ${name} with its Description`);
+  ctx.ps(updateScript(name, next));
+
+  const after = probe();
+  const problem = !after.exists ? `${name} is not registered after Register-ScheduledTask returned`
+    : after.xml !== next ? `the re-export differs from the XML given - ${firstDifference(next, after.xml)}`
+      : after.dacl !== dacl ? `its DACL is now ${after.dacl}, it was ${dacl}`
+        : null;
+  if (!problem) return;
+  ctx.log(`NOT lossless - re-registering ${name} from its original export`);
+  let back;
+  try {
+    ctx.ps(updateScript(name, xml));
+    const b = probe();
+    back = b.exists && b.xml === xml && b.dacl === dacl
+      ? `${name} was re-registered from its original export and exports it byte for byte again, with its DACL.`
+      : `Re-registering the original export did NOT give it back byte for byte - inspect ${name} (Export-ScheduledTask) before the next logon.`;
+  } catch (e) {
+    back = `Re-registering the original export FAILED (${e.message}) - inspect ${name} (Export-ScheduledTask) before the next logon.`;
+  }
+  refuse(`the Description change is not lossless on this node: ${problem}. ${back}`);
+}
+
+export async function plan(ctx) {
+  if (ctx.platform !== 'win32') return { satisfied: true, notes: [`no scheduled tasks on ${ctx.platform}`] };
+
+  const { name, probe, facts, reg, current } = readTask(ctx, refuse);
+  if (!facts.exists) return { satisfied: true, notes: [`no ${name} scheduled task on this node`] };
+  const { xml, dacl, target } = facts;
   if (current.length === 1 && current[0] === target) return { satisfied: true, notes: [`${name}: "${target}"`] };
+  if (current.length === 1 && current[0] === sessionZeroDescription(name)) return { satisfied: true, notes: [`${name}: carries the session 0 era Description - 0043 replaces it`] };
   if (current.length) refuse(`${name} already carries a Description that is not this one (${JSON.stringify(current.join(' | '))}) - replacing it is a human decision`);
 
   const uri = `<URI>\\${name}</URI>`;
@@ -107,32 +151,6 @@ export async function plan(ctx) {
   return {
     satisfied: false,
     changes,
-    apply: async () => {
-      const now = probe();
-      if (!now.exists || now.xml !== xml || now.dacl !== dacl) refuse(`${name} changed since it was planned - re-run`);
-
-      ctx.log(`re-registering ${name} with its Description`);
-      ctx.ps(updateScript(name, described));
-
-      const after = probe();
-      const problem = !after.exists ? `${name} is not registered after Register-ScheduledTask returned`
-        : after.xml !== described ? `the re-export differs from the XML given - ${firstDifference(described, after.xml)}`
-          : after.dacl !== dacl ? `its DACL is now ${after.dacl}, it was ${dacl}`
-            : null;
-      if (problem) {
-        ctx.log(`NOT lossless - re-registering ${name} from its original export`);
-        let back;
-        try {
-          ctx.ps(updateScript(name, xml));
-          const b = probe();
-          back = b.exists && b.xml === xml && b.dacl === dacl
-            ? `${name} was re-registered from its original export and exports it byte for byte again, with its DACL.`
-            : `Re-registering the original export did NOT give it back byte for byte - inspect ${name} (Export-ScheduledTask) before the next logon.`;
-        } catch (e) {
-          back = `Re-registering the original export FAILED (${e.message}) - inspect ${name} (Export-ScheduledTask) before the next logon.`;
-        }
-        refuse(`the Description change is not lossless on this node: ${problem}. ${back}`);
-      }
-    },
+    apply: async () => reRegisterLossless(ctx, { name, xml, dacl, next: described, probe, refuse }),
   };
 }

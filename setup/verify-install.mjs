@@ -2,45 +2,29 @@
 // verify-install.mjs — GUARD 2: check the LIVE machine's egpt node install for the
 // drift a vitest can never see. Read-only: it PROBES, it never fixes.
 //
-// The failure this catches: on 2026-07-03 the profile relayout moved logs to
-// config/logs, but the Windows service's NSSM AppStdout/AppStderr still pointed at the
-// DELETED old logs dir — so the service died with "The system cannot open the file" 80
-// times before a single line of our code ran. No vitest sees the service config; this
-// script does. It also checks the profile is in the canonical shape (no stale
-// old-layout residue), the spine pid/alive-beat look live, and `claude` resolves.
+// It checks the node's one runner - the Session 1 task (setup/register-session1-daemon-task.ps1)
+// registered for this profile, at logon, Interactive, logging under config/logs - and that the
+// retired Session 0 service of the same name is absent or Disabled. Then the profile shape (no
+// stale old-layout residue), the spine pid/alive-beat, and that `claude` resolves.
 //
-// Usage:  node setup/verify-install.mjs [serviceName] [egptHome]
-//   serviceName defaults to egpt-daemon; egptHome is taken from the service's own
-//   NSSM AppEnvironmentExtra when readable (the source of truth for which profile the
-//   service uses), else the arg / $EGPT_HOME / ~/.egpt-secondary.
+// Usage:  node setup/verify-install.mjs [egptHome]      (default $EGPT_HOME, else ~/.egpt)
 //
 // Dependency-light: node builtins + the repo's `yaml`.
 import { spawnSync } from 'node:child_process';
 import { statSync, readFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, basename, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import * as YAML from 'yaml';
+import { runPowerShell } from './migrate.mjs';
 
 // ── pure helpers (unit-tested; no live probes) ─────────────────────────────
 
-// nssm prints UTF-16LE with a BOM + trailing NULs. Strip the NUL/BOM/CR noise and
-// return the FIRST non-empty line (the value; stderr noise like LsaOpenPolicy is on
-// the other stream). Accepts an already-decoded string.
+// Strip NUL/BOM/CR noise and return the FIRST non-empty line. Accepts an already-decoded string.
 export function firstLine(raw) {
   const clean = String(raw ?? '').replace(/[\u0000\uFEFF\r]/g, '');
   for (const line of clean.split('\n')) { const t = line.trim(); if (t) return t; }
   return '';
-}
-
-// Extract EGPT_HOME=... from an NSSM AppEnvironmentExtra blob (one KEY=VALUE per line).
-export function egptHomeFromEnvExtra(raw) {
-  const clean = String(raw ?? '').replace(/[\u0000\uFEFF\r]/g, '');
-  for (const line of clean.split('\n')) {
-    const m = line.match(/^\s*EGPT_HOME\s*=\s*(.+?)\s*$/);
-    if (m) return m[1];
-  }
-  return null;
 }
 
 // Windows path compare: backslashes → slashes, drop a trailing slash, lowercase
@@ -67,6 +51,41 @@ export function staleResiduePaths(egptHome) {
   ];
 }
 
+// ~/.egpt -> egpt-daemon, as the registrar derives it. The retired service shares the name.
+export function daemonTaskName(egptHome) {
+  const base = basename(String(egptHome ?? '').replace(/[\\/]+$/, '')).replace(/^\./, '');
+  return base ? `${base}-daemon` : null;
+}
+
+// `task` as probeRunner reports it: { state, logonType, triggers[], actions[{ execute, arguments }] }.
+// The launcher's arguments: "<shim>" "<node>" "<repo>" "<EGPT_HOME>" "<log>".
+export function taskChecks(task, { name, egptHome, exists = existsSync }) {
+  if (!task) return [{ level: 'fail', msg: `runner: no scheduled task ${name} - nothing runs this node (setup\\register-session1-daemon-task.ps1 -EgptHome "${egptHome}")` }];
+  const out = [];
+  const bad = (msg) => out.push({ level: 'fail', msg: `runner: task ${name} ${msg}` });
+  if (task.state === 'Disabled') bad('is Disabled - nothing starts at logon');
+  if (task.logonType !== 'Interactive') bad(`LogonType is ${task.logonType}, not Interactive - it would run in session 0`);
+  if (![].concat(task.triggers ?? []).includes('MSFT_TaskLogonTrigger')) bad('has no logon trigger');
+  const actions = [].concat(task.actions ?? []);
+  const args = actions.length === 1 ? [...String(actions[0].arguments ?? '').matchAll(/"([^"]*)"/g)].map((m) => m[1]) : [];
+  const log = args[4] ?? '';
+  if (!/[\\/]session1-daemon-launcher\.vbs$/i.test(args[0] ?? '')) bad(`does not run setup\\session1-daemon-launcher.vbs (${actions.map((a) => `${a.execute} ${a.arguments}`).join(' | ')})`);
+  else if (normPath(args[3]) !== normPath(egptHome)) bad(`serves the profile ${args[3]}, not ${egptHome}`);
+  else if (!isUnderDir(log, expectedLogsDir(egptHome))) bad(`logs to ${log} - NOT under ${expectedLogsDir(egptHome)} (log-dir drift)`);
+  else if (!exists(dirname(log))) bad(`logs to ${log} - its dir is MISSING (the launcher dies before node starts)`);
+  if (!out.length) out.push({ level: 'ok', msg: `runner: task ${name} ${task.state}, at logon, Interactive, logs to ${log}` });
+  return out;
+}
+
+// The retired Session 0 service: absent, or Disabled and not running.
+export function retiredServiceCheck(service, name) {
+  if (!service) return { level: 'ok', msg: `retired: no ${name} service` };
+  if (service.startType === 'Disabled' && service.status !== 'Running') {
+    return { level: 'ok', msg: `retired: ${name} service is ${service.status} and Disabled (setup\\uninstall-nssm-service.cmd removes it)` };
+  }
+  return { level: 'fail', msg: `retired: ${name} service is ${service.status} / ${service.startType} - a session 0 spine beside the task; Stop and Disable it, or setup\\uninstall-nssm-service.cmd` };
+}
+
 // Beat-age → status. Alive beats every 60s; generous thresholds so a slow tick
 // doesn't false-alarm, but a truly dead loop trips.
 export function beatStatus(ageMs) {
@@ -85,19 +104,16 @@ export function overallExit(levels) {
 
 // ── live probes (not unit-tested) ──────────────────────────────────────────
 
-// nssm get <service> <key> — tolerant: nssm missing / non-zero exit → null.
-function nssmGet(service, key) {
-  let res;
-  try { res = spawnSync('nssm', ['get', service, key], { windowsHide: true }); }
-  catch { return null; }
-  if (!res || res.error) return null;
-  const buf = res.stdout;
-  if (!buf || !buf.length) return null;
-  // Decode UTF-16LE when NUL bytes are present (nssm's default), else UTF-8.
-  const hasNul = Buffer.isBuffer(buf) && buf.includes(0);
-  const text = Buffer.isBuffer(buf) ? buf.toString(hasNul ? 'utf16le' : 'utf8') : String(buf);
-  const line = firstLine(text);
-  return line || null;
+// The task and the service named `name`, read-only. Unelevated is enough for both.
+function probeRunner(name) {
+  const q = `'${name.replace(/'/g, "''")}'`;
+  return JSON.parse(runPowerShell(`$out = @{}
+$t = Get-ScheduledTask -TaskName ${q} -TaskPath '\\' -ErrorAction SilentlyContinue
+if ($t) { $out.task = @{ state = "$($t.State)"; logonType = "$($t.Principal.LogonType)"; triggers = @($t.Triggers | ForEach-Object { $_.CimClass.CimClassName }); actions = @($t.Actions | ForEach-Object { @{ execute = "$($_.Execute)"; arguments = "$($_.Arguments)" } }) } }
+$s = Get-Service -Name ${q} -ErrorAction SilentlyContinue
+if ($s) { $out.service = @{ status = "$($s.Status)"; startType = "$($s.StartType)" } }
+ConvertTo-Json -Depth 5 -Compress -InputObject $out
+`));
 }
 
 function pidAlive(pid) {
@@ -121,27 +137,24 @@ function resolveClaude() {
 
 const ICON = { ok: '✅', warn: '⚠️', fail: '❌' };
 
-export function runChecks({ service, egptHome, out = console.log } = {}) {
+export function runChecks({ egptHome, out = console.log } = {}) {
   const results = [];
   const add = (level, msg) => { results.push({ level, msg }); out(`${ICON[level]} ${msg}`); };
+  const name = daemonTaskName(egptHome);
 
-  out(`egpt install verify — service '${service}', profile '${egptHome}'`);
+  out(`egpt install verify — task '${name}', profile '${egptHome}'`);
   out('');
 
-  // (1) NSSM service log config — the drift that killed the service 80×.
-  const nssmProbe = nssmGet(service, 'AppStdout');   // one probe tells us if nssm+service are reachable
-  if (nssmProbe === null) {
-    add('warn', `NSSM: 'nssm get ${service} …' unreadable (nssm missing / service absent / not elevated) — cannot verify service log config`);
-  } else {
-    const logsDir = expectedLogsDir(egptHome);
-    for (const key of ['AppStdout', 'AppStderr']) {
-      const val = key === 'AppStdout' ? nssmProbe : nssmGet(service, key);
-      if (!val) { add('fail', `NSSM ${key}: empty/unreadable`); continue; }
-      const under = isUnderDir(val, logsDir);
-      const parentOk = existsSync(join(val, '..'));
-      if (under && parentOk) add('ok', `NSSM ${key} → ${val} (under config/logs, dir exists)`);
-      else if (under && !parentOk) add('fail', `NSSM ${key} → ${val} — parent dir MISSING (service will die "cannot open the file")`);
-      else add('fail', `NSSM ${key} → ${val} — NOT under ${logsDir} (log-dir drift)`);
+  // (1) the runner: the Session 1 task, and the retired Session 0 service.
+  if (process.platform !== 'win32') add('warn', 'runner: not Windows - no Session 1 task to check (setup/install-service.sh)');
+  else if (!name) add('fail', `runner: cannot derive a task name from ${egptHome}`);
+  else {
+    let facts = null;
+    try { facts = probeRunner(name); } catch (e) { add('warn', `runner: cannot read Task Scheduler / the SCM - ${e.message}`); }
+    if (facts) {
+      for (const r of taskChecks(facts.task, { name, egptHome })) add(r.level, r.msg);
+      const r = retiredServiceCheck(facts.service, name);
+      add(r.level, r.msg);
     }
   }
 
@@ -187,10 +200,10 @@ export function runChecks({ service, egptHome, out = console.log } = {}) {
   if (!existsSync(alivePath)) add('fail', `liveness: state/alive.txt MISSING (loop never beat)`);
   else { const s = beatStatus(Date.now() - mtimeMs(alivePath)); add(s.level, `liveness: alive.txt beat ${s.note}`); }
 
-  // (4) claude binary — note the SERVICE-env caveat regardless.
+  // (4) claude binary. The task runs with the operator's logon PATH.
   const claude = resolveClaude();
-  if (claude) add('ok', `claude: ${claude} (NOTE: the service runs under its own env — confirm this dir is on the SERVICE account's PATH, not just this shell's)`);
-  else add('warn', `claude: not resolvable on THIS shell's PATH (the service needs it on ITS PATH — verify the service account)`);
+  if (claude) add('ok', `claude: ${claude}`);
+  else add('warn', `claude: not resolvable on THIS shell's PATH (the task runs with the operator's logon PATH)`);
 
   const code = overallExit(results.map((r) => r.level));
   const n = (lvl) => results.filter((r) => r.level === lvl).length;
@@ -199,15 +212,9 @@ export function runChecks({ service, egptHome, out = console.log } = {}) {
   return code;
 }
 
-function resolveEgptHome(service, argHome) {
-  const fromNssm = egptHomeFromEnvExtra(nssmGet(service, 'AppEnvironmentExtra'));
-  return fromNssm || argHome || process.env.EGPT_HOME || join(homedir(), '.egpt-secondary');
-}
-
 function main() {
-  const service = process.argv[2] || 'egpt-daemon';
-  const egptHome = resolveEgptHome(service, process.argv[3]);
-  process.exit(runChecks({ service, egptHome }));
+  const egptHome = process.argv[2] || process.env.EGPT_HOME || join(homedir(), '.egpt');
+  process.exit(runChecks({ egptHome }));
 }
 
 // Run only when invoked directly (so the pure helpers import cleanly in tests).

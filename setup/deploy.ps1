@@ -1,41 +1,31 @@
-# setup/deploy.ps1 -- SELF-ELEVATING deploy for a SUPERVISOR-level change.
+# setup/deploy.ps1 -- deploy for a SUPERVISOR-level change.
 #
 # Fast-forwards the prod checkout (~/bin/egpt) to origin/main and RESTARTS the
-# egpt-daemon service. Use this (not an ingest /restart) when the change alters
-# what the supervisor spawns -- e.g. an entry-point rename that moves the spine to
-# egpt-spine.mjs. An ingest /restart only respawns the spine via the ALREADY-RUNNING
-# supervisor, so a new daemon-runtime appPath never takes effect; only a full
-# service restart reloads it.
+# Session 1 daemon: prod's setup\stop-egpt.ps1, then setup\start-egpt.ps1. Use this
+# (not an ingest /restart) when the change alters what the supervisor spawns -- e.g.
+# an entry-point rename that moves the spine to egpt-spine.mjs. An ingest /restart
+# only respawns the spine via the ALREADY-RUNNING supervisor, so a new daemon-runtime
+# appPath never takes effect; only a daemon restart reloads it.
 #
-# Service control needs admin, so this self-elevates via UAC (one prompt). It logs
-# to -LogPath (default a temp file) so the launching shell can read the result.
+# No elevation: the task and its processes are the operator's own. Run it from an
+# operator shell or ssh, never a being's shell - the stop kills the daemon's tree.
+# A node already STOPPED is fast-forwarded but not restarted. Logs to -LogPath too.
 #
 #   powershell -ExecutionPolicy Bypass -File setup\deploy.ps1
 #   powershell -ExecutionPolicy Bypass -File setup\deploy.ps1 -LogPath C:\path\deploy.log
 [CmdletBinding()]
 param(
-  [string]$Repo    = (Join-Path $env:USERPROFILE 'bin\egpt'),
-  [string]$Service = 'egpt-daemon',
-  [string]$LogPath = (Join-Path $env:TEMP 'egpt-deploy.log')
+  [string]$Repo     = (Join-Path $env:USERPROFILE 'bin\egpt'),
+  [string]$EgptHome = $(if ($env:EGPT_HOME) { $env:EGPT_HOME } else { Join-Path $env:USERPROFILE '.egpt' }),
+  [string]$LogPath  = (Join-Path $env:TEMP 'egpt-deploy.log')
 )
 $ErrorActionPreference = 'Stop'
 
-# --- self-elevate: relaunch as admin if we are not already ---
-$id = [Security.Principal.WindowsIdentity]::GetCurrent()
-$isAdmin = (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin) {
-  $a = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Repo `"$Repo`" -Service `"$Service`" -LogPath `"$LogPath`""
-  Start-Process powershell -Verb RunAs -ArgumentList $a
-  Write-Host "Elevation requested. Approve the UAC prompt. Result logged to $LogPath"
-  exit 0
-}
-
-# --- elevated from here ---
-function Log($m) { ("[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $m) | Tee-Object -FilePath $LogPath -Append | Out-Null }
+function Log($m) { ("[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $m) | Tee-Object -FilePath $LogPath -Append }
 Set-Content -Path $LogPath -Value "" -Encoding utf8
-Log "elevated deploy: repo=$Repo service=$Service"
+Log "deploy: repo=$Repo profile=$EgptHome"
 
-# git -- resolve a real path (elevated PATH may differ)
+# git -- resolve a real path (a non-interactive PATH may differ)
 $git = (Get-Command git -ErrorAction SilentlyContinue).Source
 if (-not $git) { foreach ($p in @('C:\Program Files\Git\cmd\git.exe','C:\Program Files (x86)\Git\cmd\git.exe','C:\Program Files\Git\bin\git.exe')) { if (Test-Path $p) { $git = $p; break } } }
 if (-not $git) { Log "ERROR: git not found"; Start-Sleep 4; exit 1 }
@@ -69,13 +59,16 @@ try {
   $dirty = & $git -C $Repo status --porcelain --untracked-files=no
   if ($dirty) { throw "prod tree is dirty after reset -- refusing to restart:`n$($dirty -join "`n")" }
 
-  Log "restarting service $Service ..."
-  Restart-Service $Service -Force
-  Start-Sleep -Seconds 3
-  Log "service status: $((Get-Service $Service).Status)"
+  $stopFile = Join-Path $EgptHome 'STOP'
+  if (Test-Path -LiteralPath $stopFile) { throw "node is STOPPED ($stopFile) -- prod updated, daemon NOT restarted; setup\start-egpt.cmd brings it back" }
+  Log "restarting the Session 1 daemon ..."
+  & (Join-Path $Repo 'setup\stop-egpt.ps1') -EgptHome $EgptHome -Reason 'setup\deploy.ps1 (daemon restart)' 6>&1 | ForEach-Object { Log "  $_" }
+  $global:LASTEXITCODE = 0
+  & (Join-Path $Repo 'setup\start-egpt.ps1') -EgptHome $EgptHome 6>&1 | ForEach-Object { Log "  $_" }
+  if ($LASTEXITCODE -ne 0) { throw "start-egpt.ps1 exited $LASTEXITCODE" }
 
   # Proof the SPINE (not the shell) booted: only the spine beats alive.txt.
-  $alive = Join-Path $env:USERPROFILE '.egpt\state\alive.txt'
+  $alive = Join-Path $EgptHome 'state\alive.txt'
   if (Test-Path $alive) {
     $t0 = (Get-Item $alive).LastWriteTime
     $ok = $false
