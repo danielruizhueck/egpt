@@ -2449,6 +2449,34 @@ export const CONFIG_SCHEMA = {
     shared. chrome.dedicated is retired.
   `,
 
+  browser_uploads: `
+    Lets a BOXED being attach files to web forms in its chat's browser
+    (operator 2026-10-17). Set it on ONE conversation's entry in
+    config/conversations.yaml, beside privileged_browser below.
+    DEFAULT: absent = refused. Only exactly true turns it on.
+    Covers DOM.setFileInputFiles, Page.handleFileChooser and
+    Input.dispatchDragEvent with files (src/spine/being-link.mjs).
+    Only plain files really inside that conversation's folder: no links,
+    junctions or hardlinks, no .., UNC, \\\\?\\ / \\\\.\\ device paths or
+    :streams, and the file must exist. Chrome is handed a checked COPY under
+    <EGPT_HOME>/state/uploads/, never the being's own path.
+    TRAP: it resolves across the rungs like every key, so setting it in
+    config/config.yaml turns it on for EVERY conversation.
+  `,
+
+  privileged_browser: `
+    Serves a BOXED being the same full CDP an unboxed being gets: no filter
+    at all, so file:/chrome:/devtools: pages, uploads of ANY file of the
+    operator's, and every method browser_uploads and the filter refuse
+    (operator 2026-10-17). Set it on ONE conversation's entry in
+    config/conversations.yaml. Wins over browser_uploads.
+    DEFAULT: absent = filtered. Only exactly true turns it on.
+    The spine logs "<being> (<surface>/<slug>) privileged browser — no CDP
+    filter" on every tunnel it opens. Unboxed beings are never filtered.
+    TRAP: it resolves across the rungs like every key, so setting it in
+    config/config.yaml unfilters EVERY conversation.
+  `,
+
   mirror: `
     /mirror defaults.
 

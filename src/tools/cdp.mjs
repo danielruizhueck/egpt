@@ -352,7 +352,8 @@ export async function createLinkTransport(env = process.env) {
 // stamped with it (stripped again on the way back), ids are remapped into the connection's id
 // space, and a client may use only sessions it attached. guard(msg, url) sees every message —
 // url = the page its session is on, from the mux's own discovery session — and a reason it
-// returns refuses the message. Closing a client detaches every session it held.
+// returns refuses the message; it may rewrite msg.params in place (being-link's upload copies).
+// Closing a client detaches every session it held.
 export function createCdpMux(channel) {
   const calls = new Map();      // connection id → { resolve, reject } | { client, id, targetId }
   const owners = new Map();     // sessionId → client

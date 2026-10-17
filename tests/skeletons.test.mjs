@@ -253,13 +253,16 @@ describe('config/skeletons/conversations.yaml (the registry)', () => {
     // start with '#'. Strip the '#' from the option lines an operator would.
     const on = (t, key) => t.replace(new RegExp(`^(\\s*)#(${key}:.*)$`, 'm'), '$1$2');
     let t = text;
-    for (const k of ['posts_back_delay_ms', 'guard', 'mode', 'send_to_egpt']) t = on(t, k);
+    for (const k of ['posts_back_delay_ms', 'guard', 'browser_uploads', 'privileged_browser', 'mode', 'send_to_egpt']) t = on(t, k);
 
     const state = parseConvState(t);
     const entry = getContact(state, 'whatsapp', 'EXAMPLE_CHAT_ID').entry;
     // the flat pair — read by src/spine/transcription.mjs and src/spine/boot.mjs
     expect(entry.posts_back_delay_ms).toBe(-1);
     expect(entry.guard).toEqual({ turns: -1 });
+    // the browser pair — read by src/spine/being-link.mjs through the config resolver
+    expect(entry.browser_uploads).toBe(true);
+    expect(entry.privileged_browser).toBe(true);
 
     // the per-agent pair — read by getBeing → src/spine/gating.mjs
     const b = getBeing(state, 'whatsapp', 'EXAMPLE_CHAT_ID', 'egpt');

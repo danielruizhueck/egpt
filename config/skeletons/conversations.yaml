@@ -40,6 +40,11 @@ contacts:
       # the WHOLE guard off here, repetition included. window -1 = pure consecutive count.
       #guard: { turns: -1 }
 
+      # boxed beings may attach files from THIS conversation's folder to web forms
+      #browser_uploads: true
+      # boxed beings get the unfiltered browser (file:, any upload); wins over browser_uploads
+      #privileged_browser: true
+
       # one block per resident agent, keyed by its config.yaml agents: name.
       # EVERY field a being has lives HERE, flat (operator 2026-08-14: one block
       # per being - no separate spine-written/operator-override split any more).

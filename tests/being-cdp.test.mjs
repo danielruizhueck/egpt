@@ -1,12 +1,12 @@
 // tests/being-cdp.test.mjs — chunk B of the named browser groups (plans/2610091931 rev 2026-10-11):
 // a being's raw CDP reaches ONLY its own chat's group Chrome, through the spine, over the /being
 // link. Fake Chromes on fake pipes; no real Chrome anywhere.
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeAll, afterAll } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { join } from 'node:path';
+import { join, basename, relative, isAbsolute } from 'node:path';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, symlinkSync, linkSync, unlinkSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { createPipeChannel, createCdpMux, cdpWire } from '../src/tools/cdp.mjs';
@@ -16,6 +16,7 @@ import { createShellPort } from '../src/bridges/shell-port.mjs';
 import { responseFrame, authMac, macMatches } from '../src/shell/auth.mjs';
 import { BEING_PATH, askFrame, SPINE_PORT_ENV, BEING_TOKEN_ENV, CDP_MODULE_ENV } from '../src/shell/being.mjs';
 import { slugDir } from '../src/conversations-state.mjs';
+import { createConfigResolver } from '../src/spine/config-resolver.mjs';
 import { createWarmCliSession } from '../src/warm-cli-session.mjs';
 import { createSandboxCliSession, spawnBoxedCommand } from '../src/sandbox-cli-session.mjs';
 
@@ -251,6 +252,7 @@ describe('refusals — blocked for a BOXED being, served to an UNBOXED one', () 
     ['Fetch.continueRequest rewritten to file:', 'Fetch.continueRequest', { requestId: 'r', url: 'file:///C:/x' }],
     ['DOMStorage on an extension origin', 'DOMStorage.getDOMStorageItems', { storageId: { securityOrigin: 'chrome-extension://vault', isLocalStorage: true } }],
     ['DOM.setFileInputFiles', 'DOM.setFileInputFiles', { files: ['C:/Users/an/secret.txt'], nodeId: 1 }],
+    ['Page.handleFileChooser', 'Page.handleFileChooser', { action: 'accept', files: ['C:/Users/an/secret.txt'] }],
     ['Input.dispatchDragEvent with files', 'Input.dispatchDragEvent', { type: 'drop', x: 1, y: 1, data: { items: [], files: ['C:/Users/an/x'], dragOperationsMask: 1 } }],
     ['Browser.setDownloadBehavior outside the conversation', 'Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: 'C:/Users/an/Documents' }],
     ['Page.setDownloadBehavior outside the conversation', 'Page.setDownloadBehavior', { behavior: 'allow', downloadPath: join(inside, '..', '..', 'Other-2601010101') }],
@@ -338,6 +340,178 @@ describe('refusals — blocked for a BOXED being, served to an UNBOXED one', () 
     expect(shared.of('Input.dispatchKeyEvent')).toHaveLength(4);
     expect(shared.of('Browser.grantPermissions')).toHaveLength(1);
     expect(shared.of('Browser.setPermission')).toHaveLength(1);
+  });
+});
+
+// ── 3b. UPLOADS: only where the conversation says browser_uploads, only from its own folder ──
+describe('uploads — browser_uploads: true lets a boxed being attach files from its own folder', () => {
+  const UP = { being: 'e', surface: 'whatsapp', slug: `Uploads Test-${process.pid}`, boxed: true };
+  const conv = slugDir('whatsapp', UP.slug);
+  const photo = join(conv, 'media', '20261017-132858-an-image-33369.jpg');
+  let outside, secret, stage;
+  beforeAll(() => {
+    mkdirSync(join(conv, 'media'), { recursive: true });
+    writeFileSync(photo, 'jpeg bytes');
+    outside = mkdtempSync(join(tmpdir(), 'egpt-up-outside-'));
+    secret = join(outside, 'secret.txt');
+    writeFileSync(secret, 'operator secret');
+    symlinkSync(outside, join(conv, 'jx'), 'junction');
+    linkSync(secret, join(conv, 'media', 'hard.txt'));
+    stage = mkdtempSync(join(tmpdir(), 'egpt-up-stage-'));
+  });
+  afterAll(() => {
+    for (const l of ['jx', 'ln.txt']) try { unlinkSync(join(conv, l)); } catch { /* absent */ }
+    for (const d of [conv, outside, stage]) rmSync(d, { recursive: true, force: true });
+  });
+
+  async function tunnel(flags = { browser_uploads: true }) {
+    const shared = fakeChrome();
+    const { link, logs } = linkWith({ shared }, { resolveConfig: (dir) => (dir === conv ? flags : {}), uploadStage: stage });
+    const s = sink();
+    const r = await link.ask(UP, CDP, s);
+    return { shared, s, t: r.tunnel, logs, flags };
+  }
+  const send = async ({ s, t }, method, params) => {
+    const n = s.out.length;
+    t.send(cmd(n + 1, method, params));
+    await until(() => s.out.length === n + 1);
+    return s.out[n];
+  };
+  const UPLOADERS = [
+    ['DOM.setFileInputFiles', (files) => ({ files, backendNodeId: 7 }), (m) => m.params.files],
+    ['Page.handleFileChooser', (files) => ({ action: 'accept', files }), (m) => m.params.files],
+    ['Input.dispatchDragEvent', (files) => ({ type: 'drop', x: 1, y: 1, data: { items: [], files, dragOperationsMask: 1 } }), (m) => m.params.data.files],
+  ];
+  const inStage = (p) => { const r = relative(stage, p); return !!r && !r.startsWith('..') && !isAbsolute(r); };
+
+  for (const [method, paramsOf, filesOf] of UPLOADERS) {
+    it(`${method}: without the flag (absent, or not exactly true) it is refused as before`, async () => {
+      for (const flags of [{}, { browser_uploads: 'yes' }]) {
+        const c = await tunnel(flags);
+        expect((await send(c, method, paramsOf([photo]))).error.message).toMatch(/^refused by eGPT: /);
+        expect(c.shared.of(method)).toEqual([]);
+      }
+    });
+
+    it(`${method}: with the flag, a file in media/ reaches Chrome as a checked copy the being cannot touch`, async () => {
+      const c = await tunnel();
+      expect((await send(c, method, paramsOf([photo]))).error).toBeUndefined();
+      const [got] = filesOf(c.shared.of(method)[0]);
+      expect(inStage(got)).toBe(true);
+      expect(basename(got)).toBe(basename(photo));
+      expect(readFileSync(got, 'utf8')).toBe('jpeg bytes');
+    });
+
+    it(`${method}: with the flag, a file outside the folder or behind a junction is refused`, async () => {
+      const c = await tunnel();
+      for (const f of [secret, join(conv, 'jx', 'secret.txt')]) {
+        expect((await send(c, method, paramsOf([f]))).error.message).toMatch(/^refused by eGPT: uploads may come only from this conversation's folder/);
+      }
+      expect(c.shared.of(method)).toEqual([]);
+      expect(c.logs.join('\n')).toContain(`cdp "${method}" → REFUSED`);
+    });
+  }
+
+  const ESCAPES = () => [
+    ['a hardlink inside the folder to an outside file', [join(conv, 'media', 'hard.txt')]],
+    ['.. that climbs out', [`${conv}\\..\\Other-2601010101\\x.jpg`]],
+    ['.. even when it lands back inside', [`${conv}\\media\\..\\media\\${basename(photo)}`]],
+    ['a UNC path to the same file', [`\\\\localhost\\${conv[0]}$${photo.slice(2)}`]],
+    ['a \\\\?\\ device path', [`\\\\?\\${photo}`]],
+    ['a \\\\.\\ device path', [`\\\\.\\${photo}`]],
+    ['an alternate data stream', [`${photo}:hidden`]],
+    ['the ::$DATA stream', [`${photo}::$DATA`]],
+    ['a file that does not exist', [join(conv, 'media', 'nope.jpg')]],
+    ['a directory', [join(conv, 'media')]],
+    ['a relative path', ['media/x.jpg']],
+    ['a non-string', [42]],
+    ['one good file beside one bad one', [photo, secret]],
+  ];
+  it('with the flag, every escape is refused and nothing reaches Chrome', async () => {
+    const c = await tunnel();
+    for (const [label, files] of ESCAPES()) {
+      const r = await send(c, 'DOM.setFileInputFiles', { files, backendNodeId: 7 });
+      expect(r.error?.message, label).toMatch(/^refused by eGPT: uploads may come only from this conversation's folder/);
+    }
+    expect(c.shared.of('DOM.setFileInputFiles')).toEqual([]);
+  });
+
+  it('with the flag, a file symlink inside the folder pointing outside is refused', async (ctx) => {
+    try { symlinkSync(secret, join(conv, 'ln.txt'), 'file'); } catch (e) { if (e.code === 'EPERM') return ctx.skip(); throw e; }
+    const c = await tunnel();
+    expect((await send(c, 'DOM.setFileInputFiles', { files: [join(conv, 'ln.txt')] })).error.message).toMatch(/uploads may come only/);
+    expect(c.shared.of('DOM.setFileInputFiles')).toEqual([]);
+  });
+
+  it('the flag is read per message: turning it off refuses the next upload on an open tunnel', async () => {
+    const c = await tunnel();
+    expect((await send(c, 'DOM.setFileInputFiles', { files: [photo] })).error).toBeUndefined();
+    c.flags.browser_uploads = false;
+    expect((await send(c, 'DOM.setFileInputFiles', { files: [photo] })).error.message).toMatch(/is not served to a boxed being/);
+    expect(c.shared.of('DOM.setFileInputFiles')).toHaveLength(1);
+  });
+
+  it('the key on the conversations.yaml entry reaches the link through the config resolver', async () => {
+    const resolver = createConfigResolver({
+      loadRegistry: async () => ({ contacts: { whatsapp: { 'UP@g.us': { slug: UP.slug, browser_uploads: true } } } }),
+      listEntityDirs: async () => [{ dir: conv, ns: `whatsapp/${UP.slug}` }],
+    });
+    await resolver.collect();
+    const shared = fakeChrome();
+    const { link } = linkWith({ shared }, { resolveConfig: resolver.configFor, uploadStage: stage });
+    const c = { s: sink() };
+    c.t = (await link.ask(UP, CDP, c.s)).tunnel;
+    expect((await send(c, 'DOM.setFileInputFiles', { files: [photo] })).error).toBeUndefined();
+    expect(inStage(shared.of('DOM.setFileInputFiles')[0].params.files[0])).toBe(true);
+  });
+
+  it('Page.setInterceptFileChooserDialog (no paths) reaches Chrome, flag on or off', async () => {
+    for (const flags of [{ browser_uploads: true }, {}]) {
+      const c = await tunnel(flags);
+      expect((await send(c, 'Page.setInterceptFileChooserDialog', { enabled: true })).error).toBeUndefined();
+      expect(c.shared.of('Page.setInterceptFileChooserDialog')).toHaveLength(1);
+    }
+  });
+
+  it('downloads behave as before with the flag on: into the folder served, elsewhere refused', async () => {
+    const c = await tunnel();
+    expect((await send(c, 'Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: join(conv, 'downloads') })).error).toBeUndefined();
+    expect((await send(c, 'Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: outside })).error.message).toMatch(/downloads may go only/);
+    expect(c.shared.of('Browser.setDownloadBehavior')).toHaveLength(1);
+  });
+});
+
+// ── 3c. PRIVILEGED: privileged_browser: true serves a boxed being the unboxed CDP ────────────
+describe('privileged_browser — that conversation\'s boxed being is not filtered; no other is', () => {
+  const RODZ = { being: 'e', surface: 'whatsapp', slug: 'eGPT Rodz Lulu An-2610170000', boxed: true };
+  const rodzDir = slugDir('whatsapp', RODZ.slug);
+  async function brainPair() {
+    const brain = fakeChrome('brain');
+    const { link, logs } = linkWith({ brain }, { resolveConfig: (dir) => (dir === rodzDir ? { privileged_browser: true, browser_uploads: true } : {}) });
+    const open = async (who) => { const s = sink(); const r = await link.ask(who, CDP, s); expect(r.detail).toBe('group brain'); return { s, t: r.tunnel }; };
+    return { brain, logs, rodz: await open(RODZ), admin: await open(ADMIN) };
+  }
+  const TRY = [
+    [1, 'Page.navigate', { url: 'file:///C:/Users/an/.ssh/id_rsa' }],
+    [2, 'DOM.setFileInputFiles', { files: ['C:/Users/an/secret.txt'], backendNodeId: 7 }],
+    [3, 'Target.openDevTools', { targetId: 'T-page' }],
+  ];
+
+  it('file: navigation, an upload from anywhere (privileged wins over browser_uploads) and NOT_SERVED methods reach Chrome; the open is logged', async () => {
+    const { brain, logs, rodz } = await brainPair();
+    for (const [id, method, params] of TRY) rodz.t.send(cmd(id, method, params));
+    await until(() => rodz.s.out.length === TRY.length);
+    expect(rodz.s.out.filter((m) => m.error)).toEqual([]);
+    expect(brain.of('DOM.setFileInputFiles')[0].params.files).toEqual(['C:/Users/an/secret.txt']);
+    expect(logs.filter((l) => l.includes('privileged browser — no CDP filter'))).toEqual([`e (whatsapp/${RODZ.slug}) privileged browser — no CDP filter`]);
+  });
+
+  it('the flag on another conversation in the SAME browser group does not reach this one', async () => {
+    const { brain, admin } = await brainPair();
+    for (const [id, method, params] of TRY) admin.t.send(cmd(id, method, params));
+    await until(() => admin.s.out.length === TRY.length);
+    for (const m of admin.s.out) expect(m.error.message).toMatch(/^refused by eGPT: /);
+    for (const [, method] of TRY) expect(brain.of(method)).toEqual([]);
   });
 });
 

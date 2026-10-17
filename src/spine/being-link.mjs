@@ -30,9 +30,9 @@
 // BROWSER GROUPS (operator 2026-10-11). Every being session is minted now, unboxed too — each gets
 // its chat's GROUP browser — and `browser cdp` turns the connection into a tunnel to that group's
 // Chrome and no other. A boxed being's tunnel is filtered (boxedCdpRefusal); an unboxed one runs as
-// `an` and is not.
-import { randomBytes as nodeRandomBytes } from 'node:crypto';
-import { realpathSync } from 'node:fs';
+// `an` and is not, nor is a boxed one whose conversation sets `privileged_browser: true`.
+import { randomBytes as nodeRandomBytes, createHash } from 'node:crypto';
+import { realpathSync, openSync, fstatSync, statSync, readFileSync, writeFileSync, mkdirSync, existsSync, closeSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname, basename, relative, isAbsolute, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -42,6 +42,7 @@ import { chromeConversationOf } from './chrome-pool.mjs';
 import { readBrowserGroups } from '../rooms-file.mjs';
 import { slugDir } from '../conversations-state.mjs';
 import { createCdpMux } from '../tools/cdp.mjs';
+import { EGPT_HOME } from '../egpt-home.mjs';
 
 // WHERE THE CLIENT IS, AS A POOL ACCOUNT CAN RUN IT: the copy in the eGPT CHECKOUT (~\src\egpt),
 // not the running tree this spine was started from (~\bin\egpt), and the difference is measured,
@@ -64,17 +65,61 @@ export function askSpineClientPath(home = homedir()) {
 // full CDP). Chrome runs as the operator, so each reads or writes the operator's files or reaches past
 // the group. URLs are checked as Chrome's parser reads them (tabs/newlines dropped). Null, or why not.
 const PRIVILEGED = /^(file|filesystem|chrome|chrome-[a-z-]+|devtools|view-source):/i;
-const NOT_SERVED = /^(Extensions|PWA)\.|^(Target\.(exposeDevToolsProtocol|openDevTools|sendMessageToTarget)|Browser\.(close|crash|crashGpuProcess)|DOM\.setFileInputFiles|Page\.handleFileChooser)$/;
+const NOT_SERVED = /^(Extensions|PWA)\.|^(Target\.(exposeDevToolsProtocol|openDevTools|sendMessageToTarget)|Browser\.(close|crash|crashGpuProcess))$/;
+const UPLOADS = /^(DOM\.setFileInputFiles|Page\.handleFileChooser)$/;
 const privileged = (v) => (typeof v === 'string'
   ? PRIVILEGED.test(v.replace(/[\t\n\r]/g, '').replace(/^[\x00-\x20]+/, ''))
   : !!v && typeof v === 'object' && Object.values(v).some(privileged));
 const realOf = (p) => { try { return realpathSync.native(p); } catch { const up = dirname(p); return up === p ? p : join(realOf(up), basename(p)); } };
 const inside = (p, dir) => { if (!p || !dir) return false; const rel = relative(realOf(dir), realOf(resolve(p))); return !rel.startsWith('..') && !isAbsolute(rel); };
-export function boxedCdpRefusal({ method, params = {} }, url, convDir) {
+
+// UPLOADS (operator 2026-10-17, `browser_uploads: true`): plain files really inside the conversation
+// folder. Chrome reads the path later, as the operator, and the being can swap a folder for a
+// junction meanwhile — so Chrome gets a checked copy under uploadStage, never the being's path.
+const WIN = process.platform === 'win32';
+const samePath = (a, b) => (WIN ? a.toLowerCase() === b.toLowerCase() : a === b);
+function stageUpload(p, convDir, stageDir) {
+  if (typeof p !== 'string' || !(WIN ? /^[A-Za-z]:[\\/]/.test(p) : p.startsWith('/'))) return { why: 'not an absolute local path' };
+  if (WIN && p.slice(2).includes(':')) return { why: 'a stream or device name' };
+  if (p.split(/[\\/]/).includes('..')) return { why: 'a path with ..' };
+  const rel = relative(convDir, resolve(p));
+  if (!rel || rel.startsWith('..') || isAbsolute(rel)) return { why: "outside this conversation's folder" };
+  let fd = null;
+  try {
+    const real = realpathSync.native(p);
+    if (!samePath(real, join(realpathSync.native(convDir), rel))) return { why: 'reached through a link or junction' };
+    fd = openSync(real, 'r');
+    const st = fstatSync(fd, { bigint: true });
+    if (!st.isFile() || st.nlink !== 1n) return { why: 'not a plain file' };
+    const now = statSync(real, { bigint: true });
+    if (!samePath(realpathSync.native(p), real) || now.ino !== st.ino || now.dev !== st.dev) return { why: 'changed while it was checked' };
+    const body = readFileSync(fd);
+    const dir = join(stageDir, createHash('sha256').update(body).digest('hex'));
+    const out = join(dir, basename(real));
+    mkdirSync(dir, { recursive: true });
+    if (!existsSync(out) || statSync(out).size !== body.length) writeFileSync(out, body);
+    return { path: out };
+  } catch (e) {
+    return { why: e?.code === 'ENOENT' ? 'no such file' : `unreadable (${e?.code ?? 'error'})` };
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
+}
+
+export function boxedCdpRefusal({ method, params = {} }, url, convDir, { uploads = false, stageDir = null } = {}) {
   if (NOT_SERVED.test(method)) return `${method} is not served to a boxed being`;
   if (privileged(url)) return `that session is on a ${url.split(':')[0]}: page`;
   if (privileged(params)) return 'file:, chrome:, devtools:, extension and view-source: URLs are not served to a boxed being';
-  if (method === 'Input.dispatchDragEvent' && params.data?.files?.length) return 'dragging local files is not served to a boxed being';
+  const dragged = method === 'Input.dispatchDragEvent' && !!params.data?.files?.length;
+  if (UPLOADS.test(method) || dragged) {
+    if (!uploads || !convDir || !stageDir) return dragged ? 'dragging local files is not served to a boxed being' : `${method} is not served to a boxed being`;
+    const files = dragged ? params.data.files : (params.files ?? []);
+    if (!Array.isArray(files)) return 'files must be a list';
+    const staged = files.map((f) => stageUpload(f, convDir, stageDir));
+    const bad = staged.findIndex((s) => s.why);
+    if (bad !== -1) return `uploads may come only from this conversation's folder — file ${bad + 1}: ${staged[bad].why}`;
+    files.splice(0, files.length, ...staged.map((s) => s.path));   // in place: the mux forwards these params
+  }
   if (/^(Browser|Page)\.setDownloadBehavior$/.test(method) && /^allow/.test(params.behavior ?? '') && !inside(params.downloadPath, convDir)) return "downloads may go only into this conversation's folder";
   return null;
 }
@@ -90,11 +135,13 @@ const quoted = (v) => JSON.stringify(String(v ?? '').slice(0, 40));
  * @param {(c: object) => Promise<object>} [opts.chromeClientFor] commands.chromeClientFor — the conversation's group CDP client ({ client: { channel() } })
  * @param {(site: string, o: { conversation: object, client: object }) => Promise<string>} [opts.requestLogin] boot's EXISTING auto-login limb, the SAME one /login calls (boot.requestLogin → src/spine/login.mjs). Reads Chrome's own saved credential for the group's profile, types it, returns an OUTCOME TOKEN only — never the credential.
  * @param {() => Promise<object>} [opts.readGroups] config/browsers.yaml's groups (default rooms-file.readBrowserGroups, read fresh per ask)
+ * @param {(convDir: string) => object} [opts.resolveConfig] the conversation's resolved config (config-resolver configFor): browser_uploads, privileged_browser
+ * @param {string} [opts.uploadStage]              where checked upload copies go; the being cannot write here
  * @param {string} [opts.clientPath]               the client script handed in ASK_SPINE_ENV (default askSpineClientPath()); being-cdp.mjs sits beside it
  * @param {(m: string) => void} [opts.onLog]       the AUDIT line, one per request
  * @param {typeof nodeRandomBytes} [opts.randomBytes]
  */
-export function createBeingLink({ port, startBrowser, chromeClientFor = null, requestLogin = null, readGroups = readBrowserGroups, clientPath = askSpineClientPath(), onLog = () => {}, randomBytes = nodeRandomBytes } = {}) {
+export function createBeingLink({ port, startBrowser, chromeClientFor = null, requestLogin = null, readGroups = readBrowserGroups, resolveConfig = () => ({}), uploadStage = join(EGPT_HOME, 'state', 'uploads'), clientPath = askSpineClientPath(), onLog = () => {}, randomBytes = nodeRandomBytes } = {}) {
   const live = new Map();       // secret -> { being, surface, slug, boxed }
   const tunnels = new Map();    // who -> its open CDP tunnels, closed when its secret is revoked
   const muxes = new WeakMap();  // a group's CDP channel -> its mux
@@ -115,8 +162,14 @@ export function createBeingLink({ port, startBrowser, chromeClientFor = null, re
     if (!muxes.has(channel)) muxes.set(channel, createCdpMux(channel));
     let convDir = null;
     try { convDir = slugDir(who.surface, who.slug); } catch { /* no folder → no download dir */ }
+    // Per-conversation keys, read per message so an edit applies to open tunnels. privileged_browser
+    // (operator 2026-10-17) serves a boxed being the unboxed CDP: no filter at all.
+    const flags = () => (convDir ? resolveConfig(convDir) ?? {} : {});
+    if (who.boxed && flags().privileged_browser === true) onLog(`${tag} privileged browser — no CDP filter`);
     const guard = who.boxed ? (m, url) => {
-      const why = boxedCdpRefusal(m, url, convDir);
+      const f = flags();
+      if (f.privileged_browser === true) return null;
+      const why = boxedCdpRefusal(m, url, convDir, { uploads: f.browser_uploads === true, stageDir: uploadStage });
       if (why) onLog(`${tag} cdp ${quoted(m.method)} → REFUSED: ${why}`);
       return why;
     } : null;
