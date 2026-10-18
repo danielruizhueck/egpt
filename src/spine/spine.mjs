@@ -811,7 +811,7 @@ export function createSpine({
     // A phrase trigger (commands.phraseCommand) is command-like too — it runs a command, reaches no
     // being — so it is excluded here exactly as the '/'-commands are, or a backlogged operator phrase
     // would inflate the wake-notice count.
-    if (commands?.isCommand?.(ev) || commands?.phraseCommand?.(ev) || isEnvelope(ev) || isTransit(ev) || advice?.isAnswer?.(ev)) return false;
+    if (commands?.isCommand?.(ev) || await commands?.phraseCommand?.(ev) || isEnvelope(ev) || isTransit(ev) || advice?.isAnswer?.(ev)) return false;
     const { d } = await gateOf((await targetsOf(ev))[0], ev);
     return d.receives && d.mayReply && !(d.mode === 'auto' && ev.isSender);
   }
@@ -959,7 +959,7 @@ export function createSpine({
     // non-'off' message — a phrase is a real message that doesn't start with '/'); only the being turn
     // is suppressed. Checked AFTER the '/'-command block so a '/'-word always wins, and like it, before
     // the relay/transit branches (an operator phrase is command-like, not chatter in a pipe).
-    const phraseCmd = commands?.phraseCommand?.(ev);
+    const phraseCmd = await commands?.phraseCommand?.(ev);
     if (phraseCmd) return async () => { await commands.runPhrase(ev, phraseCmd); };
 
     // Inbound mesh envelope: a message carrying a provenance tail is relay traffic,

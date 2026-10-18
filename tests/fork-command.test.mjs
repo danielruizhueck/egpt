@@ -1110,26 +1110,26 @@ describe('phrase triggers — config.<cmd>.triggers run a command discreetly (op
   // An OPERATOR message (authorized) whose whole text is `body`.
   const opEv = (body) => ({ chatId: C_CHAT, surface: 'whatsapp', msgId: 'cmd1', chatName: 'Proyecto X', authorized: true, body });
 
-  it('phraseCommand: an operator message EQUAL to a configured join.triggers phrase → "join" (trim + case-insensitive)', () => {
+  it('phraseCommand: an operator message EQUAL to a configured join.triggers phrase → "join" (trim + case-insensitive)', async () => {
     const { cmds } = harness({ config: triggerCfg() });
-    expect(cmds.phraseCommand(opEv(PHRASE))).toBe('join');
-    expect(cmds.phraseCommand(opEv('  Dame UN Segundo  '))).toBe('join');   // trimmed + lower-cased
+    expect(await cmds.phraseCommand(opEv(PHRASE))).toBe('join');
+    expect(await cmds.phraseCommand(opEv('  Dame UN Segundo  '))).toBe('join');   // trimmed + lower-cased
   });
 
-  it('phraseCommand: a NON-exact message does NOT trigger (never prefix/contains)', () => {
+  it('phraseCommand: a NON-exact message does NOT trigger (never prefix/contains)', async () => {
     const { cmds } = harness({ config: triggerCfg() });
-    expect(cmds.phraseCommand(opEv('dame un segundo por favor'))).toBe(null);
-    expect(cmds.phraseCommand(opEv('ya, dame un segundo'))).toBe(null);
+    expect(await cmds.phraseCommand(opEv('dame un segundo por favor'))).toBe(null);
+    expect(await cmds.phraseCommand(opEv('ya, dame un segundo'))).toBe(null);
   });
 
-  it('phraseCommand: a NON-operator saying the exact phrase does NOT trigger (ordinary message)', () => {
+  it('phraseCommand: a NON-operator saying the exact phrase does NOT trigger (ordinary message)', async () => {
     const { cmds } = harness({ config: triggerCfg() });
-    expect(cmds.phraseCommand({ ...opEv(PHRASE), authorized: false })).toBe(null);
+    expect(await cmds.phraseCommand({ ...opEv(PHRASE), authorized: false })).toBe(null);
   });
 
-  it('phraseCommand: unset triggers → only the "/"-word triggers (null for any phrase)', () => {
+  it('phraseCommand: unset triggers → only the "/"-word triggers (null for any phrase)', async () => {
     const { cmds } = harness({ config: cfg() });                                 // no triggers configured
-    expect(cmds.phraseCommand(opEv(PHRASE))).toBe(null);
+    expect(await cmds.phraseCommand(opEv(PHRASE))).toBe(null);
   });
 
   it('runPhrase join: creates a group with a RANDOM name and does NOT edit the operator\'s message', async () => {

@@ -120,30 +120,30 @@ const inbound = (body = '…', extra = {}) => ({ chatId: C_CHAT, surface: 'whats
 describe('phraseCommand — super_chats.triggers are the summon phrases', () => {
   const TWO = cfg({ superBlock: { triggers: ['SI chat', 'abre SI'] } });
 
-  it('each phrase, as the whole message (any case, trimmed), summons from a NON-operator', () => {
+  it('each phrase, as the whole message (any case, trimmed), summons from a NON-operator', async () => {
     const { cmds } = harness({ config: TWO });
-    for (const body of ['si chat', 'SI CHAT', '  SI chat  ', 'abre si', ' ABRE SI ']) expect(cmds.phraseCommand(inbound(body))).toBe('super');
+    for (const body of ['si chat', 'SI CHAT', '  SI chat  ', 'abre si', ' ABRE SI ']) expect(await cmds.phraseCommand(inbound(body))).toBe('super');
   });
 
-  it('EXACT whole-message only: prefix / contains / typo do not summon, nor does "…"', () => {
+  it('EXACT whole-message only: prefix / contains / typo do not summon, nor does "…"', async () => {
     const { cmds } = harness({ config: TWO });
-    for (const body of ['SI chat now', 'say SI chat', 'SI cha', 'abre SI ya', '…', '...', '']) expect(cmds.phraseCommand(inbound(body))).toBe(null);
+    for (const body of ['SI chat now', 'say SI chat', 'SI cha', 'abre SI ya', '…', '...', '']) expect(await cmds.phraseCommand(inbound(body))).toBe(null);
   });
 
-  it('no phrase ⇒ OFF: nothing summons, a leftover enabled: true included', () => {
+  it('no phrase ⇒ OFF: nothing summons, a leftover enabled: true included', async () => {
     for (const superBlock of OFF_SHAPES) {
       const { cmds } = harness({ config: cfg({ superBlock }) });
-      for (const body of ['…', '...', '', '   ', 'SI chat']) expect(cmds.phraseCommand(inbound(body))).toBe(null);
+      for (const body of ['…', '...', '', '   ', 'SI chat']) expect(await cmds.phraseCommand(inbound(body))).toBe(null);
     }
   });
 
-  it('REGRESSION: the operator fork triggers are unchanged beside it', () => {
+  it('REGRESSION: the operator fork triggers are unchanged beside it', async () => {
     const config = { ...TWO, join: { triggers: ['dame un segundo'] } };
     const { cmds } = harness({ config });
     const op = (body) => ({ ...inbound(body), authorized: true });
-    expect(cmds.phraseCommand(op('Dame un segundo'))).toBe('join');
-    expect(cmds.phraseCommand(inbound('dame un segundo'))).toBe(null);   // non-operator: ordinary message
-    expect(cmds.phraseCommand(op('SI chat'))).toBe('super');
+    expect(await cmds.phraseCommand(op('Dame un segundo'))).toBe('join');
+    expect(await cmds.phraseCommand(inbound('dame un segundo'))).toBe(null);   // non-operator: ordinary message
+    expect(await cmds.phraseCommand(op('SI chat'))).toBe('super');
   });
 });
 

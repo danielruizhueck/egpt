@@ -10,7 +10,8 @@
 // with a short note.
 import { lifecycleExit, lifecycleForce } from './ingest.mjs';
 import { isAutoMode, AUTO_MODES, DEFAULT_AUTO_MODE, superModeOf, superChatsOn } from '../auto-mode.mjs';
-import { patchBeing, patchContact, deleteBeing, getContact, getBeing, ensureContact, recordThread, findThreadJsonl, aliasContact, dropContact, aliasTargetOf, superChannelFor, isSuperChannel, residentsOf, defaultBeingOf, allowedUsersPermits, slugDir, statsPath, conversationPathOf, seedIdentityLayers, skeletonIdentityFiles, slugSuffix, rollTranscript, fixedSlugFor, DETERMINISTIC_MODEL, DETERMINISTIC_EFFORT, DEFAULT_ALLOWED_TOOLS, LOBBY_SLUG } from '../conversations-state.mjs';
+import { patchBeing, patchContact, deleteBeing, getContact, getBeing, ensureContact, recordThread, findThreadJsonl, aliasContact, dropContact, aliasTargetOf, superChannelFor, isSuperChannel, residentsOf, defaultBeingOf, allowedUsersPermits, slugDir, statsPath, conversationPathOf, seedIdentityLayers, skeletonIdentityFiles, slugSuffix, rollTranscript, fixedSlugFor, mutateState, DETERMINISTIC_MODEL, DETERMINISTIC_EFFORT, DEFAULT_ALLOWED_TOOLS, LOBBY_SLUG } from '../conversations-state.mjs';
+import { createStatCache } from '../stat-cache.mjs';
 import { stripFrontMatter } from '../transcript-meta.mjs';
 // WHERE A SANDBOXED BEING'S CLI STORE LIVES — the ONE formula, taken from the module that
 // CREATES it (src/sandbox-cli-session.mjs) rather than rebuilt here, so the two verbs that retire
@@ -496,6 +497,31 @@ export const SEND_ORIGIN_TEMPLATE_DEFAULT = '↪ from {group}:\n';
 // the key is unset; the real text is set in config.yaml. Exported so tests assert the fallback.
 export const JOIN_OPENER_DEFAULT = '🔗 Side-room of {group} — same agents, same conversation. Reply /send to a message to copy it back to the original chat; /end to close.';
 export const SPLIT_OPENER_DEFAULT = '🍴 Fork of {group} — a diverging copy: same agents, its own thread from here. Reply /send to a message to copy it back to the original chat; /end to close.';
+// ── SI chats, per conversation (operator 2026-10-18) ──
+// A chat whose OWN conversations.yaml entry has `superchats: { triggers: [...], prefix? }` opens a side
+// group on "<phrase> [<label>]": a /join-kind alias with its own transcript-si-<label>.md, the being in
+// accum. The link is SI Chats/<label>.yaml in the origin folder, by chat ids; /send /end /help read it.
+export const SUPERCHAT_PREFIX_DEFAULT = 'SI+';
+export const SUPERCHAT_DIR = 'SI Chats';
+export const SUPERCHAT_LABEL_MAX = 60;   // longer → an ordinary sentence that starts with the phrase
+export const SUPERCHAT_INTRO = '🌟 SI chat of {chat}. {being} is in accum mode here: it reads along and answers when called. To let it answer freely, send /agents mode on {being} · /help';
+export const SUPERCHAT_HELP = 'SI chat of {chat}:\n/send — reply /send to a message to copy it to {chat}\n/end — close the link (the group stays; {being} stops treating it as an SI chat)\n/help — this list';
+
+// `block` = a chat's superchats block → { label } when `body` is one of its phrases, as the whole
+// message or followed by whitespace and a label (any case, trimmed; longest phrase first), else null.
+export function superchatTrigger(block, body) {
+  const text = String(body ?? '').trim();
+  const phrases = (Array.isArray(block?.triggers) ? block.triggers : [])
+    .map((t) => String(t ?? '').trim()).filter(Boolean).sort((a, b) => b.length - a.length);
+  for (const p of phrases) {
+    if (text.slice(0, p.length).toLowerCase() !== p.toLowerCase()) continue;
+    const rest = text.slice(p.length);
+    if (rest && !/^\s/.test(rest)) continue;
+    const label = rest.trim().replace(/\s+/g, ' ');
+    return label.length <= SUPERCHAT_LABEL_MAX ? { label } : null;
+  }
+  return null;
+}
 // ── super channel (operator 2026-10-08, CHUNK 1) ────────────────────────────────────────────────
 // A per-conversation SIDE CHANNEL where the Mouth will (a later chunk) speak, so its replies stop
 // polluting the main chat. It is the SAME KIND of thing as a /join side-room — an ALIAS of the
@@ -1203,8 +1229,9 @@ export function createCommands({
     // there is only one surface to resolve here: 'shell' — the extension reads the
     // registry directly (App.jsx), never through this dispatcher. Pre-catch-all, same slot
     // as /config/status/room.
+    // In an SI chat it lists that chat's own commands.
     const helpMatch = /^\/help\b/i.exec(line);
-    if (helpMatch) { await send?.(ev.chatId, helpText([], 'shell')); return; }
+    if (helpMatch) { const si = await superchatOf(surfaceOf(ev), ev.chatId); await send?.(ev.chatId, si ? await superchatHelpText(surfaceOf(ev), si) : helpText([], 'shell')); return; }
 
     // /recap — what THIS chat said while the node slept (operator 2026-09-27), the answer to the
     // wake notice "N messages in the backlog. type /recap to list them". Read out in the chat it was
@@ -3509,10 +3536,12 @@ export function createCommands({
     if (!chatId) { onLog(`${verb}: createGroup returned no chatID (${JSON.stringify(created)}) — aborted, nothing edited/posted`); return null; }
     // Reload fresh before the write (createGroup is async). Alias the new group's chatId to ev's
     // canonical (primary) entry — both ids now resolve to the SAME folder/agents/threads.
-    const state = await loadState();
-    const primaryJid = getContact(state, surface, ev.chatId)?.jid ?? ev.chatId;
-    await writeState(aliasContact(state, surface, chatId, primaryJid, { transcript: sanitizeSlug(title), ...extra }));
-    return { chatId, primaryJid };
+    return mutateState(writeState, async () => {
+      const state = await loadState();
+      const primaryJid = getContact(state, surface, ev.chatId)?.jid ?? ev.chatId;
+      await writeState(aliasContact(state, surface, chatId, primaryJid, { transcript: sanitizeSlug(title), ...extra }));
+      return { chatId, primaryJid };
+    });
   }
 
   // ── /join shared by C's members (operator 2026-10-16) ──
@@ -4001,7 +4030,8 @@ export function createCommands({
     const surface = surfaceOf(ev);
     if (!loadState) return;                                // state not wired → silent
     const state = await loadState();
-    const originalChatId = aliasTargetOf(state, surface, ev.chatId)
+    const originalChatId = (await superchatOf(surface, ev.chatId))?.link.origin_chat
+      ?? aliasTargetOf(state, surface, ev.chatId)
       ?? getContact(state, surface, ev.chatId)?.entry?.parent_chat ?? null;
     if (!originalChatId) return;                           // not a join/split group → silent
     if (!residesHere(state, surface, ev.chatId)) return;   // gate (defensive — a group implies it)
@@ -4063,6 +4093,8 @@ export function createCommands({
   async function end(ev) {
     const surface = surfaceOf(ev);
     if (!loadState || !writeState) return;                 // state not wired → silent
+    const si = await superchatOf(surface, ev.chatId);
+    if (si) return endSuperchat(ev, surface, si);
     const state = await loadState();
     const aliasTarget = aliasTargetOf(state, surface, ev.chatId);
     const parent = getContact(state, surface, ev.chatId)?.entry?.parent_chat ?? null;
@@ -4071,6 +4103,122 @@ export function createCommands({
     await writeState(dropContact(await loadState(), surface, ev.chatId));
     onLog(`/end: ${aliasTarget ? 'join' : 'split'} group ${ev.chatId} archived + ${aliasTarget ? `alias to ${aliasTarget}` : `split conv mapping (parent ${parent})`} dropped`);
     return `archived ${ev.chatName || ev.chatId}`;         // the audit's <outcome> for a successful archive
+  }
+
+  // ── SI chats (operator 2026-10-18; see SUPERCHAT_* above) ──
+  // The chat's OWN block, never an alias's: a side group opens nothing.
+  const superchatsBlockOf = (state, surface, chatId) => {
+    const own = state?.contacts?.[surface]?.[chatId];
+    const b = own && !own.aliasOf ? own.superchats : null;
+    return b && typeof b === 'object' && !Array.isArray(b) ? b : null;
+  };
+  const superchatTriggerOf = async (ev) => {
+    if (!loadState || ev?.fromNode != null) return null;   // a being's signed line is output, never a trigger
+    let state;
+    try { state = await loadState(); } catch { return null; }
+    return superchatTrigger(superchatsBlockOf(state, surfaceOf(ev), ev.chatId), ev.body);
+  };
+  const handleOf = (being) => wakeTokens(being, cfg().agents?.[being])[0] ?? being;
+  const linkCache = createStatCache({ io: { stat, readFile } });
+  const parseLink = (text) => {
+    try { const v = text == null ? null : YAML.parse(text); return v && typeof v === 'object' && !Array.isArray(v) ? v : null; } catch { return null; }
+  };
+  const superchatDirOf = async (surface, chatId) => {
+    const room = await resolveConvRoom(surface, chatId);
+    return room ? join(room.baseDir(), SUPERCHAT_DIR) : null;
+  };
+  async function superchatLinksIn(dir) {
+    let names;
+    try { names = await readdir(dir); } catch (e) { if (e?.code !== 'ENOENT') onLog(`SI chat: ${dir}: ${e?.message ?? e}`); return []; }
+    const out = [];
+    for (const f of names.filter((n) => n.endsWith('.yaml')).sort()) {
+      const path = join(dir, f);
+      const link = await linkCache.read(path, parseLink).catch(() => null);
+      if (link) out.push({ path, key: f.slice(0, -'.yaml'.length), link });
+    }
+    return out;
+  }
+  // This side group's OPEN link, read from its origin folder by chat id, or null. Only an alias can
+  // be one, which also keeps a read from minting a contact for an unknown chat.
+  async function superchatOf(surface, chatId) {
+    if (!loadState) return null;
+    if (!aliasTargetOf(await loadState(), surface, chatId)) return null;
+    const dir = await superchatDirOf(surface, chatId);
+    const id = shortChatId(chatId);
+    return dir ? ((await superchatLinksIn(dir)).find((l) => shortChatId(l.link.chat) === id && !l.link.ended_at) ?? null) : null;
+  }
+  async function writeSuperchatLink(path, link) {
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, YAML.stringify(link), 'utf8');
+    linkCache.forget(path);
+  }
+
+  // "<phrase> [<label>]" in a chat with a superchats block: create the group on the ear (the mouth and
+  // the sender invited — members are set only at create), alias it with the being in accum, write the
+  // link, post the intro. One node acts on a shared account; the /join member rule decides who may.
+  async function openSuperchat(ev) {
+    const surface = surfaceOf(ev);
+    if (!loadState || !writeState || !forkNodeSelected(null)) return;
+    const state0 = await loadState();
+    const block = superchatsBlockOf(state0, surface, ev.chatId);
+    const hit = superchatTrigger(block, ev.body);
+    if (!hit) return;
+    const contact = getContact(state0, surface, ev.chatId);
+    if (!isOperator(ev) && !mayJoinHere(state0, surface, ev.chatId, ev)) {
+      onLog(`SI chat: ${ev.senderName ?? ev.senderId ?? '?'} may not wake a being in ${ev.chatId} — refused.`);
+      return 'refused — the sender may not wake a being here';
+    }
+    const invitee = !ev.isSender && String(ev.senderId ?? '').endsWith(':beeper.local') ? ev.senderId : null;
+    if (!ev.isSender && !invitee) { onLog(`SI chat: ${ev.senderId ?? '?'} is not an invitable id — nothing created.`); return 'refused — the sender id cannot be invited'; }
+    const dir = await superchatDirOf(surface, ev.chatId);
+    if (!dir) { onLog(`SI chat: no folder for ${ev.chatId} — nothing created.`); return; }
+    const accountID = await forkBridge.chatAccountId(ev.chatId);
+    if (!accountID) { onLog(`SI chat: could not resolve the ear account for ${ev.chatId} — nothing created.`); return; }
+    const rodzDigits = phoneDigitsOf(cfg().beeper?.secondary?.phone);
+    const rodzUserId = rodzDigits ? await forkBridge.resolveUserIdByPhone(rodzDigits, { accountID }) : null;
+    if (rodzDigits && !rodzUserId) { onLog('SI chat: config.beeper.secondary.phone would not resolve to a Beeper user id — nothing created.'); return; }
+
+    const stamp = forkTimestamp(new Date(now()));
+    let label = sanitizeSlug(hit.label) ? hit.label : stamp;
+    const prior = (await superchatLinksIn(dir)).find((l) => l.key.toLowerCase() === sanitizeSlug(label).toLowerCase());
+    if (prior) {
+      if (!prior.link.ended_at && (await superChannelAlive(prior.link.chat, { chatRaw: forkBridge.chatRaw, config: cfg() })) !== false) {
+        onLog(`SI chat: "${label}" is open (${prior.link.chat}) — no second group.`);
+        return `"${label}" is open`;
+      }
+      label = `${label} ${stamp}`;                           // ended or gone: a new record beside the old
+    }
+    const key = sanitizeSlug(label);
+    const cTitle = ev.chatName || (await forkBridge.chatTitle(ev.chatId)) || ev.chatId;
+    const prefix = typeof block.prefix === 'string' ? block.prefix : SUPERCHAT_PREFIX_DEFAULT;
+    const title = await uniqueTitle('SI chat', `${prefix}${cTitle}+${label}`, accountID);
+    const being = defaultBeingOf(contact.entry) ?? defaultKey;
+    const participantIDs = [...new Set([rodzUserId, invitee].filter(Boolean))];
+    const aliased = await createAliasedSideGroup(ev, surface, title, accountID, participantIDs, 'SI chat', { transcript: `si-${key}`, agents: { [being]: { mode: 'accum' } } });
+    if (!aliased) return;
+    await writeSuperchatLink(join(dir, `${key}.yaml`), {
+      surface, origin_chat: ev.chatId, chat: aliased.chatId, label, title,
+      created_by: ev.senderName ?? null, created_by_id: ev.senderId ?? null, created_at: new Date(now()).toISOString(),
+    });
+    onLog(`SI chat: ${cTitle} -> ${aliased.chatId} "${title}" (invited ${participantIDs.join(', ') || 'nobody'})`);
+    await postOpener({ verb: 'SI chat', newChatId: aliased.chatId, title, openerText: fillVars(SUPERCHAT_INTRO, { chat: cTitle, being: handleOf(being) }), accountID });
+    return `opened ${title}`;
+  }
+
+  // /end in an SI chat: mark the link ended and drop the alias. The group, the link file and the
+  // transcript stay.
+  async function endSuperchat(ev, surface, si) {
+    await writeSuperchatLink(si.path, { ...si.link, ended_at: new Date(now()).toISOString(), ended_by: ev.senderName ?? ev.senderId ?? null });
+    await mutateState(writeState, async () => writeState(dropContact(await loadState(), surface, ev.chatId)));
+    onLog(`/end: SI chat ${ev.chatId} ("${si.link.label}") unlinked from ${si.link.origin_chat}`);
+    await send?.(ev.chatId, `SI chat closed — this group is no longer linked to ${(await forkBridge.chatTitle(si.link.origin_chat)) || 'its chat'}.`);
+    return `ended SI chat ${si.link.label}`;
+  }
+
+  async function superchatHelpText(surface, si) {
+    const entry = getContact(await loadState(), surface, si.link.origin_chat)?.entry;
+    const chat = (await forkBridge.chatTitle(si.link.origin_chat)) || entry?.pushedName || 'the original chat';
+    return fillVars(SUPERCHAT_HELP, { chat, being: handleOf(defaultBeingOf(entry) ?? defaultKey) });
   }
 
   // ── PHRASE TRIGGERS for the fork commands (operator 2026-10-04) ──────────────────────────────────
@@ -4092,8 +4240,10 @@ export function createCommands({
   // nothing. One definition so the super trigger and the '/'-command triggers can never drift apart.
   const matchesTrigger = (triggers, body) =>
     Array.isArray(triggers) && triggers.some((t) => String(t ?? '').trim().toLowerCase() === body);
-  function phraseCommand(ev) {
+  async function phraseCommand(ev) {
     const body = String(ev?.body ?? '').trim().toLowerCase();
+    // SI CHAT — any sender, only in a chat whose own entry has a superchats block (openSuperchat gates who).
+    if (body && await superchatTriggerOf(ev)) return 'superchat';
     // SUPER CHANNEL SUMMON — ANY sender (checked before the isOperator gate): a message EQUAL to one of
     // super_chats.triggers, same matchesTrigger as the fork triggers. No phrase ⇒ SI off, no summon.
     if (body && superChatsOn(cfg()?.super_chats) && matchesTrigger(cfg().super_chats.triggers, body)) return 'super';
@@ -4112,6 +4262,7 @@ export function createCommands({
   async function runPhrase(ev, cmd) {
     // 'super': an inbound super_chats.triggers phrase summons this chat's super channel, invited to its
     // SENDER (any participant). No discreet concept and no message edit.
+    if (cmd === 'superchat') return openSuperchat(ev);
     if (cmd === 'super') return ensureSuperChannel(ev, ev.senderId ?? null);
     if (cmd === 'join') return joinGroup(ev, { discreet: true });
     if (cmd === 'split') return splitGroup(ev, { discreet: true });
