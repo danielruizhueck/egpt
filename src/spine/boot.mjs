@@ -1128,6 +1128,7 @@ export async function boot({
   fetch: fetchFn = (...a) => globalThis.fetch(...a),         // the /book calendar feed + SES seam; tests inject a fake so no request leaves
   cliHost = connectCliHost(),         // the daemon holding every claude session (src/cli-host.mjs); null = this spine spawns them
   backgroundFile = null,              // state/background.json's path when ingest is off (tests); ingest on → EGPT_HOME/state/background.json
+  lagProbe: lagProbeIn = null,        // the lag probe (src/spine/lag-probe.mjs); a bench injects one to read the step timings
 } = {}) {
   // === THE KILL SWITCH (operator 2026-07-25) — THE FIRST THING boot DOES ===============
   // "if a file named STOP exists in .egpt it *also* stops". Checked before the config is
@@ -3603,7 +3604,7 @@ export async function boot({
     return { changed };
   };
   // THE LAG PROBE (src/spine/lag-probe.mjs): the loop's delay + the queues, to log_to_group while it lags.
-  const lagProbe = createLagProbe({
+  const lagProbe = lagProbeIn ?? createLagProbe({
     config: () => getConfig()?.lag_probe, now,
     report: (text) => logToGroup(`${getConfig()?.node_name ?? '?'} · ${text}`),
     note: (m) => log.line?.(`[lag] ${m}`),
