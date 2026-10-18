@@ -3192,18 +3192,21 @@ export const CONFIG_SCHEMA = {
   group_title: `
     The title of the side-group /join or /split creates (operator 2026-10-03). A template:
       {group}  the parent chat's title
-      {name}   the command's optional <name> arg (/join spoiler → {name}=spoiler; absent → the verb
-               word, "join" or "split")
-    Unset → a small built-in default. Replaces the old fork.title.
+      {name}   the command's optional <name> arg (/join spoiler → {name}=spoiler; absent → the
+               verb's default_name)
+    Every side group's title starts with "SI+" (fixed, not part of the template; 2026-10-18).
+    Unset → "{group}-{name}", so "SI+<group>-<name>". Replaces the old fork.title.
   `,
 
   join: `
     /join — the SUPERPOSITION side-group (operator 2026-10-03). /join [<name>|<node>] creates a
-    private group (the operator + the secondary account) whose chatId is ALIASED to this chat's
-    conversation — one shared on-disk thread, two chat surfaces, nothing copied. It is a VIEW, not a
-    branch. Reply /send to relay a chosen message back to the original chat; reply /end to archive the
-    group and drop the alias. The two accounts' phones come from beeper.primary.phone /
-    beeper.secondary.phone; the group title is config.group_title; and the texts that live here are:
+    private group whose chatId is ALIASED to this chat's conversation — one shared on-disk thread, two
+    chat surfaces, nothing copied. It is a VIEW, not a branch. Anyone in a group chat may run it
+    (2026-10-18): the secondary account creates it and invites only that person; the operator's own
+    /join is made on the primary with the secondary; no secondary → the primary invites them. Reply
+    /send to relay a chosen message back to the original chat; reply /end to archive the group and
+    drop the alias. The two accounts' phones come from beeper.primary.phone / beeper.secondary.phone;
+    the group title is config.group_title; and the texts that live here are:
       default_name: the {name} used in the group title when /join carries NO <name> arg. Unset → the
                    built-in "egpt super". (A nameless /join no longer titles the group "…-join".)
       placeholder: what the operator's /join message is edited into (a member's /join gets it as a
@@ -3234,9 +3237,10 @@ export const CONFIG_SCHEMA = {
   split: `
     /split — the REAL-FORK side-group (operator 2026-10-03). /split [<name>|<node>] creates a private
     group backed by a NEW conversation (its own folder/entry, NOT an alias) whose resident beings'
-    threads are COPIED from this chat so it DIVERGES. Reply /send to relay a chosen message back to the
-    original chat; reply /end to archive the group and retire the split conversation's mapping. Group
-    title is config.group_title; the texts that live here are:
+    threads are COPIED from this chat so it DIVERGES. Who may run it, who creates it and whom it
+    invites: as /join. Reply /send to relay a chosen message back to the original chat; reply /end to
+    archive the group and retire the split conversation's mapping. Group title is config.group_title;
+    the texts that live here are:
       default_name: the {name} used in the group title when /split carries NO <name> arg. Unset → the
                    built-in "egpt split".
       placeholder: what the operator's /split message is edited into. Unset → a small built-in default.
@@ -3253,8 +3257,10 @@ export const CONFIG_SCHEMA = {
 
   send: `
     /send — relay a replied-to message from a /join or /split group back to the ORIGINAL chat
-    (operator 2026-10-03). Repeatable; posts nothing to the group and never closes it.
-      post_back_from: which account posts the relayed message to the original chat —
+    (operator 2026-10-03). Repeatable; posts nothing to the group and never closes it. Anyone in the
+    side group may run it (2026-10-18); a non-operator's relay is posted by the secondary, signed
+    (no secondary → the primary, signed), never as the operator.
+      post_back_from: which account posts the operator's relayed message to the original chat —
                       'primary' (the operator's OWN account; the DEFAULT) posts so it appears from the
                       operator; 'secondary' (the mouth) makes it appear from the bot's secondary
                       account. Unset/invalid → primary.
@@ -3275,39 +3281,32 @@ export const CONFIG_SCHEMA = {
 
   end: `
     /end — archive a /join or /split group (both kinds) and drop its mapping, closing it (operator
-    2026-10-03). Posts nothing; silent outside a join/split group.
+    2026-10-03). Anyone in the side group may run it (2026-10-18); the group is archived on the
+    account it was heard on. Posts nothing; silent outside a join/split group.
       triggers:       OPTIONAL list of extra phrases that invoke /end; the '/'-word is always a
                       trigger. A message that EQUALS one of these (trimmed, case-insensitive) runs
                       /end. Operator-only, EXACT whole-message match only (never prefix/contains).
                       Pick phrases you won't say by accident. Unset → only the '/'-word triggers.
   `,
 
-  superchats: `
-    SI chats (operator 2026-10-18). Set it on ONE conversation's OWN entry in
-    config/conversations.yaml; only that chat opens SI chats. Read nowhere else:
-    in config/config.yaml, on a side group's entry or in a folder config.yaml it
-    does nothing. Replaces the global super_chats block (migration 0047).
-    "<phrase> [<label>]" there, from anyone the being would answer, creates the
-    group "<prefix><chat title>+<label>" on the ear account, inviting the mouth
-    (beeper.secondary.phone, when set) and the sender. It is a /join-kind alias of
-    the chat: same folder and thread, its own transcript-si-<label>.md, the
-    conversation's being in accum (other beings keep their own mode). One intro
-    line names /agents mode on <handle>. The link is
-    <conversation folder>/SI Chats/<label>.yaml (origin_chat, chat, label,
-    created_by, created_at; ended_at after /end), by chat ids, so renames change
-    nothing. In the group the operator has /send (copies a replied-to message to
-    the chat), /end (closes the link; nothing archived or deleted) and /help.
-    Created only by the node_role 'primary' node.
+  side_group: `
+    The automatic side group (operator 2026-10-18). Set it on ONE conversation's
+    OWN entry in config/conversations.yaml: side_group: { automatic: true }.
+    Read nowhere else: in config/config.yaml, on a side group's entry or in a
+    folder config.yaml it does nothing. There is no trigger phrase.
 
     KEYS:
-      triggers
-        A LIST of phrases, each matched against the WHOLE message (trimmed, any
-        case), optionally followed by whitespace and a label of at most 60
-        characters. No non-blank phrase = off. No label = HHMM-MMDDYYYY. The
-        same label while its group is open opens nothing; after /end (or once
-        the group is gone) it opens "<label> HHMM-MMDDYYYY".
-      prefix
-        DEFAULT: "SI+". Put before the chat title in the group's name.
+      automatic
+        true → no being replies in this chat. The first reply opens the group
+        "SI+<chat title>" (the secondary creates it, inviting the sender of the
+        message being answered; no secondary → the primary does), and that
+        reply and every later one goes there, unquoted. A message from one of
+        our own accounts makes it on the primary with Rodz. It is a /join-kind
+        alias of the chat (same folder and thread, its own transcript), marked
+        automatic: true; /send and /end work in it, and after /end or once the
+        group is gone the next reply opens a new one. Only the node_role
+        'primary' node creates it; the other node links it from the intro and,
+        until then, withholds its replies. DEFAULT false (replies in place).
   `,
 
   aliases: `

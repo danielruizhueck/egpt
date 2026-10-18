@@ -44,8 +44,8 @@ contacts:
       # browser group: browsers.yaml uploads:
       #privileged_browser: true
 
-      # SI chats: "SI chat <label>" here opens "SI+<title>+<label>" (see config-schema superchats)
-      #superchats: { triggers: [ "SI chat" ], prefix: "SI+" }
+      # no reply here: every reply goes to the group "SI+<title>", made on the first one (see config-schema side_group)
+      #side_group: { automatic: true }
 
       # one block per resident agent, keyed by its config.yaml agents: name.
       # EVERY field a being has lives HERE, flat (operator 2026-08-14: one block

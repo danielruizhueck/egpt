@@ -2860,7 +2860,8 @@ export async function boot({
   // --- services (each DI-wired; none closes over another) ---
   const services = {
     identity: createIdentity({ now, timeZone: transcriptTimeZone }),
-    gating: createGating({ getConfig, loadState: _loadState, defaultKey }),
+    // sideGroupFor: a reply in a side_group.automatic chat goes to its SI+ group (commands, below; decide runs once the spine exists).
+    gating: createGating({ getConfig, loadState: _loadState, defaultKey, sideGroupFor: (ev) => commands.autoSideGroup?.(ev) }),
     // Router resolves an @token against the unified `agents:` block (operator 2026-07-02) —
     // the ONE registry, and since 2026-07-25 the ONLY source of off-node reach (a relay agent's
     // relay_channel). defaultBeing = defaultKey: the persona-route + the un-@mentioned
@@ -3160,6 +3161,15 @@ export async function boot({
     }
     return earBridge;
   };
+  // A side group lives on the account that made it (commands.sideGroupPlan): read the ear first, then
+  // the mouth. A room neither account has is gone only when both say so.
+  const sideChatRaw = async (chatId) => {
+    const r = await earBridge.chatRaw(chatId);
+    const mouth = postBridgeFor('secondary');
+    if (r || mouth === earBridge) return r;
+    const m = await mouth.chatRaw(chatId);
+    return m || (r === false && m === false ? false : null);
+  };
   // Every warm session's live background tasks, with the conversation each would wake in.
   const liveBackground = () => pool.stats().keys.flatMap((k) => pool.background(k).map((t) => ({ ...(brain.convOfKey(k) ?? { being: '?', chatId: k }), ...t })));
   // What this node is handling, in state/background.json (src/spine/background.mjs). Real-node only (tests: backgroundFile).
@@ -3228,7 +3238,8 @@ export async function boot({
     // group create); chatTitle its display name.
     forkBridge: {
       editMessage:   (chatId, msgId, text)            => earBridge.editMessage(chatId, msgId, text),
-      createGroup:   (opts)                           => earBridge.createGroup(opts),
+      // `via` (2026-10-18): the account that makes the group, 'secondary' (the mouth) or 'primary'.
+      createGroup:   (opts, { via = null } = {})      => postBridgeFor(via).createGroup(opts),
       // /send's post_back_from (operator 2026-10-03): 'primary' posts via the operator's OWN account,
       // 'secondary' via the mouth. Resolve the NAMED connection to its already-dialled bridge (the
       // SAME bridgeByEndpoint/endpointFor map every other outbound uses), falling back to the ear
@@ -3237,17 +3248,19 @@ export async function boot({
       // `unsigned` (operator 2026-10-04, /send) threads straight into the SAME send as skipSignature:
       // the relay posts back AS THE OPERATOR with no node signature (no visible 🏰, no invisible tag),
       // while still flowing through .send so its sent id is tracked for echo-dedup like any other post.
-      postReply:     (chatId, text, replyToMessageID, { via = null, unsigned = false } = {}) =>
-        postBridgeFor(via).send(chatId, text, { replyTo: replyToMessageID, skipSignature: unsigned }),
-      archiveChat:   (chatId)                         => earBridge.archiveChat(chatId),
-      chatAccountId: async (chatId) => { try { return (await earBridge.chatRaw(chatId))?.accountID ?? null; } catch { return null; } },
-      chatRaw:       (chatId)                         => earBridge.chatRaw(chatId),   // the side-group liveness check
+      // `canary`: the automatic side group's intro carries its origin chat id (persona-wrap).
+      postReply:     (chatId, text, replyToMessageID, { via = null, unsigned = false, canary = null } = {}) =>
+        postBridgeFor(via).send(chatId, text, { replyTo: replyToMessageID, skipSignature: unsigned, canary }),
+      archiveChat:   (chatId, { via = null } = {})    => postBridgeFor(via).archiveChat(chatId),   // via: the connection /end arrived on
+      chatAccountId: async (chatId) => { try { return (await sideChatRaw(chatId))?.accountID ?? null; } catch { return null; } },
+      chatRaw:       (chatId)                         => sideChatRaw(chatId),   // the side-group liveness check
       chatTitle:     (chatId)                         => earBridge.getChatName(chatId),
-      listMessagesRaw: (chatId, opts)                 => earBridge.listMessagesRaw(chatId, opts),   // /send reads the replied-to message's live text
+      listMessagesRaw: (chatId, opts = {})            => postBridgeFor(opts.via).listMessagesRaw(chatId, opts),   // /send reads the replied-to message's live text
       // RODZ'S BEEPER USER ID (operator 2026-10-03) — the create needs `@whatsapp_lid-…`, not a
       // +phone (the API rejects it). Resolved from config.beeper.secondary.phone by scanning this
-      // account's rosters (phoneNumber+id ride together on every participant).
-      resolveUserIdByPhone: (phoneDigits, opts) => earBridge.resolveUserIdByPhone(phoneDigits, opts),
+      // account's rosters (phoneNumber+id ride together on every participant). `via`: another account's
+      // rosters (a side group's requester, under the creating account's own id — commands.requesterIdOn).
+      resolveUserIdByPhone: (phoneDigits, opts = {}) => postBridgeFor(opts.via).resolveUserIdByPhone(phoneDigits, opts),
       // THE SECONDARY'S OWN ROOM ID for the new side-group (operator 2026-10-03, the OPENER) — the
       // group is created on the primary, but Beeper gives the SECONDARY (Rodz) its own room id for the
       // same group, surfaced async, under the SAME title. Resolved on the SECONDARY bridge

@@ -51,7 +51,7 @@ export function resolveMode(bv, being, c = {}) {
 
 // Is side group `chatId` still read by a human? true | false (DEFINITE: the GET 404'd, or the roster
 // holds only our mouth accounts) | null (unknown — keep using it). The operator counts as a human; a
-// mouth is any config.beeper phone other than the primary's. Shared by /join and SI chats.
+// mouth is any config.beeper phone other than the primary's. Shared by /join and the automatic group.
 export async function superChannelAlive(chatId, { chatRaw, config = {} }) {
   const raw = await chatRaw(chatId);
   if (raw === false) return false;
@@ -63,7 +63,9 @@ export async function superChannelAlive(chatId, { chatRaw, config = {} }) {
   return items.some((p) => !mouths.has(digits(p?.phoneNumber)));
 }
 
-export function createGating({ getConfig = () => ({}), loadState = null, defaultKey = 'e' } = {}) {
+// sideGroupFor(ev) → the chat a reply here goes to instead (a chat id), false = withhold it, null =
+// in place (commands.autoSideGroup: side_group.automatic, operator 2026-10-18). Absent → always in place.
+export function createGating({ getConfig = () => ({}), loadState = null, defaultKey = 'e', sideGroupFor = null } = {}) {
   const cfg = () => getConfig() ?? {};
 
   // The single per-message decision. ONE conversations.yaml read resolves the conversation's
@@ -81,7 +83,15 @@ export function createGating({ getConfig = () => ({}), loadState = null, default
     const { mode } = resolveMode(bv, being, c);
     const paused = !!(c.dispatch?.auto_paused ?? c.whatsapp?.auto_e_paused);
     const allowed = replyAllowed(mode, mention ?? {});
-    const mayReply = !denied && mayEmitChat({ paused, mode, replyAllowed: allowed, isReaction: ev.kind === 'reaction' });
+    let mayReply = !denied && mayEmitChat({ paused, mode, replyAllowed: allowed, isReaction: ev.kind === 'reaction' });
+    // Not asked for a backlog read or the operator's own line in an auto chat: no reply follows either.
+    let replyChatId = null;
+    if (mayReply && sideGroupFor && !ev.backlog && !(mode === 'auto' && ev.isSender)) {
+      let at = null;
+      try { at = await sideGroupFor(ev); } catch { at = false; }
+      if (at === false) mayReply = false;
+      else if (at) replyChatId = at;
+    }
     // send_to_egpt keeps the persona in a chat's context even when it won't reply — that's a
     // persona concern. A sibling is an engineer, not a context-follower: it runs ONLY when it
     // may reply, so force 'mode' for any non-persona being (never 'always'). A denied sender
@@ -89,7 +99,7 @@ export function createGating({ getConfig = () => ({}), loadState = null, default
     const sendToEgpt = (being !== defaultKey || denied || mode === 'mute')
       ? 'mode'
       : (_send(bv?.send_to_egpt) ?? _send(c.dispatch?.send_to_egpt) ?? _send(c.whatsapp?.send_to_egpt) ?? 'mode');
-    return { mode, receives: receives(mode), mayReply, sendToEgpt };
+    return { mode, receives: receives(mode), mayReply, sendToEgpt, ...(replyChatId ? { replyChatId } : {}) };
   }
 
   // POST-brain surfacing: the reply surfaces when mayReply held AND it isn't an

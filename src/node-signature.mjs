@@ -112,6 +112,33 @@ export function renderNodeSignature(text) {
   });
 }
 
+// ── THE CANARY (the automatic side group's intro, 2026-10-18) ──
+// A second frame beside the node frame carrying the origin chat's id on the shared account, so the
+// other node links the same group (commands.linkSideGroup). Same TAGS codec; its interior leads with
+// '/', which a node name never does, so decodeNodeSignature reads the node frame alone and
+// renderNodeSignature erases this one.
+const CANARY_LEAD = '/';
+/** The invisible canary frame for `chatId`, or '' when empty. Non-ASCII is dropped. */
+export function encodeChatCanary(chatId) {
+  const id = String(chatId ?? '').trim();
+  if (!id) return '';
+  let out = '';
+  for (const ch of `${CANARY_LEAD}${id}`) {
+    const c = ch.codePointAt(0);
+    if (c >= 0x20 && c <= 0x7E) out += String.fromCodePoint(TAG_BASE + c);
+  }
+  return `${TAG_BEGIN}${out}${TAG_CANCEL}`;
+}
+/** The chat id a canary frame in `text` carries, or null. */
+export function decodeChatCanary(text) {
+  for (const f of String(text ?? '').match(FRAME_G) ?? []) {
+    let interior = '';
+    for (const ch of f.slice(TAG_BEGIN.length, -TAG_CANCEL.length)) interior += String.fromCodePoint(ch.codePointAt(0) - TAG_BASE);
+    if (interior.startsWith(CANARY_LEAD)) return interior.slice(CANARY_LEAD.length) || null;
+  }
+  return null;
+}
+
 /**
  * Strip a RENDERED `<node>` marker (renderNodeSignature's output) from `text` — the strip
  * counterpart to renderNodeSignature, for a caller reading a TRANSCRIPT rather than the

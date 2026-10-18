@@ -28,7 +28,7 @@ const TEST_HOME = vi.hoisted(() => {
   process.env.EGPT_HOME = dir;
   return dir;
 });
-import { createCommands, resolveSecondaryParticipantId, rewriteForkSessionJsonl, JOIN_PLACEHOLDER_DEFAULT, JOIN_EXISTS_DEFAULT, JOIN_LIMIT_DEFAULT, SPLIT_PLACEHOLDER_DEFAULT, GROUP_TITLE_DEFAULT, JOIN_OPENER_DEFAULT, SPLIT_OPENER_DEFAULT, SEND_POST_BACK_FROM_DEFAULT } from '../src/spine/commands.mjs';
+import { createCommands, resolveSecondaryParticipantId, rewriteForkSessionJsonl, JOIN_PLACEHOLDER_DEFAULT, JOIN_EXISTS_DEFAULT, JOIN_LIMIT_DEFAULT, SPLIT_PLACEHOLDER_DEFAULT, GROUP_TITLE_DEFAULT, JOIN_OPENER_DEFAULT, SPLIT_OPENER_DEFAULT, SEND_POST_BACK_FROM_DEFAULT, SIDE_GROUP_PREFIX } from '../src/spine/commands.mjs';
 import { resolveBeingDef, sandboxSharePathsFor } from '../src/spine/brainpool.mjs';
 import { ensureContact, recordThread, getContact, getBeing, slugDir, aliasContact, aliasTargetOf, patchContact, patchBeing, readState as readConvState, writeState as writeConvState } from '../src/conversations-state.mjs';
 import { shortChatId } from '../src/bridges/chat-id.mjs';
@@ -139,7 +139,7 @@ function harness({ config, state, rooms = new Map(), rodzUserId = RODZ_USER_ID, 
   const calls = { edit: [], create: [], post: [], archive: [], resolve: [], resolveTitle: [], resolvePrimaryTitle: [], list: [] };
   const forkBridge = {
     editMessage: async (chatId, msgId, text) => { calls.edit.push({ chatId, msgId, text }); return true; },
-    createGroup: async (opts) => { calls.create.push(opts); return { success: true, chatID: createChatId ? createChatId(opts) : (opts.title?.includes('split') ? SPLIT_CHAT_FULL : JOIN_CHAT_FULL) }; },
+    createGroup: async (opts, o = {}) => { calls.create.push({ ...opts, ...(o.via ? { via: o.via } : {}) }); return { success: true, chatID: createChatId ? createChatId(opts) : (opts.title?.includes('split') ? SPLIT_CHAT_FULL : JOIN_CHAT_FULL) }; },
     // records the via account /send + the opener chose (4th arg) so a test can assert which connection posts.
     // `unsigned` is recorded ONLY when the caller passes it (the /send relay does; the opener does not), so
     // the opener's exact-shape toEqual assertions stay 4-key and the /send tests can assert the flag.
@@ -195,7 +195,7 @@ describe('/join — alias model, node_role gate', () => {
     expect(calls.create).toHaveLength(1);
     const c = calls.create[0];
     expect(c.type).toBe('group');
-    expect(c.title).toBe('egpt egpt super de Proyecto X');   // group_title with {name}=the default name ("egpt super") + {group}
+    expect(c.title).toBe('SI+egpt egpt super de Proyecto X');   // group_title with {name}=the default name ("egpt super") + {group}
     expect('messageText' in c).toBe(false);
     expect(c.participantIDs).toEqual([RODZ_USER_ID]);
     expect(c.accountID).toBe('whatsapp');
@@ -209,7 +209,7 @@ describe('/join — alias model, node_role gate', () => {
     // transcript = the side-room's sanitized title, stored so its per-surface log (transcript-<title>.md)
     // is resolvable from chatId + state without a live ev.chatName (operator 2026-10-04).
     // join_name = the /join name, so a later /join with the same name finds this room (2026-10-16).
-    expect(st.contacts.whatsapp[JOIN_CHAT]).toEqual({ aliasOf: primaryJid, transcript: 'egpt egpt super de Proyecto X', join_name: 'egpt super' });
+    expect(st.contacts.whatsapp[JOIN_CHAT]).toEqual({ aliasOf: primaryJid, transcript: 'SI+egpt egpt super de Proyecto X', join_name: 'egpt super' });
     expect(aliasTargetOf(st, 'whatsapp', JOIN_CHAT)).toBe(primaryJid);
     expect(getContact(st, 'whatsapp', JOIN_CHAT).slug).toBe(getContact(st, 'whatsapp', C_CHAT).slug);  // same folder
     expect(calls.edit).toEqual([{ chatId: C_CHAT, msgId: 'cmd1', text: PLACEHOLDER_JOIN }]);
@@ -218,14 +218,14 @@ describe('/join — alias model, node_role gate', () => {
   it('a <name> arg fills {name} in the title (and is NOT treated as a node)', async () => {
     const { cmds, calls } = harness({ config: cfg() });
     await cmds.run({ ...EV, body: '/join spoiler' });
-    expect(calls.create[0].title).toBe('egpt spoiler de Proyecto X');
+    expect(calls.create[0].title).toBe('SI+egpt spoiler de Proyecto X');
   });
 
   it('placeholder + title fall back to the built-in defaults when the texts are unset', async () => {
     const { cmds, calls } = harness({ config: cfg({ texts: false }) });
     await cmds.run({ ...EV });
     expect(calls.edit[0].text).toBe(JOIN_PLACEHOLDER_DEFAULT.replaceAll('{name}', 'egpt super'));
-    expect(calls.create[0].title).toBe(GROUP_TITLE_DEFAULT.replace('{name}', 'egpt super').replace('{group}', 'Proyecto X'));
+    expect(calls.create[0].title).toBe(SIDE_GROUP_PREFIX + GROUP_TITLE_DEFAULT.replace('{name}', 'egpt super').replace('{group}', 'Proyecto X'));
   });
 
   it('SILENT on a non-primary-role node (no override)', async () => {
@@ -276,7 +276,7 @@ describe('/join — alias model, node_role gate', () => {
     const { cmds, calls } = harness({ config: cfg({ node_name: 'do', node_role: 'secondary' }) });
     await cmds.run({ ...EV, body: '/join do' });
     expect(calls.create).toHaveLength(1);            // the override selected this node
-    expect(calls.create[0].title).toBe('egpt egpt super de Proyecto X');   // 'do' was the <node>, NOT the <name> → the default name
+    expect(calls.create[0].title).toBe('SI+egpt egpt super de Proyecto X');   // 'do' was the <node>, NOT the <name> → the default name
   });
 
   it('`/join do` on the primary node kg stands down — it addressed do, not kg (both forms: space + =)', async () => {
@@ -307,14 +307,14 @@ describe('/join — alias model, node_role gate', () => {
 
 // ── /split (REAL FORK — new conversation, diverging thread copy) ────────────────────────────────────
 describe('/split — new conversation with each resident being\'s thread COPIED to a new, diverging id', () => {
-  const EV = { chatId: C_CHAT, surface: 'whatsapp', msgId: 'cmd1', chatName: 'Proyecto X', body: '/split' };
+  const EV = { chatId: C_CHAT, surface: 'whatsapp', msgId: 'cmd1', chatName: 'Proyecto X', isSender: true, body: '/split' };
 
   it('creates a NEW conversation (own slug, NOT an alias), records parent_chat, edits placeholder from config.split', async () => {
     seedSourceThreads('e');
     const { cmds, calls, getState } = harness({ config: cfg() });
     await cmds.run({ ...EV });
     const st = getState();
-    expect(calls.create[0].title).toBe('egpt egpt split de Proyecto X');
+    expect(calls.create[0].title).toBe('SI+egpt egpt split de Proyecto X');
     // NOT an alias: SPLIT_CHAT is its own primary entry with its own slug
     expect(aliasTargetOf(st, 'whatsapp', SPLIT_CHAT)).toBe(null);
     const splitSlug = getContact(st, 'whatsapp', SPLIT_CHAT).slug;
@@ -397,13 +397,13 @@ describe('/split — new conversation with each resident being\'s thread COPIED 
 // ── the OPENER (posted FROM RODZ so the empty group surfaces in Beeper) ───────────────────────────────
 describe('opener — posted into the new group FROM RODZ (secondary) so it surfaces in Beeper', () => {
   const JOIN_EV = { chatId: C_CHAT, surface: 'whatsapp', msgId: 'cmd1', chatName: 'Proyecto X', isSender: true, body: '/join' };
-  const SPLIT_EV = { chatId: C_CHAT, surface: 'whatsapp', msgId: 'cmd1', chatName: 'Proyecto X', body: '/split' };
+  const SPLIT_EV = { chatId: C_CHAT, surface: 'whatsapp', msgId: 'cmd1', chatName: 'Proyecto X', isSender: true, body: '/split' };
 
   it('/join posts config.join.opener ({group}=parent title) to the SECONDARY room once it lists the group by title', async () => {
     const { cmds, calls } = harness({ config: cfg() });
     await cmds.run({ ...JOIN_EV });
     // resolved the SECONDARY's own room for the NEW group BY TITLE, scoped to the chat account
-    expect(calls.resolveTitle).toEqual([{ title: 'egpt egpt super de Proyecto X', opts: { accountID: 'whatsapp' } }]);
+    expect(calls.resolveTitle).toEqual([{ title: 'SI+egpt egpt super de Proyecto X', opts: { accountID: 'whatsapp' } }]);
     // opener posted to the SECONDARY room (NOT JOIN_CHAT, the primary's), FROM the secondary, {group} filled
     expect(calls.post).toEqual([{ chatId: SEC_JOIN_ROOM, text: '🔗 sala espejo de Proyecto X', replyToMessageID: null, via: 'secondary' }]);
   });
@@ -412,7 +412,7 @@ describe('opener — posted into the new group FROM RODZ (secondary) so it surfa
     seedSourceThreads('e');
     const { cmds, calls } = harness({ config: cfg() });
     await cmds.run({ ...SPLIT_EV });
-    expect(calls.resolveTitle).toEqual([{ title: 'egpt egpt split de Proyecto X', opts: { accountID: 'whatsapp' } }]);
+    expect(calls.resolveTitle).toEqual([{ title: 'SI+egpt egpt split de Proyecto X', opts: { accountID: 'whatsapp' } }]);
     expect(calls.post).toEqual([{ chatId: SEC_SPLIT_ROOM, text: '🍴 bifurcación de Proyecto X', replyToMessageID: null, via: 'secondary' }]);
   });
 
@@ -461,9 +461,9 @@ describe('opener — posted into the new group FROM RODZ (secondary) so it surfa
 // by that exact title, suffix the title (HHMM-MMDDYYYY, local) so each side-room's title is unique.
 describe('unique side-room title — a colliding title gets a HHMM-MMDDYYYY suffix so the opener lands in the right group', () => {
   const JOIN_EV = { chatId: C_CHAT, surface: 'whatsapp', msgId: 'cmd1', chatName: 'Proyecto X', isSender: true, body: '/join' };
-  const SPLIT_EV = { chatId: C_CHAT, surface: 'whatsapp', msgId: 'cmd1', chatName: 'Proyecto X', body: '/split' };
+  const SPLIT_EV = { chatId: C_CHAT, surface: 'whatsapp', msgId: 'cmd1', chatName: 'Proyecto X', isSender: true, body: '/split' };
   const FIXED = () => new Date(2026, 9, 4, 10, 48, 0).getTime();   // 10:48 local on 2026-10-04 → "1048-10042026"
-  const BASE_JOIN = 'egpt egpt super de Proyecto X';               // group_title with the default {name}
+  const BASE_JOIN = 'SI+egpt egpt super de Proyecto X';               // group_title with the default {name}
 
   // Since 2026-10-16 a 2nd /join with the same name while the 1st group is live JOINS it instead of
   // creating another, so the collision is the /end-ed (archived, still titled) group.
@@ -493,43 +493,43 @@ describe('unique side-room title — a colliding title gets a HHMM-MMDDYYYY suff
   it('a NAMED /join whose title already exists on the primary ALSO gets the suffix (collision logic is not limited to the default name)', async () => {
     const { cmds, calls } = harness({ config: cfg(), resolvePrimaryChatIdByTitle: () => '!exists', now: FIXED });
     await cmds.run({ ...JOIN_EV, body: '/join foo' });
-    expect(calls.create[0].title).toBe('egpt foo de Proyecto X 1048-10042026');
+    expect(calls.create[0].title).toBe('SI+egpt foo de Proyecto X 1048-10042026');
   });
 
   it('/split: a colliding title gets the suffix too (shared uniqueTitle helper)', async () => {
     seedSourceThreads('e');
     const { cmds, calls } = harness({ config: cfg(), resolvePrimaryChatIdByTitle: () => '!exists', now: FIXED });
     await cmds.run({ ...SPLIT_EV });
-    expect(calls.create[0].title).toBe('egpt egpt split de Proyecto X 1048-10042026');
+    expect(calls.create[0].title).toBe('SI+egpt egpt split de Proyecto X 1048-10042026');
   });
 
   it('join.default_name / split.default_name from config override the fallback; unset → "egpt super" / "egpt split"', async () => {
     const jc = cfg(); jc.join = { ...jc.join, default_name: 'super dupe' };
     const j = harness({ config: jc });
     await j.cmds.run({ ...JOIN_EV });
-    expect(j.calls.create[0].title).toBe('egpt super dupe de Proyecto X');
+    expect(j.calls.create[0].title).toBe('SI+egpt super dupe de Proyecto X');
 
     seedSourceThreads('e');
     const sc = cfg(); sc.split = { ...sc.split, default_name: 'splitty' };
     const s = harness({ config: sc });
     await s.cmds.run({ ...SPLIT_EV });
-    expect(s.calls.create[0].title).toBe('egpt splitty de Proyecto X');
+    expect(s.calls.create[0].title).toBe('SI+egpt splitty de Proyecto X');
 
     const jf = harness({ config: cfg() });           // join unset → fallback "egpt super"
     await jf.cmds.run({ ...JOIN_EV });
-    expect(jf.calls.create[0].title).toBe('egpt egpt super de Proyecto X');
+    expect(jf.calls.create[0].title).toBe('SI+egpt egpt super de Proyecto X');
 
     seedSourceThreads('e');
     const sf = harness({ config: cfg() });            // split unset → fallback "egpt split"
     await sf.cmds.run({ ...SPLIT_EV });
-    expect(sf.calls.create[0].title).toBe('egpt egpt split de Proyecto X');
+    expect(sf.calls.create[0].title).toBe('SI+egpt egpt split de Proyecto X');
   });
 
   it('REGRESSION: a first-time named /join (title NOT on the primary) is UNCHANGED — no suffix, alias keyed SHORT, placeholder edited', async () => {
     const { cmds, calls, getState } = harness({ config: cfg(), resolvePrimaryChatIdByTitle: () => null });
     await cmds.run({ ...JOIN_EV, body: '/join foo' });
-    expect(calls.create[0].title).toBe('egpt foo de Proyecto X');     // probed, not found → no suffix
-    expect(calls.resolvePrimaryTitle).toEqual([{ title: 'egpt foo de Proyecto X', opts: { accountID: 'whatsapp' } }]);
+    expect(calls.create[0].title).toBe('SI+egpt foo de Proyecto X');     // probed, not found → no suffix
+    expect(calls.resolvePrimaryTitle).toEqual([{ title: 'SI+egpt foo de Proyecto X', opts: { accountID: 'whatsapp' } }]);
     const st = getState();
     expect(st.contacts.whatsapp[JOIN_CHAT].aliasOf).toBe(getContact(st, 'whatsapp', C_CHAT).jid);
     expect(calls.edit).toEqual([{ chatId: C_CHAT, msgId: 'cmd1', text: PLACEHOLDER_JOIN }]);
@@ -561,7 +561,7 @@ describe('/join <name> — template placeholder, same-name reuse, member gate', 
     const c = cfg(); c.join = { ...c.join, placeholder: '🔗 {by} joined {name} — {title} — {group}' };
     const { cmds, calls } = harness({ config: c });
     await cmds.run(opJoin('/join emely'));
-    expect(calls.edit).toEqual([{ chatId: C_CHAT, msgId: 'cmd1', text: '🔗 An joined emely — egpt emely de Proyecto X — Proyecto X' }]);
+    expect(calls.edit).toEqual([{ chatId: C_CHAT, msgId: 'cmd1', text: '🔗 An joined emely — SI+egpt emely de Proyecto X — Proyecto X' }]);
   });
 
   it('the built-in default names the group and the command to join it', async () => {
@@ -575,7 +575,7 @@ describe('/join <name> — template placeholder, same-name reuse, member gate', 
     const { cmds, getState } = harness({ config: cfg() });
     await cmds.run(opJoin('/join Emely'));
     const st = getState();
-    expect(st.contacts.whatsapp[JOIN_CHAT]).toEqual({ aliasOf: getContact(st, 'whatsapp', C_CHAT).jid, transcript: 'egpt Emely de Proyecto X', join_name: 'emely', join_by: 'An' });
+    expect(st.contacts.whatsapp[JOIN_CHAT]).toEqual({ aliasOf: getContact(st, 'whatsapp', C_CHAT).jid, transcript: 'SI+egpt Emely de Proyecto X', join_name: 'emely', join_by: 'An' });
   });
 
   it('a 2nd member, SAME name, live room, not in it: NO new group — told it exists and whom to ask', async () => {
@@ -617,7 +617,7 @@ describe('/join <name> — template placeholder, same-name reuse, member gate', 
     const { cmds, calls, getState } = harness({ config: cfg(), chatRaw: roster(), createChatId: byTitle });
     await cmds.run(opJoin('/join emely'));
     await cmds.run(opJoin('/join nue11'));
-    expect(calls.create.map((c) => c.title)).toEqual(['egpt emely de Proyecto X', 'egpt nue11 de Proyecto X']);
+    expect(calls.create.map((c) => c.title)).toEqual(['SI+egpt emely de Proyecto X', 'SI+egpt nue11 de Proyecto X']);
     expect(joinAliases(getState()).map(([, e]) => e.join_name).sort()).toEqual(['emely', 'nue11']);
   });
 
@@ -628,7 +628,7 @@ describe('/join <name> — template placeholder, same-name reuse, member gate', 
     await cmds.run(memberJoin('/join emely'));
     expect(calls.archive).toEqual([{ chatId: JOIN_CHAT }]);
     expect(calls.create).toHaveLength(2);
-    expect(calls.create[1].participantIDs).toEqual([RODZ_USER_ID, MEMBER]);
+    expect(calls.create[1].participantIDs).toEqual([MEMBER]);
     expect(sent).toEqual([{ chatId: C_CHAT, text: PLACEHOLDER_JOIN }]);
   });
 
@@ -650,33 +650,29 @@ describe('/join <name> — template placeholder, same-name reuse, member gate', 
   });
 
   // ── the gate ──
-  it('isCommand admits /join from any sender (joinGroup gates it); /split, /send, /end, /agents stay operator-only', () => {
+  it('isCommand admits /join /split /send /end from any sender (each handler gates it); /agents verbs stay operator-only', () => {
     const { cmds } = harness({ config: cfg() });
-    expect(cmds.isCommand(memberJoin('/join emely'))).toBe(true);
-    for (const body of ['/split x', '/send', '/end', '/agents rethread e', '/agents reset e', '/agents mode on e', '/joinx']) {
+    for (const body of ['/join emely', '/split x', '/send', '/end']) expect(cmds.isCommand(memberJoin(body)), body).toBe(true);
+    for (const body of ['/agents rethread e', '/agents reset e', '/agents mode on e', '/joinx']) {
       expect(cmds.isCommand(memberJoin(body)), body).toBe(false);
     }
   });
 
-  it('a member a resident being would answer creates the group WITH themselves in it; the placeholder is a reply', async () => {
+  it('a member: the secondary creates the group with only them in it; the placeholder is a reply', async () => {
     const { cmds, calls, sent, getState } = harness({ config: cfg() });
     await cmds.run(memberJoin('/join emely'));
     expect(calls.create).toHaveLength(1);
-    expect(calls.create[0].participantIDs).toEqual([RODZ_USER_ID, MEMBER]);
+    expect(calls.create[0]).toMatchObject({ participantIDs: [MEMBER], via: 'secondary' });
     expect(calls.edit).toHaveLength(0);
     expect(sent).toEqual([{ chatId: C_CHAT, text: PLACEHOLDER_JOIN }]);
     expect(getState().contacts.whatsapp[JOIN_CHAT].join_by).toBe('Emely');
   });
 
-  it('a member no resident being would answer (allowed_users) is refused silently — nothing created, edited or sent', async () => {
+  it('a member no resident being would answer (allowed_users) may /join too: anyone in the group', async () => {
     const c = { ...cfg(), agents: { e: { conversation_defaults: { allowed_users: ['@someone-else:beeper.local'] } } } };
-    const { cmds, calls, sent, getState } = harness({ config: c });
-    const before = getState();
+    const { cmds, calls } = harness({ config: c });
     await cmds.run(memberJoin('/join emely'));
-    expect(calls.create).toHaveLength(0);
-    expect(calls.edit).toHaveLength(0);
-    expect(sent).toHaveLength(0);
-    expect(getState()).toBe(before);
+    expect(calls.create).toHaveLength(1);
   });
 
   it('the conversation tier wins: a per-conversation allowed_users naming the member lets them in', async () => {
@@ -687,12 +683,12 @@ describe('/join <name> — template placeholder, same-name reuse, member gate', 
     expect(calls.create).toHaveLength(1);
   });
 
-  it('a conversation whose own agent denies a stranger: another resident does not let them in', async () => {
+  it('a conversation whose own agent denies a stranger: they may still /join (membership is the gate)', async () => {
     const c = { ...cfg(), agents: { e: {}, mk: {} } };
     const st = patchBeing(seedState(), 'whatsapp', C_CHAT, 'mk', { default: true, allowed_users: [] });
     const { cmds, calls } = harness({ config: c, state: st });
     await cmds.run(memberJoin('/join emely'));
-    expect(calls.create).toHaveLength(0);
+    expect(calls.create).toHaveLength(1);
   });
 
   it('not widened in a 1:1: the other party of a private chat cannot /join', async () => {
@@ -730,7 +726,7 @@ describe('/join <name> — template placeholder, same-name reuse, member gate', 
   it('member_cap 2: two rooms, the third is refused', async () => {
     const { cmds, calls, sent } = harness({ config: capped(2), chatRaw: roster(), createChatId: byTitle });
     for (const n of three) await cmds.run(memberJoin(`/join ${n}`));
-    expect(calls.create.map((c) => c.title)).toEqual(['egpt emely de Proyecto X', 'egpt nue11 de Proyecto X']);
+    expect(calls.create.map((c) => c.title)).toEqual(['SI+egpt emely de Proyecto X', 'SI+egpt nue11 de Proyecto X']);
     expect(sent.at(-1)).toEqual({ chatId: C_CHAT, text: JOIN_LIMIT_DEFAULT.replaceAll('{name}', 'emely, nue11') });
   });
 
@@ -776,7 +772,7 @@ describe('/join <name> — template placeholder, same-name reuse, member gate', 
 describe('/send — relays the replied-to message back to the original (alias OR recorded parent)', () => {
   it('in a /join group: posts to the alias target (primary = the original chat directly); repeatable, no close', async () => {
     const { cmds, calls, getState } = harness({ state: stateWithJoin(), rooms: roomWith(JOIN_CHAT), config: cfg({ send: { post_back_from: 'primary' } }) });
-    await cmds.run({ chatId: JOIN_CHAT, surface: 'whatsapp', msgId: 'snd1', replyToId: 'M1', body: '/send' });
+    await cmds.run({ chatId: JOIN_CHAT, surface: 'whatsapp', msgId: 'snd1', replyToId: 'M1', body: '/send', isSender: true });
     expect(calls.post).toHaveLength(1);
     expect(calls.post[0].chatId).toBe(C_CHAT);
     expect(calls.post[0].via).toBe('primary');
@@ -787,14 +783,14 @@ describe('/send — relays the replied-to message back to the original (alias OR
 
   it('REPRODUCE-FIRST: the relay requests an UNSIGNED post (unsigned:true) so it lands as the operator, with no node signature', async () => {
     const { cmds, calls } = harness({ state: stateWithJoin(), rooms: roomWith(JOIN_CHAT), config: cfg({ send: { post_back_from: 'primary' } }) });
-    await cmds.run({ chatId: JOIN_CHAT, surface: 'whatsapp', msgId: 'snd1', replyToId: 'M1', body: '/send' });
+    await cmds.run({ chatId: JOIN_CHAT, surface: 'whatsapp', msgId: 'snd1', replyToId: 'M1', body: '/send', isSender: true });
     expect(calls.post).toHaveLength(1);
     expect(calls.post[0].unsigned).toBe(true);   // routed INTO the existing send path with the unsigned flag
   });
 
   it('in a /split group: posts to the recorded parent_chat (primary = directly)', async () => {
     const { cmds, calls } = harness({ state: stateWithSplit(), rooms: roomWith(SPLIT_CHAT), config: cfg({ send: { post_back_from: 'primary' } }) });
-    await cmds.run({ chatId: SPLIT_CHAT, surface: 'whatsapp', msgId: 'snd1', replyToId: 'M1', body: '/send' });
+    await cmds.run({ chatId: SPLIT_CHAT, surface: 'whatsapp', msgId: 'snd1', replyToId: 'M1', body: '/send', isSender: true });
     expect(calls.post).toHaveLength(1);
     expect(calls.post[0].chatId).toBe(C_CHAT);
     expect(calls.post[0].text).toBe('↪ from egpt split Proyecto X:\nla respuesta elegida');   // send.origin auto names the split
@@ -802,7 +798,7 @@ describe('/send — relays the replied-to message back to the original (alias OR
 
   it('post_back_from secondary: resolves the ORIGINAL\'s secondary room by title and posts THERE (Rodz), not the primary id', async () => {
     const { cmds, calls } = harness({ state: stateWithJoin(), rooms: roomWith(JOIN_CHAT), config: cfg({ send: { post_back_from: 'secondary' } }) });
-    await cmds.run({ chatId: JOIN_CHAT, surface: 'whatsapp', msgId: 'snd1', replyToId: 'M1', body: '/send' });
+    await cmds.run({ chatId: JOIN_CHAT, surface: 'whatsapp', msgId: 'snd1', replyToId: 'M1', body: '/send', isSender: true });
     expect(calls.post[0].via).toBe('secondary');
     expect(calls.post[0].chatId).toBe(SEC_JOIN_ROOM);   // Rodz's OWN room for the original — NOT C_CHAT (the primary id)
     expect(calls.post[0].chatId).not.toBe(C_CHAT);
@@ -810,36 +806,36 @@ describe('/send — relays the replied-to message back to the original (alias OR
 
   it('post_back_from secondary but the secondary room is unresolvable → falls back to the primary, into the original', async () => {
     const { cmds, calls } = harness({ state: stateWithJoin(), rooms: roomWith(JOIN_CHAT), config: cfg({ send: { post_back_from: 'secondary' } }), resolveSecondaryChatIdByTitle: () => null });
-    await cmds.run({ chatId: JOIN_CHAT, surface: 'whatsapp', msgId: 'snd1', replyToId: 'M1', body: '/send' });
+    await cmds.run({ chatId: JOIN_CHAT, surface: 'whatsapp', msgId: 'snd1', replyToId: 'M1', body: '/send', isSender: true });
     expect(calls.post[0].via).toBe('primary');
     expect(calls.post[0].chatId).toBe(C_CHAT);
   });
 
   it('post_back_from: primary (default, operator 2026-10-04) routes via the operator; secondary routes via the mouth', async () => {
     const def = harness({ state: stateWithJoin(), rooms: roomWith(JOIN_CHAT), config: cfg() });              // unset → primary
-    await def.cmds.run({ chatId: JOIN_CHAT, surface: 'whatsapp', msgId: 's', replyToId: 'M1', body: '/send' });
+    await def.cmds.run({ chatId: JOIN_CHAT, surface: 'whatsapp', msgId: 's', replyToId: 'M1', body: '/send', isSender: true });
     expect(def.calls.post[0].via).toBe('primary');
     expect(def.calls.post[0].chatId).toBe(C_CHAT);                                                            // primary posts into the original directly
 
     const sec = harness({ state: stateWithJoin(), rooms: roomWith(JOIN_CHAT), config: cfg({ send: { post_back_from: 'secondary' } }) });
-    await sec.cmds.run({ chatId: JOIN_CHAT, surface: 'whatsapp', msgId: 's', replyToId: 'M1', body: '/send' });
+    await sec.cmds.run({ chatId: JOIN_CHAT, surface: 'whatsapp', msgId: 's', replyToId: 'M1', body: '/send', isSender: true });
     expect(sec.calls.post[0].via).toBe('secondary');
 
     const prim = harness({ state: stateWithJoin(), rooms: roomWith(JOIN_CHAT), config: cfg({ send: { post_back_from: 'primary' } }) });
-    await prim.cmds.run({ chatId: JOIN_CHAT, surface: 'whatsapp', msgId: 's', replyToId: 'M1', body: '/send' });
+    await prim.cmds.run({ chatId: JOIN_CHAT, surface: 'whatsapp', msgId: 's', replyToId: 'M1', body: '/send', isSender: true });
     expect(prim.calls.post[0].via).toBe('primary');
   });
 
   it('SILENT outside a join/split group (no alias, no parent) → nothing posted/sent', async () => {
     const { cmds, sent, calls } = harness({ state: seedState(), rooms: roomWith(C_CHAT), config: cfg() });
-    await cmds.run({ chatId: C_CHAT, surface: 'whatsapp', msgId: 'snd1', replyToId: 'M1', body: '/send' });
+    await cmds.run({ chatId: C_CHAT, surface: 'whatsapp', msgId: 'snd1', replyToId: 'M1', body: '/send', isSender: true });
     expect(sent).toHaveLength(0);
     expect(calls.post).toHaveLength(0);
   });
 
   it('in a group but no reply target → an error, nothing posted', async () => {
     const { cmds, sent, calls } = harness({ state: stateWithJoin(), rooms: roomWith(JOIN_CHAT), config: cfg() });
-    await cmds.run({ chatId: JOIN_CHAT, surface: 'whatsapp', msgId: 'snd1', replyToId: null, body: '/send' });
+    await cmds.run({ chatId: JOIN_CHAT, surface: 'whatsapp', msgId: 'snd1', replyToId: null, body: '/send', isSender: true });
     expect(sent[0].text).toMatch(/reply to a message with \/send/i);
     expect(calls.post).toHaveLength(0);
   });
@@ -856,7 +852,7 @@ describe('/send — relays the replied-to message back to the original (alias OR
 describe('/send — edited-placeholder + inline-stamp cleaning (the end-to-end fix)', () => {
   // cfg + the two keys the cleaning reads: the agent stamp set (body_emoji + name) and the bridge close.
   const sendCfg = () => ({ ...cfg({ send: { post_back_from: 'primary' } }), agents: { egpt: { body_emoji: '🐶', name: 'E' } }, bridge_signature_close: '🏰' });
-  const EV = { chatId: JOIN_CHAT, surface: 'whatsapp', msgId: 'snd1', body: '/send' };
+  const EV = { chatId: JOIN_CHAT, surface: 'whatsapp', msgId: 'snd1', body: '/send', isSender: true };
   // The EXACT live shape: a placeholder entry #21005 then its settled poem as an `edited #21005` block
   // (its `+` side round-trips the persona stamp + signature + the stage-direction's trailing ` ]`).
   const EDITED_TRANSCRIPT = [
@@ -928,7 +924,7 @@ describe('/send — edited-placeholder + inline-stamp cleaning (the end-to-end f
 // editAction's flattened `+` line. The relay must come from the chat's own copy of the message.
 describe('/send — relays the live message, line breaks intact', () => {
   const sendCfg = () => ({ ...cfg({ send: { post_back_from: 'primary' } }), agents: { egpt: { body_emoji: '🐶', name: 'E' } }, bridge_signature_close: '🏰' });
-  const EV = { chatId: JOIN_CHAT, surface: 'whatsapp', msgId: '26881', body: '/send' };
+  const EV = { chatId: JOIN_CHAT, surface: 'whatsapp', msgId: '26881', body: '/send', isSender: true };
   const CHAT = 'SPOILER ALERT: chat de EyAy-super 1457-10112026';
   const FLAT = '🐶 E: ¡Qué lindo, Caro! Te dejo un texto listo para reenviar 👇 📚 *Este miércoles 14 de octubre, 18 h*, presento *Yo te cielo* junto a otras cuatro autoras de Metrópolis, en un encuentro íntimo para conversar, narrar y compartirnos. 📍 Casa PAM!, Aguirre 130, Villa Crespo (CABA) Me encantaría verles ahí. Traigan a quien quieran 💙 Si me dices el tono que buscas, más formal o más canchero, o si es para Instagram, lo adapto. 🏰<kg>';
   const TRANSCRIPT = [
@@ -974,8 +970,8 @@ describe('/send — origin prefix (send.origin auto|always|never, send.origin_te
     const c = cfg({ send });
     return { ...c, group_title: '{group}-{name}', join: { ...c.join, triggers: [PHRASE] }, split: { ...c.split, triggers: [PHRASE] } };
   };
-  const inC = (body, over = {}) => ({ chatId: C_CHAT, surface: 'whatsapp', msgId: 'cmd1', chatName: 'SI+EduWeb', senderName: 'An', isSender: true, authorized: true, raw: { chatType: 'group' }, body, ...over });
-  const sendFrom = (chatId, over = {}) => ({ chatId, surface: 'whatsapp', msgId: 'snd1', replyToId: 'M1', body: '/send', ...over });
+  const inC = (body, over = {}) => ({ chatId: C_CHAT, surface: 'whatsapp', msgId: 'cmd1', chatName: 'EduWeb', senderName: 'An', isSender: true, authorized: true, raw: { chatType: 'group' }, body, ...over });
+  const sendFrom = (chatId, over = {}) => ({ chatId, surface: 'whatsapp', msgId: 'snd1', replyToId: 'M1', body: '/send', isSender: true, ...over });
   const relayed = (calls) => calls.post.filter((p) => p.chatId === C_CHAT);
 
   async function joined({ send, discreet = false } = {}) {
@@ -1108,7 +1104,7 @@ describe('phrase triggers — config.<cmd>.triggers run a command discreetly (op
   // triggerCfg = the normal config PLUS config.join.triggers = [PHRASE].
   const triggerCfg = () => { const c = cfg(); return { ...c, join: { ...c.join, triggers: [PHRASE] } }; };
   // An OPERATOR message (authorized) whose whole text is `body`.
-  const opEv = (body) => ({ chatId: C_CHAT, surface: 'whatsapp', msgId: 'cmd1', chatName: 'Proyecto X', authorized: true, body });
+  const opEv = (body) => ({ chatId: C_CHAT, surface: 'whatsapp', msgId: 'cmd1', chatName: 'Proyecto X', authorized: true, isSender: true, body });
 
   it('phraseCommand: an operator message EQUAL to a configured join.triggers phrase → "join" (trim + case-insensitive)', async () => {
     const { cmds } = harness({ config: triggerCfg() });
@@ -1124,7 +1120,7 @@ describe('phrase triggers — config.<cmd>.triggers run a command discreetly (op
 
   it('phraseCommand: a NON-operator saying the exact phrase does NOT trigger (ordinary message)', async () => {
     const { cmds } = harness({ config: triggerCfg() });
-    expect(await cmds.phraseCommand({ ...opEv(PHRASE), authorized: false })).toBe(null);
+    expect(await cmds.phraseCommand({ ...opEv(PHRASE), authorized: false, isSender: false })).toBe(null);
   });
 
   it('phraseCommand: unset triggers → only the "/"-word triggers (null for any phrase)', async () => {
@@ -1136,7 +1132,7 @@ describe('phrase triggers — config.<cmd>.triggers run a command discreetly (op
     const { cmds, calls } = harness({ config: triggerCfg() });
     await cmds.runPhrase(opEv(PHRASE), 'join');
     expect(calls.create).toHaveLength(1);
-    expect(calls.create[0].title).toMatch(/^egpt [0-9a-f]{5} de Proyecto X$/);   // random token, not the verb word
+    expect(calls.create[0].title).toMatch(/^SI\+egpt [0-9a-f]{5} de Proyecto X$/);   // random token, not the verb word
     expect(calls.create[0].title).not.toBe('egpt join de Proyecto X');
     expect(calls.edit).toHaveLength(0);                                          // message left untouched in the chat
   });
@@ -1157,7 +1153,7 @@ describe('phrase triggers — config.<cmd>.triggers run a command discreetly (op
   it('/join parachat (the explicit "/"-form) is UNCHANGED: name "parachat", placeholder edited (NOT discreet)', async () => {
     const { cmds, calls } = harness({ config: cfg() });
     await cmds.run({ chatId: C_CHAT, surface: 'whatsapp', msgId: 'cmd1', chatName: 'Proyecto X', isSender: true, body: '/join parachat' });
-    expect(calls.create[0].title).toBe('egpt parachat de Proyecto X');           // <name> = parachat
+    expect(calls.create[0].title).toBe('SI+egpt parachat de Proyecto X');           // <name> = parachat
     expect(calls.edit).toEqual([{ chatId: C_CHAT, msgId: 'cmd1', text: PLACEHOLDER_JOIN }]);   // placeholder edited
   });
 

@@ -11,7 +11,6 @@
 import { lifecycleExit, lifecycleForce } from './ingest.mjs';
 import { isAutoMode, AUTO_MODES, DEFAULT_AUTO_MODE } from '../auto-mode.mjs';
 import { patchBeing, patchContact, deleteBeing, getContact, getBeing, ensureContact, recordThread, findThreadJsonl, aliasContact, dropContact, aliasTargetOf, residentsOf, defaultBeingOf, allowedUsersPermits, slugDir, statsPath, conversationPathOf, seedIdentityLayers, skeletonIdentityFiles, slugSuffix, rollTranscript, fixedSlugFor, mutateState, DETERMINISTIC_MODEL, DETERMINISTIC_EFFORT, DEFAULT_ALLOWED_TOOLS, LOBBY_SLUG } from '../conversations-state.mjs';
-import { createStatCache } from '../stat-cache.mjs';
 import { stripFrontMatter } from '../transcript-meta.mjs';
 // WHERE A SANDBOXED BEING'S CLI STORE LIVES — the ONE formula, taken from the module that
 // CREATES it (src/sandbox-cli-session.mjs) rather than rebuilt here, so the two verbs that retire
@@ -256,8 +255,9 @@ const quoteLeadingCommand = (text) => String(text ?? '').replace(/^\/([a-z0-9_-]
 // isCommand admits it from any sender, because all it does is read a chat's own backlog back to that
 // same chat. One pattern, read by that gate and by run()'s dispatch, so the two cannot disagree.
 const RECAP_CMD = /^\/recap\b/i;
-// /join (operator 2026-10-16) — admitted from any sender too; joinGroup decides who may run it.
-const JOIN_CMD = /^\/join\b/i;
+// /join /split /send /end (operator 2026-10-18) — admitted from any sender too, never from a node-signed
+// line; each handler decides (a member: /join + /split in a group, /send + /end in a side group).
+const SIDE_CMD = /^\/(?:join|split|send|end)\b/i;
 // Bare /agents (operator 2026-10-16) — admitted from any sender; a non-operator gets agentsPublic.
 const AGENTS_BARE_CMD = /^\/agents\s*$/i;
 // The public list's words for a reply mode; 'off' has none (that being is not listed).
@@ -483,7 +483,9 @@ export const JOIN_EXISTS_DEFAULT = '🔗 group {name} already exists. Ask {by} t
 // chat; -1/unset = unlimited) is reached. {name} lists that member's rooms.
 export const JOIN_LIMIT_DEFAULT = '🔗 you already have group {name} here.';
 export const SPLIT_PLACEHOLDER_DEFAULT = '🍴🤖 ...';
-export const GROUP_TITLE_DEFAULT = 'egpt {name} {group}';
+export const GROUP_TITLE_DEFAULT = '{group}-{name}';
+// Every side group's title starts with it: "SI+<group>-<name>" (/join, /split), "SI+<group>" (automatic).
+export const SIDE_GROUP_PREFIX = 'SI+';
 // /send's posting account when config.send.post_back_from is unset or invalid: the operator's OWN
 // account (primary) — /send relays as the operator, who typed it (operator 2026-10-04). The config
 // override config.send.post_back_from='secondary' still routes via the mouth when set.
@@ -497,31 +499,6 @@ export const SEND_ORIGIN_TEMPLATE_DEFAULT = '↪ from {group}:\n';
 // the key is unset; the real text is set in config.yaml. Exported so tests assert the fallback.
 export const JOIN_OPENER_DEFAULT = '🔗 Side-room of {group} — same agents, same conversation. Reply /send to a message to copy it back to the original chat; /end to close.';
 export const SPLIT_OPENER_DEFAULT = '🍴 Fork of {group} — a diverging copy: same agents, its own thread from here. Reply /send to a message to copy it back to the original chat; /end to close.';
-// ── SI chats, per conversation (operator 2026-10-18) ──
-// A chat whose OWN conversations.yaml entry has `superchats: { triggers: [...], prefix? }` opens a side
-// group on "<phrase> [<label>]": a /join-kind alias with its own transcript-si-<label>.md, the being in
-// accum. The link is SI Chats/<label>.yaml in the origin folder, by chat ids; /send /end /help read it.
-export const SUPERCHAT_PREFIX_DEFAULT = 'SI+';
-export const SUPERCHAT_DIR = 'SI Chats';
-export const SUPERCHAT_LABEL_MAX = 60;   // longer → an ordinary sentence that starts with the phrase
-export const SUPERCHAT_INTRO = '🌟 SI chat of {chat}. {being} is in accum mode here: it reads along and answers when called. To let it answer freely, send /agents mode on {being} · /help';
-export const SUPERCHAT_HELP = 'SI chat of {chat}:\n/send — reply /send to a message to copy it to {chat}\n/end — close the link (the group stays; {being} stops treating it as an SI chat)\n/help — this list';
-
-// `block` = a chat's superchats block → { label } when `body` is one of its phrases, as the whole
-// message or followed by whitespace and a label (any case, trimmed; longest phrase first), else null.
-export function superchatTrigger(block, body) {
-  const text = String(body ?? '').trim();
-  const phrases = (Array.isArray(block?.triggers) ? block.triggers : [])
-    .map((t) => String(t ?? '').trim()).filter(Boolean).sort((a, b) => b.length - a.length);
-  for (const p of phrases) {
-    if (text.slice(0, p.length).toLowerCase() !== p.toLowerCase()) continue;
-    const rest = text.slice(p.length);
-    if (rest && !/^\s/.test(rest)) continue;
-    const label = rest.trim().replace(/\s+/g, ' ');
-    return label.length <= SUPERCHAT_LABEL_MAX ? { label } : null;
-  }
-  return null;
-}
 // The side-group opener poll (operator 2026-10-03): Beeper creates the group on the SECONDARY account
 // ASYNCHRONOUSLY, so its own room id for the new group may take a moment to list. Poll a few times,
 // short delay, through the injectable sleep seam — the same shape createGroup's async-create wait uses.
@@ -955,15 +932,15 @@ export function createCommands({
   // against cfg.telegram.chat_id, not whatsapp's — ids are per-surface namespaces.
   // Fall back to the whatsapp block when ev.surface is absent (safety). Authorized
   // senders (per-surface allowed_users / isSender) can command from anywhere.
-  // …EXCEPT /recap, which anybody may type (RECAP_CMD, above — operator 2026-09-27), and /join, which
-  // joinGroup gates itself (JOIN_CMD, operator 2026-10-16), and bare /agents, which a non-operator
-  // gets as the public list (AGENTS_BARE_CMD). Every other command, lifecycle and every /agents verb
-  // included, still needs the operator.
+  // …EXCEPT /recap, which anybody may type (RECAP_CMD, above — operator 2026-09-27), the side-group
+  // verbs, which their handlers gate (SIDE_CMD, operator 2026-10-18), and bare /agents, which a
+  // non-operator gets as the public list (AGENTS_BARE_CMD). Every other command, lifecycle and every
+  // /agents verb included, still needs the operator.
   function isCommand(ev) {
     const body = String(ev?.body ?? '').trim();
     if (isOperator(ev) && isRadioQuickReply(ev)) return true;
     if (!body.startsWith('/')) return false;
-    return isOperator(ev) || RECAP_CMD.test(body) || JOIN_CMD.test(body) || AGENTS_BARE_CMD.test(body);
+    return isOperator(ev) || RECAP_CMD.test(body) || (ev?.fromNode == null && SIDE_CMD.test(body)) || AGENTS_BARE_CMD.test(body);
   }
 
   // Run a command and CAPTURE its reply instead of sending it. Routes through the ONE run()
@@ -1213,9 +1190,8 @@ export function createCommands({
     // there is only one surface to resolve here: 'shell' — the extension reads the
     // registry directly (App.jsx), never through this dispatcher. Pre-catch-all, same slot
     // as /config/status/room.
-    // In an SI chat it lists that chat's own commands.
     const helpMatch = /^\/help\b/i.exec(line);
-    if (helpMatch) { const si = await superchatOf(surfaceOf(ev), ev.chatId); await send?.(ev.chatId, si ? await superchatHelpText(surfaceOf(ev), si) : helpText([], 'shell')); return; }
+    if (helpMatch) { await send?.(ev.chatId, helpText([], 'shell')); return; }
 
     // /recap — what THIS chat said while the node slept (operator 2026-09-27), the answer to the
     // wake notice "N messages in the backlog. type /recap to list them". Read out in the chat it was
@@ -1248,9 +1224,9 @@ export function createCommands({
     // side-group backed by a NEW, DIVERGING conversation (its beings' threads are copied); /send —
     // reply /send to a message in either group to relay it back to the original chat; /end — reply
     // /end in either group to archive it and drop its mapping (operator 2026-10-03). They sit
-    // pre-catch-all like the rest. Operator-only automatically: isCommand gates every '/'-verb except
-    // /recap, /join and bare /agents behind isOperator, so no handler re-checks it (same as chrome/radio); joinGroup
-    // runs its own member gate (operator 2026-10-16). NOT in
+    // pre-catch-all like the rest. isCommand admits these four from any sender (SIDE_CMD); /join and
+    // /split refuse a member outside a group, /send and /end act only in a side group (operator
+    // 2026-10-18). NOT in
     // NODE_ADDRESSABLE: a /join/split node override is parsed by the handler itself (`/join do` or
     // `/join=do`). Each handler STANDS DOWN SILENTLY on the node that is not the right one (not the
     // node_role=primary / addressed node for /join+/split; no alias-or-parent for /send+/end), so a
@@ -2234,7 +2210,7 @@ export function createCommands({
   async function agentsMode(ev, surface, jid, where, handles, mode, state, named = handles.join(', ')) {
     try {
       let next = state;
-      // An ALIAS room (/join, SI chat) keeps its mode on its OWN entry: patchBeing resolves through
+      // An ALIAS room (/join, the automatic group) keeps its mode on its OWN entry: patchBeing resolves through
       // aliasOf and would write the origin (operator 2026-10-11). getBeing reads it back.
       for (const h of handles) {
         const { aliasOf, ...room } = next.contacts?.[surface]?.[jid] ?? {};
@@ -3399,10 +3375,10 @@ export function createCommands({
   // config.join.placeholder / config.split.placeholder, with the built-in fallback so a command never
   // edits to an empty string.
   const placeholderOf = (block, dflt) => (block && typeof block.placeholder === 'string' && block.placeholder.trim()) ? block.placeholder : dflt;
-  // config.group_title ({group}=parent chat name, {name}=the <name> arg), with the built-in fallback.
+  // SIDE_GROUP_PREFIX + config.group_title ({group}=parent chat name, {name}=the <name> arg).
   const groupTitleTpl = () => ((typeof cfg().group_title === 'string' && cfg().group_title.trim()) ? cfg().group_title : GROUP_TITLE_DEFAULT);
   const groupTitleOf = (groupName, name) =>
-    groupTitleTpl().replaceAll('{group}', String(groupName ?? '')).replaceAll('{name}', String(name ?? ''));
+    SIDE_GROUP_PREFIX + groupTitleTpl().replaceAll('{group}', String(groupName ?? '')).replaceAll('{name}', String(name ?? ''));
   // A side group made before the `discreet` flag: its title's {name} slot holds a randomGroupToken
   // (plus uniqueTitle's optional " HHMM-MMDDYYYY"). A typed 5-hex name also matches; that only drops the prefix.
   const titleLooksDiscreet = (title) => {
@@ -3410,7 +3386,7 @@ export function createCommands({
     if (!title || !tpl.includes('{name}')) return false;
     const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const body = tpl.split('{name}').map((p) => p.split('{group}').map(esc).join('.*')).join('[0-9a-f]{5}');
-    return new RegExp(`^${body}( \\d{4}-\\d{8})?$`).test(String(title));
+    return new RegExp(`^(?:${esc(SIDE_GROUP_PREFIX)})?${body}( \\d{4}-\\d{8})?$`).test(String(title));
   };
   // config.join.opener / config.split.opener ({group}=parent chat title), with the built-in fallback —
   // the message posted into the new side-group so it surfaces in Beeper (see postOpener below).
@@ -3445,9 +3421,10 @@ export function createCommands({
   // group by this EXACT title already exists on the PRIMARY account, append " HHMM-MMDDYYYY" (local,
   // minute-granular — effectively unique, no loop). Covers the defaulted AND the explicitly-named case.
   // A probe that is unavailable (standalone/tests) returns the title untouched; a probe that THROWS is
-  // treated as "does not exist" and logged — creation is NEVER blocked on a probe. Shared by /join, /split + SI chats.
-  const uniqueTitle = async (verb, title, accountID) => {
-    if (typeof forkBridge.resolvePrimaryChatIdByTitle !== 'function') return title;
+  // treated as "does not exist" and logged — creation is NEVER blocked on a probe. Only a group made on
+  // the primary needs it: one made on the secondary is posted to by its own id, never looked up by title.
+  const uniqueTitle = async (verb, title, { accountID, creator }) => {
+    if (creator !== 'primary' || typeof forkBridge.resolvePrimaryChatIdByTitle !== 'function') return title;
     let exists = false;
     try { exists = !!(await forkBridge.resolvePrimaryChatIdByTitle(title, { accountID })); }
     catch (e) { onLog(`${verb}: title-collision probe failed for "${title}" — ${e?.message ?? e} (treating as unique)`); return title; }
@@ -3465,43 +3442,87 @@ export function createCommands({
   // FALLBACK — the opener must ALWAYS appear: if the secondary never surfaces the group (or the post
   // there fails), post from the PRIMARY account to the new chatId. A failed opener NEVER fails the
   // command (the group + alias/copy already succeeded): log the path used and move on.
-  const postOpener = async ({ verb, newChatId, title, openerText, accountID }) => {
+  // A group the secondary made (or made with no mouth) is posted to by its creator, in its own id.
+  // `canary`: the origin chat id, stamped invisibly so the other node links the same group.
+  const postOpener = async ({ verb, newChatId, title, openerText, accountID, creator = 'primary', canary = null }) => {
     try {
+      if (creator === 'secondary' || !hasMouth()) {
+        await forkBridge.postReply(newChatId, openerText, null, { via: creator, canary });
+        onLog(`${verb}: opener posted by the ${creator} into ${newChatId}`);
+        return;
+      }
       let secondaryRoomId = null;
       for (let i = 1; i <= OPENER_POLL_ATTEMPTS; i++) {
         secondaryRoomId = await forkBridge.resolveSecondaryChatIdByTitle(title, { accountID });
         if (secondaryRoomId) break;
         if (i < OPENER_POLL_ATTEMPTS) await sleep(OPENER_POLL_MS);
       }
-      if (secondaryRoomId && await forkBridge.postReply(secondaryRoomId, openerText, null, { via: 'secondary' })) {
+      if (secondaryRoomId && await forkBridge.postReply(secondaryRoomId, openerText, null, { via: 'secondary', canary })) {
         onLog(`${verb}: opener posted FROM RODZ into ${secondaryRoomId} (secondary's room for "${title}")`);
         return;
       }
       const why = secondaryRoomId ? 'secondary post failed' : `secondary never surfaced "${title}" after ${OPENER_POLL_ATTEMPTS} polls`;
-      await forkBridge.postReply(newChatId, openerText, null, { via: 'primary' });
+      await forkBridge.postReply(newChatId, openerText, null, { via: 'primary', canary });
       onLog(`${verb}: ${why} — opener posted via the PRIMARY into ${newChatId}`);
     } catch (e) {
       onLog(`${verb}: opener post failed — ${e?.message ?? e} (group + alias/copy already succeeded; moving on)`);
     }
   };
 
-  // THE create+alias CORE shared by /join and SI chats (operator 2026-10-08) — §5.1: ONE
-  // create-group + ONE alias-registration path, not two. Create the side-group (operator + Rodz +
-  // any extra members), normalize createGroup's FULL matrix id to the SHORT chatId the spine keys by
+  // WHO MAKES A SIDE GROUP AND WHOM IT INVITES (operator 2026-10-18), shared by /join, /split and the
+  // automatic group. With a mouth (beeper.secondary.phone) the secondary creates it and invites only the
+  // requester. A request from one of our own accounts (the operator's line, a node-signed one) is made
+  // on the primary with Rodz — the same two members, and the id the primary's create returns is the one
+  // the primary then hears the group under. No mouth → the primary invites the requester.
+  // → { creator, accountID, participantIDs } or null (logged).
+  const hasMouth = () => !!phoneDigitsOf(cfg().beeper?.secondary?.phone);
+  const invitableOf = (ev) => (String(ev?.senderId ?? '').endsWith(':beeper.local') ? ev.senderId : null);
+  const ownAccount = (ev) => !!ev?.isSender || ev?.fromNode != null;
+  async function sideGroupPlan(ev, verb) {
+    if (ownAccount(ev)) {
+      if (!hasMouth()) { onLog(`${verb}: the request is from this node's own account and there is no mouth to invite — nothing created.`); return null; }
+      const rodz = await resolveRodz(ev.chatId, verb);
+      return rodz ? { creator: 'primary', accountID: rodz.accountID, participantIDs: [rodz.rodzUserId] } : null;
+    }
+    const heard = invitableOf(ev);
+    if (!heard) { onLog(`${verb}: ${ev.senderId ?? '?'} is not an invitable id — nothing created.`); return null; }
+    const accountID = await forkBridge.chatAccountId(ev.chatId);
+    if (!accountID) { onLog(`${verb}: could not resolve the account of ${ev.chatId} — nothing created.`); return null; }
+    const creator = hasMouth() ? 'secondary' : 'primary';
+    return { creator, accountID, participantIDs: [await requesterIdOn(ev, creator, accountID, heard, verb)] };
+  }
+  // Participant ids are per account: one heard on another connection is found on the creator's rosters
+  // by the phone the arrival roster shows for it. No phone, or no match → invited as heard (logged).
+  async function requesterIdOn(ev, creator, accountID, heard, verb) {
+    if (!hasMouth() || (ev.connection ?? 'primary') === creator) return heard;
+    const items = (await forkBridge.chatRaw?.(ev.chatId))?.participants?.items;
+    const phone = phoneDigitsOf((Array.isArray(items) ? items : []).find((p) => p?.id === heard)?.phoneNumber);
+    const mine = phone ? await forkBridge.resolveUserIdByPhone(phone, { accountID, via: creator }) : null;
+    if (!mine) onLog(`${verb}: ${heard} has no ${phone ? 'match' : 'phone'} on the ${creator}'s rosters — invited as heard`);
+    return mine ?? heard;
+  }
+  // createGroup on the plan's account → the SHORT chat id, or null (logged).
+  async function createSideGroup(plan, title, verb) {
+    const created = await forkBridge.createGroup({ accountID: plan.accountID, participantIDs: plan.participantIDs, type: 'group', title }, { via: plan.creator });
+    const raw = created?.chatID ?? created?.chatId ?? null;
+    if (!raw) onLog(`${verb}: createGroup returned no chatID (${JSON.stringify(created)}) — aborted, nothing edited/posted`);
+    return raw ? shortChatId(raw) : null;
+  }
+
+  // THE create+alias CORE shared by /join and the automatic group (operator 2026-10-08) — §5.1: ONE
+  // create-group + ONE alias-registration path, not two. Create the side-group (sideGroupPlan),
+  // normalize createGroup's FULL matrix id to the SHORT chatId the spine keys by
   // (shortChatId — or an incoming short-form arrival spawns a separate folder+thread, the 2026-10-04
   // "side-room has no context" bug), and ALIAS it onto ev's conversation (aliasContact — so the being
   // keeps writing its ONE thread; two chat surfaces, one on-disk conversation). The side-room's
   // sanitized title is stored as the alias's per-surface transcript key, exactly as /join does.
   // Returns { chatId, primaryJid } (SHORT chatId), or null on a create failure — the caller then
-  // edits/posts nothing. The caller owns everything that DIFFERS between /join and an SI chat: the
-  // (already-unique'd) title, the trigger-message edit, the opener post, and `extra` — the fields
-  // stored on the alias entry (an SI chat passes its own transcript key and the being's accum mode;
-  // /join passes its join_name/join_by).
-  async function createAliasedSideGroup(ev, surface, title, accountID, participantIDs, verb, extra = {}) {
-    const created = await forkBridge.createGroup({ accountID, participantIDs, type: 'group', title });
-    const raw = created?.chatID ?? created?.chatId ?? null;
-    const chatId = raw ? shortChatId(raw) : null;
-    if (!chatId) { onLog(`${verb}: createGroup returned no chatID (${JSON.stringify(created)}) — aborted, nothing edited/posted`); return null; }
+  // edits/posts nothing. The caller owns the (already-unique'd) title, the trigger-message edit, the
+  // opener post, and `extra` — the fields stored on the alias entry (/join: join_name/join_by;
+  // automatic: automatic: true).
+  async function createAliasedSideGroup(ev, surface, title, plan, verb, extra = {}) {
+    const chatId = await createSideGroup(plan, title, verb);
+    if (!chatId) return null;
     // Reload fresh before the write (createGroup is async). Alias the new group's chatId to ev's
     // canonical (primary) entry — both ids now resolve to the SAME folder/agents/threads.
     return mutateState(writeState, async () => {
@@ -3539,11 +3560,9 @@ export function createCommands({
     }
     return out;
   };
-  // Who besides the operator may /join: a member of a GROUP C whom a being resident in C would wake,
-  // by router.resolve's allowed_users test (the conversation's block, else the agent's
-  // conversation_defaults; a stranger reaches only the conversation's own agent). The room is C's
-  // alias, so it grants nothing C does not. Every /agents verb and every other command keep isOperator.
-  // senderMayWake is that test for ONE being; bare /agents' public list reads it too.
+  // Whom a being would wake for this sender here, by router.resolve's allowed_users test (the
+  // conversation's block, else the agent's conversation_defaults; a stranger reaches only the
+  // conversation's own agent). Bare /agents' public list reads it.
   const senderMayWake = (state, surface, chatId, ev, being) => {
     const owner = defaultBeingOf(getContact(state, surface, chatId)?.entry);
     if (owner && being !== owner && !isKnownSender(ev?.senderId, cfg())) return false;
@@ -3551,8 +3570,13 @@ export function createCommands({
     const global = cfg().agents?.[being]?.conversation_defaults?.allowed_users;
     return allowedUsersPermits(Array.isArray(conv) ? conv : (Array.isArray(global) ? global : null), ev?.senderId);
   };
-  const mayJoinHere = (state, surface, chatId, ev) => ev?.raw?.chatType === 'group'
-    && residentsOf(getContact(state, surface, chatId)?.entry).some((b) => senderMayWake(state, surface, chatId, ev, b));
+  // Who besides the operator may /join or /split (operator 2026-10-18): anyone in a GROUP this node
+  // hears. Refused here → a log line and the audit outcome, nothing in the chat.
+  const memberRefusal = (ev, verb) => {
+    if (isOperator(ev) || ev?.raw?.chatType === 'group') return null;
+    onLog(`${verb}: ${ev.senderName ?? ev.senderId ?? '?'} is not in a group here — refused.`);
+    return 'refused — a member may run it only in a group';
+  };
 
   // ── bare /agents from a non-operator (operator 2026-10-16) ──
   // One public list per chat per agents_list.every_ms; calls inside the window are ignored, and a
@@ -3622,7 +3646,7 @@ export function createCommands({
     return lines.length ? ['Agents in this chat:', ...lines].join('\n') : null;
   }
 
-  // /join (operator types /join [<name>|<node>] in chat C): create the side-group and ALIAS it to C.
+  // /join (anyone types /join [<name>|<node>] in chat C): create the side-group and ALIAS it to C.
   // Every precondition resolves BEFORE any bridge/state mutation (an unresolvable Rodz STOPS, nothing
   // created).
   async function joinGroup(ev, { discreet = false } = {}) {
@@ -3630,14 +3654,11 @@ export function createCommands({
     if (!loadState || !writeState) return;                   // state not wired → silent
     const { node, name } = parseForkArgs(ev.body);
     if (!forkNodeSelected(node)) return;                     // not the selected node → silent
+    const refused = memberRefusal(ev, '/join');
+    if (refused) return refused;
     const state0 = await loadState();
     const contact = getContact(state0, surface, ev.chatId);
-    // A non-operator gets in only through mayJoinHere; refused silently, like an unanswered wake.
     const operator = isOperator(ev);
-    if (!operator && !(contact && mayJoinHere(state0, surface, ev.chatId, ev))) {
-      onLog(`/join: ${ev.senderName ?? ev.senderId ?? '?'} may not wake a being in ${ev.chatId} — refused.`);
-      return 'refused — the sender may not wake a being here';
-    }
     // /join only ALIASES this chat's conversation onto the new side-group, so it needs a KNOWN
     // conversation to alias — NOT an existing being thread. A chat the being never answered in (an
     // ingested 1:1 transcript, no agents block) is still joinable: a fresh E invocation in the
@@ -3651,8 +3672,8 @@ export function createCommands({
       return;
     }
     // A sender other than the account itself goes into the new group; only a bridged id can be invited.
-    const invitee = !ev.isSender && String(ev.senderId ?? '').endsWith(':beeper.local') ? ev.senderId : null;
-    if (!operator && !invitee) {
+    const invitee = ev.isSender ? null : invitableOf(ev);
+    if (!ev.isSender && !invitee) {
       await send?.(ev.chatId, '/join: I can\'t add you to a group from this account.');
       return 'refused — the sender id cannot be invited';
     }
@@ -3665,19 +3686,27 @@ export function createCommands({
     const placeholder = (title) => fillVars(placeholderOf(cfg().join, JOIN_PLACEHOLDER_DEFAULT), vars(title));
     // Our own message is edited in place; anyone else's is not ours to edit, so it gets a reply.
     const announce = (text) => (ev.isSender ? forkBridge.editMessage(ev.chatId, ev.msgId, text) : send?.(ev.chatId, text));
+    // In the room under the id heard here, or under the secondary's own id for them (a room it made).
+    const inRoom = async (chatId) => {
+      const raw = await forkBridge.chatRaw?.(chatId);
+      if (rosterHas(raw, ev.senderId)) return true;
+      const accountID = invitee && hasMouth() ? await forkBridge.chatAccountId(ev.chatId) : null;
+      return !!accountID && rosterHas(raw, await requesterIdOn(ev, 'secondary', accountID, invitee, '/join'));
+    };
 
     // SAME NAME, LIVE ROOM → no second group (operator 2026-10-16). A room the bridge reports gone
     // is dropped and replaced. The Desktop API has no add-member endpoint, so a sender not already in
     // the room is told whom to ask.
     const key = joinNameKey(joinName);
-    const hit = joinRoomOf(state0, surface, contact.jid, key, sanitizeSlug(baseTitle));
+    // A room made before join_name was titled before the SI+ prefix too.
+    const hit = joinRoomOf(state0, surface, contact.jid, key, sanitizeSlug(baseTitle.slice(SIDE_GROUP_PREFIX.length)));
     if (hit) {
       const alive = forkBridge.chatRaw ? await superChannelAlive(hit.chatId, { chatRaw: forkBridge.chatRaw, config: cfg() }) : null;
       if (alive === false) {
         await writeState(dropContact(await loadState(), surface, hit.chatId));
         onLog(`/join: side-room ${hit.chatId} ("${joinName}") is gone — alias dropped, creating a new one`);
       } else {
-        if (ev.isSender || rosterHas(await forkBridge.chatRaw?.(hit.chatId), ev.senderId)) {
+        if (ev.isSender || await inRoom(hit.chatId)) {
           await announce(placeholder(baseTitle));
           return `already in ${hit.chatId} ("${joinName}")`;
         }
@@ -3697,33 +3726,31 @@ export function createCommands({
       }
     }
 
-    const rodz = await resolveRodz(ev.chatId, '/join');
-    if (!rodz) return;
+    const plan = await sideGroupPlan(ev, '/join');
+    if (!plan) return;
     // …then make it unique (suffix the title if the primary already has a group by that exact name, so the
     // opener's by-title lookup lands in THIS group, not a stale same-named one — the 2026-10-04 bug).
-    const title = await uniqueTitle('/join', baseTitle, rodz.accountID);
+    const title = await uniqueTitle('/join', baseTitle, plan);
 
     // ── mutations begin ──
-    // (a+b) CREATE the group (operator + Rodz + a member who ran it, forced to a group; no inline
-    //       opener — the group inherits C's whole thread by the alias) and ALIAS its SHORT chatId to
-    //       C's canonical entry, via the create+alias core shared with SI chats
-    //       (createAliasedSideGroup, which also stores the sanitized title as the alias's per-surface
-    //       transcript key; join_name/join_by find this room for the next /join of the same name).
-    //       null → createGroup gave no chatId: abort, placeholder NOT edited, nothing posted.
-    const participantIDs = [...new Set([rodz.rodzUserId, ...(invitee ? [invitee] : [])])];
-    const aliased = await createAliasedSideGroup(ev, surface, title, rodz.accountID, participantIDs, '/join', { join_name: key, ...(discreet ? { discreet: true } : {}), ...(ev.senderName ? { join_by: ev.senderName } : {}), ...(invitee ? { join_by_id: invitee } : {}) });
+    // (a+b) CREATE the group (sideGroupPlan: who creates, whom it invites; no inline opener — the
+    //       group inherits C's whole thread by the alias) and ALIAS its SHORT chatId to C's canonical
+    //       entry, via the create+alias core (createAliasedSideGroup, which also stores the sanitized
+    //       title as the alias's per-surface transcript key; join_name/join_by find this room for the
+    //       next /join of the same name). null → no chatId: abort, placeholder NOT edited, nothing posted.
+    const aliased = await createAliasedSideGroup(ev, surface, title, plan, '/join', { join_name: key, ...(discreet ? { discreet: true } : {}), ...(ev.senderName ? { join_by: ev.senderName } : {}), ...(invitee ? { join_by_id: invitee } : {}) });
     if (!aliased) return;
     const { chatId: joinChatId, primaryJid } = aliased;
     // (c) EDIT the operator's /join message into the placeholder (raw, no persona; a reply for anyone
     //     else) — SKIPPED when discreet, so a phrase-triggered /join leaves the natural words in the chat.
     if (!discreet) await announce(placeholder(title));
-    onLog(`/join${discreet ? ' (discreet)' : ''}: ${cTitle} -> group ${joinChatId} aliased to ${primaryJid} (members ${participantIDs.join(', ')})`);
+    onLog(`/join${discreet ? ' (discreet)' : ''}: ${cTitle} -> group ${joinChatId} aliased to ${primaryJid} (made on the ${plan.creator}, invited ${plan.participantIDs.join(', ')})`);
     // (d) POST THE OPENER so the new (otherwise-empty) group surfaces in Beeper — added step AFTER the
     //     success path; a failure here never undoes the alias/placeholder above.
-    await postOpener({ verb: '/join', newChatId: joinChatId, title, openerText: openerOf(cfg().join, JOIN_OPENER_DEFAULT, cTitle), accountID: rodz.accountID });
+    await postOpener({ verb: '/join', newChatId: joinChatId, title, openerText: openerOf(cfg().join, JOIN_OPENER_DEFAULT, cTitle), accountID: plan.accountID, creator: plan.creator });
   }
 
-  // /split (operator types /split [<name>|<node>] in chat C): create a side-group backed by a NEW
+  // /split (anyone types /split [<name>|<node>] in chat C): create a side-group backed by a NEW
   // conversation that DIVERGES from C — each resident being's thread is COPIED under a new thread id.
   // Same preconditions/gate as /join; the difference is a NEW entry + per-being thread copy instead of
   // an alias.
@@ -3732,28 +3759,29 @@ export function createCommands({
     if (!loadState || !writeState) return;                   // state not wired → silent
     const { node, name } = parseForkArgs(ev.body);
     if (!forkNodeSelected(node)) return;                     // not the selected node → silent
+    const refused = memberRefusal(ev, '/split');
+    if (refused) return refused;
     let state = await loadState();
     if (!residesHere(state, surface, ev.chatId)) return;     // no being with a thread to copy → silent
-    const rodz = await resolveRodz(ev.chatId, '/split');
-    if (!rodz) return;
+    if (!ev.isSender && !invitableOf(ev)) {
+      await send?.(ev.chatId, '/split: I can\'t add you to a group from this account.');
+      return 'refused — the sender id cannot be invited';
+    }
+    const plan = await sideGroupPlan(ev, '/split');
+    if (!plan) return;
     const cTitle = ev.chatName || (await forkBridge.chatTitle(ev.chatId)) || ev.chatId;
     const placeholder = placeholderOf(cfg().split, SPLIT_PLACEHOLDER_DEFAULT);
     // DISCREET (a phrase trigger): random group name + message left unedited (same as /join above).
     let title = groupTitleOf(cTitle, discreet ? randomGroupToken() : (name ?? defaultNameOf(cfg().split, 'egpt split')));
-    // …then make it unique (same reason as /join — see uniqueTitle); rodz.accountID resolved just above.
-    title = await uniqueTitle('/split', title, rodz.accountID);
+    // …then make it unique (same reason as /join — see uniqueTitle).
+    title = await uniqueTitle('/split', title, plan);
 
     // ── mutations begin ──
-    // (a) CREATE the group.
-    const created = await forkBridge.createGroup({ accountID: rodz.accountID, participantIDs: [rodz.rodzUserId], type: 'group', title });
-    // SHORT id, same reason as /join above: the new entry + parent_chat must key by the form the
-    // spine resolves incoming messages under, or a short-form arrival spawns a second entry.
-    const rawSplitId = created?.chatID ?? created?.chatId ?? null;
-    const splitChatId = rawSplitId ? shortChatId(rawSplitId) : null;
-    if (!splitChatId) {
-      onLog(`/split: createGroup returned no chatID (${JSON.stringify(created)}) — aborted, placeholder NOT edited`);
-      return;
-    }
+    // (a) CREATE the group (sideGroupPlan). SHORT id, same reason as /join above: the new entry +
+    // parent_chat must key by the form the spine resolves incoming messages under, or a short-form
+    // arrival spawns a second entry. null → aborted, placeholder NOT edited.
+    const splitChatId = await createSideGroup(plan, title, '/split');
+    if (!splitChatId) return;
     // (b) REGISTER the new group as its OWN conversation (ensureContact FIRST — recordThread/patch
     //     below no-op on an unknown contact), and record the parent chat so /send+/end find the
     //     original (a split group is NOT an alias).
@@ -3797,15 +3825,16 @@ export function createCommands({
     }
     await writeState(state);
     // (d) EDIT the operator's /split message into the placeholder marker — SKIPPED when discreet
-    //     (a phrase-triggered /split leaves the operator's natural words in the chat).
-    if (!discreet) await forkBridge.editMessage(ev.chatId, ev.msgId, placeholder);
-    onLog(`/split${discreet ? ' (discreet)' : ''}: ${cTitle} -> NEW conv ${splitChatId} (${ensured.slug}); copied threads for ${copied.join(', ') || '(none)'} (parent ${ev.chatId})`);
+    //     (a phrase-triggered /split leaves the operator's natural words in the chat) and for anyone
+    //     else's message (not ours to edit; the new group's opener is their answer).
+    if (!discreet && ev.isSender) await forkBridge.editMessage(ev.chatId, ev.msgId, placeholder);
+    onLog(`/split${discreet ? ' (discreet)' : ''}: ${cTitle} -> NEW conv ${splitChatId} (${ensured.slug}, made on the ${plan.creator}, invited ${plan.participantIDs.join(', ')}); copied threads for ${copied.join(', ') || '(none)'} (parent ${ev.chatId})`);
     // (e) POST THE OPENER so the new group surfaces in Beeper — added step AFTER the copy + placeholder;
     //     a failure here never undoes the conversation/threads already written.
-    await postOpener({ verb: '/split', newChatId: splitChatId, title, openerText: openerOf(cfg().split, SPLIT_OPENER_DEFAULT, cTitle), accountID: rodz.accountID });
+    await postOpener({ verb: '/split', newChatId: splitChatId, title, openerText: openerOf(cfg().split, SPLIT_OPENER_DEFAULT, cTitle), accountID: plan.accountID, creator: plan.creator });
   }
 
-  // /send (the operator REPLIES /send to a message M in a join/split group): relay M's text into the
+  // /send (anyone in a join/split group REPLIES /send to a message M there): relay M's text into the
   // ORIGINAL chat. Repeatable — no placeholder edit, no close. The original is the alias target (join)
   // or the recorded parent_chat (split); silent when neither. Reads M's text off the chat, else the
   // transcript (as /radio say's quick-reply does), then strips the node/bridge/persona wrap. Posts via the
@@ -3815,8 +3844,7 @@ export function createCommands({
     const surface = surfaceOf(ev);
     if (!loadState) return;                                // state not wired → silent
     const state = await loadState();
-    const originalChatId = (await superchatOf(surface, ev.chatId))?.link.origin_chat
-      ?? aliasTargetOf(state, surface, ev.chatId)
+    const originalChatId = aliasTargetOf(state, surface, ev.chatId)
       ?? getContact(state, surface, ev.chatId)?.entry?.parent_chat ?? null;
     if (!originalChatId) return;                           // not a join/split group → silent
     if (!residesHere(state, surface, ev.chatId)) return;   // gate (defensive — a group implies it)
@@ -3831,7 +3859,7 @@ export function createCommands({
     if (path) { try { text = await readFile(path, 'utf8'); } catch { text = null; } }
     // The chat's own copy first: an edited message (every being reply) is on the record only as
     // editAction's one flattened line, so its line breaks survive nowhere else.
-    const live = (await forkBridge.listMessagesRaw?.(ev.chatId))?.find((m) => m?.id != null && String(m.id) === String(ev.replyToId));
+    const live = (await forkBridge.listMessagesRaw?.(ev.chatId, { via: ev.connection ?? null }))?.find((m) => m?.id != null && String(m.id) === String(ev.replyToId));
     const body = htmlToMarkdown(live?.text) || (text ? bodyForMessageId(text, ev.replyToId) : null);
     const cleaned = body ? cleanQuotedBody(body) : null;
     if (!cleaned) { await send?.(ev.chatId, '/send: nothing to send — reply to a message that has text'); return; }
@@ -3849,7 +3877,9 @@ export function createCommands({
       if (sideTitle && (origin === 'always' || !discreet)) prefix = originTpl.replaceAll('{group}', sideTitle);
     }
     const pbf = String(cfg().send?.post_back_from ?? '').trim().toLowerCase();
-    let via = (pbf === 'primary' || pbf === 'secondary') ? pbf : SEND_POST_BACK_FROM_DEFAULT;
+    // A member's /send (operator 2026-10-18) is said by the mouth, signed: only the operator's posts as him.
+    const member = !isOperator(ev);
+    let via = member ? (hasMouth() ? 'secondary' : 'primary') : ((pbf === 'primary' || pbf === 'secondary') ? pbf : SEND_POST_BACK_FROM_DEFAULT);
     // Rodz (the secondary) has its OWN room id for the ORIGINAL chat — a group is a different Matrix
     // room per account — so posting the original's PRIMARY id on the secondary bridge FAILS ("could
     // not post", the 2026-10-04 bug). When posting FROM RODZ, resolve the secondary's room for the
@@ -3866,144 +3896,81 @@ export function createCommands({
     // UNSIGNED (operator 2026-10-04): /send posts back AS THE OPERATOR — no node signature (no visible
     // 🏰 bridge close, no invisible node tag). Routed into the SAME .send via skipSignature, so the
     // relay's sent id is still tracked for echo-dedup (beeper.mjs _sentIds) and this node won't re-ingest it.
-    const posted = await forkBridge.postReply(targetChatId, prefix + cleaned, null, { via, unsigned: true });
+    const posted = await forkBridge.postReply(targetChatId, prefix + cleaned, null, { via, unsigned: !member });
     if (!posted) { await send?.(ev.chatId, '/send: could not post to the original chat'); return; }
     onLog(`/send: ${ev.chatId} -> original ${originalChatId} via ${via}${targetChatId !== originalChatId ? ` (Rodz's room ${targetChatId})` : ''} (message ${ev.replyToId}; origin ${prefix ? 'named' : 'omitted'})`);
   }
 
-  // /end (the operator REPLIES /end in a join/split group): archive the group and drop its mapping so
+  // /end (anyone in a join/split group REPLIES /end there): archive the group and drop its mapping so
   // it is closed. For /join that is the alias; for /split it is the group's OWN conversation entry (its
   // parent_chat marks it) — dropContact retires the mapping (the diverged folder/jsonl stay on disk).
   // Posts NOTHING. Silent outside a join/split group (no alias and no parent on this node).
   async function end(ev) {
     const surface = surfaceOf(ev);
     if (!loadState || !writeState) return;                 // state not wired → silent
-    const si = await superchatOf(surface, ev.chatId);
-    if (si) return endSuperchat(ev, surface, si);
     const state = await loadState();
     const aliasTarget = aliasTargetOf(state, surface, ev.chatId);
     const parent = getContact(state, surface, ev.chatId)?.entry?.parent_chat ?? null;
     if (!aliasTarget && !parent) return 'no-op — not a /join or /split side channel';   // silent to the chat; the audit says why nothing happened
-    await forkBridge.archiveChat(ev.chatId);
+    await forkBridge.archiveChat(ev.chatId, { via: ev.connection ?? null });   // the account the group was heard on
     await writeState(dropContact(await loadState(), surface, ev.chatId));
     onLog(`/end: ${aliasTarget ? 'join' : 'split'} group ${ev.chatId} archived + ${aliasTarget ? `alias to ${aliasTarget}` : `split conv mapping (parent ${parent})`} dropped`);
     return `archived ${ev.chatName || ev.chatId}`;         // the audit's <outcome> for a successful archive
   }
 
-  // ── SI chats (operator 2026-10-18; see SUPERCHAT_* above) ──
-  // The chat's OWN block, never an alias's: a side group opens nothing.
-  const superchatsBlockOf = (state, surface, chatId) => {
-    const own = state?.contacts?.[surface]?.[chatId];
-    const b = own && !own.aliasOf ? own.superchats : null;
-    return b && typeof b === 'object' && !Array.isArray(b) ? b : null;
-  };
-  const superchatTriggerOf = async (ev) => {
-    if (!loadState || ev?.fromNode != null) return null;   // a being's signed line is output, never a trigger
+  // ── THE AUTOMATIC SIDE GROUP (operator 2026-10-18) ──
+  // `side_group: { automatic: true }` on a chat's OWN conversations.yaml entry: the being never replies
+  // there. gating.decide asks this before a reply → the chat id of "SI+<group>" (an alias of the chat
+  // marked `automatic: true`; made on the first reply, Rodz + the sender answered); false = withhold the
+  // reply (no group, and only the node_role primary node creates one); null = reply in place.
+  const autoCreating = new Map();   // surface+chatId → the create in flight, so one reply makes one group
+  async function autoSideGroup(ev) {
+    if (!loadState || !writeState) return null;
+    const surface = surfaceOf(ev);
     let state;
     try { state = await loadState(); } catch { return null; }
-    return superchatTrigger(superchatsBlockOf(state, surfaceOf(ev), ev.chatId), ev.body);
-  };
-  const handleOf = (being) => wakeTokens(being, cfg().agents?.[being])[0] ?? being;
-  const linkCache = createStatCache({ io: { stat, readFile } });
-  const parseLink = (text) => {
-    try { const v = text == null ? null : YAML.parse(text); return v && typeof v === 'object' && !Array.isArray(v) ? v : null; } catch { return null; }
-  };
-  const superchatDirOf = async (surface, chatId) => {
-    const room = await resolveConvRoom(surface, chatId);
-    return room ? join(room.baseDir(), SUPERCHAT_DIR) : null;
-  };
-  async function superchatLinksIn(dir) {
-    let names;
-    try { names = await readdir(dir); } catch (e) { if (e?.code !== 'ENOENT') onLog(`SI chat: ${dir}: ${e?.message ?? e}`); return []; }
-    const out = [];
-    for (const f of names.filter((n) => n.endsWith('.yaml')).sort()) {
-      const path = join(dir, f);
-      const link = await linkCache.read(path, parseLink).catch(() => null);
-      if (link) out.push({ path, key: f.slice(0, -'.yaml'.length), link });
+    const own = state?.contacts?.[surface]?.[ev.chatId];
+    if (!own || own.aliasOf || own.side_group?.automatic !== true) return null;
+    const room = Object.keys(state.contacts[surface]).find((id) => state.contacts[surface][id]?.aliasOf === ev.chatId && state.contacts[surface][id].automatic === true) ?? null;
+    if (room) {
+      const alive = forkBridge.chatRaw ? await superChannelAlive(room, { chatRaw: forkBridge.chatRaw, config: cfg() }) : null;
+      if (alive !== false) return room;
+      await mutateState(writeState, async () => writeState(dropContact(await loadState(), surface, room)));
+      onLog(`automatic: ${room} (the SI+ group of ${ev.chatName || ev.chatId}) is gone — alias dropped`);
     }
-    return out;
+    if (!forkNodeSelected(null)) { onLog(`automatic: ${ev.chatName || ev.chatId} has no SI+ group on this node and only the node_role primary node makes one — reply withheld`); return false; }
+    const key = `${surface}\u0000${ev.chatId}`;
+    if (!autoCreating.has(key)) autoCreating.set(key, openAutoSideGroup(ev, surface).finally(() => autoCreating.delete(key)));
+    return (await autoCreating.get(key)) ?? false;
   }
-  // This side group's OPEN link, read from its origin folder by chat id, or null. Only an alias can
-  // be one, which also keeps a read from minting a contact for an unknown chat.
-  async function superchatOf(surface, chatId) {
-    if (!loadState) return null;
-    if (!aliasTargetOf(await loadState(), surface, chatId)) return null;
-    const dir = await superchatDirOf(surface, chatId);
-    const id = shortChatId(chatId);
-    return dir ? ((await superchatLinksIn(dir)).find((l) => shortChatId(l.link.chat) === id && !l.link.ended_at) ?? null) : null;
-  }
-  async function writeSuperchatLink(path, link) {
-    await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, YAML.stringify(link), 'utf8');
-    linkCache.forget(path);
-  }
-
-  // "<phrase> [<label>]" in a chat with a superchats block: create the group on the ear (the mouth and
-  // the sender invited — members are set only at create), alias it with the being in accum, write the
-  // link, post the intro. One node acts on a shared account; the /join member rule decides who may.
-  async function openSuperchat(ev) {
-    const surface = surfaceOf(ev);
-    if (!loadState || !writeState || !forkNodeSelected(null)) return;
-    const state0 = await loadState();
-    const block = superchatsBlockOf(state0, surface, ev.chatId);
-    const hit = superchatTrigger(block, ev.body);
-    if (!hit) return;
-    const contact = getContact(state0, surface, ev.chatId);
-    if (!isOperator(ev) && !mayJoinHere(state0, surface, ev.chatId, ev)) {
-      onLog(`SI chat: ${ev.senderName ?? ev.senderId ?? '?'} may not wake a being in ${ev.chatId} — refused.`);
-      return 'refused — the sender may not wake a being here';
-    }
-    const invitee = !ev.isSender && String(ev.senderId ?? '').endsWith(':beeper.local') ? ev.senderId : null;
-    if (!ev.isSender && !invitee) { onLog(`SI chat: ${ev.senderId ?? '?'} is not an invitable id — nothing created.`); return 'refused — the sender id cannot be invited'; }
-    const dir = await superchatDirOf(surface, ev.chatId);
-    if (!dir) { onLog(`SI chat: no folder for ${ev.chatId} — nothing created.`); return; }
-    const accountID = await forkBridge.chatAccountId(ev.chatId);
-    if (!accountID) { onLog(`SI chat: could not resolve the ear account for ${ev.chatId} — nothing created.`); return; }
-    const rodzDigits = phoneDigitsOf(cfg().beeper?.secondary?.phone);
-    const rodzUserId = rodzDigits ? await forkBridge.resolveUserIdByPhone(rodzDigits, { accountID }) : null;
-    if (rodzDigits && !rodzUserId) { onLog('SI chat: config.beeper.secondary.phone would not resolve to a Beeper user id — nothing created.'); return; }
-
-    const stamp = forkTimestamp(new Date(now()));
-    let label = sanitizeSlug(hit.label) ? hit.label : stamp;
-    const prior = (await superchatLinksIn(dir)).find((l) => l.key.toLowerCase() === sanitizeSlug(label).toLowerCase());
-    if (prior) {
-      if (!prior.link.ended_at && (await superChannelAlive(prior.link.chat, { chatRaw: forkBridge.chatRaw, config: cfg() })) !== false) {
-        onLog(`SI chat: "${label}" is open (${prior.link.chat}) — no second group.`);
-        return `"${label}" is open`;
-      }
-      label = `${label} ${stamp}`;                           // ended or gone: a new record beside the old
-    }
-    const key = sanitizeSlug(label);
+  async function openAutoSideGroup(ev, surface) {
+    const plan = await sideGroupPlan(ev, 'automatic');
+    if (!plan) return null;
     const cTitle = ev.chatName || (await forkBridge.chatTitle(ev.chatId)) || ev.chatId;
-    const prefix = typeof block.prefix === 'string' ? block.prefix : SUPERCHAT_PREFIX_DEFAULT;
-    const title = await uniqueTitle('SI chat', `${prefix}${cTitle}+${label}`, accountID);
-    const being = defaultBeingOf(contact.entry) ?? defaultKey;
-    const participantIDs = [...new Set([rodzUserId, invitee].filter(Boolean))];
-    const aliased = await createAliasedSideGroup(ev, surface, title, accountID, participantIDs, 'SI chat', { transcript: `si-${key}`, agents: { [being]: { mode: 'accum' } } });
-    if (!aliased) return;
-    await writeSuperchatLink(join(dir, `${key}.yaml`), {
-      surface, origin_chat: ev.chatId, chat: aliased.chatId, label, title,
-      created_by: ev.senderName ?? null, created_by_id: ev.senderId ?? null, created_at: new Date(now()).toISOString(),
+    const title = await uniqueTitle('automatic', `${SIDE_GROUP_PREFIX}${cTitle}`, plan);
+    const aliased = await createAliasedSideGroup(ev, surface, title, plan, 'automatic', { automatic: true });
+    if (!aliased) return null;
+    onLog(`automatic: ${cTitle} -> ${aliased.chatId} "${title}" (made on the ${plan.creator}, invited ${plan.participantIDs.join(', ')})`);
+    await postOpener({ verb: 'automatic', newChatId: aliased.chatId, title, openerText: openerOf(cfg().join, JOIN_OPENER_DEFAULT, cTitle), accountID: plan.accountID, creator: plan.creator, canary: aliased.primaryJid });
+    return aliased.chatId;
+  }
+  // The other node's half: the intro carries the origin's chat id (ev.canary, beside the creator's node
+  // frame). A chat with no conversation of its own here (unknown, or only seen — no alias, no parent,
+  // no being thread) is linked to that conversation as its automatic group; any other is left alone.
+  async function linkSideGroup(ev) {
+    const base = ev?.canary;
+    if (!base || ev.fromNode == null || !loadState || !writeState) return;
+    const surface = surfaceOf(ev);
+    const chatId = shortChatId(ev.chatId);
+    await mutateState(writeState, async () => {
+      const state = await loadState();
+      const own = state?.contacts?.[surface]?.[chatId];
+      if (own && (own.aliasOf || own.parent_chat || residesHere(state, surface, chatId))) return;
+      const contact = getContact(state, surface, base);
+      if (!contact) { onLog(`automatic: ${chatId} names ${base} as its chat, which this node does not have — not linked`); return; }
+      await writeState(aliasContact(state, surface, chatId, contact.jid, { transcript: sanitizeSlug(ev.chatName || chatId), automatic: true }));
+      onLog(`automatic: ${chatId} linked to ${contact.jid} from its intro (made by <${ev.fromNode}>)`);
     });
-    onLog(`SI chat: ${cTitle} -> ${aliased.chatId} "${title}" (invited ${participantIDs.join(', ') || 'nobody'})`);
-    await postOpener({ verb: 'SI chat', newChatId: aliased.chatId, title, openerText: fillVars(SUPERCHAT_INTRO, { chat: cTitle, being: handleOf(being) }), accountID });
-    return `opened ${title}`;
-  }
-
-  // /end in an SI chat: mark the link ended and drop the alias. The group, the link file and the
-  // transcript stay.
-  async function endSuperchat(ev, surface, si) {
-    await writeSuperchatLink(si.path, { ...si.link, ended_at: new Date(now()).toISOString(), ended_by: ev.senderName ?? ev.senderId ?? null });
-    await mutateState(writeState, async () => writeState(dropContact(await loadState(), surface, ev.chatId)));
-    onLog(`/end: SI chat ${ev.chatId} ("${si.link.label}") unlinked from ${si.link.origin_chat}`);
-    await send?.(ev.chatId, `SI chat closed — this group is no longer linked to ${(await forkBridge.chatTitle(si.link.origin_chat)) || 'its chat'}.`);
-    return `ended SI chat ${si.link.label}`;
-  }
-
-  async function superchatHelpText(surface, si) {
-    const entry = getContact(await loadState(), surface, si.link.origin_chat)?.entry;
-    const chat = (await forkBridge.chatTitle(si.link.origin_chat)) || entry?.pushedName || 'the original chat';
-    return fillVars(SUPERCHAT_HELP, { chat, being: handleOf(defaultBeingOf(entry) ?? defaultKey) });
   }
 
   // ── PHRASE TRIGGERS for the fork commands (operator 2026-10-04) ──────────────────────────────────
@@ -4024,10 +3991,8 @@ export function createCommands({
   // only, never prefix/contains. A non-array/empty list matches nothing.
   const matchesTrigger = (triggers, body) =>
     Array.isArray(triggers) && triggers.some((t) => String(t ?? '').trim().toLowerCase() === body);
-  async function phraseCommand(ev) {
+  function phraseCommand(ev) {
     const body = String(ev?.body ?? '').trim().toLowerCase();
-    // SI CHAT — any sender, only in a chat whose own entry has a superchats block (openSuperchat gates who).
-    if (body && await superchatTriggerOf(ev)) return 'superchat';
     if (!isOperator(ev)) return null;                        // same gate the '/'-commands sit behind
     if (!body) return null;
     for (const cmd of PHRASE_TRIGGER_CMDS) {
@@ -4041,7 +4006,6 @@ export function createCommands({
   // '/'-word would run on this node. /send + /end take no name and edit nothing, so a phrase just runs
   // them (they are typed in the private side-room anyway).
   async function runPhrase(ev, cmd) {
-    if (cmd === 'superchat') return openSuperchat(ev);
     if (cmd === 'join') return joinGroup(ev, { discreet: true });
     if (cmd === 'split') return splitGroup(ev, { discreet: true });
     if (cmd === 'send') return sendToOriginal(ev);
@@ -4583,5 +4547,5 @@ export function createCommands({
   // above). `/e`/`/egpt` now carry no special meaning at all and fall through to the generic
   // catch-all like any other unrecognized token.
 
-  return { isCommand, phraseCommand, runPhrase, run, runCaptured, remoteNode, nodeCommandForMe, makeNodeExplicit, currentRoomOf, startBrowser, chromeClientFor: ensureChrome, browserConversationOf, chatChromeOf };
+  return { isCommand, phraseCommand, runPhrase, run, runCaptured, remoteNode, nodeCommandForMe, makeNodeExplicit, currentRoomOf, startBrowser, chromeClientFor: ensureChrome, browserConversationOf, chatChromeOf, autoSideGroup, linkSideGroup };
 }
