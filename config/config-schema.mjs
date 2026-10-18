@@ -3263,9 +3263,9 @@ export const CONFIG_SCHEMA = {
     SI / the SUPER CHANNEL (operator 2026-10-08; renamed from \`super\` 2026-10-13) — a per-conversation
     side channel (SI group) where the bot speaks so its replies stop polluting the main chat. Like /join
     it is an ALIAS of the original conversation (one shared on-disk thread/transcript, two chat surfaces),
-    NOT a diverging /split copy. Summoned by an inbound "…" / "..." (a whole-message deliberate-silence)
-    from ANY participant — NOT operator-only, because the point is a counterparty summoning it so they can
-    read the reply there. Close it with /end (an SI group is an alias, so /end already archives it + drops
+    NOT a diverging /split copy. Summoned by an inbound message EQUAL to \`trigger\` from ANY participant —
+    NOT operator-only, because the point is a counterparty summoning it so they can read the reply there.
+    Close it with /end (an SI group is an alias, so /end already archives it + drops
     the mapping). The two accounts come from beeper.primary.phone / beeper.secondary.phone, as for /join;
     SI also works with NO secondary (the ear creates + posts, one-account baseline). Two co-account nodes
     CONVERGE on the SAME SI group with no RPC: whoever creates first stamps the intro with the base chat's
@@ -3273,24 +3273,22 @@ export const CONFIG_SCHEMA = {
 
     KEYS:
       enabled
-        DEFAULT: false (unset ⇒ off). The master switch. Off ⇒ an inbound "…" does NOTHING special
-        (it falls through exactly as today). On ⇒ an inbound "…" summons / reuses this chat's SI group,
+        DEFAULT: false (unset ⇒ off). The master switch. Off ⇒ the trigger does NOTHING special
+        (it falls through as an ordinary message). On ⇒ the trigger summons / reuses this chat's SI group,
         AND the access gate applies (a sender who is not a current member of an existing SI group does
         not wake the bot). Created only by the node whose node_role is 'primary' (like a nameless /join).
       automatic
         DEFAULT: false. When ON (and enabled), the bot AUTO-CREATES this chat's SI group the first time
-        it would reply there (no "…" needed) and replies in it. When OFF (the default) with no SI group
+        it would reply there (no trigger needed) and replies in it. When OFF (the default) with no SI group
         yet, the bot does NOT reply in the base chat: its answer is SIPHONED to admin_channel (eGPT
         Admin), visible to the operator only, carrying a one-time warning + the recovery phrase — so the
-        base chat stays clean. Create a channel explicitly with the \`triggers\` phrase.
-      triggers
-        DEFAULT: unset ⇒ the "…"/"..." deliberate-silence shape summons (today's behavior). Set a LIST
-        of exact whole-message phrases to summon on those instead: the whole trimmed body must EQUAL
-        one (case-insensitive) — never prefix/contains, so an everyday sentence can't fire it. SAME
-        matching as join/split/send/end .triggers, with ONE difference: those are OPERATOR-ONLY, but
-        the super trigger is ANY-SENDER (a counterparty summoning so they can read the reply there is
-        the whole point). An empty list falls back to the "…" default. Pick phrases you won't say by
-        accident.
+        base chat stays clean. Create a channel explicitly with the \`trigger\` phrase.
+      trigger
+        DEFAULT: unset ⇒ NO summon; "" is the same (effectively disabled, even with enabled on).
+        ONE phrase, a string (it was the \`triggers\` list until migration 0045; "…" no longer
+        summons). The whole trimmed body must EQUAL it (case-insensitive), never prefix/contains.
+        SAME matching as join/split/send/end .triggers, but ANY-SENDER, not operator-only. Pick a
+        phrase you won't say by accident.
       suffix
         DEFAULT: "-super". The channel's title is <this chat's title> + suffix.
       mode

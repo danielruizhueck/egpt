@@ -9,7 +9,7 @@
 // built (Phase 4c); until then they are RECOGNIZED (not leaked to E) and answered
 // with a short note.
 import { lifecycleExit, lifecycleForce } from './ingest.mjs';
-import { isAutoMode, AUTO_MODES, DEFAULT_AUTO_MODE, isDeliberateSilence, superModeOf } from '../auto-mode.mjs';
+import { isAutoMode, AUTO_MODES, DEFAULT_AUTO_MODE, superModeOf } from '../auto-mode.mjs';
 import { patchBeing, patchContact, deleteBeing, getContact, getBeing, ensureContact, recordThread, findThreadJsonl, aliasContact, dropContact, aliasTargetOf, superChannelFor, isSuperChannel, residentsOf, defaultBeingOf, allowedUsersPermits, slugDir, statsPath, conversationPathOf, seedIdentityLayers, skeletonIdentityFiles, slugSuffix, rollTranscript, fixedSlugFor, DETERMINISTIC_MODEL, DETERMINISTIC_EFFORT, DEFAULT_ALLOWED_TOOLS, LOBBY_SLUG } from '../conversations-state.mjs';
 import { stripFrontMatter } from '../transcript-meta.mjs';
 // WHERE A SANDBOXED BEING'S CLI STORE LIVES — the ONE formula, taken from the module that
@@ -501,7 +501,7 @@ export const SPLIT_OPENER_DEFAULT = '🍴 Fork of {group} — a diverging copy: 
 // polluting the main chat. It is the SAME KIND of thing as a /join side-room — an ALIAS of the
 // original conversation (shares its folder/thread/transcript, "one transcript per group"), NOT a
 // /split-style diverging copy. Created + aliased by REUSING /join's create+alias path
-// (createAliasedSideGroup below), summoned by an inbound "…"/"..." (deliberate-silence) from ANY
+// (createAliasedSideGroup below), summoned by an inbound super_chats.trigger from ANY
 // participant. These are the small built-in fallbacks when config.super.* is unset; the real values
 // live in config.yaml. Exported so tests assert the fallback without re-hardcoding the strings.
 export const SUPER_SUFFIX_DEFAULT = '-super';
@@ -3739,13 +3739,13 @@ export function createCommands({
   // SUPER CHANNEL: a per-conversation side channel aliased to the original conversation (one shared
   // thread/transcript), where the Mouth will LATER speak so its replies stop polluting the main chat.
   // It REUSES /join's create+alias+opener path (createAliasedSideGroup + postOpener) — never a parallel
-  // one. Summoned by an inbound "…" from ANY participant; config.super.enabled is gated at the trigger
+  // one. Summoned by an inbound super_chats.trigger from ANY participant; enabled is gated at the trigger
   // (phraseCommand), not here.
   //   not existing → create it (operator + Rodz + the summoner), alias it (carrying the `super: true`
   //                  routing/gate marker), post config.super.opener once. It sets NO stored mode.
   //   existing     → reuse it while live (no re-create, no duplicate opener); dead → replaced.
   // NODE GATE: like a nameless /join, only the primary-role node acts — on a shared account both
-  // co-account nodes hear the "…" and only one must create the channel. THE MODE IS INTRINSIC, NOT
+  // co-account nodes hear the trigger and only one must create the channel. THE MODE IS INTRINSIC, NOT
   // STORED (operator 2026-10-08, CHUNK 2): a super channel is an ALIAS, so a stored per-being mode
   // would resolve THROUGH aliasOf to the origin and mutate IT (and never revert on /end — the chunk-1
   // bug). Instead config.super.mode is read LIVE at the reply gate (gating.mjs, via the per-surface
@@ -3858,9 +3858,10 @@ export function createCommands({
     if (!adminId) { onLog(`super-siphon: automatic is off and ${shortChatId(ev?.chatId)} has no SI channel, but admin_channel is unresolvable — reply falls back to the base chat.`); return null; }
     const key = `${surfaceOf(ev)}:${shortChatId(ev?.chatId)}`;
     if (_onceWithin(_siphonWarned, key)) {
-      const trig = (cfg().super_chats?.triggers ?? []).find((t) => typeof t === 'string' && t.trim()) || '…';
+      const trig = String(cfg().super_chats?.trigger ?? '').trim();
       const where = ev?.chatName || shortChatId(ev?.chatId);
-      try { await noticeToAdmin(`⚠ SI (super_chats) is enabled for "${where}" but it has no SI channel and automatic is off — this reply was siphoned here, the base chat got nothing. To give it its own channel, send "${trig}" in that chat.`); }
+      const recover = trig ? `To give it its own channel, send "${trig}" in that chat.` : 'No super_chats.trigger is set, so no phrase can open one.';
+      try { await noticeToAdmin(`⚠ SI (super_chats) is enabled for "${where}" but it has no SI channel and automatic is off — this reply was siphoned here, the base chat got nothing. ${recover}`); }
       catch (e) { onLog(`super-siphon: warning post failed — ${e?.message ?? e}`); }
     }
     return adminId;
@@ -4094,23 +4095,10 @@ export function createCommands({
     Array.isArray(triggers) && triggers.some((t) => String(t ?? '').trim().toLowerCase() === body);
   function phraseCommand(ev) {
     const body = String(ev?.body ?? '').trim().toLowerCase();
-    // SUPER CHANNEL SUMMON (operator 2026-10-08) — the ONE phrase trigger that is NOT operator-gated:
-    // an inbound message from ANY participant summons the super channel, so a counterparty can read
-    // the bot's reply there. CHECKED BEFORE the isOperator gate the other triggers sit behind — the
-    // any-sender scope is the whole point. Gated on config.super.enabled (unset/false ⇒ it falls
-    // through exactly as today). The summon PHRASE is config.super.triggers when set to a non-empty
-    // LIST (EXACT whole-message match, the SAME matchesTrigger the fork triggers use) — else, UNSET,
-    // the deliberate-silence shape ("…"/"...") via isDeliberateSilence (auto-mode.mjs, the ONE
-    // ellipsis-shape predicate), preserving today's default behavior exactly. INBOUND ONLY: the
-    // model's reply-"…" is OUTBOUND, echo-deduped before classify, so it cannot self-summon.
+    // SUPER CHANNEL SUMMON — ANY sender (checked before the isOperator gate): a message EQUAL to
+    // super_chats.trigger, same matchesTrigger as the fork triggers. Empty/unset trigger ⇒ no summon.
     const superCfg = cfg()?.super_chats;
-    if (superCfg?.enabled) {
-      const triggers = superCfg.triggers;
-      const summoned = Array.isArray(triggers) && triggers.length
-        ? matchesTrigger(triggers, body)        // configured phrases replace the default
-        : isDeliberateSilence(ev?.body);        // DEFAULT (unset/empty): the "…"/"..." shape
-      if (summoned) return 'super';
-    }
+    if (superCfg?.enabled && body && matchesTrigger([superCfg.trigger], body)) return 'super';
     if (!isOperator(ev)) return null;                        // same gate the '/'-commands sit behind
     if (!body) return null;
     for (const cmd of PHRASE_TRIGGER_CMDS) {
@@ -4124,9 +4112,8 @@ export function createCommands({
   // '/'-word would run on this node. /send + /end take no name and edit nothing, so a phrase just runs
   // them (they are typed in the private side-room anyway).
   async function runPhrase(ev, cmd) {
-    // 'super' (operator 2026-10-08): the inbound "…" summons this chat's super channel, invited to
-    // its SENDER (the summoner) — any participant, so they can read the reply there. No discreet
-    // concept and no message edit (the "…" IS the user's message, not a command to hide).
+    // 'super': the inbound super_chats.trigger summons this chat's super channel, invited to its
+    // SENDER (any participant). No discreet concept and no message edit.
     if (cmd === 'super') return ensureSuperChannel(ev, ev.senderId ?? null);
     if (cmd === 'join') return joinGroup(ev, { discreet: true });
     if (cmd === 'split') return splitGroup(ev, { discreet: true });

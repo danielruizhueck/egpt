@@ -2,17 +2,17 @@
 //
 // A super channel is the SAME KIND of thing as a /join side-room: an ALIAS of the original
 // conversation (shares its folder/thread/transcript — conversations-state aliasOf), NOT a /split
-// diverging copy. Chunk 1 builds its config + lifecycle + the manual "…" summon; it does NOT yet
+// diverging copy. Chunk 1 builds its config + lifecycle + the manual summon; it does NOT yet
 // reroute any replies (chunk 2) or implement respect-exit / mention-reinvite (chunk 3).
 //
 // WHAT THIS LOCKS:
-//   · an inbound "…"/"..." from ANY participant (not operator-only), when config.super.enabled,
+//   · an inbound super_chats.trigger phrase from ANY participant (not operator-only), when enabled,
 //     summons the channel through the EXISTING phraseCommand → runPhrase path;
 //   · a first summon CREATES <chat>-super, ALIASES it to the conversation (same alias kind /join
 //     writes), INVITES Rodz + the summoner, posts config.super.opener ONCE, and sets the channel's
 //     auto-mode to config.super.mode;
 //   · a second summon REUSES it (no re-create, no duplicate opener);
-//   · super disabled/unset ⇒ the "…" is ordinary chat (phraseCommand returns null);
+//   · super disabled/unset, or trigger empty ⇒ ordinary chat (phraseCommand returns null);
 //   · the mode lands on the SHARED entry (a super channel is an alias; mode resolves THROUGH aliasOf
 //     to the primary — there is no per-alias mode slot).
 //
@@ -112,72 +112,47 @@ function harness({ config, state, resolveSecondaryChatIdByTitle = () => SEC_SUPE
 // An INBOUND message (no `authorized`/`isSender`, chat is not a configured Self-DM ⇒ NOT operator).
 const inbound = (body = '…', extra = {}) => ({ chatId: C_CHAT, surface: 'whatsapp', chatName: CHAT_TITLE, senderId: SUMMONER, body, ...extra });
 
-// ── the "…" trigger: ANY sender, gated only on super.enabled ───────────────────────────────────────
-describe('phraseCommand — the "…" super summon is any-sender and super.enabled-gated', () => {
-  it('an inbound "…"/"..." from a NON-operator returns "super" when super.enabled (trim-tolerant)', () => {
-    const { cmds } = harness({ config: cfg() });
-    expect(cmds.phraseCommand(inbound('…'))).toBe('super');
-    expect(cmds.phraseCommand(inbound('...'))).toBe('super');
-    expect(cmds.phraseCommand(inbound('  …  '))).toBe('super');   // whole trimmed body
-    expect(cmds.phraseCommand(inbound('……'))).toBe('super');      // a run of ellipsis
+// ── super_chats.trigger: ONE exact phrase, ANY sender; empty/unset ⇒ no summon (operator 2026-10-18) ──
+describe('phraseCommand — super_chats.trigger is the one summon phrase', () => {
+  const withTrigger = (trigger, enabled = true) => cfg({ superBlock: { enabled, trigger } });
+
+  it('trigger "SI chat": the whole message (any case, trimmed) summons, from a NON-operator', () => {
+    const { cmds } = harness({ config: withTrigger('SI chat') });
+    expect(cmds.phraseCommand(inbound('si chat'))).toBe('super');
+    expect(cmds.phraseCommand(inbound('SI CHAT'))).toBe('super');
+    expect(cmds.phraseCommand(inbound('  SI chat  '))).toBe('super');
   });
 
-  it('super disabled OR unset ⇒ an inbound "…" does NOTHING special (falls through as ordinary chat)', () => {
-    expect(harness({ config: cfg({ superBlock: { enabled: false } }) }).cmds.phraseCommand(inbound('…'))).toBe(null);
-    expect(harness({ config: cfg({ superBlock: null }) }).cmds.phraseCommand(inbound('…'))).toBe(null);
-  });
-
-  it('only a WHOLE deliberate-silence body triggers (never prefix/contains)', () => {
-    const { cmds } = harness({ config: cfg() });
-    expect(cmds.phraseCommand(inbound('hola'))).toBe(null);
-    expect(cmds.phraseCommand(inbound('… y algo más'))).toBe(null);
-    expect(cmds.phraseCommand(inbound('..'))).toBe(null);   // two dots is not the silence shape (needs 3+)
-  });
-});
-
-// ── config.super.triggers: the summon PHRASE is configurable, still ANY-SENDER (operator 2026-10-08) ──
-// A non-empty config.super.triggers LIST replaces the "…"/"..." default with EXACT whole-message
-// phrases — the SAME matching the operator join/split/send/end triggers use, but ANY-SENDER (the super
-// summon is never operator-gated). UNSET / empty ⇒ the deliberate-silence default, byte-for-byte as before.
-describe('phraseCommand — config.super.triggers makes the summon phrase configurable', () => {
-  const withTriggers = (triggers, enabled = true) => cfg({ superBlock: { enabled, triggers } });
-
-  it('triggers UNSET ⇒ the "…"/"..." default still summons (any-sender preserved)', () => {
-    const { cmds } = harness({ config: cfg() });              // super.enabled, NO triggers key
-    expect(cmds.phraseCommand(inbound('…'))).toBe('super');
-    expect(cmds.phraseCommand(inbound('...'))).toBe('super');
-  });
-
-  it('triggers=["beep"] ⇒ a whole-message "beep" (any case, trim-tolerant) summons; "…" no longer does', () => {
-    const { cmds } = harness({ config: withTriggers(['beep']) });
-    expect(cmds.phraseCommand(inbound('beep'))).toBe('super');
-    expect(cmds.phraseCommand(inbound('BEEP'))).toBe('super');     // case-insensitive
-    expect(cmds.phraseCommand(inbound('  Beep  '))).toBe('super'); // whole TRIMMED body
-    expect(cmds.phraseCommand(inbound('…'))).toBe(null);           // the default is REPLACED, not added
-  });
-
-  it('EXACT whole-message only — prefix / contains / typo do NOT summon', () => {
-    const { cmds } = harness({ config: withTriggers(['beep']) });
-    expect(cmds.phraseCommand(inbound('beeep'))).toBe(null);   // typo
-    expect(cmds.phraseCommand(inbound('say beep'))).toBe(null);
-    expect(cmds.phraseCommand(inbound('beep now'))).toBe(null);
-  });
-
-  it('an EMPTY triggers list falls back to the "…" default (not "match nothing")', () => {
-    const { cmds } = harness({ config: withTriggers([]) });
-    expect(cmds.phraseCommand(inbound('…'))).toBe('super');
-  });
-
-  it('triggers set but super.enabled FALSE ⇒ nothing summons', () => {
-    const { cmds } = harness({ config: withTriggers(['beep'], false) });
-    expect(cmds.phraseCommand(inbound('beep'))).toBe(null);
+  it('EXACT whole-message only: prefix / contains / typo do not summon, nor does "…"', () => {
+    const { cmds } = harness({ config: withTrigger('SI chat') });
+    expect(cmds.phraseCommand(inbound('SI chat now'))).toBe(null);
+    expect(cmds.phraseCommand(inbound('say SI chat'))).toBe(null);
+    expect(cmds.phraseCommand(inbound('SI cha'))).toBe(null);
     expect(cmds.phraseCommand(inbound('…'))).toBe(null);
   });
 
-  it('a configured trigger from a NON-operator summons (ANY-SENDER, unlike the fork triggers)', () => {
-    const { cmds } = harness({ config: withTriggers(['beep']) });
-    // inbound() is a plain participant (SUMMONER), never the operator — it still fires.
-    expect(cmds.phraseCommand(inbound('beep'))).toBe('super');
+  it('trigger "" ⇒ nothing summons, "…" / "..." / an empty body included', () => {
+    const { cmds } = harness({ config: withTrigger('') });
+    for (const body of ['…', '...', '', '   ', 'SI chat']) expect(cmds.phraseCommand(inbound(body))).toBe(null);
+  });
+
+  it('trigger UNSET ⇒ the evicted "…" default does NOT summon', () => {
+    const { cmds } = harness({ config: cfg() });              // enabled, no trigger key
+    for (const body of ['…', '...', '……', '']) expect(cmds.phraseCommand(inbound(body))).toBe(null);
+  });
+
+  it('disabled, or no super_chats block ⇒ nothing summons even with a trigger set', () => {
+    expect(harness({ config: withTrigger('SI chat', false) }).cmds.phraseCommand(inbound('SI chat'))).toBe(null);
+    expect(harness({ config: cfg({ superBlock: null }) }).cmds.phraseCommand(inbound('…'))).toBe(null);
+  });
+
+  it('REGRESSION: the operator fork triggers are unchanged beside it', () => {
+    const config = { ...withTrigger('SI chat'), join: { triggers: ['dame un segundo'] } };
+    const { cmds } = harness({ config });
+    const op = (body) => ({ ...inbound(body), authorized: true });
+    expect(cmds.phraseCommand(op('Dame un segundo'))).toBe('join');
+    expect(cmds.phraseCommand(inbound('dame un segundo'))).toBe(null);   // non-operator: ordinary message
+    expect(cmds.phraseCommand(op('SI chat'))).toBe('super');
   });
 });
 
@@ -721,13 +696,16 @@ describe('SI PART C — siphonReplyToAdmin (automatic off, no channel): reply to
     expect(adminPosts).toHaveLength(1);
   });
 
-  it('the warning names the recovery phrase (super_chats.triggers[0], else "…")', async () => {
-    const { cmds, adminPosts } = harness({ config: cfg({ superBlock: { enabled: true, triggers: ['SI chat'] } }) });
+  it('the warning names super_chats.trigger; with none it says so and names no phrase', async () => {
+    const { cmds, adminPosts } = harness({ config: cfg({ superBlock: { enabled: true, trigger: 'SI chat' } }) });
     await cmds.siphonReplyToAdmin({ chatId: C_CHAT, surface: 'whatsapp', chatName: CHAT_TITLE });
-    expect(adminPosts[0]).toContain('SI chat');
-    const h2 = harness({ config: cfg({ superBlock: OFF }) });     // no triggers → the "…" default
-    await h2.cmds.siphonReplyToAdmin({ chatId: C_CHAT, surface: 'whatsapp', chatName: CHAT_TITLE });
-    expect(h2.adminPosts[0]).toContain('…');
+    expect(adminPosts[0]).toContain('send "SI chat" in that chat');
+    for (const superBlock of [OFF, { enabled: true, trigger: '' }]) {
+      const h = harness({ config: cfg({ superBlock }) });
+      await h.cmds.siphonReplyToAdmin({ chatId: C_CHAT, surface: 'whatsapp', chatName: CHAT_TITLE });
+      expect(h.adminPosts[0]).toMatch(/no super_chats\.trigger is set/i);
+      expect(h.adminPosts[0]).not.toMatch(/send "|…/);
+    }
   });
 
   it('admin_channel UNRESOLVABLE → returns null (gating falls back to the base chat), nothing posted', async () => {
