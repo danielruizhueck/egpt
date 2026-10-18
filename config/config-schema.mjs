@@ -2725,6 +2725,21 @@ export const CONFIG_SCHEMA = {
         Background status lines share it.
   `,
 
+  lag_probe: `
+    Is the spine's one event loop keeping up? (src/spine/lag-probe.mjs, operator
+    2026-10-18.) Lag = the worst loop delay in a sample, or the fast pump's oldest
+    wait, whichever is larger. Over threshold: ONE line to log_to_group with the
+    attribution (spine/node CPU, top processes, queues, slowest spine steps),
+    repeated at most every 10 min, then one "recovered" line after a clean minute.
+    A baseline line goes to the node log every 5 min. Both keys read live.
+
+    KEYS:
+      threshold_ms
+        DEFAULT: 10000.
+      every_ms
+        DEFAULT: 5000. The sample cadence.
+  `,
+
   auto_restart_on_config_change: `
     Restart to apply a config.yaml edit that touches a RESTART-ONLY key
     (operator 2026-10-09; step B 2026-10-16; src/spine/spine.mjs
