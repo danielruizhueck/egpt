@@ -8,7 +8,7 @@
 //     the Node process + context RAM. Never keep every conversation-e warm.
 //     Per-class TTL: system=persistent (-1), conversation=short follow-up window,
 //     sibling=medium. HOUSE DIALECT (operator 2026-07-26, as posts_back_delay_ms
-//     and guard.turns): -1 = never idle-evict, 0 = always evict (at turn end), N ms.
+//     and loop_guard.inbound.turns): -1 = never idle-evict, 0 = always evict (at turn end), N ms.
 //     PER-RUN OVERRIDE (operator 2026-07-02: "keep any conversation as a
 //     background agent 15m after the last message, configurable … honor override
 //     per configuration"): run() takes an optional `idleTtlMs` that stamps THIS

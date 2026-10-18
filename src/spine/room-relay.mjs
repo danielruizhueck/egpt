@@ -12,7 +12,7 @@
 // back to its own author.
 //
 // The loop is bounded by the ONE guard: each re-entered brain reply is a non-human turn, so a
-// two-brain room answering itself trips guard.turns and `blocked()` short-circuits the
+// two-brain room answering itself trips loop_guard.inbound.turns and `blocked()` short-circuits the
 // fan-out. This service NEVER counts and NEVER logs the transcript — the re-entry does both
 // once, at the chokepoint (spine.mjs), which is what keeps "count/log exactly once" honest.
 //
@@ -199,7 +199,7 @@ export function createRoomRelay({
   return {
     // Deliver a received room message to each admitting brain member. `blocked()` (the guard's
     // per-channel stop) short-circuits a channel the counter tripped mid-fan-out — so a runaway
-    // multi-brain room halts at guard.turns. `reenter` = the spine's handleInbound: a member's
+    // multi-brain room halts at loop_guard.inbound.turns. `reenter` = the spine's handleInbound: a member's
     // finalized reply re-enters the pipe (counted once, reaching the others + E). Never throws.
     async fanOut(ev, { blocked = () => false, reenter } = {}) {
       let members;

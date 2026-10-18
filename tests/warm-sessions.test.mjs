@@ -445,7 +445,7 @@ describe('warm-session pool', () => {
 
   // TTL CONVENTION (operator 2026-07-26: "'never evict' should be -1, 0 always,
   // right?"). Warm now speaks the house dialect used by posts_back_delay_ms and
-  // guard.turns: -1 = never idle-evict, 0 = always evict (immediately, never kept
+  // loop_guard.inbound.turns: -1 = never idle-evict, 0 = always evict (immediately, never kept
   // warm), N = evict after N ms idle.
   it('ttl -1 arms no timer and never evicts (keep warm forever)', async () => {
     const { makeSession, made } = fakeFactory();

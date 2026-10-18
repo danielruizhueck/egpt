@@ -674,7 +674,7 @@ export function createCommands({
   dueFor = dueForCompaction,
   // /radio say seams — the SAME uploader/gate convention createRadioNoteRelay uses (real
   // uploader by default; gate defaults to a bare passthrough so a standalone/test
-  // createCommands that doesn't inject the lasso is unaffected — never a second ceiling).
+  // createCommands that doesn't inject the send guard is unaffected — never a second ceiling).
   uploadNote: uploadNoteFn = uploadNote,
   gate: gateFn = (fn) => fn(),
   // Bare /radio's node-wide report seams. listEntityDirs enumerates every conversation/room
@@ -3209,7 +3209,7 @@ export function createCommands({
     const filename = radioNoteFilename(now(), 'md');
     const bytes = Buffer.from(rest, 'utf8');
     const result = await gateFn(() => uploadNoteFn({ radio: radios[joinedRadio], speaker, filename, bytes, onLog }));
-    if (result == null) return;   // gate refused — silent, per the lasso ruling
+    if (result == null) return;   // gate refused — silent, per the send-guard ruling
     if (!result.ok) {
       await send?.(ev.chatId, `radio say failed — ${result.error}${result.status ? ` (${result.status})` : ''}`);
       return;

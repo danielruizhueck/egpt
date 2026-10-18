@@ -1,4 +1,4 @@
-// lasso.test.mjs — THE OUTBOUND CEILING (src/lasso.mjs), reproduce-first.
+// loop-guard.test.mjs — THE OUTBOUND CEILING (src/loop-guard.mjs createSendGuard), reproduce-first.
 //
 // THE LIVE FAILURE (2026-07-25): two nodes traded hundreds of messages ~0.7s apart until the
 // service had to be killed. Nothing bounded what LEAVES the node.
@@ -7,7 +7,7 @@
 // probably a bug if there is flooding" / "bridge stops looping until human intervention". So
 // an over-ceiling emit no longer WAITS its turn — it STOPS THE NODE, through the same
 // EGPT_HOME/STOP kill switch the STOP safe word pulls. These tests fail on the pre-reversal
-// lasso, which queued instead: the 21st message came out late rather than writing STOP.
+// ceiling, which queued instead: the 21st message came out late rather than writing STOP.
 //
 // TWO COUNTERS (operator: "only count outbound messages or edits"): committed MESSAGES are
 // tight (a new line in someone's chat is the damage); EDITS are loose (they make ONE line
@@ -18,7 +18,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { promises as fs, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';
-import { createLasso } from '../src/lasso.mjs';
+import { createSendGuard } from '../src/loop-guard.mjs';
 import { createShellPort } from '../src/bridges/shell-port.mjs';
 import { responseFrame } from '../src/shell/auth.mjs';
 // The shell token the fake editor below authenticates with — the limb refuses to dial without one.
@@ -30,14 +30,14 @@ const SHELL_TOKEN = 'test-shell-token';
 // Let every pending microtask + already-resolved await chain run.
 const flush = () => new Promise((r) => setImmediate(r));
 
-// A driveable clock. There are no timers left in the lasso — nothing waits — so this is a
+// A driveable clock. There are no timers left in the send guard — nothing waits — so this is a
 // clock and nothing more.
 function fakeClock(start = 1_000_000) {
   let t = start;
   return { now: () => t, advance(ms) { t += ms; } };
 }
 
-// A recording limb port with the shape the lasso wraps (beeper-port / shell-port).
+// A recording limb port with the shape the send guard wraps (beeper-port / shell-port).
 function fakePort(clock) {
   const posts = [];
   return {
@@ -72,25 +72,25 @@ function fakePort(clock) {
   };
 }
 
-// The lasso under test, with the trip captured instead of taken.
+// The send guard under test, with the trip captured instead of taken.
 function withTrips(over = {}) {
   const clock = fakeClock();
   const trips = [];
   const logs = [];
   const states = [];
   const port = fakePort(clock);
-  const lasso = createLasso({
+  const sendGuard = createSendGuard({
     messages: 20, windowMs: 5000, edits: 2000,
     now: clock.now, onTrip: (t) => trips.push(t),
     onLog: (m) => logs.push(m), writeState: (s) => states.push(s),
     ...over,
   });
-  return { clock, trips, logs, states, port, lasso, bridge: lasso.wrap(port) };
+  return { clock, trips, logs, states, port, sendGuard, bridge: sendGuard.wrap(port) };
 }
 
-describe('lasso — the outbound ceiling', () => {
+describe('loop guard — the outbound ceiling', () => {
   it('1. an over-ceiling MESSAGE stops the node — it is not queued, not sent late', async () => {
-    const { trips, logs, port, lasso, bridge } = withTrips();
+    const { trips, logs, port, sendGuard, bridge } = withTrips();
 
     // The ceiling is a HARD ceiling: 20 leave, the 21st does not.
     const ok = await Promise.all(Array.from({ length: 20 }, (_, i) => bridge.send('!room', `m ${i}`)));
@@ -99,7 +99,7 @@ describe('lasso — the outbound ceiling', () => {
     expect(trips).toEqual([]);
 
     const over = await bridge.send('!room', 'the 21st');
-    expect(over).toBe(null);                    // ← the pre-reversal lasso RESOLVED this, late
+    expect(over).toBe(null);                    // ← the pre-reversal guard RESOLVED this, late
     expect(port.posts).toHaveLength(20);        // it never reached the limb at all
 
     // Tripped ONCE, and it says WHY: the kind, the count and the ceiling that was crossed.
@@ -113,7 +113,7 @@ describe('lasso — the outbound ceiling', () => {
     expect(await bridge.postStatus('!room', '🤔')).toBe(null);
     expect(await bridge.sendMedia('!room', '/tmp/x.png')).toBe(false);
     expect(trips).toHaveLength(1);
-    expect(lasso.stats()).toMatchObject({ messages: 20, tripped: { kind: 'message' } });
+    expect(sendGuard.stats()).toMatchObject({ messages: 20, tripped: { kind: 'message' } });
   });
 
   it('2. a burst UNDER the ceiling sends normally, and the window slides', async () => {
@@ -131,7 +131,7 @@ describe('lasso — the outbound ceiling', () => {
   });
 
   it('3. an ordinary streamed reply is ONE message — its frames are EDITS, never messages', async () => {
-    const { trips, port, lasso, bridge } = withTrips();
+    const { trips, port, sendGuard, bridge } = withTrips();
 
     // Exactly what src/spine/sender.mjs does per reply.
     const stream = bridge.startStream('!room', '⏳ Thinking…', { bodyEmoji: '🐶' });
@@ -146,7 +146,7 @@ describe('lasso — the outbound ceiling', () => {
     expect(stream.delivered).toBe(true);                      // the §7 fallback stays off
     // finish is an EDIT (it PUTs into the placeholder startStream already counted), so the
     // reply costs 1 message and 4 edits — never 2 messages.
-    expect(lasso.stats()).toMatchObject({ messages: 1, edits: 4, tripped: null });
+    expect(sendGuard.stats()).toMatchObject({ messages: 1, edits: 4, tripped: null });
 
     // 20 consecutive ordinary replies still leave — 20 messages, 40 edits, no trip.
     for (let i = 0; i < 19; i++) {
@@ -155,12 +155,12 @@ describe('lasso — the outbound ceiling', () => {
     }
     await flush();
     expect(port.posts).toHaveLength(20);
-    expect(lasso.stats()).toMatchObject({ messages: 20, edits: 42, tripped: null });
+    expect(sendGuard.stats()).toMatchObject({ messages: 20, edits: 42, tripped: null });
     expect(trips).toEqual([]);
   });
 
   it('4. EDITS have their OWN ceiling — an infinite-edit runaway stops the node too', async () => {
-    const { trips, port, lasso, bridge } = withTrips({ edits: 10 });
+    const { trips, port, sendGuard, bridge } = withTrips({ edits: 10 });
 
     const s = bridge.startStream('!room', '⏳ Thinking…', {});   // 1 message, 0 edits
     for (let i = 0; i < 10; i++) s.update(`frame ${i}`);
@@ -174,7 +174,7 @@ describe('lasso — the outbound ceiling', () => {
     expect(trips[0].reason).toBe('outbound edit flood — 11 edits in 5000ms (ceiling 10)');
 
     // The MESSAGE budget was never spent by those edits — the counters are separate.
-    expect(lasso.stats()).toMatchObject({ messages: 1, edits: 10 });
+    expect(sendGuard.stats()).toMatchObject({ messages: 1, edits: 10 });
 
     // editStatus / editOwn are edits too — the same ceiling, the same trip.
     expect(bridge.editOwn('!room', 'id', 'x')).toBe(null);
@@ -182,22 +182,22 @@ describe('lasso — the outbound ceiling', () => {
     expect(trips).toHaveLength(1);
   });
 
-  it('5. NEVER the STOP path — bypassLasso still gets out AFTER a trip', async () => {
+  it('5. NEVER the STOP path — bypassLoopGuard still gets out AFTER a trip', async () => {
     const { trips, port, bridge } = withTrips({ messages: 3 });
 
     await Promise.all(Array.from({ length: 4 }, (_, i) => bridge.send('!room', `flood ${i}`)));
     expect(trips).toHaveLength(1);
     expect(port.posts).toHaveLength(3);
 
-    // The worst possible moment for a kill switch — the lasso has already tripped.
-    const stopped = await bridge.send('!room', '🛑 STOP received — egpt is stopping', { bypassLasso: true });
+    // The worst possible moment for a kill switch — the guard has already tripped.
+    const stopped = await bridge.send('!room', '🛑 STOP received — egpt is stopping', { bypassLoopGuard: true });
     expect(stopped).toEqual({ ok: true });
     expect(port.posts.at(-1).text).toContain('STOP received');   // out NOW, past the tripped gate
     expect(port.posts).toHaveLength(4);
   });
 
   it('6. reactions and deletes are NEITHER a message nor an edit', async () => {
-    const { trips, port, lasso, bridge } = withTrips({ messages: 1, edits: 1 });
+    const { trips, port, sendGuard, bridge } = withTrips({ messages: 1, edits: 1 });
 
     // No text, so no counter: a reaction is not a line in a chat, a delete removes one.
     for (let i = 0; i < 50; i++) {
@@ -206,7 +206,7 @@ describe('lasso — the outbound ceiling', () => {
       bridge.deleteOwn('!room', 'id');
     }
     expect(port.posts).toHaveLength(150);
-    expect(lasso.stats()).toMatchObject({ messages: 0, edits: 0, tripped: null });
+    expect(sendGuard.stats()).toMatchObject({ messages: 0, edits: 0, tripped: null });
     expect(trips).toEqual([]);
   });
 
@@ -214,7 +214,7 @@ describe('lasso — the outbound ceiling', () => {
     const clock = fakeClock();
     const trips = [];
     const beeper = fakePort(clock);
-    const lasso = createLasso({ messages: 3, windowMs: 5000, now: clock.now, onTrip: (t) => trips.push(t) });
+    const sendGuard = createSendGuard({ messages: 3, windowMs: 5000, now: clock.now, onTrip: (t) => trips.push(t) });
 
     // The real shell port, which now SERVES the console (operator ruling 2026-08-26) over a fake
     // listener, with a fake EDITOR dialing in. The fake editor also ANSWERS THE AUTH CHALLENGE
@@ -238,14 +238,14 @@ describe('lasso — the outbound ceiling', () => {
       on(ev, cb) { (this._h[ev] ||= []).push(cb); if (ev === 'connection') queueMicrotask(() => cb(new FakeEditorSocket())); return this; }
       close() {}
     }
-    const shell = lasso.wrap(createShellPort({ WebSocketServer: FakeWSS, token: SHELL_TOKEN, reapPort: () => 0 }));
+    const shell = sendGuard.wrap(createShellPort({ WebSocketServer: FakeWSS, token: SHELL_TOKEN, reapPort: () => 0 }));
     shell.start();
     await flush();
 
     // The Proxy must not freeze a GETTER (a spread would have): isConnected is live.
     expect(shell.isConnected).toBe(true);
 
-    const bridge = lasso.wrap(beeper);
+    const bridge = sendGuard.wrap(beeper);
     await Promise.all([bridge.send('!room', 'one'), bridge.send('!room', 'two')]);
     expect(beeper.posts).toHaveLength(2);
 
@@ -264,11 +264,11 @@ describe('lasso — the outbound ceiling', () => {
     const clock = fakeClock();
     const trips = [];
     const beeper = fakePort(clock);
-    const lasso = createLasso({ messages: 3, windowMs: 5000, now: clock.now, onTrip: (t) => trips.push(t) });
+    const sendGuard = createSendGuard({ messages: 3, windowMs: 5000, now: clock.now, onTrip: (t) => trips.push(t) });
     const shellOwned = new Set(['main']);
     const shell = { owns: (c) => shellOwned.has(c), send: async () => true, startStream: () => ({}), postStatus: async () => null };
-    const wrapped = lasso.wrap(beeper);
-    const facade = makeShellAwareBridge(wrapped, lasso.wrap(shell));
+    const wrapped = sendGuard.wrap(beeper);
+    const facade = makeShellAwareBridge(wrapped, sendGuard.wrap(shell));
 
     await Promise.all(Array.from({ length: 9 }, (_, i) => facade.send('!room', `flood ${i}`)));
     expect(beeper.posts).toHaveLength(3);
@@ -283,7 +283,7 @@ describe('lasso — the outbound ceiling', () => {
     const clock = fakeClock();
     const trips = [];
     const port = fakePort(clock);
-    const bridge = createLasso({ messages: -1, now: clock.now, onTrip: (t) => trips.push(t) }).wrap(port);
+    const bridge = createSendGuard({ messages: -1, now: clock.now, onTrip: (t) => trips.push(t) }).wrap(port);
     await Promise.all(Array.from({ length: 50 }, (_, i) => bridge.send('!room', `x${i}`)));
     const s = bridge.startStream('!room', '⏳', {});
     for (let i = 0; i < 50; i++) s.update(`f${i}`);
@@ -291,7 +291,7 @@ describe('lasso — the outbound ceiling', () => {
     expect(trips).toEqual([]);
 
     const port2 = fakePort(clock);
-    const b2 = createLasso({ messages: 20, edits: 0, now: clock.now, onTrip: (t) => trips.push(t) }).wrap(port2);
+    const b2 = createSendGuard({ messages: 20, edits: 0, now: clock.now, onTrip: (t) => trips.push(t) }).wrap(port2);
     const s2 = b2.startStream('!room', '⏳', {});
     for (let i = 0; i < 500; i++) s2.update(`f${i}`);
     expect(port2.posts[0].handle.frames).toHaveLength(500);   // edit counter off…
@@ -302,7 +302,7 @@ describe('lasso — the outbound ceiling', () => {
 
   // THE MOUTH LINK'S POST IS STILL A MESSAGE (operator 2026-09-05). A peer spine hands this node a
   // finished line and this node posts it on its own account — that is an outbound message leaving
-  // this limb, and the ceiling is "any limb, node-wide". A path the lasso did not know about would
+  // this limb, and the ceiling is "any limb, node-wide". A path the guard did not know about would
   // be a hole straight through the ceiling, and the hole would be reachable from ANOTHER process.
   it('11. postVerbatim (the peer spine\'s line, said on this account) is counted like any other message', async () => {
     const { trips, port, bridge } = withTrips({ messages: 3 });
@@ -363,14 +363,14 @@ describe('lasso — the outbound ceiling', () => {
     const clock = fakeClock();
     const trips = [];
     const port = fakePort(clock);
-    const bridge = createLasso({ now: clock.now, onTrip: (t) => trips.push(t) }).wrap(port);
+    const bridge = createSendGuard({ now: clock.now, onTrip: (t) => trips.push(t) }).wrap(port);
     await Promise.all(Array.from({ length: 18 }, () => bridge.send('!room', 'x')));
     expect(trips).toEqual([]);
     await bridge.send('!room', 'the 19th');
     expect(trips[0]).toMatchObject({ limit: 18, window_ms: 10000, kind: 'message' });
 
     const port2 = fakePort(clock);
-    const b2 = createLasso({ now: clock.now, onTrip: (t) => trips.push(t) }).wrap(port2);
+    const b2 = createSendGuard({ now: clock.now, onTrip: (t) => trips.push(t) }).wrap(port2);
     const s = b2.startStream('!room', '⏳', {});
     for (let i = 0; i < 4000; i++) s.update(`f${i}`);
     expect(trips).toHaveLength(1);
@@ -384,10 +384,10 @@ describe('lasso — the outbound ceiling', () => {
 // the SAME kill switch the STOP safe word pulls, and that the two known gaps stay closed:
 // the shell limb (shell-owned chats route to shellPort, bypassing the beeper port) and the
 // 👂 echo (posted from inside the beeper limb, BELOW the port).
-const tmpHome = join(os.tmpdir(), `egpt-lasso-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+const tmpHome = join(os.tmpdir(), `egpt-loop-guard-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 process.env.EGPT_HOME = tmpHome;
 const STOP_PATH = join(tmpHome, 'STOP');
-const LASSO_JSON = join(tmpHome, 'state', 'lasso.json');
+const STATE_JSON = join(tmpHome, 'state', 'loop-guard.json');
 
 // Both come from the same dynamic import — makeShellAwareBridge is used by test 8 above, and a
 // top-level beforeAll runs before every test in the file whatever the declaration order.
@@ -399,7 +399,7 @@ afterAll(async () => {
 });
 // writeStopFile NEVER clobbers, and boot REFUSES to start while the file exists — so every
 // case starts from a node that may run.
-beforeEach(async () => { await fs.rm(STOP_PATH, { force: true }); await fs.rm(LASSO_JSON, { force: true }); });
+beforeEach(async () => { await fs.rm(STOP_PATH, { force: true }); await fs.rm(STATE_JSON, { force: true }); });
 
 function fakeStart() {
   const spy = { onIncoming: null, echoGate: null, sent: [] };
@@ -415,12 +415,12 @@ function fakeStart() {
   return { start, spy };
 }
 
-async function bootNode(lasso = { messages: 3, window_ms: 5000 }) {
+async function bootNode(outbound = { messages: 3, window_ms: 5000 }) {
   const { start, spy } = fakeStart();
   const exits = [];
   const logs = [];
   const app = await boot({
-    readConfig: () => ({ whatsapp: {}, node_name: 'kg', lasso, agents: { egpt: { configuration: 'egpt', handles: ['e'], default: true } } }),   // node_name is MANDATORY since 2026-07-26 (the structural node signature)
+    readConfig: () => ({ whatsapp: {}, node_name: 'kg', loop_guard: { outbound }, agents: { egpt: { configuration: 'egpt', handles: ['e'], default: true } } }),   // node_name is MANDATORY since 2026-07-26 (the structural node signature)
     startBridge: start,
     makeSession: () => ({ sessionId: 's', async turn() { return { text: 'ok' }; }, close() {} }),
     loadState: async () => (await import('../src/conversations-state.mjs')).emptyState(),
@@ -433,13 +433,13 @@ async function bootNode(lasso = { messages: 3, window_ms: 5000 }) {
 // The publisher is DELIBERATELY fire-and-forget and non-atomic (boot.mjs:
 // `writeFile(…).catch(() => {})`), so the test waits for the file instead of assuming it.
 // Missing / never-parseable both FAIL.
-async function waitForLassoState(boundMs = 5000) {
+async function waitForGuardState(boundMs = 5000) {
   const deadline = Date.now() + boundMs;
   let why = 'never appeared';
   for (;;) {
-    try { return JSON.parse(await fs.readFile(LASSO_JSON, 'utf8')); }
+    try { return JSON.parse(await fs.readFile(STATE_JSON, 'utf8')); }
     catch (e) { why = e?.message ?? String(e); }
-    if (Date.now() >= deadline) throw new Error(`state/lasso.json after ${boundMs}ms: ${why}`);
+    if (Date.now() >= deadline) throw new Error(`state/loop-guard.json after ${boundMs}ms: ${why}`);
     await new Promise((r) => setTimeout(r, 5));
   }
 }
@@ -451,7 +451,7 @@ describe('boot() — an over-ceiling emit pulls the SAME kill switch the safe wo
       const out = await Promise.all(Array.from({ length: 4 }, (_, i) => app.bridge.send('!room:beeper.com', `flood ${i}`)));
       await flush();
 
-      expect(spy.sent).toHaveLength(3);              // ← the pre-reversal lasso sent all 4, late
+      expect(spy.sent).toHaveLength(3);              // ← the pre-reversal guard sent all 4, late
       expect(out.at(-1)).toBe(null);
 
       // THE SAME PRIMITIVE, not a second one: the STOP file (src/stop-guard.mjs writeStopFile)
@@ -461,18 +461,18 @@ describe('boot() — an over-ceiling emit pulls the SAME kill switch the safe wo
 
       // …and it says WHY, so a flood-stop is not mistaken for a safe-word stop.
       const stopFile = await fs.readFile(STOP_PATH, 'utf8');
-      expect(stopFile).toContain('reason: lasso: outbound message flood — 4 messages in 5000ms (ceiling 3)');
-      expect(stopFile).toContain('who:    lasso');
+      expect(stopFile).toContain('reason: loop_guard: outbound message flood — 4 messages in 5000ms (ceiling 3)');
+      expect(stopFile).toContain('who:    loop_guard');
       expect(stopFile).toContain(`rm ${STOP_PATH}`);        // the human act that clears it
       expect(logs.join('\n')).toContain('TRIPPED');
     } finally { app.stop(); }
   });
 
-  it('publishes the trip to EGPT_HOME/state/lasso.json', async () => {
+  it('publishes the trip to EGPT_HOME/state/loop-guard.json', async () => {
     const { app } = await bootNode();
     try {
       await Promise.all(Array.from({ length: 4 }, (_, i) => app.bridge.send('!room:beeper.com', `x${i}`)));
-      const state = await waitForLassoState();
+      const state = await waitForGuardState();
       expect(state).toMatchObject({
         state: 'tripped',
         limit: { messages: 3, edits: 4000, window_ms: 5000 },
@@ -481,13 +481,13 @@ describe('boot() — an over-ceiling emit pulls the SAME kill switch the safe wo
     } finally { app.stop(); }
   });
 
-  it('ships 18 messages / 10000ms and 4000 edits when the config carries no lasso: block at all', async () => {
+  it('ships 18 messages / 10000ms and 4000 edits when the config carries no loop_guard: block at all', async () => {
     const { app } = await bootNode({});   // {} → boot.mjs's OWN fallback literals, not a test override
     try {
       // one chat each: 19 to ONE chat would trip that chat's own rules (similar / burst) first
       const out = await Promise.all(Array.from({ length: 19 }, (_, i) => app.bridge.send(`!room${i}:beeper.com`, `x${i}`)));
       expect(out.filter((r) => r != null)).toHaveLength(18);   // the 19th is refused
-      const state = await waitForLassoState();
+      const state = await waitForGuardState();
       expect(state.limit).toMatchObject({ messages: 18, edits: 4000, window_ms: 10000 });
       expect(state.tripped).toMatchObject({ kind: 'message', count: 19, limit: 18 });
     } finally { app.stop(); }
@@ -502,12 +502,12 @@ describe('boot() — an over-ceiling emit pulls the SAME kill switch the safe wo
         app.bridge.send('!room:beeper.com', 'c'),
       ]);
       expect(existsSync(STOP_PATH)).toBe(false);
-      expect(await app.shellPort.send('main', 'shell line')).toBe(null);   // ← was unregulated pre-lasso
+      expect(await app.shellPort.send('main', 'shell line')).toBe(null);   // ← was unregulated pre-guard
       expect(existsSync(STOP_PATH)).toBe(true);                            // the shell limb trips it too
     } finally { app.stop(); }
   });
 
-  it('closes the 👂 ECHO gap — the in-limb echo is gated by the same lasso', async () => {
+  it('closes the 👂 ECHO gap — the in-limb echo is gated by the same send guard', async () => {
     const { app, spy } = await bootNode();
     try {
       expect(spy.echoGate).toBeTypeOf('function');
@@ -518,7 +518,7 @@ describe('boot() — an over-ceiling emit pulls the SAME kill switch the safe wo
       ]);
       let echoed = false;
       expect(await spy.echoGate(() => { echoed = true; return 'posted'; })).toBe(null);
-      expect(echoed).toBe(false);               // ← FAILS on the pre-lasso boot: no gate existed at all
+      expect(echoed).toBe(false);               // ← FAILS on the pre-guard boot: no gate existed at all
       expect(existsSync(STOP_PATH)).toBe(true); // the echo spends the SAME budget, and trips it
     } finally { app.stop(); }
   });

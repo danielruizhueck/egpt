@@ -621,7 +621,7 @@ export function createMeshService({
           else {
             // Only the being path ever streams (onPartial below) — open the placeholder HERE, once
             // the branch is known, so a static command never pays for a "🤔" it never uses plus an
-            // extra outbound edit against the lasso budget (operator 2026-07-27: "no AI involved,
+            // extra outbound edit against the send-guard budget (operator 2026-07-27: "no AI involved,
             // it's static tubing").
             // THE ONE PLACE the origin conversation enters: `from` (the origin chat's name, off the
             // tail) reaches meshEv only on the being path, so a static command still pays for no

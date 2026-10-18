@@ -107,7 +107,7 @@ beforeAll(async () => {
     node_name: 'kg',
     whatsapp: { chat_id: 'self@fixture', allowed_users: ['u-1'], auto_e_default: 'mute' },
     agents: { egpt: { configuration: 'egpt', handles: ['e', 'egpt'], default: true, conversation_defaults: { access_level: 'regular' } } },
-    lasso: { messages: 500 },   // the burst opens 30 placeholders in seconds — above the node's 18/10s ceiling by design
+    loop_guard: { outbound: { messages: 500 } },   // the burst opens 30 placeholders in seconds — above the node's 18/10s ceiling by design
     heartbeats: { nightly: { daily: '03:00', command: 'echo nightly' }, hourly: { frequency: '1h', command: 'echo hourly' } },
   }), 'utf8');
   await fs.writeFile(join(HOME, 'config', 'agents', 'egpt.yaml'), 'type: ccode\nmodel: sonnet\neffort: high\n', 'utf8');

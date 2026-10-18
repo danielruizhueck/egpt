@@ -308,14 +308,14 @@ export function createSpine({
       // bridge pauses, it must emit warning in the channel with instructions on how to recover,
       // instead of leaving everybody hanging"). Only the STOP, never the warn. Through the ONE
       // placement (boot's sayOnce); a channel nobody can speak to still has the log line above.
-      // ⚠ bypassLasso, and a 3s cap, for the same two reasons the STOP confirmation has both
+      // ⚠ bypassLoopGuard, and a 3s cap, for the same two reasons the STOP confirmation has both
       // (boot.mjs): the notice announces a flood, so it must not QUEUE behind that flood at the
       // outbound ceiling — an unseen pause notice is the hanging this ruling exists to end — and
       // the fast pump must not wait on a send that is slow to come back.
       if (say) {
         try {
           await Promise.race([
-            say({ chatId: ev.chatId, text: pauseNotice(why), opts: { bypassLasso: true }, what: 'guard' }),
+            say({ chatId: ev.chatId, text: pauseNotice(why), opts: { bypassLoopGuard: true }, what: 'guard' }),
             new Promise((r) => { const t = setTimeoutFn(r, 3000); t?.unref?.(); }),
           ]);
         } catch (e) { note(`guard: could not announce the pause in ${channel}: ${e?.message ?? e}`); }
@@ -1107,7 +1107,7 @@ export function createSpine({
     // GROUP's message into the room it joined (operator 2026-08-31), which is how a group triggers
     // that room's agents: one re-entry mechanism, two kinds of member (see room-relay.mjs's
     // header). `blocked` short-circuits a channel the counter just tripped,
-    // so a runaway multi-brain room halts at guard.turns. Its completion promise folds into the
+    // so a runaway multi-brain room halts at loop_guard.inbound.turns. Its completion promise folds into the
     // turn this message resolves on (withRelay), so a caller awaits the fan-out too. Absent roomRelay
     // (every existing pipe path) → null → handleFast is byte-identical to before.
     const relayTurn = (roomRelay && !(guard && guard.blocked(channel)))

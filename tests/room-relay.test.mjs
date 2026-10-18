@@ -3,7 +3,7 @@
 //   1. a brain member's MODE gates delivery (muted→never, mention→@<id> only, active→every msg);
 //   2. the member's reply RE-ENTERS as a synthetic NON-human turn — counted EXACTLY ONCE by the
 //      guard and logged once (phase-3 tie);
-//   3. two `active` brains answering each other are BOUNDED at guard.turns;
+//   3. two `active` brains answering each other are BOUNDED at loop_guard.inbound.turns;
 //   4. E participates in the brain chatter per its OWN mode (the reply reaches E via re-entry).
 // …and, since 2026-08-31, THE SAME re-entry carrying an invited group's message into the room it
 // joined — so a group triggers that room's agents — with a LOOP SAFETY suite at the bottom that
@@ -167,7 +167,7 @@ describe('room relay — the reply counts as exactly ONE non-human turn (phase-3
   });
 });
 
-describe('room relay — two active brains answering each other halt at guard.turns', () => {
+describe('room relay — two active brains answering each other halt at loop_guard.inbound.turns', () => {
   it('bounded: relays stop, the channel is blocked, the counter saturates at turns', async () => {
     const members = [
       { id: 'aa', kind: 'brain', state: 'active', adapter: 'chatgpt-cdp', targetId: 'T-A' },
@@ -454,7 +454,7 @@ describe('room relay — LOOP SAFETY: every cycle built, and the thing that stop
     expect(posts.map((p) => p.chatId)).toEqual([B]);
   });
 
-  it("3 — AN AGENT'S OWN REPLY: a brain member never re-triggers itself, and two of them halt at guard.turns", async () => {
+  it("3 — AN AGENT'S OWN REPLY: a brain member never re-triggers itself, and two of them halt at loop_guard.inbound.turns", async () => {
     // One brain: its reply re-enters (so the others + E see it) but is never fed back to its own
     // author — `ev.fromMember.id === m.id`. One drive, not an endless self-conversation.
     const solo = harness({ members: [{ id: 'chatgpt', kind: 'brain', state: 'active', adapter: 'chatgpt-cdp', targetId: 'T1' }] });

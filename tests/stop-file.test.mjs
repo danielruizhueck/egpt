@@ -1,5 +1,5 @@
 // stop-file.test.mjs — THE SAFE WORD IS A FILE (operator 2026-07-25, verbatim: "we must
-// enforce a safe word in this lasso, if i write 'stop' all activity, whatever it is, must
+// enforce a safe word in this [loop guard], if i write 'stop' all activity, whatever it is, must
 // stop" / "better than only stopping service, is that if a file named STOP exists in .egpt
 // it *also* stops... STOP in a chat writes this file that inoculates service").
 //

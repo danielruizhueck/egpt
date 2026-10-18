@@ -2614,8 +2614,8 @@ export const CONFIG_SCHEMA = {
 
     IT CANNOT STORM: one probe in flight at a time (a tick during a probe is dropped,
     not queued) and one tick per \`every\`, so at most one message per window whatever
-    happens. NOTE: this send does NOT pass through \`lasso\` — the lasso regulates what
-    the spine emits to its LIMBS, and this leaves via Telegram, beside them. The
+    happens. NOTE: this send does NOT pass through \`loop_guard.outbound\` — that regulates
+    what the spine emits to its LIMBS, and this leaves via Telegram, beside them. The
     cadence and the non-overlap rule are the whole bound, which is why the cadence is
     minutes. An injection that FAILS (Telegram unreachable, bot not in the chat) is
     INCONCLUSIVE, never "deaf": a broken sender cannot restart the bridge.
@@ -2626,13 +2626,165 @@ export const CONFIG_SCHEMA = {
     probe OK" / "EAR DEAF"). It verifies DELIVERY, not that a being answered.
   `,
 
-  lasso: `
-    THE OUTBOUND CEILING (src/lasso.mjs, wired in src/spine/boot.mjs around every
-    limb port). A node-wide hard ceiling on how much egpt may EMIT per time window —
-    brain replies, command replies, mesh envelopes, 👂 echoes, heartbeat posts,
-    error lines, on every surface. Operator 2026-07-26: "a big lasso that sandboxes
-    egpt ... under no reason must the bridge exceed a normal sending rate. that is a
-    self-regulated existance."
+  loop_guard: `
+    THE LOOP GUARD — one block, two halves (operator 2026-10-18: "one loop_guard block
+    for both"):
+      inbound   bot↔bot CONVERSATION loops: non-human turns at the prompt chokepoint
+                (src/stop-guard.mjs createStopGuard). A trip PAUSES that channel.
+      outbound  the node's EMIT rate at its limb ports (src/loop-guard.mjs
+                createSendGuard). Over the node-wide ceiling STOPS the node; a per-chat
+                rule PAUSES that chat (the inbound half's pause, cleared by RESUME).
+    Nested, not flat: the halves count different things over different windows
+    (inbound.window is MINUTES, outbound.window_ms is ms). Both are restart-only
+    (src/spine/config-swap.mjs RESTART_KEYS).
+
+    SHAPE:
+      loop_guard:
+        inbound:  { turns: 6, window: 2 }
+        outbound: { messages: 18, window_ms: 10000, edits: 4000, chat_messages: 5,
+                    chat_window_ms: 3000, chat_similar_count: 5, chat_similar_window_ms: 2000,
+                    chat_similar_ratio: 0.85, chat_burst_count: 10, chat_burst_window_ms: 2000 }
+
+    BACK-COMPAT (one release): a half absent here is read from its pre-0044
+    top-level block, with one deprecation line in the log. migrations/0044 moves
+    those blocks under loop_guard:.
+
+    KEYS:
+      inbound.turns
+        DEFAULT: 6 — non-human turns within \`window\` that pause the channel.
+        -1 or 0 = the WHOLE inbound half off (repetition included).
+      inbound.window
+        DEFAULT: 2 — MINUTES the rate is measured over. -1 or 0 = pure
+        consecutive count, whatever the elapsed time.
+      outbound.messages
+        DEFAULT: 18 — committed messages allowed per window. 0 or negative =
+        the outbound half OFF (both counters).
+      outbound.window_ms
+        DEFAULT: 10000 — the sliding window, in ms, for both counters.
+      outbound.edits
+        DEFAULT: 4000 — edits allowed per window. 0 or negative = the EDIT counter
+        only is off. Large on purpose: edits are counted at the port, ABOVE the
+        limb's 400ms edit debounce, so one streamed reply is already several
+        hundred (one per streamed token delta) and a room fan-out multiplies that.
+        A runaway is unbounded by definition and crosses it in milliseconds anyway.
+      outbound.chat_messages
+        DEFAULT: 5 — PER CHAT, SUSTAINED (operator 2026-10-18: "a mere sustained rate
+        of 5msg every 3 secs should be stopped"): messages to ONE Beeper chat in each
+        of two consecutive chat_window_ms windows pause THAT chat — the inbound
+        half's pause, cleared by RESUME / RESUME ALL — instead of stopping the node.
+        Every chat_* rule pauses the same way: while paused its new lines are
+        dropped; one line naming the rule goes to log_to_group and the pause notice
+        to the chat. System lines (command replies, alerts, log_to_group/admin
+        notices) are neither counted nor held. 0 or negative = off (each chat_*
+        count/window).
+      outbound.chat_window_ms
+        DEFAULT: 3000 — the sustained rule's window, in ms.
+      outbound.chat_similar_count
+        DEFAULT: 5 — PER CHAT, SIMILAR ("five equal sends or more in 2s"; "just
+        changing a timestamp … should also trip it"): near-identical messages inside
+        chat_similar_window_ms. Near-identical = equal after folding case, spacing,
+        ids and every digit-bearing token, or word overlap ≥ chat_similar_ratio.
+        Text only: a ⏳ placeholder or a captionless media post is no line.
+      outbound.chat_similar_window_ms
+        DEFAULT: 2000.
+      outbound.chat_similar_ratio
+        DEFAULT: 0.85 — word-token overlap (src/text-similarity.mjs similarity).
+        0 or negative = the fold alone.
+      outbound.chat_burst_count
+        DEFAULT: 10 — PER CHAT, BURST ("even 12 in a second … it MUST" trip):
+        messages of any content inside chat_burst_window_ms. A requested burst
+        trips too — safety first.
+      outbound.chat_burst_window_ms
+        DEFAULT: 2000.
+
+    ═══ INBOUND — the loop-breaker ═══
+
+    The SINGLE loop-breaker (src/stop-guard.mjs, wired at the spine prompt
+    chokepoint src/spine/spine.mjs; replaces the old flood-guard + mesh circuit
+    breaker).
+
+    ONE GUARD, TWO TRIGGERS (operator 2026-09-20, after "🌴FAMILIA PALMA🌴" sat
+    paused for eight hours):
+
+      · RATE — \`turns\` non-human turns within \`window\` MINUTES. "a hard limit of
+        turns is only effective on a rapid succession … six spread over a day is
+        the kind of conservatism we must avoid."
+      · REPETITION — "pause on repetition, not chatter." The same normalized line
+        said 3× by the same author within 10 minutes, or two lines alternating
+        A,B,A,B. Bots saying NEW things never trip it: "a chatter between bots is
+        desired, and even encouraged."
+
+    A genuine human message resets both. "human" is decided by PROVENANCE, not
+    display name — a mesh message posted AS the operator parses as relay traffic
+    (an envelope) and is NON-human, so it counts toward the cap instead of
+    resetting it (closes the 2026-06-19 hole).
+
+    THIS NODE'S OWN ECHO IS NEITHER. A frame this spine committed (its own node
+    signature, or a send the bridge knows by id) coming back through the bridge is
+    BOOKKEEPING: it does not count and does not reset. E's own "⏳ Thinking…" /
+    "⏳ Queued…" placeholders, posted through the mouth account, are what filled
+    PALMA's cap in five seconds. ANOTHER node's being still counts — that is real
+    chatter.
+
+    A PAUSE ANNOUNCES ITSELF in the channel, once, naming what tripped it (the
+    repeated line, or the rate with its numbers) and how to recover — \`resume\`
+    there, or \`resume all\`. Only the stop; the warn stays in the log.
+
+    Repetition's own numbers (3 repeats / 10 minutes) are not config: they are
+    what "said the same thing again" means, not a tuning knob.
+
+    PER-CONVERSATION OVERRIDE: a contact/room entry in conversations.yaml may
+    carry its own  guard: { turns: -1 }  to loosen or disable it for that channel
+    (e.g. a busy relay room).
+
+    RESUME / RESUME ALL (from an authorized sender, on any surface) clear a
+    channel this counter auto-stopped — the only way back short of a restart.
+    RESUME clears the channel it was typed in; RESUME ALL clears every channel the
+    counter stopped (it can stop several independently).
+
+    THE SAFE WORD IS SEPARATE, AND IT IS THE KILL SWITCH (operator 2026-07-25):
+    a bare  stop  IN THE SELF CHAT writes  EGPT_HOME/STOP  with its reason +
+    provenance, posts a one-line warning back into Self (best-effort, capped — it
+    can never delay the stop) and stops the SERVICE (a clean exit 0, which
+    egpt-daemon does not respawn). It does NOT pause a channel. While that file
+    exists the node refuses to boot, and a RUNNING node halts on its next tick — so
+    touch ~/.egpt/STOP  stops egpt too, as does double-clicking
+    setup\\stop-egpt.cmd. Recovery is  rm ~/.egpt/STOP  (or setup\\start-egpt.cmd)
+    and nothing else: the file is the whole state.
+
+    WHERE IT WORKS: **THE SELF CHAT ONLY** (operator 2026-07-26: "is must be a
+    single word message in Self, 'stop', case insensitive") — that is
+    networks.<surface>.chat_ids[0] on whatsapp, the same Self-DM the restart
+    announce posts to. It used to fire from ANY chat on ANY surface, which made one
+    stray "stop" in a group — or anyone at the operator console, which is
+    unconditionally authorized — enough to take the node down. In every OTHER chat,
+    group, and on the shell surface, "stop" is now ordinary text. No Self chat
+    configured → the chat safe word is simply unavailable (fail-closed); the STOP
+    file is still the way out. The other admin chats (chat_ids[1..]) and every
+    group take stop_phrase instead (operator 2026-10-18, superseding 0a2fc04's
+    2026-10-15 widening of the bare word to every chat_ids entry).
+
+    WHAT COUNTS AS THE WORD: the WHOLE trimmed message, case-insensitive, trailing
+    '.'/'!' tolerated. "stop it", "please stop", "stopping" are ordinary text.
+
+    WHO MAY PULL IT: an authorized sender (per-surface allowed_users, or the Beeper
+    account owner) AND a genuine HUMAN turn. On a shared Beeper account every send
+    from the account reads as authorized, so the safe word is additionally gated on
+    the same PROVENANCE predicate this counter uses — our own output, a brain
+    member's re-entered reply, relay envelopes and backlog replay can never pull it.
+
+    THE COMPLETE SAFE-WORD VOCABULARY IS:  STOP | RESUME | RESUME ALL.
+    "STOP ALL" was unwired on 2026-07-26 — it is ordinary text now, not an alias.
+    (RESUME / RESUME ALL are NOT Self-scoped: they only clear a loop-counter pause,
+    so they stay usable in the channel that got paused.)
+
+    ═══ OUTBOUND — the emit ceiling ═══
+
+    A node-wide hard ceiling on how much egpt may EMIT per time window (wired in
+    src/spine/boot.mjs around every limb port) — brain replies, command replies,
+    mesh envelopes, 👂 echoes, heartbeat posts, error lines, on every surface.
+    Operator 2026-07-26: "under no reason must the bridge exceed a normal sending
+    rate. that is a self-regulated existance."
 
     IT TRIPS, IT DOES NOT THROTTLE (operator 2026-07-26: "by throttle i did actually
     mean stop. there is probably a bug if there is flooding" / "bridge stops looping
@@ -2653,51 +2805,10 @@ export const CONFIG_SCHEMA = {
         flicker; it is a backstop against an infinite-edit runaway, nothing more.
     REACTIONS AND DELETES COUNT AS NEITHER (react / deleteStatus / deleteOwn) — no
     text, so neither a new line nor an edit of one.
-    NOTHING INBOUND IS COUNTED — that is \`guard\`'s job (below).
+    NOTHING INBOUND IS COUNTED — that is the inbound half's job (above).
 
-    THE STOP PATH IS NEVER GATED — a send carrying bypassLasso gets out even after a
-    trip, or the node could not announce its own halt.
-
-    KEYS:
-      messages
-        DEFAULT: 18 — committed messages allowed per window. 0 or negative =
-        lasso OFF (both counters).
-      window_ms
-        DEFAULT: 10000 — the sliding window, in ms, for both counters.
-      edits
-        DEFAULT: 4000 — edits allowed per window. 0 or negative = the EDIT counter
-        only is off. Large on purpose: edits are counted at the port, ABOVE the
-        limb's 400ms edit debounce, so one streamed reply is already several
-        hundred (one per streamed token delta) and a room fan-out multiplies that.
-        A runaway is unbounded by definition and crosses it in milliseconds anyway.
-      chat_messages
-        DEFAULT: 5 — PER CHAT, SUSTAINED (operator 2026-10-18: "a mere sustained rate
-        of 5msg every 3 secs should be stopped"): messages to ONE Beeper chat in each
-        of two consecutive chat_window_ms windows pause THAT chat — the loop guard's
-        pause, cleared by RESUME / RESUME ALL — instead of stopping the node. Every
-        chat_* rule pauses the same way: while paused its new lines are dropped; one
-        line naming the rule goes to log_to_group and the pause notice to the chat.
-        System lines (command replies, alerts, log_to_group/admin notices) are
-        neither counted nor held. 0 or negative = off (each chat_* count/window).
-      chat_window_ms
-        DEFAULT: 3000 — the sustained rule's window, in ms.
-      chat_similar_count
-        DEFAULT: 5 — PER CHAT, SIMILAR ("five equal sends or more in 2s"; "just
-        changing a timestamp … should also trip it"): near-identical messages inside
-        chat_similar_window_ms. Near-identical = equal after folding case, spacing,
-        ids and every digit-bearing token, or word overlap ≥ chat_similar_ratio.
-        Text only: a ⏳ placeholder or a captionless media post is no line.
-      chat_similar_window_ms
-        DEFAULT: 2000.
-      chat_similar_ratio
-        DEFAULT: 0.85 — word-token overlap (src/text-similarity.mjs similarity).
-        0 or negative = the fold alone.
-      chat_burst_count
-        DEFAULT: 10 — PER CHAT, BURST ("even 12 in a second … it MUST" trip):
-        messages of any content inside chat_burst_window_ms. A requested burst
-        trips too — safety first.
-      chat_burst_window_ms
-        DEFAULT: 2000.
+    THE STOP PATH IS NEVER GATED — a send carrying bypassLoopGuard gets out even
+    after a trip, or the node could not announce its own halt.
 
     18/10000ms (operator 2026-07-26) is NOT a loosening of the prior 20/5000ms: that allowed a
     sustained 4 messages/second, this allows 1.8/s — less than half — while the longer window
@@ -2705,15 +2816,15 @@ export const CONFIG_SCHEMA = {
     at once) room to land inside one window. edits scaled to 4000 to hold the SAME rate as the
     old 2000/5000ms rather than quietly halving it on a now-twice-as-long window.
 
-    VISIBLE ON DISK: a trip is published to EGPT_HOME/state/lasso.json ({ state:
+    VISIBLE ON DISK: a trip is published to EGPT_HOME/state/loop-guard.json ({ state:
     tripped, limit, messages_in_window, edits_in_window, tripped: { kind, count,
     limit, window_ms, at, reason } }), so "why did egpt stop" is answerable with
     cat. Written on the trip only — the send path never does IO.
 
-    NOT THE LOOP-BREAKER. \`guard\` (below) bounds a bot↔bot CONVERSATION by counting
-    inbound non-human turns at the prompt chokepoint; this bounds the node's EMIT
-    RATE whatever the cause. Since a64b209 the guard finally sees a peer node's
-    turns (ev.fromNode), so bot↔bot loops are ITS job and the lasso is the
+    NOT THE LOOP-BREAKER. The inbound half bounds a bot↔bot CONVERSATION by
+    counting inbound non-human turns at the prompt chokepoint; this bounds the
+    node's EMIT RATE whatever the cause. Since a64b209 the inbound half finally sees
+    a peer node's turns (ev.fromNode), so bot↔bot loops are ITS job and this is the
     catastrophic backstop for a runaway that outruns even that — which is why this
     ceiling is set above ordinary traffic rather than at the incident's rate.
   `,
@@ -2805,102 +2916,13 @@ export const CONFIG_SCHEMA = {
     disable); nothing automatic does, so there is no restart loop.
   `,
 
-  guard: `
-    The SINGLE loop-breaker (src/stop-guard.mjs, wired at the spine prompt
-    chokepoint src/spine/spine.mjs; replaces the old flood-guard + mesh circuit
-    breaker).
-
-    ONE GUARD, TWO TRIGGERS (operator 2026-09-20, after "🌴FAMILIA PALMA🌴" sat
-    paused for eight hours):
-
-      · RATE — \`turns\` non-human turns within \`window\` MINUTES. "a hard limit of
-        turns is only effective on a rapid succession … six spread over a day is
-        the kind of conservatism we must avoid."
-      · REPETITION — "pause on repetition, not chatter." The same normalized line
-        said 3× by the same author within 10 minutes, or two lines alternating
-        A,B,A,B. Bots saying NEW things never trip it: "a chatter between bots is
-        desired, and even encouraged."
-
-    A genuine human message resets both. "human" is decided by PROVENANCE, not
-    display name — a mesh message posted AS the operator parses as relay traffic
-    (an envelope) and is NON-human, so it counts toward the cap instead of
-    resetting it (closes the 2026-06-19 hole).
-
-    THIS NODE'S OWN ECHO IS NEITHER. A frame this spine committed (its own node
-    signature, or a send the bridge knows by id) coming back through the bridge is
-    BOOKKEEPING: it does not count and does not reset. E's own "⏳ Thinking…" /
-    "⏳ Queued…" placeholders, posted through the mouth account, are what filled
-    PALMA's cap in five seconds. ANOTHER node's being still counts — that is real
-    chatter.
-
-    A PAUSE ANNOUNCES ITSELF in the channel, once, naming what tripped it (the
-    repeated line, or the rate with its numbers) and how to recover — \`resume\`
-    there, or \`resume all\`. Only the stop; the warn stays in the log.
-
-    KEYS:
-      turns
-        DEFAULT: 6 — non-human turns within \`window\` that pause the channel.
-        -1 or 0 = the WHOLE guard off (repetition included).
-      window
-        DEFAULT: 2 — MINUTES the rate is measured over. -1 or 0 = pure
-        consecutive count, whatever the elapsed time.
-
-    Repetition's own numbers (3 repeats / 10 minutes) are not config: they are
-    what "said the same thing again" means, not a tuning knob.
-
-    PER-CONVERSATION OVERRIDE: a contact/room entry in conversations.yaml may
-    carry its own  guard: { turns: -1 }  to loosen or disable it for that channel
-    (e.g. a busy relay room).
-
-    RESUME / RESUME ALL (from an authorized sender, on any surface) clear a
-    channel this counter auto-stopped — the only way back short of a restart.
-    RESUME clears the channel it was typed in; RESUME ALL clears every channel the
-    counter stopped (it can stop several independently).
-
-    THE SAFE WORD IS SEPARATE, AND IT IS THE KILL SWITCH (operator 2026-07-25):
-    a bare  stop  IN THE SELF CHAT writes  EGPT_HOME/STOP  with its reason +
-    provenance, posts a one-line warning back into Self (best-effort, capped — it
-    can never delay the stop) and stops the SERVICE (a clean exit 0, which
-    egpt-daemon does not respawn). It does NOT pause a channel. While that file
-    exists the node refuses to boot, and a RUNNING node halts on its next tick — so
-    touch ~/.egpt/STOP  stops egpt too, as does double-clicking
-    setup\\stop-egpt.cmd. Recovery is  rm ~/.egpt/STOP  (or setup\\start-egpt.cmd)
-    and nothing else: the file is the whole state.
-
-    WHERE IT WORKS: **THE SELF CHAT ONLY** (operator 2026-07-26: "is must be a
-    single word message in Self, 'stop', case insensitive") — that is
-    networks.<surface>.chat_ids[0] on whatsapp, the same Self-DM the restart
-    announce posts to. It used to fire from ANY chat on ANY surface, which made one
-    stray "stop" in a group — or anyone at the operator console, which is
-    unconditionally authorized — enough to take the node down. In every OTHER chat,
-    group, and on the shell surface, "stop" is now ordinary text. No Self chat
-    configured → the chat safe word is simply unavailable (fail-closed); the STOP
-    file is still the way out. The other admin chats (chat_ids[1..]) and every
-    group take stop_phrase instead (operator 2026-10-18, superseding 0a2fc04's
-    2026-10-15 widening of the bare word to every chat_ids entry).
-
-    WHAT COUNTS AS THE WORD: the WHOLE trimmed message, case-insensitive, trailing
-    '.'/'!' tolerated. "stop it", "please stop", "stopping" are ordinary text.
-
-    WHO MAY PULL IT: an authorized sender (per-surface allowed_users, or the Beeper
-    account owner) AND a genuine HUMAN turn. On a shared Beeper account every send
-    from the account reads as authorized, so the safe word is additionally gated on
-    the same PROVENANCE predicate this counter uses — our own output, a brain
-    member's re-entered reply, relay envelopes and backlog replay can never pull it.
-
-    THE COMPLETE SAFE-WORD VOCABULARY IS:  STOP | RESUME | RESUME ALL.
-    "STOP ALL" was unwired on 2026-07-26 — it is ordinary text now, not an alias.
-    (RESUME / RESUME ALL are NOT Self-scoped: they only clear a loop-counter pause,
-    so they stay usable in the channel that got paused.)
-  `,
-
   media_flood: `
     The MEDIA-FLOOD auto-ban (src/flood-ban.mjs, wired in src/spine/boot.mjs into the
     Beeper bridge dispatch). A single sender dumping a BURST of media (GIFs / stickers
     / images — "a whatsapp virus") into one chat pollutes E's accumulated context and
     bloats the chat's media/ folder; this mutes that sender automatically.
 
-    (NOT the \`lasso\` block's "flooding" — that is the node's OUTBOUND emit ceiling.
+    (NOT \`loop_guard.outbound\`'s "flooding" — that is the node's OUTBOUND emit ceiling.
     This is an INBOUND per-sender mute, a different concept with its own key.)
 
     TRIGGER: one sender posting >= \`count\` media attachments within \`window_ms\`, in
@@ -2971,7 +2993,7 @@ export const CONFIG_SCHEMA = {
                    sibling: 43200000 }
 
     TTL DIALECT (operator 2026-07-26 — the same one posts_back_delay_ms and
-    guard.turns speak): -1 = never idle-evict (warm forever), 0 = always evict
+    loop_guard.inbound.turns speak): -1 = never idle-evict (warm forever), 0 = always evict
     (dropped the moment its turn ends, so every turn is a cold --resume), N =
     evict after N ms idle. An ABSENT class falls through to idle_ttl_ms; absent
     never means 0.

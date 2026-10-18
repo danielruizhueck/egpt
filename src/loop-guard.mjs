@@ -1,8 +1,12 @@
-// lasso.mjs — THE OUTBOUND CEILING (operator 2026-07-26): "this guard must be agnostic to
-// everything, is a major loop that counts how many messages in a time window has been sent
-// out to any limb ... a big lasso that sandboxes egpt" / "under no reason must the bridge
-// exceed a normal sending rate. that is a self-regulated existance." / "the lasso count
-// outbound messages (completed) sent to beeper. that count cant exceed the threshold."
+// loop-guard.mjs — the loop guard's SEND rules (config loop_guard.outbound) and the one reader of
+// the loop_guard: block (loopGuardConfig). Its TURN rules (loop_guard.inbound) are src/stop-guard.mjs
+// createStopGuard.
+//
+// THE OUTBOUND CEILING (operator 2026-07-26): "this guard must be agnostic to everything, is a
+// major loop that counts how many messages in a time window has been sent out to any limb ..."
+// / "under no reason must the bridge exceed a normal sending rate. that is a self-regulated
+// existance." / "... count outbound messages (completed) sent to beeper. that count cant exceed
+// the threshold." (Named loop_guard, operator 2026-10-18.)
 //
 // WHY IT EXISTS (2026-07-25 incident, not theory): two nodes traded hundreds of messages
 // ~0.7s apart until the service had to be killed. Nothing bounded what LEAVES the node.
@@ -49,8 +53,8 @@
 // category and they belong in neither counter — do not re-add them reasoning "it is still
 // traffic".
 //
-// NOTHING INBOUND IS COUNTED HERE. The lasso wraps the ports' SEND surface only. A peer's
-// message arriving at this node is the LOOP GUARD's business (src/stop-guard.mjs, via
+// NOTHING INBOUND IS COUNTED HERE. The send rules wrap the ports' SEND surface only. A peer's
+// message arriving at this node is the TURN rules' business (src/stop-guard.mjs, via
 // ev.fromNode). Two mechanisms, cleanly separated.
 //
 // WHY 18/10000ms — AND WHY THIS IS NOT A LOOSENING (operator 2026-07-26, after a mesh
@@ -66,7 +70,7 @@
 // ceiling would NOT have caught it, same as 20/5000ms would not have. It does not have to:
 // a64b209 fixed the reason it had to. A peer's message now carries `ev.fromNode`, isHumanTurn
 // returns false, and the loop counter finally moves on exactly the traffic it used to miss.
-// Bot↔bot loops are the LOOP GUARD's job now; the lasso is the catastrophic backstop for a
+// Bot↔bot loops are the TURN rules' job now; this ceiling is the catastrophic backstop for a
 // runaway that outruns even that. A tighter number would halt the node on ordinary traffic —
 // three quick human lines, a voice-note flurry, a room fan-out — which is worse than none.
 //
@@ -82,12 +86,12 @@
 // way. Erring high is the correct trade: a false trip halts the node mid-conversation, a late
 // trip costs some wasted API calls on a line nobody is reading twice.
 //
-// NEVER THE STOP PATH: a send carrying `{ bypassLasso: true }` skips the gate entirely, and
+// NEVER THE STOP PATH: a send carrying `{ bypassLoopGuard: true }` skips the gate entirely, and
 // keeps skipping it AFTER a trip. A kill switch that cannot get out past the very flood it
 // exists to end is not a kill switch — the node could not even announce its own halt.
 //
-// FILE CONTROLLED: the ceilings come from the config's `lasso:` block (loosen without a
-// deploy) and a trip is published to EGPT_HOME/state/lasso.json — so "why did egpt stop" is
+// FILE CONTROLLED: the ceilings come from config loop_guard.outbound (loosen without a deploy)
+// and a trip is published to EGPT_HOME/state/loop-guard.json — so "why did egpt stop" is
 // answerable with `cat`, not a debugger. The hot path never does IO: the file is written on
 // the trip only, once.
 //
@@ -100,10 +104,10 @@
 //               foldLine, or text-similarity's overlap ≥ chatSimilarRatio)
 //   burst     — ≥chatBurstCount messages of any content inside chatBurstWindowMs
 //   sustained — ≥chatMessages in each of the last two chatWindowMs windows
-// A trip PAUSES that chat (onTrip → the loop guard's pause, which RESUME clears) instead of
+// A trip PAUSES that chat (onTrip → the turn rules' pause, which RESUME clears) instead of
 // stopping the node; while paused its new lines are DROPPED — answered as said, so no caller
 // re-routes them through another account. Edits and reactions are not counted, as above. Not
-// counted, never held: bypassLasso (the stop path) and systemLine (operator/system lines).
+// counted, never held: bypassLoopGuard (the stop path) and systemLine (operator/system lines).
 import { normalizeTokens, similarity } from './text-similarity.mjs';
 
 const DEFAULTS = {
@@ -112,6 +116,29 @@ const DEFAULTS = {
   chatSimilarCount: 5, chatSimilarWindowMs: 2_000, chatSimilarRatio: 0.85,
   chatBurstCount: 10, chatBurstWindowMs: 2_000,
 };
+
+// The pre-0044 top-level blocks, read for one release (remove with this constant).
+export const LEGACY_BLOCKS = { inbound: 'guard', outbound: 'lasso' };
+
+const isMap = (v) => v != null && typeof v === 'object' && !Array.isArray(v);
+
+/**
+ * config.yaml's loop_guard: block as { inbound, outbound } (each a plain object, {} when unset).
+ * A half missing from loop_guard falls back to its pre-0044 block, logged once via onDeprecated.
+ */
+export function loopGuardConfig(cfg, { onDeprecated = () => {} } = {}) {
+  const lg = isMap(cfg?.loop_guard) ? cfg.loop_guard : {};
+  const out = {};
+  const old = [];
+  for (const [half, legacy] of Object.entries(LEGACY_BLOCKS)) {
+    const has = isMap(cfg?.[legacy]);
+    if (isMap(lg[half])) { out[half] = lg[half]; if (has) old.push(`${legacy}: ignored, loop_guard.${half} is set`); }
+    else if (has) { out[half] = cfg[legacy]; old.push(`${legacy}: read as loop_guard.${half}`); }
+    else out[half] = {};
+  }
+  if (old.length) onDeprecated(`deprecated config.yaml key(s) — ${old.join('; ')}. Migration 0044 moves them under loop_guard:`);
+  return out;
+}
 
 // Near-identical, folded: case, whitespace, Matrix ids, and every token carrying a digit
 // (counters, timestamps, ids) — a loop that only bumps a timestamp is still one line.
@@ -124,7 +151,7 @@ const foldLine = (text) => String(text ?? '').toLowerCase()
 
 /**
  * @param {object} o
- * @param {number} [o.messages]   committed messages allowed per window (<= 0 disables the lasso entirely)
+ * @param {number} [o.messages]   committed messages allowed per window (<= 0 disables the send rules entirely)
  * @param {number} [o.windowMs]   the sliding window, ms
  * @param {number} [o.edits]      edits allowed per window (<= 0 disables the edit counter only)
  * @param {number} [o.chatMessages]  per-chat messages per window, sustained over two windows, that pause the chat (<= 0 off)
@@ -136,10 +163,10 @@ const foldLine = (text) => String(text ?? '').toLowerCase()
  * @param {number} [o.chatBurstWindowMs]
  * @param {() => number} [o.now]  clock seam (tests drive it — no real waiting)
  * @param {(m: string) => void} [o.onLog]
- * @param {(s: object) => void} [o.writeState]  best-effort publisher for state/lasso.json (async, fire-and-forget)
+ * @param {(s: object) => void} [o.writeState]  best-effort publisher for state/loop-guard.json (async, fire-and-forget)
  * @param {(t: object) => void} [o.onTrip]      the halt — boot routes it into the STOP file + clean exit
  */
-export function createLasso({
+export function createSendGuard({
   messages = DEFAULTS.messages,
   windowMs = DEFAULTS.windowMs,
   edits = DEFAULTS.edits,
@@ -267,7 +294,7 @@ export function createLasso({
     update() {}, fail() {},
     async finish() {}, async delete() {},
     delivered: false,
-    lastError: 'lasso: outbound ceiling tripped — egpt is stopping',
+    lastError: 'loop guard: outbound ceiling tripped — egpt is stopping',
   });
 
   // The frames that follow a placeholder EDIT a message already counted, so they spend the
@@ -283,7 +310,7 @@ export function createLasso({
     return new Proxy(h, { get: (t, k) => (Object.hasOwn(framed, k) ? framed[k] : Reflect.get(t, k, t)) });
   }
 
-  // Wrap a LIMB PORT — the beeper port AND the shell port, both, from the ONE lasso, so the
+  // Wrap a LIMB PORT — the beeper port AND the shell port, both, from the ONE send guard, so the
   // count is node-wide rather than per-limb (the operator's "any limb"). A Proxy, not a
   // spread: the shell port exposes `isConnected` as a GETTER and a spread would freeze it to
   // its boot-time value. Everything the port has that is not a counted emit passes straight
@@ -293,9 +320,9 @@ export function createLasso({
     const ok = (chat, text, opts) => admitChat(chat, text, opts, port);
     const droppedStream = () => ({ ...deadStream(), delivered: true, lastError: null });
     const gated = {
-      // bypassLasso: the STOP path. It must ALWAYS get out — see the module header.
+      // bypassLoopGuard: the STOP path. It must ALWAYS get out — see the module header.
       send: async (chat, text, opts = {}) =>
-        opts?.bypassLasso ? port.send(chat, text, opts)
+        opts?.bypassLoopGuard ? port.send(chat, text, opts)
           : !ok(chat, text, opts) ? { dropped: true }
           : admit('message') ? port.send(chat, text, opts) : (refuse('send', chat), null),
       postStatus: async (chat, text) =>
@@ -303,7 +330,7 @@ export function createLasso({
       // THE MOUTH's verbatim post (beeper-port.postVerbatim, operator 2026-09-05): a PEER SPINE's
       // finished line, said on this account. It leaves this node's limb like any other message —
       // the ceiling is "any limb", and an unwrapped path here would be a hole straight through it
-      // — so it is admitted on the same 'message' budget as send(). No bypassLasso: the stop path
+      // — so it is admitted on the same 'message' budget as send(). No bypassLoopGuard: the stop path
       // is send()'s alone, and nothing arriving over the link is a stop.
       postVerbatim: port.postVerbatim && (async (chat, text) =>
         !ok(chat, text) ? { dropped: true } : admit('message') ? port.postVerbatim(chat, text) : (refuse('postVerbatim', chat), null)),
@@ -333,7 +360,7 @@ export function createLasso({
   return {
     wrap,
     gate,
-    // The per-chat pause owner (boot: the loop guard). keyOf(chat) → the chat's key, or null = not
+    // The per-chat pause owner (boot: the turn rules' createStopGuard). keyOf(chat) → the chat's key, or null = not
     // counted; lineOf(text) → what was said (boot: normalizeLine — a ⏳ placeholder is ''); isPaused(key);
     // onTrip(key, { chat, name, rule, count, spanMs, why }). Unbound ⇒ no per-chat count.
     bindChats(b) { chats = b; },

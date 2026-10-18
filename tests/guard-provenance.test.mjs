@@ -47,7 +47,7 @@ describe('isHumanTurn — provenance, not display name', () => {
   it("an INVITED GROUP's message tunnelled into the room it joined stays HUMAN — the KIND is the test (operator 2026-08-31)", () => {
     // The SAME re-entry carries a wa-group member's line into the room, so the group can trigger
     // the room's agents. That is a person talking: counting it would auto-STOP the room after
-    // guard.turns group messages and silence the very agents the tunnel exists to wake.
+    // loop_guard.inbound.turns group messages and silence the very agents the tunnel exists to wake.
     expect(isHumanTurn({ ...humanMsg, fromMember: { id: '!grp-A', kind: 'wa-group' } }, { isEnvelope })).toBe(true);
     // …but one of OUR OWN sends that escaped the bridge's echo gate is caught by the signature the
     // tunnel synthetic carries across the re-addressing — non-human, so the guard still bounds it.

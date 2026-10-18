@@ -189,7 +189,7 @@ describe('createRadioNoteRelay — reuses the SAME cached audio, never a second 
 // that as non-human (src/stop-guard.mjs), so spine.mjs's gate never calls relay() for it at all
 // (locked in tests/spine-radio-relay.test.mjs, the layer that actually sees ev.backlog). This
 // module keeps no memory of what it already relayed.
-describe('createRadioNoteRelay — the upload is an outbound message: gated by the SAME lasso every send uses', () => {
+describe('createRadioNoteRelay — the upload is an outbound message: gated by the SAME send guard every send uses', () => {
   it('routes the upload THROUGH the injected gate, never calling uploadNote directly', async () => {
     const room = new TmpRoom(join(base, 'conv'), 'conv-1');
     seed(room, 'radio:\n  join: wildnloyal\n');
@@ -204,11 +204,11 @@ describe('createRadioNoteRelay — the upload is an outbound message: gated by t
     expect(order).toEqual(['gate', 'upload']);   // the call happens INSIDE the gate, not beside it
   });
 
-  it('a gate that refuses (the lasso already tripped) is honored — uploadNote is never invoked, and relay() does not throw', async () => {
+  it('a gate that refuses (the send guard already tripped) is honored — uploadNote is never invoked, and relay() does not throw', async () => {
     const room = new TmpRoom(join(base, 'conv'), 'conv-1');
     seed(room, 'radio:\n  join: wildnloyal\n');
     const uploadNote = vi.fn();
-    const gate = vi.fn(async () => null);   // the real lasso.gate's shape when the ceiling is tripped
+    const gate = vi.fn(async () => null);   // the real sendGuard.gate's shape when the ceiling is tripped
     const cfg = { radio_service: { wildnloyal: { enabled: true, default_speaker: 'egpt' } } };
     const { relay } = harness({ cfg, room, uploadNote, gate });
     relay.noteMedia(audioMeta());
@@ -216,19 +216,19 @@ describe('createRadioNoteRelay — the upload is an outbound message: gated by t
     expect(uploadNote).not.toHaveBeenCalled();
   });
 
-  it('with the REAL lasso, a note counts toward the SAME ceiling a send would — a second note past the cap is refused, never reaches uploadNote', async () => {
-    const { createLasso } = await import('../src/lasso.mjs');
-    const lasso = createLasso({ messages: 1, windowMs: 10_000, now: () => 1000 });   // one message per window, like a busy-room trip
+  it('with the REAL send guard, a note counts toward the SAME ceiling a send would — a second note past the cap is refused, never reaches uploadNote', async () => {
+    const { createSendGuard } = await import('../src/loop-guard.mjs');
+    const sendGuard = createSendGuard({ messages: 1, windowMs: 10_000, now: () => 1000 });   // one message per window, like a busy-room trip
     const room = new TmpRoom(join(base, 'conv'), 'conv-1');
     seed(room, 'radio:\n  join: wildnloyal\n');
     const uploadNote = vi.fn(async () => ({ ok: true, status: 201 }));
     const cfg = { radio_service: { wildnloyal: { enabled: true, default_speaker: 'egpt' } } };
-    const { relay } = harness({ cfg, room, uploadNote, gate: lasso.gate });
+    const { relay } = harness({ cfg, room, uploadNote, gate: sendGuard.gate });
 
     relay.noteMedia(audioMeta({ msgId: 'm1' }));
     await relay.relay(voiceEv({ msgId: 'm1' }));
     expect(uploadNote).toHaveBeenCalledTimes(1);
-    expect(lasso.stats().messages).toBe(1);   // counted exactly like an outbound send
+    expect(sendGuard.stats().messages).toBe(1);   // counted exactly like an outbound send
 
     relay.noteMedia(audioMeta({ msgId: 'm2' }));
     await relay.relay(voiceEv({ msgId: 'm2' }));

@@ -323,6 +323,19 @@ const blockLinesEnd = (src, pair, col) => {
 export function spliceYamlRemoveKey(src, mapPath, { key }) {
   const label = pathLabel([...mapPath, key]);
   const doc = parseForSplice(src, label);
+  const { start, end } = keyLines(src, doc, mapPath, key, label);
+  const expected = doc.toJS();
+  delete mapPath.reduce((o, k) => o[k], expected)[key];
+  return verifySplice(src.slice(0, start) + src.slice(end), expected, label);
+}
+
+/** The lines spliceYamlRemoveKey cuts for `key`: src.slice(start, end); keyAt = the key's offset. */
+export function yamlKeyLines(src, mapPath, { key }) {
+  const label = pathLabel([...mapPath, key]);
+  return keyLines(src, parseForSplice(src, label), mapPath, key, label);
+}
+
+function keyLines(src, doc, mapPath, key, label) {
   const map = mapPath.length ? doc.getIn(mapPath, true) : doc.contents;
   if (!YAML.isMap(map)) throw new YamlSpliceRefusal(`refusing to remove ${label}: ${pathLabel(mapPath)} is not a mapping`);
   if (map.flow) throw new YamlSpliceRefusal(`refusing to remove ${label}: ${pathLabel(mapPath)} is a flow mapping`);
@@ -331,18 +344,15 @@ export function spliceYamlRemoveKey(src, mapPath, { key }) {
 
   const lineStart = (i) => src.lastIndexOf('\n', i - 1) + 1;
 
-  let start = lineStart(pair.key.range[0]);
-  const col = pair.key.range[0] - start;
+  const keyAt = pair.key.range[0];
+  let start = lineStart(keyAt);
+  const col = keyAt - start;
   while (start > 0) {
     const prev = lineStart(start - 1);
     if (commentColAt(src, prev, start) !== col) break;
     start = prev;
   }
-  const end = blockLinesEnd(src, pair, col);
-
-  const expected = doc.toJS();
-  delete mapPath.reduce((o, k) => o[k], expected)[key];
-  return verifySplice(src.slice(0, start) + src.slice(end), expected, label);
+  return { start, end: blockLinesEnd(src, pair, col), keyAt };
 }
 
 // ─── THE INSERTION: add ONE key to a block mapping, as the TEXT the caller wrote ─────────────

@@ -239,7 +239,7 @@ describe('ONE beeper token, ONE account, ONE node — the baseline that must nev
   // NO FANOUT WRAPPER. bridge-fanout.mjs promises a single connection gets "not merely equivalent
   // but IDENTICAL" — the bridge itself, not a Proxy around it. Observed by IDENTITY: the facade's
   // trap mints a FRESH closure for the fanned-out keys on every property read, while a real
-  // bridge hands back its own stable method (boot's lasso wrap forwards these via Reflect.get, so
+  // bridge hands back its own stable method (boot's send-guard wrap forwards these via Reflect.get, so
   // it is transparent here). The control at the end proves the discriminator has teeth rather
   // than passing on any object at all.
   it('builds NO fanout wrapper — the spine holds the single bridge itself', async () => {

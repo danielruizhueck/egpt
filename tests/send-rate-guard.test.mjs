@@ -1,4 +1,4 @@
-// send-rate-guard.test.mjs — the per-chat SEND RATE, counted at the lasso (src/lasso.mjs).
+// send-rate-guard.test.mjs — the per-chat SEND RATE, counted at the send guard (src/loop-guard.mjs).
 //
 // Operator 2026-10-18: "a signed message is also from a being; but a being is triggered only if
 // it's mentioned. loop guard has to count how many messages are sent to beeper. a mere sustained
@@ -22,7 +22,7 @@ const _PRIVATE_HOME = vi.hoisted(() => {
 });
 import { promises as fs } from 'node:fs';
 import { dirname } from 'node:path';
-import { createLasso } from '../src/lasso.mjs';
+import { createSendGuard } from '../src/loop-guard.mjs';
 import { createStopGuard, anyChannel, normalizeLine } from '../src/stop-guard.mjs';
 import { createSpine } from '../src/spine/spine.mjs';
 import { createIdentity } from '../src/spine/identity.mjs';
@@ -61,21 +61,21 @@ function fakePort(clock) {
   };
 }
 
-// The lasso bound to a REAL loop guard, the way boot binds it.
+// The send guard bound to a REAL turn guard, the way boot binds it.
 function rig({ keyOf = (c) => c, limits = {} } = {}) {
   const clock = fakeClock();
   const guard = createStopGuard({ now: clock.now });
   const trips = [];
   const nodeTrips = [];
   const port = fakePort(clock);
-  const lasso = createLasso({ now: clock.now, onTrip: (t) => nodeTrips.push(t), ...limits });
-  lasso.bindChats({
+  const sendGuard = createSendGuard({ now: clock.now, onTrip: (t) => nodeTrips.push(t), ...limits });
+  sendGuard.bindChats({
     keyOf,
     lineOf: normalizeLine,
     isPaused: (key) => guard.blocked(anyChannel(key)),
     onTrip: (key, info) => { trips.push({ key, ...info }); guard.stopChannel(anyChannel(key)); },
   });
-  const bridge = lasso.wrap(port);
+  const bridge = sendGuard.wrap(port);
   const sends = (chat, n, at, step = 100, opts = {}, text = (ms) => `line ${word(ms)}`) => Promise.all(Array.from({ length: n }, (_, i) => {
     clock.set(at + i * step);
     return bridge.send(chat, text(at + i * step, i), opts);
@@ -84,7 +84,7 @@ function rig({ keyOf = (c) => c, limits = {} } = {}) {
 }
 const sentTo = (port, chat) => port.posts.filter((p) => p.chat === chat);
 
-describe('send-rate guard — the lasso counts each chat\'s sends', () => {
+describe('send-rate guard — loop_guard.outbound counts each chat\'s sends', () => {
   it('REPRODUCE: 5 + 5 sends in two consecutive 3 s windows pause THAT chat and drop what follows', async () => {
     const { guard, trips, nodeTrips, port, bridge, sends, clock } = rig();
     await sends('!flood', 5, 0);                 // t = 0..400
@@ -235,7 +235,7 @@ describe('send-rate guard — the lasso counts each chat\'s sends', () => {
     expect(trips).toHaveLength(1);
     clock.set(24_000);
     expect((await bridge.send('!log', 'audit line', { systemLine: true }))?.ok).toBe(true);   // …a system line still lands
-    expect((await bridge.send('!log', 'STOP notice', { bypassLasso: true }))?.ok).toBe(true);
+    expect((await bridge.send('!log', 'STOP notice', { bypassLoopGuard: true }))?.ok).toBe(true);
     expect(await bridge.send('!log', 'being line')).toMatchObject({ dropped: true });
   });
 
@@ -351,7 +351,7 @@ function memIo() {
 let app = null;
 afterEach(() => { try { app?.stop(); } catch {} app = null; vi.useRealTimers(); });
 
-async function bootNode(lasso = undefined) {
+async function bootNode(outbound = undefined) {
   const { start, built } = fakeTransport();
   const lines = [];
   let convState = emptyState();
@@ -361,7 +361,7 @@ async function bootNode(lasso = undefined) {
       networks: { whatsapp: { chat_ids: [SELF_DM], allowed_users: ['+16468217865'] } },
       beeper: { primary: { account: 'an@example.com', token: 'TOK' } },
       agents: { egpt: { configuration: 'egpt', default: true, handles: ['e'], name: 'E' } },
-      lasso,
+      loop_guard: { outbound },
     }),
     startBridge: start,
     makeSession: (o) => ({ sessionId: o.sessionId ?? 's', async turn(m) { return { text: `↩ ${m}` }; }, close() {} }),
@@ -436,7 +436,7 @@ describe('boot — the send-rate trip, wired', () => {
     expect(await app.bridge.send(ADMIN_ROOM, 'being line')).toMatchObject({ dropped: true });
   });
 
-  it('reads each per-chat rule from config.yaml lasso:, names the rule it tripped, and <= 0 turns rules off', async () => {
+  it('reads each per-chat rule from config.yaml loop_guard.outbound, names the rule it tripped, and <= 0 turns rules off', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(T0);
     let t = await bootNode({ chat_burst_count: 3, chat_burst_window_ms: 1000, chat_similar_count: 2, chat_similar_window_ms: 500 });

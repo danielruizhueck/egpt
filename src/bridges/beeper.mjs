@@ -636,7 +636,7 @@ export async function startBeeperBridge(opts = {}) {
     // now. Default 1h covers the sleep-window courtesy. 0 or negative = no bound. A note with no
     // parseable timestamp echoes normally (fail-open, matching the backlog gate).
     echoMaxAgeMs = 3_600_000,
-    // 👂 OUTBOUND GATE (operator 2026-07-26): the node's rate regulator (src/lasso.mjs, wired in
+    // 👂 OUTBOUND GATE (operator 2026-07-26): the node's rate regulator (src/loop-guard.mjs, wired in
     // boot). The 👂 echo is the ONE message this limb posts on its OWN initiative — every other
     // send arrives through the port, which boot already wrapped — so without this the echo is the
     // one hole in a node-wide "at most N messages per window" ceiling, exactly where a burst of
@@ -2244,7 +2244,7 @@ export async function startBeeperBridge(opts = {}) {
           // position-independent — a wrap layer above the 👂 no longer breaks dedup.
           // Through the node's outbound regulator (echoGate, above): an echo is a committed
           // message and spends from the same budget as a persona reply — the port's wrap can't
-          // see this send, so it takes the lasso directly.
+          // see this send, so it takes the send guard directly.
           reply: (t) => echoGate(() => sendMessage(chatID, wrapEcho(echoTag, t), { replyToMessageID: msg.id })),
           enabled: svc.enabled,
           // rank 1 → post now (immediate/debounced); rank>1 → HOLD + arm a promotion at

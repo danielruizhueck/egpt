@@ -4,6 +4,7 @@
 // touches a key below: those are bound ONCE at boot — a dialled bridge, a bound port, a resolved
 // service profile — and nothing re-reads them. A key boot starts binding once belongs here.
 import { isDeepStrictEqual } from 'node:util';
+import { LEGACY_BLOCKS } from '../loop-guard.mjs';
 
 // `*` matches any one segment (an agent's map key).
 export const RESTART_KEYS = [
@@ -16,11 +17,11 @@ export const RESTART_KEYS = [
   'user_name', 'whatsapp.user_name', 'whatsapp.media',                    // bridge construction options
   'bridge_signature_open', 'bridge_signature_close', 'transcription_open', 'transcription_close',
   'echo', 'echo_max_age_ms', 'echo_priority', 'echo_timeout_ms', 'echo_coverage_similarity', 'peer_nodes',
-  'lasso', 'ear_probe', 'media_flood',
+  'ear_probe', 'media_flood',
   'transcription_service', 'transcription', 'transcriptor', 'voice_service', 'synthesizer',   // profiles resolved once, worker roles
   'default_time_zone',                                                    // resolved once for identity, transcript, spine, commands
   'warm.max', 'warm.idle_ttl_ms', 'warm.idle_ttl_by_class',               // the warm pool's own limits
-  'guard', 'turn_timeout_ms',                                             // loop-guard defaults, the per-turn backstop
+  'loop_guard', ...Object.values(LEGACY_BLOCKS), 'turn_timeout_ms',      // both loop-guard halves (+ pre-0044 keys), the per-turn backstop
 ];
 
 const isMap = (v) => v != null && typeof v === 'object' && !Array.isArray(v);

@@ -35,7 +35,7 @@
 // IT CANNOT STORM. One probe in flight at a time (a tick that finds one running is dropped,
 // not queued) and one tick per `everyMs`, so the outbound is structurally bounded to at most
 // one message per window no matter what. NOTE for the operator: this send does NOT pass
-// through the node's lasso (src/lasso.mjs) — the lasso regulates what the SPINE emits to its
+// through the node's send guard (src/loop-guard.mjs) — it regulates what the SPINE emits to its
 // limbs, and this leaves via Telegram, below/beside every limb. The bound above is the whole
 // bound, which is why the cadence is minutes and the non-overlap rule is structural.
 //

@@ -70,7 +70,7 @@ import { hasNodeSignature, stripNodeSignature, stripRenderedNodeSignature } from
 import { THINKING, QUEUED, LIVE_TICK_SUFFIX } from './spine/sender.mjs';
 import { shortChatId } from './bridges/chat-id.mjs';
 
-// A chat paused on EVERY surface — the lasso's send-rate trip (src/lasso.mjs) knows the chat id,
+// A chat paused on EVERY surface — the send-rate trip (src/loop-guard.mjs) knows the chat id,
 // not the surface. Channels are `${surface}:${chatId}`; blocked() matches either key.
 export const anyChannel = (chatId) => `*:${shortChatId(chatId)}`;
 const anyOf = (channel) => anyChannel(String(channel).slice(String(channel).indexOf(':') + 1));
@@ -155,11 +155,11 @@ export function isStopPhrase(text, phrase = STOP_PHRASE) {
 //                   came from. A `brain` MEMBER's own reply (design B, phase 4) is posted and then
 //                   re-fed as a synthetic inbound so it reaches the other brains + E: that is OUR
 //                   output, so NON-human by provenance — it counts toward the cap, which is
-//                   exactly what bounds a two-brain room at guard.turns.
+//                   exactly what bounds a two-brain room at loop_guard.inbound.turns.
 //                   THE KIND IS THE TEST, not the mere presence (operator 2026-08-31). The same
 //                   re-entry now carries an INVITED GROUP's message into the room it joined, so
 //                   the group can trigger the room's agents — and that is a PERSON talking, not
-//                   our output. Counting it would auto-STOP the room after guard.turns group
+//                   our output. Counting it would auto-STOP the room after loop_guard.inbound.turns group
 //                   messages and silence the very agents the tunnel exists to wake, so a
 //                   non-brain member stays human here and resets the room's counter as any human
 //                   turn does. (An escaped echo of one of OUR sends is caught a line below

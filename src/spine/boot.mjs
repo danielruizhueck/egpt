@@ -48,7 +48,7 @@ import {
 } from '../conversations-state.mjs';
 import { createStopGuard, STOP_FILE, stopFilePresent, writeStopFile, anyChannel, pauseNotice, normalizeLine } from '../stop-guard.mjs';
 import { createFloodBan } from '../flood-ban.mjs';
-import { createLasso } from '../lasso.mjs';
+import { createSendGuard, loopGuardConfig } from '../loop-guard.mjs';
 import { CLEAN_EXIT_CODE } from '../daemon-runtime.mjs';
 
 import { createIdentity, surfaceOf, SHELL_SURFACE } from './identity.mjs';
@@ -500,7 +500,7 @@ export function makePeerMouth({ peer, bridge, bridgeOf = null, owns = () => fals
     // the mouth and when the mouth is elsewhere but has no room here; a temporary mark (the 🎧) must
     // tell those apart, because only the first may be placed from the holder (sender.mjs `react`).
     mouthIsElsewhere(chatId, being = null) { return !owns(chatId) && localMouth?.(being, chatId) != null; },
-    // The chat a LOCAL mouth room was routed from — the lasso counts and pauses the two as one.
+    // The chat a LOCAL mouth room was routed from — the send guard counts and pauses the two as one.
     homeChatOf(mouthChatId) { return homeOf.get(mouthChatId) ?? null; },
     // WHICH MOUTH SAYS THIS REPLY, and where. Three answers:
     //   null                       — nobody but the connection holding the chat; it says it.
@@ -847,8 +847,8 @@ export function computeShellHeader({ nodeName, agents, defaultNode, currentRoom 
 // THE UPLOAD IS AN OUTBOUND MESSAGE (operator ruling 2026-08-08): "the event of a note going out
 // MUST BE the same as any message ... it must increase the output counter as any message
 // currently does." So it is routed through `gate` — boot always hands in the SAME node-wide
-// lasso (src/lasso.mjs) every limb's send already goes through (the exact precedent: the shell
-// port and the 👂 echo are both wrapped by "the SAME lasso ... never a second one"). Never a
+// send guard (src/loop-guard.mjs) every limb's send already goes through (the exact precedent: the
+// shell port and the 👂 echo are both wrapped by the SAME one, never a second one). Never a
 // radio-specific throttle on top: one ceiling, node-wide. A busy room can trip it — the node
 // stops, which is the guard working, not a bug.
 export function createRadioNoteRelay({
@@ -856,9 +856,9 @@ export function createRadioNoteRelay({
   getConfig = () => ({}),       // the live config — radio_service map lives at .radio_service
   uploadNote: uploadNoteFn = uploadNote,
   readFile: readFileFn = readFile,
-  // THE OUTBOUND CEILING (src/lasso.mjs) — boot always passes lasso.gate, the SAME seam the 👂
-  // echo (an in-limb emit that also isn't a port method) uses. Default is a bare passthrough so
-  // a caller that isn't testing the lasso integration is unaffected — never a second ceiling.
+  // THE OUTBOUND CEILING (src/loop-guard.mjs) — boot always passes sendGuard.gate, the SAME seam
+  // the 👂 echo (an in-limb emit that also isn't a port method) uses. Default is a bare passthrough
+  // so a caller that isn't testing the send-guard integration is unaffected — never a second ceiling.
   gate: gateFn = (fn) => fn(),
   cacheMax = 200,               // bounded — an unmatched cache entry (e.g. download policy excludes audio) self-evicts, never grows unbounded
   onLog = () => {},
@@ -969,7 +969,7 @@ export function createMemberResolver({ resolveConvRoom, readRooms = readRoomsFil
 // operator's own recollection of when he wrote.
 //
 // THIS IS THE ONE PLACE. boot builds ONE `log` object and threads `log.line` into every service's
-// onLog (bridge, heartbeat, warm, mouth, transcribe, brain, actions, lasso, mesh, spine…), so
+// onLog (bridge, heartbeat, warm, mouth, transcribe, brain, actions, loop_guard, mesh, spine…), so
 // every line in that file arrives here. Nothing stamps at a call site, and there is no second
 // logger: a caller that injects its own `log` (every test, the shell) still gets exactly what it
 // asked for, unstamped.
@@ -1178,14 +1178,14 @@ export async function boot({
       // so a slow or wedged POST can never wedge the stop. If it fails or times out the node
       // still stops — the FILE is the durable record, this line is only courtesy.
       //
-      // ⚠ bypassLasso: the outbound rate regulator (src/lasso.mjs) must NEVER hold the stop.
+      // ⚠ bypassLoopGuard: the outbound rate regulator (src/loop-guard.mjs) must NEVER hold the stop.
       // A kill switch that queues behind the very flood it exists to end is not a kill switch,
       // so this one send skips the gate outright (operator 2026-07-26).
       if (why.chatId) {
         try {
           await Promise.race([
             // Said through the one placement (sayOnce, declared below — read at call time).
-            sayOnce({ chatId: why.chatId, text: `🛑 STOP received — egpt is stopping (the service will not respawn).\nTo start it again:  rm ${STOP_FILE}`, opts: { bypassLasso: true }, what: 'stop' }),
+            sayOnce({ chatId: why.chatId, text: `🛑 STOP received — egpt is stopping (the service will not respawn).\nTo start it again:  rm ${STOP_FILE}`, opts: { bypassLoopGuard: true }, what: 'stop' }),
             new Promise((r) => setTimeoutFn(r, 3000)),
           ]);
         } catch (e) { log.line?.(`[stop] could not post the warning (${e?.message ?? e}) — stopping anyway`); }
@@ -2014,38 +2014,39 @@ export async function boot({
   // off the leading edge no longer breaks dedup. The opens are safe on a multi-peer node.)
 
   // --- ports ---
-  // THE LASSO (operator 2026-07-26): "a major loop that counts how many messages in a time
-  // window has been sent out to any limb ... a big lasso that sandboxes egpt" / "under no
+  // THE LOOP GUARD's SEND rules (config loop_guard.outbound; operator 2026-07-26): "a major loop
+  // that counts how many messages in a time window has been sent out to any limb ..." / "under no
   // reason must the bridge exceed a normal sending rate". ONE ceiling for the whole node,
   // built HERE — before any port exists — because every limb is wrapped by it below, so the
-  // budget is node-wide and no limb has its own. See src/lasso.mjs for the two counters
+  // budget is node-wide and no limb has its own. See src/loop-guard.mjs for the two counters
   // (messages vs edits) and what counts as each. Config-controlled so the operator can
   // loosen it without a deploy.
   //
   // OVER THE CEILING ⇒ THE NODE STOPS (operator 2026-07-26: "by throttle i did actually mean
   // stop. there is probably a bug if there is flooding"), through the SAME stopSwitch the
-  // STOP safe word pulls — the STOP file explains itself with the lasso's reason, the daemon
+  // STOP safe word pulls — the STOP file explains itself with the guard's reason, the daemon
   // does not respawn, and only a human restart clears it. Never a second halt mechanism.
   // The trip is fire-and-forget from the send path: pull() is already once-only (`stopping`)
   // and never throws, and a send must not wait on the stop it just caused.
   // 18/10000ms, not 20/5000ms (operator 2026-07-26): a mesh reply-mirror over-bills as a
-  // message, and the fix is headroom, not a classification branch — see src/lasso.mjs for the
+  // message, and the fix is headroom, not a classification branch — see src/loop-guard.mjs for the
   // full reasoning (it is a LOWER sustained rate, not a loosening).
-  const lassoCfg = (cfg.lasso && typeof cfg.lasso === 'object') ? cfg.lasso : {};
-  const lasso = createLasso({
-    messages: Number.isFinite(lassoCfg.messages) ? lassoCfg.messages : 18,
-    windowMs: Number.isFinite(lassoCfg.window_ms) ? lassoCfg.window_ms : 10_000,
-    edits: Number.isFinite(lassoCfg.edits) ? lassoCfg.edits : 4_000,
-    chatMessages: Number.isFinite(lassoCfg.chat_messages) ? lassoCfg.chat_messages : 5,
-    chatWindowMs: Number.isFinite(lassoCfg.chat_window_ms) ? lassoCfg.chat_window_ms : 3_000,
-    chatSimilarCount: Number.isFinite(lassoCfg.chat_similar_count) ? lassoCfg.chat_similar_count : 5,
-    chatSimilarWindowMs: Number.isFinite(lassoCfg.chat_similar_window_ms) ? lassoCfg.chat_similar_window_ms : 2_000,
-    chatSimilarRatio: Number.isFinite(lassoCfg.chat_similar_ratio) ? lassoCfg.chat_similar_ratio : 0.85,
-    chatBurstCount: Number.isFinite(lassoCfg.chat_burst_count) ? lassoCfg.chat_burst_count : 10,
-    chatBurstWindowMs: Number.isFinite(lassoCfg.chat_burst_window_ms) ? lassoCfg.chat_burst_window_ms : 2_000,
-    onLog: (m) => log.line?.(`[lasso] ${m}`),
-    writeState: (s) => { writeFile(join(EGPT_HOME, 'state', 'lasso.json'), `${JSON.stringify(s, null, 2)}\n`, 'utf8').catch(() => {}); },
-    onTrip: (t) => { Promise.resolve(stopSwitch.pull({ reason: `lasso: ${t.reason}`, who: 'lasso', where: 'outbound' })).catch(() => {}); },
+  const loopGuard = loopGuardConfig(cfg, { onDeprecated: (m) => log.line?.(`[loop_guard] ${m}`) });
+  const sends = loopGuard.outbound;
+  const sendGuard = createSendGuard({
+    messages: Number.isFinite(sends.messages) ? sends.messages : 18,
+    windowMs: Number.isFinite(sends.window_ms) ? sends.window_ms : 10_000,
+    edits: Number.isFinite(sends.edits) ? sends.edits : 4_000,
+    chatMessages: Number.isFinite(sends.chat_messages) ? sends.chat_messages : 5,
+    chatWindowMs: Number.isFinite(sends.chat_window_ms) ? sends.chat_window_ms : 3_000,
+    chatSimilarCount: Number.isFinite(sends.chat_similar_count) ? sends.chat_similar_count : 5,
+    chatSimilarWindowMs: Number.isFinite(sends.chat_similar_window_ms) ? sends.chat_similar_window_ms : 2_000,
+    chatSimilarRatio: Number.isFinite(sends.chat_similar_ratio) ? sends.chat_similar_ratio : 0.85,
+    chatBurstCount: Number.isFinite(sends.chat_burst_count) ? sends.chat_burst_count : 10,
+    chatBurstWindowMs: Number.isFinite(sends.chat_burst_window_ms) ? sends.chat_burst_window_ms : 2_000,
+    onLog: (m) => log.line?.(`[loop_guard] ${m}`),
+    writeState: (s) => { writeFile(join(EGPT_HOME, 'state', 'loop-guard.json'), `${JSON.stringify(s, null, 2)}\n`, 'utf8').catch(() => {}); },
+    onTrip: (t) => { Promise.resolve(stopSwitch.pull({ reason: `loop_guard: ${t.reason}`, who: 'loop_guard', where: 'outbound' })).catch(() => {}); },
   });
   // THE EAR PROBE (operator 2026-07-07, redesigned 2026-07-26; ROADMAP §3) — the DEAF-BRIDGE
   // detector. It injects a message with TELEGRAM'S OWN API (out of band, sharing no machinery
@@ -2174,9 +2175,9 @@ export async function boot({
     // THE ONE EMIT BELOW THE PORT (the 👂 echo, src/bridges/beeper.mjs): the transcript ack is
     // posted by the LIMB itself, from inside the voice-note path, so wrapping the port here
     // would miss it — a regulator with a hole exactly where a burst of notes lands. Hand the
-    // limb the SAME lasso so the echo spends from the SAME node-wide budget. Forwarded
+    // limb the SAME send guard so the echo spends from the SAME node-wide budget. Forwarded
     // verbatim through beeper-port's `rest`.
-    echoGate: lasso.gate,
+    echoGate: sendGuard.gate,
     // THE EAR PROBE (above). Both telegram fields are required; either missing → the limb
     // builds no injector and the probe never runs.
     earProbeTelegram: (earTg.token && earTg.chat_id != null) ? { token: earTg.token, chatId: earTg.chat_id } : null,
@@ -2203,7 +2204,7 @@ export async function boot({
   // OWNERSHIP, decided HERE and nowhere else, so no call site downstream has to remember it.
   // A connection this node does not own is OUTBOUND-ONLY: it still sends, and its three inbound
   // registrations become no-ops, so nothing this node can do will wake on it. Same Proxy shape
-  // lasso.wrap uses — the bridge's whole surface passes through untouched except those three.
+  // sendGuard.wrap uses — the bridge's whole surface passes through untouched except those three.
   const wakesOn = (ep) => !ep.ownerNode || ownNodeNamesOf(cfg).has(String(ep.ownerNode).trim().toLowerCase());
   const outboundOnly = (port) => new Proxy(port, {
     get: (t, k) => ((k === 'onMessage' || k === 'onEdit' || k === 'onMedia') ? (() => {}) : Reflect.get(t, k, t)),
@@ -2346,7 +2347,7 @@ export async function boot({
         // The two-account voice echo is now dropped by SOURCE (sender ∈ mouth identities) before
         // whisper — the cross-bridge audio-hash fan it replaced is gone (beeper.mjs, 2026-10-13).
         earIdentities };   // the operator's account: excepted from "a reaction by a mouth is ours" (beeper.mjs _maybeEmitReactions)
-      const port = lasso.wrap(await createBeeperBridgePort(opts, startBridge ? { start: startBridge } : {}));
+      const port = sendGuard.wrap(await createBeeperBridgePort(opts, startBridge ? { start: startBridge } : {}));
       const owned = ear && wakesOn(ep);
       // A PER-CHAT ear: not one of the node's ears, but a connection allowed to be the ear of the
       // chats that ear is not in (perChatEars, above). Decided by NAME because that is what the
@@ -2572,10 +2573,10 @@ export async function boot({
   const media = createMedia({ contacts, io, transcribe: tx.transcribe, resolveTranscriptionService: tx.resolveTranscriptionService, transcribeCfg: tx.cliCfg, onLog: (m) => log.line?.(`[media] ${m}`) });
   // radio relay (createRadioNoteRelay, above) piggybacks on the SAME onMedia callback to stash
   // a voice note's already-downloaded local path — see that function's header for why it needs
-  // both this AND the spine's ev, and how the two are correlated. gate: lasso.gate — the SAME
+  // both this AND the spine's ev, and how the two are correlated. gate: sendGuard.gate — the SAME
   // node-wide outbound ceiling the echo (echoGate, above) and every port send already go
   // through; a note reaching the station counts as an outbound message, never a second budget.
-  const radioRelay = createRadioNoteRelay({ resolveConvRoom, getConfig, gate: lasso.gate, onLog: (m) => log.line?.(`[radio] ${m}`) });
+  const radioRelay = createRadioNoteRelay({ resolveConvRoom, getConfig, gate: sendGuard.gate, onLog: (m) => log.line?.(`[radio] ${m}`) });
   const onMediaSaved = (m) => { radioRelay.noteMedia(m); return media.save(m); };   // a resumed voice note's audio too (background resume)
   bridge.onMedia(onMediaSaved);
 
@@ -2588,7 +2589,7 @@ export async function boot({
   // The SAME per-NODE bridge-signature layers the beeper bridge received (above) — so a persona
   // reply rendered to the operator console is wrapped byte-identically to one rendered to Beeper
   // (ONE path, operator 2026-07-25). Default '' → nothing added, exactly like the beeper side.
-  // Wrapped by the SAME lasso as the beeper limb (never a second one): a shell-owned chat
+  // Wrapped by the SAME send guard as the beeper limb (never a second one): a shell-owned chat
   // routes to this port and would otherwise leave the node unregulated — "any limb", operator
   // 2026-07-26. The wrap is a Proxy precisely so this port's `isConnected` GETTER stays live.
   // THE PERMANENT SHELL HEADER (operator 2026-07-27, computeShellHeader above): computed HERE,
@@ -2625,13 +2626,13 @@ export async function boot({
     post: (chatId, text) => bridge.postVerbatim(chatId, text),
     // THE REPLY TRAIN's target on this account: the UNWRAPPED stream, for exactly the reason
     // postVerbatim above is unwrapped — every frame of it was written and signed by the peer.
-    // Lasso-gated like any other stream this node opens (one 'message' for the placeholder, the
+    // Send-guarded like any other stream this node opens (one 'message' for the placeholder, the
     // edits on the 'edit' budget), because `bridge` here is the wrapped port.
     startStream: (chatId, init) => bridge.startStreamVerbatim(chatId, init),
     // THE REACTION VERB's two reads on this account (operator 2026-09-07): its own copies of the
     // chat's recent messages — the peer names one by CONTENT, because no id crosses the link — and
     // the same `react` primitive the /react limb and the steer ack already use. Ungated by the
-    // lasso on purpose, exactly as every other reaction is (src/lasso.mjs: a reaction carries no
+    // send guard on purpose, exactly as every other reaction is (src/loop-guard.mjs: a reaction carries no
     // text and is not a line in a chat).
     listMessages: (chatId) => bridge.listMessagesRaw(chatId),
     react: (chatId, msgId, emoji) => bridge.react(chatId, msgId, emoji),
@@ -2658,7 +2659,7 @@ export async function boot({
     onLog: (m) => log.line?.(`[being] ${m}`),
   });
 
-  const shellPort = lasso.wrap(createShellPort({
+  const shellPort = sendGuard.wrap(createShellPort({
     wakeWords,
     addressWithoutAt,                     // same switch, same route — the shell gate and the beeper gate move together
     bridgeSignatureOpen: cfg.bridge_signature_open ?? '',
@@ -3210,7 +3211,7 @@ export async function boot({
     stopBeing: (being, ev) => brain.stop(being, ev),
     warmStats: () => pool.stats(),                    // /status `warm:` field — { size, max, keys }
     shellConnected: () => shellPort.isConnected,       // /status `shell:` field — is the operator's editor dialed in
-    gate: lasso.gate,                                  // /radio say's upload — the SAME node-wide lasso instance the beeper bridge, echo and shell port already spend from (never a second one)
+    gate: sendGuard.gate,                              // /radio say's upload — the SAME node-wide send guard instance the beeper bridge, echo and shell port already spend from (never a second one)
     listEntityDirs,                                    // bare /radio's joined-rooms report + /radio leave all|<slug> — THE walk (above), never a second entity enumeration
     // Live status-line room reflection (operator 2026-08-16): /rooms join|leave (or any other
     // currentRoom clear) on the shell surface recomputes the SAME computeShellHeader (above)
@@ -3503,12 +3504,12 @@ export async function boot({
   // REPETITION (the same line said again — "pause on repetition, not chatter"). A genuine human
   // message resets both; provenance decides who is human, not the display name (a mesh envelope
   // posted AS the operator counts). Replaces the flood-guard + mesh breaker. Config
-  // `guard: { turns, window }` (turns -1 = the whole guard off, window minutes -1 = pure
+  // `loop_guard.inbound: { turns, window }` (turns -1 = the whole guard off, window minutes -1 = pure
   // consecutive count). guardOverride reads the conversation's own `guard:` block
   // (conversations.yaml) so a busy relay room can loosen/disable it — else the node defaults apply.
   const guard = createStopGuard({
-    turns: Number.isFinite(cfg.guard?.turns) ? cfg.guard.turns : 6,
-    window: Number.isFinite(cfg.guard?.window) ? cfg.guard.window : 2,
+    turns: Number.isFinite(loopGuard.inbound.turns) ? loopGuard.inbound.turns : 6,
+    window: Number.isFinite(loopGuard.inbound.window) ? loopGuard.inbound.window : 2,
     onLog: (m) => log.line?.(`[guard] ${m}`),
   });
   const guardOverride = async (surface, chatId) => {
@@ -3521,18 +3522,18 @@ export async function boot({
   // `!= null` is the unsigned case (a person): fromOtherNode is false for those too, and they are
   // not our echo.
   const fromThisNode = (ev) => ev?.fromNode != null && !fromOtherNode(getConfig(), ev);
-  // THE SEND-RATE PAUSE (operator 2026-10-18; src/lasso.mjs bindChats): a chat whose Beeper sends
+  // THE SEND-RATE PAUSE (operator 2026-10-18; src/loop-guard.mjs bindChats): a chat whose Beeper sends
   // trip a per-chat rule (similar / burst / sustained) is paused HERE — the pause RESUME clears —
   // said in the chat, and logged ONCE to log_to_group. A mouth room counts as its home chat; the
   // shell is not Beeper. A line is compared as the loop guard reads it (normalizeLine).
-  lasso.bindChats({
+  sendGuard.bindChats({
     keyOf: (chat) => (shellPort.owns(chat) ? null : shortChatId(peerMouth?.homeChatOf?.(chat) ?? chat)),
     lineOf: normalizeLine,
     isPaused: (key) => guard.blocked(anyChannel(key)),
     onTrip: (key, { chat, name, why }) => {
       guard.stopChannel(anyChannel(key));
       const home = peerMouth?.homeChatOf?.(chat) ?? chat;
-      Promise.resolve(sayOnce({ chatId: home, text: pauseNotice(`send-rate guard, ${why}`), opts: { bypassLasso: true }, what: 'guard' })).catch((e) => log.line?.(`[guard] could not announce the pause in ${home}: ${e?.message ?? e}`));
+      Promise.resolve(sayOnce({ chatId: home, text: pauseNotice(`send-rate guard, ${why}`), opts: { bypassLoopGuard: true }, what: 'guard' })).catch((e) => log.line?.(`[guard] could not announce the pause in ${home}: ${e?.message ?? e}`));
       Promise.resolve(logToGroup(`${getConfig()?.node_name ?? '?'} · send-rate guard paused ${name ?? home} — ${why}`)).catch(() => {});
     },
   });
