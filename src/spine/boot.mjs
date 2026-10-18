@@ -8,7 +8,7 @@
 // the claude session factory, conv-state IO), so boot() itself is testable
 // end-to-end against fakes — the real services + real warm pool, fakes only at
 // the transport + process boundary (tests/spine-boot.test.mjs).
-import { readFile, writeFile, mkdir, unlink, readdir, rename } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, unlink, readdir, rename, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { spawnSync, spawn } from 'node:child_process';
 
@@ -110,7 +110,8 @@ import { createHeartbeats } from './heartbeats.mjs';
 import { createHeartbeatLoader, parseFrequency, resolveTimeZone } from './heartbeat-loader.mjs';
 import { createConfigResolver, parseEntityConfig, readHeartbeatFiles } from './config-resolver.mjs';
 import { seedSkeletons } from './seed.mjs';
-import { readRoomConfig, readRoomsFile } from '../rooms-file.mjs';
+import { readRoomConfig, readRoomsFile, roomsFilePath, agentsFilePath } from '../rooms-file.mjs';
+import { RACY_MS } from '../stat-cache.mjs';
 import { isSilenceReply } from '../auto-mode.mjs';
 import { isBrainFailureResult } from '../brain-errors.mjs';
 
@@ -722,6 +723,24 @@ export async function listEntityDirs() {
   try { agents = await readdir(AGENTS_ROOT, { withFileTypes: true }); } catch { agents = []; }
   for (const ent of agents) if (ent.isDirectory()) out.push({ dir: join(AGENTS_ROOT, ent.name), ns: `agent/${ent.name}` });
   return out;
+}
+
+// THE WALK'S FINGERPRINT (the resolver's `stamp`): the stats of every file the walk reads — the
+// registries, the entity set, each entity's heartbeats/*.yaml — so a reload with nothing changed is
+// skipped. A file touched within RACY_MS reads as changed (a same-tick rewrite keeps its stat).
+export async function configInputsStamp({ files = [], listDirs = listEntityDirs, now = Date.now } = {}) {
+  const st = async (p) => {
+    try { const s = await stat(p); return now() - s.mtimeMs <= RACY_MS ? `racy ${now()}` : `${s.mtimeMs}:${s.size}:${s.ino}`; }
+    catch { return '-'; }
+  };
+  const dirs = await listDirs();
+  const beats = await Promise.all(dirs.map(async ({ dir, ns }) => {
+    const folder = join(dir, HEARTBEATS_DIR);
+    let names;
+    try { names = (await readdir(folder)).filter((n) => n.endsWith('.yaml')).sort(); } catch { names = []; }
+    return names.length ? `${ns} ${(await Promise.all(names.map(async (n) => `${n}@${await st(join(folder, n))}`))).join(' ')}` : ns;
+  }));
+  return [...(await Promise.all(files.map(st))), ...beats].join('\n');
 }
 
 // Where does this agent ROUTE? No `to:` anywhere → LOCAL, keyed by this node's own nodeName.
@@ -1357,6 +1376,8 @@ export async function boot({
   const configResolver = createConfigResolver({
     getConfig, loadRegistry: _loadState, listEntityDirs, readEntityConfig,
     readEntityBeats: readHeartbeatFiles,   // <entity>/heartbeats/*.yaml — a being's own beats, run boxed or not at all
+    // An injected registry is not on disk, so its changes have no stat: walk every time.
+    stamp: (loadState || writeState) ? null : () => configInputsStamp({ files: [CONV_YAML_PATH, roomsFilePath(), agentsFilePath()] }),
     egptHome: EGPT_HOME, io: { writeFile, mkdir },
     onLog: (m) => log.line?.(`[config] ${m}`),
   });

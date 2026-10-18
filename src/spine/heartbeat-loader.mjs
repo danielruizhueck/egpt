@@ -235,9 +235,9 @@
 //                    for the pump env), register them, write the readonly.yaml. Runs
 //                    AFTER createSpine.
 //   reload()       — rebuild the whole set on demand (called from boot.mjs's
-//                    refreshConfig, itself called from spine.mjs on message arrival).
-//                    Reentrancy-guarded so a burst of messages can't pile up concurrent
-//                    reloads.
+//                    refreshConfig, itself called from spine.mjs on message arrival),
+//                    only when the resolver's inputs changed. A concurrent caller joins
+//                    the reload in flight, so a burst can't pile up concurrent reloads.
 //
 // Every effectful edge is injected (the resolver / spawn / io.writeFile / io.mkdir
 // / now) so the whole loader is unit-testable
@@ -654,7 +654,7 @@ export function createHeartbeatLoader({
   let _registry = null;   // bound in wrapRegistry() — the real registry reload replaces entries on
   let _stats = null;      // bound in activate() — the pump-stats source for command env
   let _bootTickMs = 0;    // bound in activate() — the fixed boot tick, for the finer-cadence warning
-  let _reloading = false; // reentrancy guard: a reload in flight blocks another
+  let _reloading = null;  // the reload in flight — a concurrent caller joins it
   let _activated = false; // flipped by activate() — before it, reload() is a no-op (nothing loaded yet)
   let _ledger = null;     // beat name → what it last fired for: a daily: local date ("YYYY-MM-DD"), a when: instant (ISO); read from disk once, then authoritative in-process
   let _ledgerWrite = Promise.resolve();   // serializes ledger writes (two beats can fire on one tick)
@@ -989,11 +989,16 @@ export function createHeartbeatLoader({
 
   // ── reload: rebuild the whole set on demand (called from boot.mjs's refreshConfig,
   //    itself invoked from spine.mjs's handleFast on every inbound message) ────
-  async function reload() {
-    if (!_activated) return;                    // before activate() there are no beats loaded yet — nothing to reload
-    if (_reloading) return;                     // reentrancy guard — a reload in flight blocks another
-    _reloading = true;
+  //    Change-driven: nothing the walk reads has moved (resolver.changed) → no walk, no writes.
+  //    A caller arriving while one runs waits for it (lanes call this concurrently).
+  function reload() {
+    if (!_activated) return Promise.resolve();  // before activate() there are no beats loaded yet — nothing to reload
+    _reloading ??= _reload().finally(() => { _reloading = null; });
+    return _reloading;
+  }
+  async function _reload() {
     try {
+      if (resolver.changed && !(await resolver.changed())) return;
       const { entries, finestMs } = await collect();   // collect() re-runs the resolver's walk
       if (entries.some((e) => e.daily || e.whenMs != null)) await _ensureLedger();
       _registry.clear();   // drop the whole old set — the fresh collect() rebuilds it
@@ -1006,8 +1011,6 @@ export function createHeartbeatLoader({
       await _placeChats(entries);
     } catch (e) {
       onLog(`reload failed: ${e?.message ?? e}`);   // never let a reload error break the message path
-    } finally {
-      _reloading = false;
     }
   }
 

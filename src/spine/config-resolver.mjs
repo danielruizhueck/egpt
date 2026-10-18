@@ -56,7 +56,8 @@
 //
 // CONFIG REFRESH ON MESSAGE ARRIVAL (2026-08): config changes are picked up automatically on
 // the next inbound message — spine.mjs's handleFast calls the injected refreshConfig before
-// dispatching, which re-runs collect() (see boot.mjs) — or at boot/restart. No file deletion,
+// dispatching, which re-runs collect() when changed() says a file it reads moved (see boot.mjs
+// configInputsStamp) — or at boot/restart. No file deletion,
 // no periodic timer, no manual action needed. These three files are PURE diagnostic output;
 // they carry zero control role.
 //
@@ -168,6 +169,7 @@ export function createConfigResolver({
   listEntityDirs = async () => [],
   readEntityConfig = async () => ({}),
   readEntityBeats = async () => ({}),
+  stamp = null,   // () => Promise<string>: a stat fingerprint of every file the walk reads (boot); null = always walk
   egptHome = EGPT_HOME,
   io = {},
   onLog = () => {},
@@ -182,6 +184,7 @@ export function createConfigResolver({
   };
 
   let _set = null;   // the in-memory resolved set — what consumers read
+  let _seen = null;  // { cfg, stamp } the last walk read
 
   // The node rung, resolved on its own: the whole doc (heartbeats included — the node's
   // block is one of the UNION's contributors) plus the base every entity layers over
@@ -231,6 +234,7 @@ export function createConfigResolver({
 
   /** Scan every rung and load the resolved set into memory. Never throws. */
   async function collect() {
+    const seen = { cfg: getConfig(), stamp: stamp ? await stamp() : null };   // taken BEFORE the reads: a change during the walk shows next time
     const node = _node();
 
     let registryState = {};
@@ -305,7 +309,14 @@ export function createConfigResolver({
     }
 
     _set = { node, entities };
+    _seen = seen;
     return _set;
+  }
+
+  /** Would a walk now read anything the last one did not? A new node config, or a changed stamp. */
+  async function changed() {
+    if (!stamp || !_seen) return true;
+    return getConfig() !== _seen.cfg || (await stamp()) !== _seen.stamp;
   }
 
   /** The resolved entity record for a folder, or null when it wasn't in the last walk. */
@@ -374,5 +385,5 @@ export function createConfigResolver({
       YAML.stringify({ entities }, { lineWidth: 0 }));
   }
 
-  return { collect, configFor, sourceFor, entityFor, snapshot, writeReadonly, paths };
+  return { collect, changed, configFor, sourceFor, entityFor, snapshot, writeReadonly, paths };
 }
