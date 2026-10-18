@@ -56,6 +56,18 @@ export async function topProcesses({ platform = process.platform, exec = run } =
   return all.sort((a, b) => b.pct - a.pct).slice(0, 3);
 }
 
+// THE INTAKE CAP (spine.mjs lanes): how many chats' fast phases run at once, from the last sample.
+// A quarter of it when memory runs low or the machine or the loop is busy, one past the edge.
+export const INTAKE_LANES = 8;
+export function intakeCap(load) {
+  if (!load) return INTAKE_LANES;
+  const free = load.total > 0 ? (load.free / load.total) * 100 : 100;
+  const hot = Math.max(load.cpu ?? 0, load.busy ?? 0);
+  if (free < 5 || hot >= 95) return 1;
+  if (free < 15 || hot >= 80) return INTAKE_LANES / 4;
+  return INTAKE_LANES;
+}
+
 export function createLagProbe({
   config = () => null,          // () => config.lag_probe, read every sample
   report = null,                // (text) => Promise — the logging group
@@ -142,13 +154,15 @@ export function createLagProbe({
 
   // --- the sample ---
   let lagging = null;           // { since, postedAt, worst, clearSince }
-  let fastMax = 0, summaryAt = 0, timer = null, loop = null;
+  let fastMax = 0, summaryAt = 0, timer = null, loop = null, last = null;
   function sample() {
     const t = now();
     const l = loop.sample();
     const fast = backlog()?.fast ?? {};
     fastMax = Math.max(fastMax, fast.queueDepth ?? 0);
     const sys = { spine: spineCpu.sample(), busy: busy.sample(), node: nodeCpu.sample() };
+    const { free, total } = memory();
+    last = { cpu: sys.node.pct, busy: sys.busy, free, total };
     const lag = Math.max(l.max, fast.oldestMs ?? 0);
     const fire = (head) => alert(head, l, sys).catch((e) => note(`lag probe: ${e?.message ?? e}`));
     if (lag >= knob('threshold_ms')) {
@@ -202,5 +216,6 @@ export function createLagProbe({
     loop?.stop?.();
     loop = null;
   }
-  return { start, stop, time, slowest };
+  // The last sample's load ({ cpu, busy, free, total }), null before the first: intakeCap's input.
+  return { start, stop, time, slowest, load: () => last };
 }

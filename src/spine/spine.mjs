@@ -22,6 +22,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { createTurns } from './turns.mjs';
+import { makeSerialByKey } from '../serial-by-key.mjs';
+import { INTAKE_LANES } from './lag-probe.mjs';
 import { createLiveness } from './liveness.mjs';
 // WHICH CONNECTION AN OUTBOUND GOES OUT ON — the ONE resolver (sender.mjs makeOutbound), not a
 // fourth local copy of `bridgeOf(being) ?? bridge`.
@@ -209,6 +211,7 @@ export function createSpine({
   // tests are deterministic. Defaults to Math.random.
   rng = Math.random,
   probe = null,                        // optional lag probe (src/spine/lag-probe.mjs): times the fast-phase steps + the tick
+  intakeCap = () => INTAKE_LANES,      // () => how many chats' fast phases may run at once (boot: lag-probe intakeCap over the last load sample)
 } = {}) {
   for (const [name, dep] of Object.entries({ bridge, brain, identity, router, gating, sender, transcript, heartbeats })) {
     if (!dep) throw new Error(`createSpine: missing required dependency '${name}'`);
@@ -232,6 +235,11 @@ export function createSpine({
   // the SAME bridge/bridgeOf pair `outbound` uses, because the steer-ack react it owns is one of
   // the spine's own direct bridge sends and must ride the acked being's connection.
   const turns = injectedTurns ?? createTurns({ brain, bridge, bridgeOf, log });
+  // COMMANDS KEEP THE NODE-WIDE ORDER the single pump gave them: a handler rewrites
+  // conversations.yaml / rooms.yaml without the registry lock. Chats run at once now; commands do not.
+  const inCommandOrder = makeSerialByKey();
+  const ordered = (fn) => (...a) => inCommandOrder('commands', () => fn(...a));
+  if (commands) commands = new Proxy(commands, { get: (t, k) => ((k === 'run' || k === 'runPhrase') && typeof t[k] === 'function' ? ordered(t[k].bind(t)) : Reflect.get(t, k)) });
   // LIVENESS (src/spine/liveness.mjs): a running turn and a being's background work stay visibly
   // alive in the chat; long background work is asked about through the wake path below.
   const liveness = createLiveness({ sender, brain, now: () => clock.now(), everyMs: livenessEveryMs, stopped: () => !!stopSwitch?.present(), labelOf, note, ask: (o) => wakeOnBackground(o), report: logToGroup });
@@ -313,20 +321,23 @@ export function createSpine({
     } else if (action === 'warn') note(`guard: ${channel} nearing the loop cap (${guard.countOf(channel)})`);
   }
 
-  // --- the inbound queue (event-driven half). Bridge callbacks push; ONE async
-  //     pump drains the FAST phase serially — identity → command/mesh → route →
-  //     gate → open THIS mention's placeholder → dispatch its turn — so arrival
-  //     order and conversation-state reads never interleave. The pump does NOT run
-  //     the brain turn inline: the turn goes onto a PER-CONVERSATION FIFO queue
-  //     (turnBy), so a second mention that arrives while a conversation's train is
-  //     still in flight is QUEUED behind it (never dropped, never interrupting,
-  //     never concurrent on the same warm key; replies land in order under their
-  //     own placeholders), while a DIFFERENT conversation's turn runs FULLY
-  //     concurrently. The FAST phase is quick, so the shared pump no longer blocks
-  //     one chat behind another chat's slow turn. Each entry carries its enqueue
-  //     time so stats() can report the oldest pending message's age. ---
-  const queue = [];
-  let pumping = null;
+  // --- the inbound LANES (event-driven half; operator 2026-10-18: "same channel is linear,
+  //     different channels in parallel, memory-cpu aware so no starvation"). Bridge callbacks push;
+  //     each lane runs the FAST phase — identity → command/mesh → route → gate → open THIS mention's
+  //     placeholder → dispatch its turn — one message at a time, in arrival order. A lane is the
+  //     chat the message arrived in (surface + chatId), found with no lookup: anything asked before
+  //     the ingestion point (the turn scope: brain.scopeOf → contacts.resolve) would create the
+  //     conversation before ingestion seeds it. Chats that share a turn scope still share its turn
+  //     FIFO. Different lanes run at once, at most intakeCap() of them; a lane that ran one message
+  //     goes to the back of the line, so a busy chat never starves another.
+  //     The brain turn is not run inline: it goes onto the PER-CONVERSATION FIFO (turnBy), so a
+  //     second mention while a train is in flight QUEUES behind it, and a different conversation's
+  //     turn runs concurrently. Each entry carries its enqueue time so stats() can report the
+  //     oldest pending message's age. ---
+  const lanes = new Map();        // lane key -> entries in arrival order; [0] runs while the key is in `running`
+  const ready = [];               // lane keys waiting for a slot
+  const running = new Set();
+  const waiting = new Set();      // entries not started yet (insertion = arrival order)
   // THE MACHINERY ITSELF LIVES IN src/spine/turns.mjs NOW (operator 2026-08-31). It was
   // closure-private here, which is why src/spine/mesh.mjs's relayDispatch — the RESPONDER of a
   // cross-node relay — could not reach any of it and called brain.turn bare: a relayed turn got
@@ -472,32 +483,43 @@ export function createSpine({
   // returns as soon as the fast phase has dispatched the turn.
   function enqueue(msg) {
     let settle; const done = new Promise((r) => { settle = r; });
-    queue.push({ msg, at: clock.now(), settle });
-    pump();
+    let ev = null;
+    try { ev = identity.build(msg); } catch { /* handleFast builds it again and reports why */ }
+    const entry = { msg, at: clock.now(), settle, ev };
+    const key = `${ev?.surface}\0${ev?.chatId}`;
+    waiting.add(entry);
+    const lane = lanes.get(key);
+    if (lane) lane.push(entry);                   // waiting or running: it takes this one in order
+    else { lanes.set(key, [entry]); ready.push(key); drain(); }
     return done;
   }
-  function pump() {
-    if (pumping) return pumping;
-    pumping = (async () => {
-      try {
-        while (queue.length) {
-          const entry = queue.shift();
-          let r;
-          try { r = await handleFast(entry.msg); }
-          catch (e) { note(`inbound: ${e?.message ?? e}`); }
-          // settle the caller's promise when this message's turn (if any) finishes;
-          // a message that runs no turn (logged-only / command / off) settles now.
-          Promise.resolve(r?.turn).then(entry.settle, entry.settle);
-        }
-      } finally { pumping = null; }
-    })();
-    return pumping;
+  function drain() {
+    while (ready.length && running.size < Math.max(1, intakeCap() || 0)) {
+      const key = ready.shift();
+      running.add(key);
+      runLane(key);
+    }
   }
-  // Pump observability: depth of the (not-yet-started) FAST queue and how long its
-  // oldest entry has waited. 0/0 when empty. Bookkeeping, not machinery.
+  async function runLane(key) {
+    const lane = lanes.get(key);
+    const entry = lane[0];
+    waiting.delete(entry);
+    let r;
+    try { r = await handleFast(entry.msg, entry.ev); }
+    catch (e) { note(`inbound: ${e?.message ?? e}`); }
+    // settle the caller's promise when this message's turn (if any) finishes;
+    // a message that runs no turn (logged-only / command / off) settles now.
+    Promise.resolve(r?.turn).then(entry.settle, entry.settle);
+    lane.shift();
+    running.delete(key);
+    if (lane.length) ready.push(key); else lanes.delete(key);
+    drain();
+  }
+  // Intake observability: how many messages have not started their FAST phase and how long the
+  // oldest has waited. 0/0 when empty. Bookkeeping, not machinery.
   function stats() {
-    const oldest = queue[0];
-    return { queueDepth: queue.length, oldestMs: oldest ? clock.now() - oldest.at : 0 };
+    const oldest = waiting.values().next().value;
+    return { queueDepth: waiting.size, oldestMs: oldest ? clock.now() - oldest.at : 0 };
   }
 
   // Process a message end-to-end (fast phase + its turn). Bridge inbound flows
@@ -651,13 +673,13 @@ export function createSpine({
   //     Returns `{ turn }` — the dispatched turn's completion promise wrapped so the pump
   //     does NOT await it (a bare `return turnBy(...)` from this async fn would ADOPT the
   //     promise and re-serialize every turn globally) — or undefined when no turn runs. ---
-  async function handleFast(msg) {
+  async function handleFast(msg, built = null) {
     // CONFIG REFRESH ON MESSAGE ARRIVAL: before anything else, so every config-dependent
     // read for this message (gating, brainpool, transcription) sees the freshest scan — a changed
     // config.yaml included (a restart it needs is left to the tick).
     timed('config', null, () => maybeApplyConfigChange({ mayRestart: false }));
     await timed('refresh', null, () => refreshConfig?.());
-    const ev = identity.build(msg);
+    const ev = built ?? identity.build(msg);   // built at arrival, to find the message's lane
     // SI PEER-LINK (2026-10-13): a canary-stamped super-channel intro arriving in a side-group this
     // node has no alias for yet links the SAME channel (commands.linkSuperChannel decodes ev.canary →
     // its own base conversation → writes the super alias). BEFORE classify so this message's own routing

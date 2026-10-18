@@ -180,19 +180,20 @@ describe('spine pipe', () => {
     let now = 1000;
     let release;
     const gate = new Promise((r) => { release = r; });
-    const brain = { async turn() { await gate; return { text: 'x' }; } };
+    const brain = { async turn() { return { text: 'x' }; } };
+    // the first msg's FAST phase parks (its record is slow); the second, same chat, waits behind it
+    const transcript = { ...fakeTranscript(), async log(ev) { if (ev.msgId === 'a') await gate; } };
     const spine = createSpine({
       bridge, brain, store: fakeStore(),
       identity: fakeIdentity, router: fakeRouter, gating: fakeGating({}),
-      sender: fakeSender(bridge), transcript: fakeTranscript(), heartbeats: fakeHeartbeats(),
+      sender: fakeSender(bridge), transcript, heartbeats: fakeHeartbeats(),
       clock: { now: () => now },
     });
     spine.start();
 
-    // first msg is in-flight (shifted, parked on the never-yet-resolved brain);
-    // the second stays pending in the queue.
     const drained = bridge.emit({ ...MSG, msgId: 'a', body: 'one' });
     bridge.emit({ ...MSG, msgId: 'b', body: 'two' });
+    await new Promise((r) => setTimeout(r, 0));
     expect(spine.stats().queueDepth).toBe(1);
     now = 5000;
     expect(spine.stats().oldestMs).toBe(4000);   // pending msg enqueued at 1000
