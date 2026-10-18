@@ -151,3 +151,68 @@ describe('clean ingest — the loop guard counts a same-node cross-being wake', 
     expect(g.countOf('whatsapp:c')).toBe(0);
   });
 });
+
+// A NODE-SIGNED line (this node's or a peer's) wakes a being only by EXPLICIT address — @handle or a
+// quote of that being's own post — never by the persona fall-through, mode on/auto, or a generic
+// replyToBot (live 2026-10-18, eGPT Admin: do's audit line woke kg's E in mode on; E's ⏳ quoting it
+// woke do's D, D's quoting E woke E).
+describe('clean ingest — a signed line wakes only the being it explicitly addresses', () => {
+  const SIG_DO = encodeNodeSignature('do');   // a peer node's own system line (no being)
+  const CH = 'whatsapp:c';
+
+  it('LIVE: a peer node-only frame in a mode-on chat wakes nobody, is recorded, and is not counted', async () => {
+    const g = createStopGuard({ turns: 4 });
+    const { spine, brain, transcript } = buildSpine({ mode: 'on', guard: g });
+    await spine.handleInbound({ body: `do: /agents in eGPT Admin by An → no egpt in node do ⟦e8dc68c68e⟧${SIG_DO}`, from: from({ msgKey: 'do-sys-1', isSender: true }) });
+    expect(wokeBeings(brain)).toEqual([]);
+    expect(transcript.logged.at(-1)?.body).toMatch(/⟦e8dc68c68e⟧<do>$/);
+    expect(g.countOf(CH)).toBe(0);
+  });
+
+  it('a peer being frame (do/don) addressing nobody does not wake E in mode on', async () => {
+    const { spine, brain } = buildSpine({ mode: 'on' });
+    await spine.handleInbound({ body: `…${SIG_DO_DON}`, from: from({ msgKey: 'don-1', isSender: true }) });
+    expect(wokeBeings(brain)).toEqual([]);
+  });
+
+  it('a peer being frame with @e wakes E, and the guard counts it', async () => {
+    const g = createStopGuard({ turns: 4 });
+    const { spine, brain } = buildSpine({ mode: 'on', guard: g });
+    await spine.handleInbound({ body: `@e ¿lo ves?${SIG_DO_DON}`, from: from({ msgKey: 'don-2', isSender: true }) });
+    expect(wokeBeings(brain)).toEqual(['egpt']);
+    expect(g.countOf(CH)).toBe(1);
+  });
+
+  it("a peer being frame quoting E's own post (replyToBeing egpt) wakes E", async () => {
+    const { spine, brain } = buildSpine({ mode: 'on' });
+    await spine.handleInbound({ body: `…${SIG_DO_DON}`, from: from({ msgKey: 'don-3', isSender: true, replyToBot: true, replyToBeing: 'egpt' }) });
+    expect(wokeBeings(brain)).toEqual(['egpt']);
+  });
+
+  it('a peer being frame quoting a system line (replyToBot, no replyToBeing) wakes nobody', async () => {
+    for (const mode of ['on', 'mention']) {
+      const { spine, brain } = buildSpine({ mode });
+      await spine.handleInbound({ body: `⏳ Thinking…${SIG_DO_DON}`, from: from({ msgKey: `don-4-${mode}`, isSender: true, replyToBot: true }) });
+      expect(wokeBeings(brain)).toEqual([]);
+    }
+  });
+
+  it("an 'off' chat still does not receive a peer node-only frame (not recorded)", async () => {
+    const { spine, brain, transcript } = buildSpine({ mode: 'off' });
+    await spine.handleInbound({ body: `aviso${SIG_DO}`, from: from({ msgKey: 'do-sys-2', isSender: true }) });
+    expect(wokeBeings(brain)).toEqual([]);
+    expect(transcript.logged).toHaveLength(0);
+  });
+
+  it('LOCK: a human (unsigned) line in a mode-on chat still wakes E', async () => {
+    const { spine, brain } = buildSpine({ mode: 'on' });
+    await spine.handleInbound({ body: 'hola', from: from({ msgKey: 'h-2', isSender: false, senderName: 'Bob' }) });
+    expect(wokeBeings(brain)).toEqual(['egpt']);
+  });
+
+  it("LOCK: this node's own node-only frame wakes nobody, even naming @eplus", async () => {
+    const { spine, brain } = buildSpine({ mode: 'on' });
+    await spine.handleInbound({ body: `@eplus aviso${encodeNodeSignature('kg')}`, from: from({ msgKey: 'kg-sys-1', isSender: true }) });
+    expect(wokeBeings(brain)).toEqual([]);
+  });
+});

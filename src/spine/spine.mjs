@@ -85,7 +85,7 @@ import { cleanForSpeech } from '../speech-clean.mjs';
  * @property {boolean} isSender    arrived on OUR OWN account (the operator, a peer node, or our own echo)
  * @property {boolean} isVoice     the body is a voice-note transcription
  * @property {{id: string, kind: string}|null} fromMember  the ROSTER MEMBER this turn was re-entered from by the room relay — a brain member whose reply this is, or the invited group whose message this is, tunnelled into the room it joined; null on every genuine inbound
- * @property {string|null} fromNode   WHICH NODE's spine committed this text. null = UNSIGNED (a human, the ordinary case); '' = SIGNED BY A NODE WE CANNOT NAME; otherwise the node name. Read by the guard (isHumanTurn: OUR OWN output is not a human turn) and by the room relay. It does NOT gate waking: cross-node and same-node inter-agent addressing is wanted (operator 2026-09-01), and loop safety is the guard's counter plus /rules, not a blanket refusal to hear another node
+ * @property {string|null} fromNode   WHICH NODE's spine committed this text. null = UNSIGNED (a human, the ordinary case); '' = SIGNED BY A NODE WE CANNOT NAME; otherwise the node name. Read by the guard (isHumanTurn: OUR OWN output is not a human turn) and by the room relay. A signed line wakes only a being it explicitly addresses (@mention or a quote of its post), never by fall-through or mode (handleFast, operator 2026-10-18)
  * @property {{surface: string, chatId: string, chatName?: string}|null} origin  WHERE this message ACTUALLY ARRIVED, when a synthetic re-addressed it elsewhere (the room relay's wa-group tunnel). The address above is its IDENTITY (thread/warm process/queue/access_level); this is its PROVENANCE, read ONLY by the gates that ask "where did this arrive" (router.mjs's surface pin + fallback_handle roster question). null on every genuine inbound ⇒ those gates read ev itself
  * @property {string} [line]    the formatted dispatch line every brain sees, built once here (C7.6e)
  * @property {any}    raw       the bridge's original `from` payload
@@ -1010,17 +1010,20 @@ export function createSpine({
     // (older/other fakes) normalizes to a one-target list, so those callers are unchanged.
     let targets = await targetsOf(ev);
 
-    // OUR OWN OUTPUT, PER-BEING (operator 2026-10-13). An own-frame line (fromThisNode) NEVER wakes
-    // its AUTHOR being, but DOES wake a DIFFERENT being it EXPLICITLY addresses (@mention/reply —
-    // the persona fall-through is not an address, so it is skipped). Unsigned own-output (no author
-    // in the frame) wakes nobody. Record-only means the frame IS on the record (the ingestion point
-    // above wrote it) — it just prompts no one. A cross-being wake rides on as a normal dispatch AND
-    // counts toward the loop guard (crossBeingWake below), exactly as a peer node's frame does.
+    // A SIGNED LINE (our own output, or any node's frame) wakes ONLY a being it EXPLICITLY addresses
+    // (@mention/quote of its post) — never the persona fall-through, so never by mode alone (operator
+    // 2026-10-13 own output, 2026-10-18 every node). Our own frame never wakes its AUTHOR; our output
+    // with no author wakes nobody. A peer's frame has no author exclusion (another node's instance).
+    // Unaddressed = record-only ('off' still not received); a wake counts toward the loop guard.
     let crossBeingWake = false;
-    if (kindOf(ev) === 'echo') {
-      const author = fromThisNode(ev) && ev.fromBeing ? String(ev.fromBeing).toLowerCase() : null;
-      const woke = author ? targets.filter((t) => !t.fallthrough && String(gateAs(t, defaultBeing)).toLowerCase() !== author) : [];
-      if (!woke.length) return () => { note(`echo: ${guardChannel(ev)} — this node's own output re-entered; recorded, prompts nobody`); };
+    const echo = kindOf(ev) === 'echo';
+    if (echo || ev.fromNode != null) {
+      const author = echo && fromThisNode(ev) && ev.fromBeing ? String(ev.fromBeing).toLowerCase() : null;
+      const woke = (author || !echo) ? targets.filter((t) => !t.fallthrough && String(gateAs(t, defaultBeing)).toLowerCase() !== author) : [];
+      if (!woke.length) {
+        if (!echo && !(await gateOf(targets[0], { ...ev, backlog: true })).d.receives) return null;
+        return () => { note(echo ? `echo: ${guardChannel(ev)} — this node's own output re-entered; recorded, prompts nobody` : `signed: ${guardChannel(ev)} — node <${ev.fromNode}>'s line addresses no being; recorded, prompts nobody`); };
+      }
       targets = woke;
       crossBeingWake = true;
     }
@@ -1074,25 +1077,6 @@ export function createSpine({
     // same-being/unsigned own-frame is already returned record-only there, and a cross-being wake
     // rides on from here as a normal dispatch. The old wholesale `kindOf==='echo'` return lived
     // here; it is gone because it suppressed a DIFFERENT being's wake too (the same-node sibling).
-
-    // A BEING DOES NOT WAKE ON A FRAME ANOTHER NODE'S SPINE COMMITTED (operator 2026-08-31, on a
-    // room message fanned into a group that the other node then sees). The node signature already
-    // told the guard this was not a person — that only bounded the COUNTING. It did not stop a
-    // reply: a node-posted line containing `@e` mention-matches like any other text and gets
-    // answered, so two spines watching one chat answer each other until guard.turns cuts it off,
-    // guard.turns messages deep, in front of everybody.
-    //
-    // AFTER the guard block on purpose: the counter must keep counting these (tests/guard-
-    // provenance.test.mjs locks a burst of peer posts tripping at `turns`) — the loop-breaker is
-    // not weakened, it is simply no longer the only thing standing between two nodes. And after
-    // gating too, so an 'off' chat still returns null and records nothing.
-    //
-    // A no-op ACTION, not null: the frame IS received. It stays on the record (handleFast already
-    // wrote it, above), the guard already counted it, and the being reads it as back-context in
-    // transcript.md like any other line — it simply prompts nobody. That covers every wake this
-    // message could produce in one place: the primary turn, fanOutExtras' other addressed agents,
-    // the mesh forward, the auto dwell, and roomRelay.fanOut's drive of the brain-member tabs.
-    // THE TEST IS "another node", never `fromNode != null` — see the seam's own note above.
 
     return () => dispatchChat({ ev, d, to, mention, meshTarget, targets, channel });
   }

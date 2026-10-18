@@ -85,7 +85,7 @@ function build({ levels = {}, turns = 3, stopSwitch = null, isSelfChat = () => f
 
 // Trip the brake the way kg's was tripped: non-human posts, no human turn between them.
 async function tripWithPeerPosts(spine, guard, n = 3) {
-  for (let i = 0; i < n; i++) await spine.handleInbound(peer(`beat ${i}`));
+  for (let i = 0; i < n; i++) await spine.handleInbound(peer(`@e beat ${i}`));
   expect(guard.blocked(CH)).toBe(true);
 }
 
