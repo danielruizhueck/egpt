@@ -367,6 +367,14 @@ describe('the link is the record: chat ids, never names', () => {
   });
 });
 
+describe('the legacy global super_chats block is inactive', () => {
+  it('its triggers summon nothing, here or in any chat', async () => {
+    const h = harness({ config: cfg({ superChats: { triggers: ['hola super'], automatic: true } }) });
+    expect(await h.cmds.phraseCommand(inOrigin('hola super'))).toBe(null);
+    expect(await h.cmds.phraseCommand(inOrigin('hola super', { chatId: OTHER }))).toBe(null);
+  });
+});
+
 // The REAL spine, identity, router, gating and commands over one in-memory registry.
 describe('no loop: side-group output wakes nobody, and nothing crosses to the origin', () => {
   const AGENTS = { e: { default: true, handles: ['e'] }, codex: { handles: ['codex'], mode: 'off' } };

@@ -179,7 +179,7 @@ const SAID = {
 // shape, 2026-09-15): no body, one attachment; the id and the mxc id are per account, the size,
 // mimeType and timestamp are not. The 🎧 listening mark is placed on the MOUTH's copy of it.
 const voiceNote = (id) => ({ id, timestamp: '2026-09-11T14:04:00.000Z', type: 'VOICE', text: null, attachments: [{ type: 'audio', mimeType: 'audio/ogg; codecs=opus', fileSize: 22740, isVoiceNote: true, id: `mxc://local.beeper.com/${id}` }] });
-// …and one text message there, the trigger the ✅/❌ SI-state reaction is placed on (mouth's copy).
+// …and one text message there, a trigger the mouth answers (its copy is mouth-hola).
 const HOLA = { text: 'hola', timestamp: '2026-09-11T14:04:30.000Z' };
 const LISTED = {
   [BOTH_AS_PRIMARY]: [voiceNote('ear-note'), { id: 'ear-hola', ...HOLA }],
@@ -1176,61 +1176,25 @@ describe('the 🎧 listening mark: boot hands each connection the one placement'
   });
 });
 
-// ── THE ✓/❌ SI-STATE REACTION (operator 2026-10-13) ──────────────────────────────────────────────
-// When SI is on (super_chats.triggers set) and a being is about to REPLY, a reaction lands on the TRIGGERING message
-// in the base chat signalling the SI state: ✅ this conversation HAS an SI channel, ❌ it has none. It
-// rides the SAME outbound.react seam the steer 📩/👀 ack uses, is placed ONCE per message, and is
-// best-effort — a react fault never breaks the reply. Driven end-to-end through kg's two accounts, in
-// the chat both are in: the MOUTH places it on its own copy. A one-account node places none (2026-10-18).
-describe('the ✓/❌ SI-state reaction lands on the triggering message', () => {
-  const SI = (shape = KG, block = { triggers: ['SI chat'] }) => { const c = shape(); if (block) c.super_chats = block; return c; };
-  const SI_CHAN = '!both-super';   // the SI channel aliased to the base chat
-  // The base chat known + (optionally) its SI channel aliased to it, super:true.
-  const seed = ({ withChannel, base = BOTH_AS_PRIMARY } = {}) => {
-    let st = ensureContact(emptyState(), 'whatsapp', base, { pushedName: 'base' }).state;
-    if (withChannel) st = aliasContact(st, 'whatsapp', SI_CHAN, getContact(st, 'whatsapp', base).jid, { transcript: 'x', super: true });
-    return st;
+// ── THE GLOBAL super_chats BLOCK IS RETIRED (2026-10-18; SI chats are per conversation) ──
+// Whatever it says, and with a legacy `super: true` alias on disk, a reply lands in the base chat
+// through the usual mouth (secondary when present, else primary) and no ✅/❌ state reaction is placed.
+describe('the retired super_chats block reroutes nothing and places no SI-state reaction', () => {
+  const SI = (shape = KG, block) => { const c = shape(); if (block) c.super_chats = block; return c; };
+  const SI_CHAN = '!both-super';
+  const seed = (base = BOTH_AS_PRIMARY) => {
+    const st = ensureContact(emptyState(), 'whatsapp', base, { pushedName: 'base' }).state;
+    return aliasContact(st, 'whatsapp', SI_CHAN, getContact(st, 'whatsapp', base).jid, { transcript: 'x', super: true });
   };
-  const reactionKeys = (spy, chatId) => spy.reactions.filter((r) => r.chatId === chatId).map((r) => r.key);
-  // The trigger as the ear hears it, carrying its cross-account key (beeper.mjs mints both).
   const hola = (spy) => spy.onIncoming('hola', {
     chatId: BOTH_AS_PRIMARY, chatName: 'both', network: 'whatsapp', userId: DANDO, senderName: 'Dando', authorized: true,
     msgKey: 'ear-hola', msgHash: crossAccountMsgKey(HOLA), msgTs: Date.parse(HOLA.timestamp), atEStart: true, atEAnywhere: true,
   });
+  const BLOCKS = [{ triggers: ['SI chat'], automatic: true, mode: 'on' }, { triggers: ['SI chat'] }, null, { triggers: [] }];
 
-  it('a channel EXISTS → ✅ on the mouth\'s copy of the triggering message, none from the ear', async () => {
-    const { app, byConnection } = await bootWith(SI(), { state: seed({ withChannel: true }) });
-    hola(byConnection.primary);
-    await waitFor(() => reactionKeys(byConnection.secondary, BOTH_AS_SECONDARY).includes('✅'));
-    expect(byConnection.secondary.reactions).toEqual([{ chatId: BOTH_AS_SECONDARY, id: 'mouth-hola', key: '✅' }]);   // exactly ONE
-    expect(byConnection.primary.reactions).toEqual([]);
-    app.stop();
-  });
-
-  it('NO channel (enabled) → ❌ on the mouth\'s copy of the triggering message', async () => {
-    const { app, byConnection } = await bootWith(SI(), { state: seed() });
-    hola(byConnection.primary);
-    await waitFor(() => reactionKeys(byConnection.secondary, BOTH_AS_SECONDARY).includes('❌'));
-    expect(reactionKeys(byConnection.secondary, BOTH_AS_SECONDARY)).toEqual(['❌']);
-    expect(byConnection.primary.reactions).toEqual([]);
-    app.stop();
-  });
-
-  it('a ONE-account node signals no SI state by reaction; the reply still lands', async () => {
-    const { app, byConnection, replies } = await bootWith(SI(SINGLE), { state: seed({ withChannel: true, base: AN_GROUP }) });
-    deliver(byConnection.primary, AN_GROUP, 'hola', { atE: true });
-    await waitFor(() => replies().length > 0);
-    expect(replies().length).toBeGreaterThan(0);
-    expect(byConnection.primary.reactions).toEqual([]);
-    app.stop();
-  });
-
-  // SI OFF (no phrase; a leftover enabled: true included), even with a channel aliased: the reply goes
-  // to the base chat through the normal mouth (secondary when present, else primary), no ✅/❌.
-  const OFF_BLOCKS = [null, { triggers: [] }, { triggers: [''] }, { enabled: true, automatic: true }];
-  it('SI OFF → NO SI reaction, and the reply lands in the base chat via the mouth (secondary)', async () => {
-    for (const block of OFF_BLOCKS) {
-      const { app, byConnection, replies } = await bootWith(SI(KG, block), { state: seed({ withChannel: true }) });
+  it('two accounts: the reply lands in the base chat via the mouth (secondary), no ✅/❌', async () => {
+    for (const block of BLOCKS) {
+      const { app, byConnection, replies } = await bootWith(SI(KG, block), { state: seed() });
       hola(byConnection.primary);
       await waitFor(() => replies().length > 0);
       expect(replies()).toEqual([{ connection: 'secondary', chatId: BOTH_AS_SECONDARY }]);
@@ -1239,23 +1203,13 @@ describe('the ✓/❌ SI-state reaction lands on the triggering message', () => 
     }
   });
 
-  it('SI OFF on a ONE-account node → the reply lands in the base chat via primary', async () => {
-    for (const block of OFF_BLOCKS) {
-      const { app, byConnection, replies } = await bootWith(SI(SINGLE, block), { state: seed({ withChannel: true, base: AN_GROUP }) });
+  it('one account: the reply lands in the base chat via primary', async () => {
+    for (const block of BLOCKS) {
+      const { app, byConnection, replies } = await bootWith(SI(SINGLE, block), { state: seed(AN_GROUP) });
       deliver(byConnection.primary, AN_GROUP, 'hola', { atE: true });
       await waitFor(() => replies().length > 0);
       expect(replies()).toEqual([{ connection: 'primary', chatId: AN_GROUP }]);
       app.stop();
     }
-  });
-
-  it('a reaction-place FAILURE never breaks the reply (best-effort, swallowed)', async () => {
-    const { app, byConnection, replies } = await bootWith(SI(), { state: seed({ withChannel: true }) });
-    byConnection.secondary.reactThrows = true;               // the mouth's every sendReaction now throws
-    hola(byConnection.primary);
-    await waitFor(() => replies().length > 0);               // the reply STILL goes out
-    expect(replies().length).toBeGreaterThan(0);
-    expect([...byConnection.primary.reactions, ...byConnection.secondary.reactions]).toEqual([]);   // the reaction itself never landed
-    app.stop();
   });
 });

@@ -3282,48 +3282,32 @@ export const CONFIG_SCHEMA = {
                       Pick phrases you won't say by accident. Unset → only the '/'-word triggers.
   `,
 
-  super_chats: `
-    SI / the SUPER CHANNEL (operator 2026-10-08; renamed from \`super\` 2026-10-13) — a per-conversation
-    side channel (SI group) where the bot speaks so its replies stop polluting the main chat. Like /join
-    it is an ALIAS of the original conversation (one shared on-disk thread/transcript, two chat surfaces),
-    NOT a diverging /split copy. Summoned by an inbound message EQUAL to one of \`triggers\` from ANY participant —
-    NOT operator-only, because the point is a counterparty summoning it so they can read the reply there.
-    Close it with /end (an SI group is an alias, so /end already archives it + drops
-    the mapping). The two accounts come from beeper.primary.phone / beeper.secondary.phone, as for /join;
-    SI also works with NO secondary (the ear creates + posts, one-account baseline). Two co-account nodes
-    CONVERGE on the SAME SI group with no RPC: whoever creates first stamps the intro with the base chat's
-    shared-account id (an invisible node-signature frame); the other links from it.
+  superchats: `
+    SI chats (operator 2026-10-18). Set it on ONE conversation's OWN entry in
+    config/conversations.yaml; only that chat opens SI chats. Read nowhere else:
+    in config/config.yaml, on a side group's entry or in a folder config.yaml it
+    does nothing. Replaces the global super_chats block (migration 0047).
+    "<phrase> [<label>]" there, from anyone the being would answer, creates the
+    group "<prefix><chat title>+<label>" on the ear account, inviting the mouth
+    (beeper.secondary.phone, when set) and the sender. It is a /join-kind alias of
+    the chat: same folder and thread, its own transcript-si-<label>.md, the
+    conversation's being in accum (other beings keep their own mode). One intro
+    line names /agents mode on <handle>. The link is
+    <conversation folder>/SI Chats/<label>.yaml (origin_chat, chat, label,
+    created_by, created_at; ended_at after /end), by chat ids, so renames change
+    nothing. In the group the operator has /send (copies a replied-to message to
+    the chat), /end (closes the link; nothing archived or deleted) and /help.
+    Created only by the node_role 'primary' node.
 
     KEYS:
       triggers
-        DEFAULT: unset ⇒ OFF. A LIST of exact whole-message phrases (trimmed, case-insensitive), and
-        THE switch: SI is on exactly when one is non-blank (no \`enabled\` key since migration 0046).
-        On ⇒ a phrase from ANY sender summons / reuses this chat's SI group (created only by the
-        node_role 'primary' node), and a non-member of an existing SI group does not wake the bot.
-        Off ⇒ the bot replies in the chat as usual. "…" never summons.
-      automatic
-        DEFAULT: false. When ON (and SI is on), the bot AUTO-CREATES this chat's SI group the first time
-        it would reply there (no trigger needed) and replies in it. When OFF (the default) with no SI group
-        yet, the bot does NOT reply in the base chat: its answer is SIPHONED to admin_channel (eGPT
-        Admin), visible to the operator only, carrying a one-time warning + the recovery phrase — so the
-        base chat stays clean. Create a channel explicitly with a \`triggers\` phrase.
-      suffix
-        DEFAULT: "-super". The channel's title is <this chat's title> + suffix.
-      mode
-        DEFAULT: "on". The auto-mode the channel runs under. Read LIVE at the reply gate (operator
-        2026-10-08, CHUNK 2): a message that ARRIVED in the super channel is gated by THIS value, not
-        the shared stored mode — group-independent, so the channel and its origin never conflict.
-        Summoning stores NOTHING (the mode is intrinsic), so /end reverts it for free. Must be one of
-        the auto-mode tokens.
-        ⚠ QUOTE IT. Bare on/off are YAML BOOLEANS (on → true, off → false), not the strings this wants.
-        A boolean that slips through is COERCED (true → "on", false → "off"); an unrecognized value
-        falls back to the default and is logged.
-      opener
-        The bridge-voice INTRO posted once (FROM the secondary when a mouth exists, else the ear) when
-        the channel is created, so the otherwise-empty group surfaces in Beeper (Beeper hides chats with
-        no messages). It also carries the invisible canary that lets the peer node link the SAME group. A
-        {chat}/{group} template (both = this chat's title); it should name /send and /end. Unset → a small
-        built-in default.
+        A LIST of phrases, each matched against the WHOLE message (trimmed, any
+        case), optionally followed by whitespace and a label of at most 60
+        characters. No non-blank phrase = off. No label = HHMM-MMDDYYYY. The
+        same label while its group is open opens nothing; after /end (or once
+        the group is gone) it opens "<label> HHMM-MMDDYYYY".
+      prefix
+        DEFAULT: "SI+". Put before the chat title in the group's name.
   `,
 
   aliases: `

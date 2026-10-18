@@ -157,7 +157,7 @@ describe('fast intake — incoming → placeholder on a realistic profile', () =
       await send(i, `e test ${i}`);
       rows.push(stagesOf(chatId(i)));
     }
-    const names = ['config', 'refresh', 'link', 'classify', 'transcript', 'act'];
+    const names = ['config', 'refresh', 'classify', 'transcript', 'act'];
     const line = (r) => `${String(ms(r.total)).padStart(5)}ms  ${names.map((n) => `${n} ${ms(r.by[n] ?? 0)}`).join(' · ')}`;
     await report(`[bench] idle incoming→placeholder (median ${ms(median(rows.map((r) => r.total)))}ms):\n${rows.map(line).join('\n')}`);
     expect(median(rows.map((r) => r.total))).toBeLessThan(1000);

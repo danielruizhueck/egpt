@@ -224,13 +224,6 @@ export function createSpine({
   // have ev.chatId's room at all and the send was DROPPED. Its one caller holds `ev`.
   // …and the MOUTH is asked too (2026-09-16): the attach is said through makeOutbound `say`.
   const outbound = makeOutbound({ bridge, bridgeOf, peerMouth, onLog: note });
-  // SI-STATE REACTION (2026-10-13): place ✅/❌ on the TRIGGERING message through the SAME outbound.react
-  // seam the steer 📩/👀 ack uses (turns.mjs placeReaction) — whichever mouth answers places it, keyed by
-  // the inbound's cross-account key. Best-effort: never throws, so a reaction fault cannot undo the reply.
-  async function placeSiReaction(to, ev, emoji) {
-    try { await outbound(to, ev.chatId).react(ev.msgId, emoji, () => ({ msgKey: ev.msgHash, timestamp: ev.msgTs }), 'si-state'); }
-    catch (e) { note(`si-state ${to}/${ev.chatId}: ${e?.message ?? e}`); }
-  }
   // The shared turn machinery, or our own private one (see the option's note above). Built with
   // the SAME bridge/bridgeOf pair `outbound` uses, because the steer-ack react it owns is one of
   // the spine's own direct bridge sends and must ride the acked being's connection.
@@ -470,9 +463,7 @@ export function createSpine({
     if (d.mode !== 'auto' || !d.mayReply) { note(`dwell ${turnKey}: mode ${d.mode} — dwell dropped (no auto reply)`); return; }
     const replyTo = ev.msgId ?? null;                 // quote UNIFORMLY — including auto (see openAndRunReply)
     const ahead = bumpTrain(turnKey);
-    // CHUNK 2 super-channel routing: the reply goes to this conversation's super channel when it has
-    // one right now (gating.decide's live lookup), else the arrival chat — unchanged otherwise.
-    const out = sender.open(d.replyChatId ?? ev.chatId, { being: to, replyTo, auto: true, origin: ev.chatId });
+    const out = sender.open(ev.chatId, { being: to, replyTo, auto: true, origin: ev.chatId });
     // `trigger` (operator 2026-09-11) — the handle-stripped dispatch line of the message that
     // armed this dwell. It is the BASE only when the drained cycle came back empty (a burst with
     // lines prompts with those verbatim), and each of those lines was already stripped on its way
@@ -682,11 +673,6 @@ export function createSpine({
     timed('config', null, () => maybeApplyConfigChange({ mayRestart: false }));
     await timed('refresh', null, () => refreshConfig?.());
     const ev = built ?? identity.build(msg);   // built at arrival, to find the message's lane
-    // SI PEER-LINK (2026-10-13): a canary-stamped super-channel intro arriving in a side-group this
-    // node has no alias for yet links the SAME channel (commands.linkSuperChannel decodes ev.canary →
-    // its own base conversation → writes the super alias). BEFORE classify so this message's own routing
-    // already sees it; idempotent and a no-op on every message without an intro canary (ev.canary null).
-    await timed('link', ev, () => commands?.linkSuperChannel?.(ev));
     // GUARD (C7.7): the channel is the CONVERSATION (surface + chatId). Resolved once here
     // for the safe-word + the loop counter inside classify; null when no guard is wired.
     //
@@ -1085,19 +1071,6 @@ export function createSpine({
   // and take its own branch. Runs strictly AFTER the ingestion append, so every reply line it
   // can produce lands below the inbound line it answers.
   async function dispatchChat({ ev, d, to, mention, meshTarget, targets, channel }) {
-    // SI ACCESS GATE (PART D, 2026-10-13): when an SI channel EXISTS for this conversation, a sender
-    // who is NOT a current member of it does not wake the bot — their triggering message gets the fixed
-    // "member of SI group" reply (rate-limited) and nothing dispatches. Only a message that WOULD wake
-    // (d.mayReply) is gated; non-members' non-triggering chatter flows as context, unchanged. No channel
-    // / SI off / unreadable roster → superMemberGate returns false (no gate). The record is already
-    // written (handleFast's ingestion), so a blocked message stays on the transcript; it just runs no turn.
-    if (d.mayReply && commands?.superMemberGate && await commands.superMemberGate(ev)) return;
-    // SI-STATE REACTION (2026-10-13): signal the SI state to the base chat — ✅ this conversation has an
-    // SI channel (incl. one auto-created this turn), ❌ none (reply siphoned to admin / base chat). It is
-    // a REACTION on the TRIGGERING message via the SAME seam the steer 📩/👀 ack uses (outbound.react →
-    // whichever mouth answers); gated + resolved by decide (d.siReaction, null when SI off / not replying).
-    // Fire-and-forget: best-effort, a reaction fault never touches the reply. ONE per message (here only).
-    if (d.siReaction) void placeSiReaction(to, ev, d.siReaction);
     // PHASE 4 — brain-member fan-out (design B: re-entry). Kicked off HERE, concurrently with
     // E's own dispatch below (never blocking E's turn). It delivers this received room message
     // to each brain member whose mode admits it; each member's finalized reply is streamed into
@@ -1403,11 +1376,8 @@ export function createSpine({
   function openAndRunReply({ to, ev, d, turnKey, pinned = false, trigger = null }) {
     const replyTo = ev.msgId ?? null;
     const ahead = bumpTrain(turnKey);
-    // CHUNK 2 super-channel routing: post to the conversation's super channel when it has one right
-    // now (gating.decide's live lookup), else the arrival chat — unchanged otherwise. The transcript/
-    // limbs below stay keyed to ev.chatId (the alias shares that one on-disk conversation).
     // replyIn null: replyTo is this chat's own id — a local mouth quotes its own copy (sender quoteIn).
-    const out = sender.open(d.replyChatId ?? ev.chatId, { being: to, replyTo, replyIn: null, replyKey: { msgKey: ev.msgHash, timestamp: ev.msgTs }, queued: ahead > 0, queuedAhead: ahead, auto: d.mode === 'auto', origin: ev.chatId });
+    const out = sender.open(ev.chatId, { being: to, replyTo, replyIn: null, replyKey: { msgKey: ev.msgHash, timestamp: ev.msgTs }, queued: ahead > 0, queuedAhead: ahead, auto: d.mode === 'auto', origin: ev.chatId });
     return turnBy(turnKey, () => runReplyTurn({ to, ev, d, out, replyTo, turnKey, queued: ahead > 0, pinned, trigger }));
   }
 
@@ -1498,7 +1468,7 @@ export function createSpine({
       // would claim the live slot from the turn actually streaming.
       turns.setLive(turnKey, { senderId: ev.senderId ?? null, chatId: ev.chatId ?? null });
       out.activate?.();                                 // queued → live the moment its turn starts
-      live = liveness.turnStarted({ out, being: to, ev, chat: d.replyChatId ?? ev.chatId, auto: d.mode === 'auto' });
+      live = liveness.turnStarted({ out, being: to, ev, chat: ev.chatId, auto: d.mode === 'auto' });
       // Drain the accumulated cycle. A QUEUED turn prompts with it (ending with its own
       // mention line); an IMMEDIATE turn discards it and keeps the single dispatch line —
       // draining either way advances the baseline the next turn's cycle starts from.
@@ -1712,11 +1682,7 @@ export function createSpine({
               // Said like /media (makeOutbound `say`), replying to the text. That text's id lives
               // where the sender put it (`confirmedIn`: a local mouth's room, else this chat's own
               // connection), so its key is read off that copy and the id itself is handed on only there.
-              // Same target the TEXT reply used (d.replyChatId — the super channel when one exists):
-              // the voice note replies to that delivered text, so it must land in the SAME chat, not
-              // the arrival chat. This changes only the destination chatId — the wantsVoice gate and
-              // the settle path above/below are untouched (CHUNK 2 super-channel routing).
-              const o = outbound(to, d.replyChatId ?? ev.chatId);
+              const o = outbound(to, ev.chatId);
               const heldBy = out.confirmedIn ?? null;
               try { await o.say((on, room, replyTo) => on.sendMedia(room, tmpPath, { replyTo }), { msgId: heldBy ? null : textId, keyOf: o.keyOf(textId, 'voice', heldBy), what: 'voice' }); }
               catch (e) { note(`voice-send ${to}/${ev.chatId}: ${e?.message ?? e}`); }
