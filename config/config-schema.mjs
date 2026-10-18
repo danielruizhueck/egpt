@@ -1367,6 +1367,13 @@ export const CONFIG_SCHEMA = {
       posts_back_delay_ms
         Trailing debounce before the echo. Negative = never echo (still HEARD).
         0 = immediate. Absent = the rung above, then the shared floor.
+      listening_reaction
+        🎧 on a voice note while this node decodes it, off when done.
+        ENUM: false (DEFAULT) | true | "operator" — operator = only notes the
+        operator sent (isSender or networks.<surface>.allowed_users, the same
+        check that authorizes commands). Operator 2026-10-18: an automatic
+        reaction reaches whoever sent the note. Per chat, on its
+        conversations.yaml entry: transcription_service: { listening_reaction: true }
       use_config
         Name of the active profile — THE one line that differs REVE vs DOLLY on
         a mirrored config.yaml.

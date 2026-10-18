@@ -77,8 +77,12 @@ function seedOn() {
 }
 
 describe('boot — a voice note pending across the restart', () => {
-  it('REPRODUCE: audio saved into media/, outcome dispatched, the stale 🎧 taken off', async () => {
-    const dir = join(_PRIVATE_HOME, 'case-1');
+  // `listening`: whether listening_reaction let a 🎧 go up at arrival (operator 2026-10-18: off by default).
+  for (const [why, listening, removed] of [
+    ['the stale 🎧 taken off', true, [[CHAT, 'v1', '🎧']]],
+    ['no 🎧 could be up (listening_reaction off), so none is removed', undefined, []],
+  ]) it(`REPRODUCE: audio saved into media/, outcome dispatched, ${why}`, async () => {
+    const dir = join(_PRIVATE_HOME, `case-${listening ? 'on' : 'off'}`);
     mkdirSync(join(dir, 'state'), { recursive: true });
     const audio = join(dir, 'note.ogg');
     writeFileSync(audio, 'OggS');
@@ -87,7 +91,7 @@ describe('boot — a voice note pending across the restart', () => {
     const media = { chatID: CHAT, chatName: 'fam', chatType: 'private', network: 'whatsapp', msgId: 'v1', senderName: 'An', isSender: false, ts, kind: 'audio', mime: 'audio/ogg', fileName: null, localPath: audio, caption: null, isVoiceNote: true };
     const backgroundFile = join(dir, 'state', 'background.json');
     writeFileSync(backgroundFile, JSON.stringify({
-      transcriptions: [{ surface: 'whatsapp', chatId: CHAT, chatName: 'fam', msgId: 'v1', sender: 'An', file: audio, arrivedAt: new Date(ts).toISOString(), node: 'kg', media, from }],
+      transcriptions: [{ surface: 'whatsapp', chatId: CHAT, chatName: 'fam', msgId: 'v1', sender: 'An', file: audio, arrivedAt: new Date(ts).toISOString(), node: 'kg', media, listening, from }],
       agents: [],
     }));
     const { start, built } = fakeTransport();
@@ -116,8 +120,9 @@ describe('boot — a voice note pending across the restart', () => {
     expect(io.copies).toEqual([[audio, expect.stringMatching(/media[\\/][^\\/]*-an-audio-v1\.ogg$/)]]);
     const index = [...io.files.entries()].find(([p]) => /media[\\/]index\.md$/.test(p))?.[1] ?? '';
     expect(index).toContain('· An · audio · [');
-    await vi.waitFor(() => expect(spy.removed).toEqual([[CHAT, 'v1', '🎧']]), { timeout: 5000 });
+    await vi.waitFor(() => expect(spy.removed).toEqual(removed), { timeout: 5000 });
     await vi.waitFor(() => expect(JSON.parse(readFileSync(backgroundFile, 'utf8')).transcriptions).toEqual([]), { timeout: 5000 });
+    expect(spy.removed).toEqual(removed);
     app.stop();
   });
 });

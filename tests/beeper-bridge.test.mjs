@@ -4142,17 +4142,47 @@ describe('beeper bridge — 🎧 listening mark: placed where the decode runs, t
   }
 
   // One connection receiving the note, wired to `tx` and to the placement. The ear's own list serves
-  // the note (the key the mouth is told is read off it).
+  // the note (the key the mouth is told is read off it). The chat's verdict has the 🎧 on unless a test says otherwise.
+  const LISTEN = (listeningReaction) => async () => ({ enabled: true, postsBack: false, listeningReaction });
   async function ear({ tx, mouth = null, logs = [], extra = {} } = {}) {
     const ref = {};
-    const started = await startBridge({ transcribe: tx.transcribe, outboundFor: placementFor(ref, mouth, logs), ...extra });
+    const started = await startBridge({ transcribe: tx.transcribe, outboundFor: placementFor(ref, mouth, logs), resolveTranscriptionService: LISTEN(true), ...extra });
     ref.bridge = started.bridge;
     return started;
   }
-  const emitNote = (id) => {
+  const emitNote = (id, over = {}) => {
     fake.messages.set(CHAT('chat-1'), [{ id, timestamp: NOTE_TS, type: 'VOICE', text: null, attachments: [listedAtt(`anrodriguez_${id}`)] }]);
-    fake.emit({ type: 'message.upserted', entries: [liveMsg({ id, isSender: false, text: null, type: 'VOICE', attachments: [voiceAtt(`bytes of ${id}`)] })] });
+    fake.emit({ type: 'message.upserted', entries: [liveMsg({ id, isSender: false, text: null, type: 'VOICE', attachments: [voiceAtt(`bytes of ${id}`)], ...over })] });
   };
+
+  // OFF BY DEFAULT (operator 2026-10-18: "rodz reacts with a emoji, and this gets to the user that sent
+  // the audio. this is not desirable"). The decode runs HERE and still nothing is placed or removed.
+  for (const [why, resolver] of [["the bridge's own default verdict", undefined], ['listening_reaction: false', LISTEN(false)]]) {
+    it(`${why}: no 🎧 placed or removed on either account, and the arrival says so`, async () => {
+      const mouth = mouthBridge();
+      const { incoming, arrivals } = await ear({ tx: chain({ profile: DO, own: DO_OWN }), mouth, extra: { resolveTranscriptionService: resolver } });
+      emitNote('note-quiet');
+      await waitFor(() => incoming.length === 1, 3000);
+      await new Promise((r) => setTimeout(r, 50));
+      expect(incoming[0].text).toBe('(voice transcription) fake transcript');
+      expect([fake.reactions, fake.unreactions, mouth.reactions, mouth.unreactions]).toEqual([[], [], [], []]);
+      expect(arrivals[0].from.voiceListening).toBe(false);
+    });
+  }
+
+  // `operator`: only on a note the operator sent (the `authorized` signal: isSender or allowed_users).
+  it("listening_reaction: operator — the 🎧 goes on the operator's note, not on another sender's in the same chat", async () => {
+    const OP = 'op@beeper.local';
+    const { incoming, arrivals } = await ear({ tx: chain({ profile: DO, own: DO_OWN }), extra: { resolveTranscriptionService: LISTEN('operator'), isAllowedUser: (id) => id === OP } });
+    emitNote('note-bea', { senderID: 'bea@beeper.local', senderName: 'Bea' });
+    await waitFor(() => incoming.length === 1, 3000);
+    emitNote('note-op', { senderID: OP });
+    await waitFor(() => incoming.length === 2, 3000);
+    await waitFor(() => fake.unreactions.length === 1, 3000);
+    expect(fake.reactions.map((r) => r.messageID)).toEqual(['note-op']);
+    expect(fake.unreactions.map((r) => r.messageID)).toEqual(['note-op']);
+    expect(arrivals.map((a) => [a.from.msgKey, a.from.voiceListening])).toEqual([['note-bea', false], ['note-op', true]]);
+  });
 
   // THE REPRODUCTION, kg's shape: the note is decoded on ANOTHER node's worker. This node decodes
   // nothing, so it places nothing — on either account, mouth or no mouth.
@@ -4247,13 +4277,14 @@ describe('beeper bridge — 🎧 listening mark: placed where the decode runs, t
   // REGRESSION LOCK, the one-connection node: no mouth, so the connection's own bridge places and
   // removes the mark on its own id — exactly as react() already does without a mouth.
   it('NO mouth: the receiving connection places and removes the 🎧 on its own id', async () => {
-    const { incoming } = await ear({ tx: chain({ profile: DO, own: DO_OWN }) });
+    const { incoming, arrivals } = await ear({ tx: chain({ profile: DO, own: DO_OWN }) });
     emitNote('note-solo');
     await waitFor(() => incoming.length === 1, 3000);
     await waitFor(() => fake.unreactions.length === 1, 3000);
     expect(fake.reactions).toHaveLength(1);
     expect(fake.reactions[0]).toMatchObject({ chatID: CHAT('chat-1'), messageID: 'note-solo', reactionKey: LISTENING_REACTION });
     expect(fake.unreactions[0]).toMatchObject({ chatID: CHAT('chat-1'), messageID: 'note-solo', reactionKey: LISTENING_REACTION });
+    expect(arrivals[0].from.voiceListening).toBe(true);   // what a restart's removal goes by
   });
 
   // A failure AFTER the decode (the echo's debounce arm throws) leaves no mark behind: the mark came
@@ -4265,7 +4296,7 @@ describe('beeper bridge — 🎧 listening mark: placed where the decode runs, t
       tx: chain({ profile: DO, own: DO_OWN }),
       extra: {
         echoPlan: () => ({ rank: 1, winner: true }),
-        resolveTranscriptionService: async () => ({ enabled: true, postsBack: true, postsBackDelayMs: 5_000 }),
+        resolveTranscriptionService: async () => ({ enabled: true, postsBack: true, postsBackDelayMs: 5_000, listeningReaction: true }),
         scheduler: { set() { throw new Error('scheduler exploded'); }, clear() {} },
         onLog: (m) => logs.push(m),
       },

@@ -59,8 +59,8 @@ export function createBackgroundRegistry({ path, node = null, liveAgents = () =>
   // The spine's ingestion point: a recorded arrival is pending, its outcome settles it.
   function noteVoice(ev) {
     if (ev?.voiceLine === 'arrival' && ev.raw?.voicePath) {
-      const { voicePath, voiceMedia = null, ...from } = ev.raw;
-      const note = { surface: ev.surface, chatId: ev.chatId, chatName: ev.chatName ?? null, msgId: ev.msgId, sender: ev.senderName ?? null, file: voicePath, arrivedAt: iso(ev.ts ?? now()), node, media: voiceMedia, from };
+      const { voicePath, voiceMedia = null, voiceListening = false, ...from } = ev.raw;
+      const note = { surface: ev.surface, chatId: ev.chatId, chatName: ev.chatName ?? null, msgId: ev.msgId, sender: ev.senderName ?? null, file: voicePath, arrivedAt: iso(ev.ts ?? now()), node, media: voiceMedia, listening: voiceListening === true, from };
       doc.transcriptions = [...doc.transcriptions.filter((t) => !sameNote(t, note)), note];
       persist();
     } else if (ev?.voiceLine === 'outcome') settle(ev);
@@ -76,7 +76,7 @@ export function createBackgroundRegistry({ path, node = null, liveAgents = () =>
   // transcription service when this node can still decode it (else "(voice note not transcribed: restart)"),
   // its audio saved first (saveAudio: the bridge's onMedia meta, caption = transcription), its outcome
   // dispatched with the bridge's mention read (it was in flight, not old: backlog only if its arrival was),
-  // then the stale 🎧 taken off (unlisten, best-effort, never awaited).
+  // then the stale 🎧 taken off (unlisten, best-effort, never awaited) — only where one could be up (`listening`).
   async function resume({ transcribe, audioCfg = {}, wake = null, deliver, saveAudio = null, unlisten = null }) {
     const notes = previous;
     previous = [];
@@ -103,7 +103,7 @@ export function createBackgroundRegistry({ path, node = null, liveAgents = () =>
         .catch((e) => onLog(`${where}: outcome not delivered — ${e?.message ?? e}`))
         .finally(() => settle(n));
       side = Promise.all([side, delivered]);
-      if (ours && unlisten) Promise.resolve().then(() => unlisten(n.from)).catch((e) => onLog(`${where}: 🎧 not removed — ${e?.message ?? e}`));
+      if (ours && n.listening && unlisten) Promise.resolve().then(() => unlisten(n.from)).catch((e) => onLog(`${where}: 🎧 not removed — ${e?.message ?? e}`));
     }
   }
 

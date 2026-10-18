@@ -187,16 +187,18 @@ describe('a voice note pending across a spine restart', () => {
     expect(none).toEqual([]);
   });
 
-  it("the stale 🎧 comes off once the resumed decode ends — transcribed, failed or file gone — after the outcome line, never for another node's note", async () => {
+  it("the stale 🎧 comes off once the resumed decode ends — transcribed, failed or file gone — after the outcome line, never for another node's note, never where none could be up", async () => {
     const withAudio = (dir) => { const a = join(dir, 'n.ogg'); writeFileSync(a, 'OggS'); return a; };
-    for (const [why, audioOf, text, node, expected] of [
-      ['transcribed', withAudio, 'hola', null, 1],
-      ['no transcript', withAudio, null, null, 1],
-      ['file gone', (dir) => join(dir, 'gone.ogg'), 'x', null, 1],
-      ['another node', withAudio, 'x', 'do', 0],
+    for (const [why, audioOf, text, node, listening, expected] of [
+      ['transcribed', withAudio, 'hola', null, true, 1],
+      ['no transcript', withAudio, null, null, true, 1],
+      ['file gone', (dir) => join(dir, 'gone.ogg'), 'x', null, true, 1],
+      ['another node', withAudio, 'x', 'do', true, 0],
+      ['listening_reaction off at arrival', withAudio, 'hola', null, false, 0],
     ]) {
       const dir = home();
-      const { files } = await arriveThenDie(dir, audioOf(dir));
+      const { files } = await arriveThenDie(dir, audioOf(dir), { from: listening ? { voiceListening: true } : {} });
+      expect(readReg(dir).transcriptions[0], why).toMatchObject({ listening, from: expect.not.objectContaining({ voiceListening: true }) });
       if (node) { const r = readReg(dir); r.transcriptions[0].node = node; writeFileSync(fileOf(dir), JSON.stringify(r)); }
       const off = [];
       const { order } = await restart(dir, files, { transcribe: fakeTranscriber(text).transcribe, unlisten: (f) => off.push([f.chatId, f.msgKey]) });
@@ -210,7 +212,7 @@ describe('a voice note pending across a spine restart', () => {
       const dir = home();
       const audio = join(dir, 'n.ogg');
       writeFileSync(audio, 'OggS');
-      const { files, before } = await arriveThenDie(dir, audio);
+      const { files, before } = await arriveThenDie(dir, audio, { from: { voiceListening: true } });
       const { reg, lines } = registry(dir);
       await reg.load();
       const next = buildSpine({ files, background: reg, at: T(16, 20) });

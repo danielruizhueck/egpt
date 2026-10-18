@@ -289,6 +289,8 @@ networks:
 #
 # transcription_service:
 #   enabled: true
+#   listening_reaction: false     # 🎧 on a note while decoding: true | operator (your notes only); per chat in conversations.yaml
+#   posts_back_delay_ms: 300000   # a voice note resumed after a restart gets no 👂 echo
 #   use_config: main
 #   main:
 #     fallback_order: [gpu, local]

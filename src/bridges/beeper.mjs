@@ -2116,7 +2116,7 @@ export async function startBeeperBridge(opts = {}) {
       if (justBanned) return;   // this message tipped the flood → drop it too (floodBan logged the notice)
     }
 
-    let _voiceAtt = null, _voicePath = null, _voicePending = null;
+    let _voiceAtt = null, _voicePath = null, _voicePending = null, _voiceListening = false;
     if ((msg.type === 'VOICE' || msg.type === 'AUDIO') && Array.isArray(msg.attachments) && msg.attachments.length) {
       // OUR OWN VOICE OUTPUT (operator 2026-10-13): an incoming audio from a MOUTH identity is a
       // being's synthesized reply echoing back — DROP it before whisper (don't transcribe, don't
@@ -2197,9 +2197,12 @@ export async function startBeeperBridge(opts = {}) {
           if (!(await out.react(msg.id, LISTENING_REACTION, keyOf, 'listening', { temporary: true }))) return null;
           return () => out.react(msg.id, LISTENING_REACTION, keyOf, 'listening', { remove: true });
         };
+        // …only where transcription_service.listening_reaction allows it (operator 2026-10-18): true, or
+        // `operator` for a note the operator sent (the `authorized` signal below). Off: nothing placed or removed.
+        _voiceListening = svc.listeningReaction === true || (svc.listeningReaction === 'operator' && (!!msg.isSender || isAllowedUser(msg.senderID, acct)));
         const _transcription = _transcribing('whisper', () => transcribeVoiceNote({
           localPath: path, audioCfg,
-          transcribe: (p, c, l, m) => transcribe(p, c, l, m, listening),
+          transcribe: (p, c, l, m) => transcribe(p, c, l, m, _voiceListening ? listening : null),
           // The SHARED wrap (persona-wrap.mjs) brackets the '👂 <transcript>' core with the bridge +
           // transcription layers — the same machinery a persona reply renders through (covers
           // immediate/debounced/promoted echoes). The coverage query matches on WORD TOKENS, so it is
@@ -2516,8 +2519,9 @@ export async function startBeeperBridge(opts = {}) {
       isReaction: false,
       // a voice note's ARRIVAL carries no transcript (yet); its outcome line, below, does
       isTranscriptFromVoice: isVoice && !_voicePending,
-      // …and what a restart resumes it from (spine/background.mjs): the file whisper reads, the audio's onMedia meta
-      ...(_voicePending ? { voiceLine: 'arrival', voicePath: _voicePath, voiceMedia: typeof onMedia === 'function' ? mediaMeta(msg, info, _voiceAtt, _voicePath, null) : null } : {}),
+      // …and what a restart resumes it from (spine/background.mjs): the file whisper reads, the audio's onMedia meta,
+      // whether a 🎧 may be up on it
+      ...(_voicePending ? { voiceLine: 'arrival', voicePath: _voicePath, voiceMedia: typeof onMedia === 'function' ? mediaMeta(msg, info, _voiceAtt, _voicePath, null) : null, voiceListening: _voiceListening } : {}),
       msgKey: msg.id || null,
       // THE CROSS-ACCOUNT IDENTITY of this message (crossAccountMsgKey, above): the content hash
       // and the message's OWN timestamp — the only two fields the co-account node's view of this

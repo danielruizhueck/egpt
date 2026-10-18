@@ -37,6 +37,8 @@
 //                         DEFAULT OFF — opt-IN, only an explicit `true` enables it.
 //   posts_back_delay_ms → how long after a burst goes quiet the 👂 echo fires;
 //                         negative = never echo (HEARD but never SPOKEN)
+//   listening_reaction  → 🎧 on a note while this node decodes it: false (DEFAULT) | true |
+//                         operator (the operator's own notes). Operator 2026-10-18: it reaches the sender.
 // `enabled:true, posts_back:false` = transcribe for the model/log but stay silent — and
 // that is exactly what an unconfigured entity now gets.
 //
@@ -60,10 +62,11 @@
 // and both are strict about the type: a non-boolean (`posts_back: yes` parses as the STRING
 // "yes" under YAML 1.2) neither enables the echo nor disables hearing.
 
-export const DEFAULT_SERVICE = { enabled: true, postsBack: false };
+export const DEFAULT_SERVICE = { enabled: true, postsBack: false, listeningReaction: false };
+const LISTENING = new Set([true, 'operator']);
 
 // Pure: a RESOLVED config doc (the resolver's merge of all three rungs) →
-// { enabled, postsBack, postsBackDelayMs }. `enabled` is opt-OUT (an explicit `false` turns
+// { enabled, postsBack, postsBackDelayMs, listeningReaction }. `enabled` is opt-OUT (an explicit `false` turns
 // it off); `postsBack` is opt-IN (an explicit `true` turns it on). postsBackDelayMs is null
 // when no rung set one (the caller applies the floor).
 export function parseTranscriptionConfig(doc) {
@@ -73,5 +76,6 @@ export function parseTranscriptionConfig(doc) {
     enabled: t.enabled !== false,
     postsBack: t.posts_back === true,
     postsBackDelayMs: Number.isFinite(t.posts_back_delay_ms) ? t.posts_back_delay_ms : null,
+    listeningReaction: LISTENING.has(t.listening_reaction) ? t.listening_reaction : false,
   };
 }

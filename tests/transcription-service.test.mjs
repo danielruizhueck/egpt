@@ -41,7 +41,7 @@ describe('parseTranscriptionConfig — defaults + explicit-false', () => {
   // profile with no block also has no engine. Written LITERALLY rather than against
   // DEFAULT_SERVICE: this is the lock ON the constant, so it must not move with it.
   it('a config with NO posts_back key yields postsBack:false — and hearing is untouched', () => {
-    expect(DEFAULT_SERVICE).toEqual({ enabled: true, postsBack: false });
+    expect(DEFAULT_SERVICE).toEqual({ enabled: true, postsBack: false, listeningReaction: false });
     for (const yaml of [null, '', 'transcription_service:\n  enabled: true\n',
       'transcription_service:\n  posts_back_delay_ms: 8000\n']) {
       expect(parseTranscriptionConfig(doc(yaml))).toMatchObject({ enabled: true, postsBack: false });
@@ -59,8 +59,8 @@ describe('parseTranscriptionConfig — defaults + explicit-false', () => {
   });
 
   it('both explicit', () => {
-    expect(parseTranscriptionConfig(doc('transcription_service:\n  enabled: false\n  posts_back: false\n'))).toEqual({ enabled: false, postsBack: false, postsBackDelayMs: null });
-    expect(parseTranscriptionConfig(doc('transcription_service:\n  enabled: true\n  posts_back: true\n'))).toEqual({ enabled: true, postsBack: true, postsBackDelayMs: null });
+    expect(parseTranscriptionConfig(doc('transcription_service:\n  enabled: false\n  posts_back: false\n'))).toEqual({ enabled: false, postsBack: false, postsBackDelayMs: null, listeningReaction: false });
+    expect(parseTranscriptionConfig(doc('transcription_service:\n  enabled: true\n  posts_back: true\n'))).toEqual({ enabled: true, postsBack: true, postsBackDelayMs: null, listeningReaction: false });
   });
 
   // Each test is strict, and each strictness is the FAIL-CLOSED side of its own flag: `yes`
@@ -71,6 +71,16 @@ describe('parseTranscriptionConfig — defaults + explicit-false', () => {
     // FLAG's own reading of a stringy value, not the constant
     expect(parseTranscriptionConfig(doc('transcription_service:\n  posts_back: yes\n')).postsBack).toBe(false);
     expect(parseTranscriptionConfig(doc('transcription_service:\n  enabled: no\n')).enabled).toBe(true);
+  });
+
+  // 🎧 (operator 2026-10-18): an automatic reaction reaches whoever sent the note, so it is opt-in.
+  it('listening_reaction: false unless exactly true or operator', () => {
+    expect(parseTranscriptionConfig(doc(null)).listeningReaction).toBe(false);
+    expect(parseTranscriptionConfig(doc('transcription_service:\n  listening_reaction: true\n')).listeningReaction).toBe(true);
+    expect(parseTranscriptionConfig(doc('transcription_service:\n  listening_reaction: operator\n')).listeningReaction).toBe('operator');
+    for (const v of ['false', 'yes', 'all', '"true"', 'Operator', '1']) {
+      expect(parseTranscriptionConfig(doc(`transcription_service:\n  listening_reaction: ${v}\n`)).listeningReaction, v).toBe(false);
+    }
   });
 
   it('posts_back_delay_ms joins the SAME key; a non-number reads as unset', () => {
@@ -100,24 +110,24 @@ describe('the entity folder as a rung — through the real resolver', () => {
 
   it('no config.yaml in the folder → the node rung stands (its posts_back: true included)', async () => {
     await withDir('egpt-tsvc-', null, { transcription_service: { posts_back: true, posts_back_delay_ms: 300 } },
-      (v) => expect(v).toEqual({ enabled: true, postsBack: true, postsBackDelayMs: 300 }));
+      (v) => expect(v).toEqual({ enabled: true, postsBack: true, postsBackDelayMs: 300, listeningReaction: false }));
   });
 
   // The other half of the same case: a node rung that opts nobody in leaves every folder
   // that says nothing SILENT — the shape the 2026-09-13 ruling is about.
   it('no config.yaml AND no node posts_back → HEARD but SILENT at the node delay', async () => {
     await withDir('egpt-tsvc-', null, { transcription_service: { posts_back_delay_ms: 300 } },
-      (v) => expect(v).toEqual({ enabled: true, postsBack: false, postsBackDelayMs: 300 }));
+      (v) => expect(v).toEqual({ enabled: true, postsBack: false, postsBackDelayMs: 300, listeningReaction: false }));
   });
 
   it('the folder file BEATS the node rung, leaf by leaf', async () => {
     await withDir('egpt-tsvc-', 'transcription_service:\n  posts_back: false\n',
       { transcription_service: { enabled: true, posts_back: true, posts_back_delay_ms: 300 } },
-      (v) => expect(v).toEqual({ enabled: true, postsBack: false, postsBackDelayMs: 300 }));
+      (v) => expect(v).toEqual({ enabled: true, postsBack: false, postsBackDelayMs: 300, listeningReaction: false }));
   });
 
   it('surface-independent: the same shape works for a room folder', async () => {
     await withDir('egpt-room-', 'transcription_service:\n  enabled: false\n', {},
-      (v) => expect(v).toEqual({ enabled: false, postsBack: false, postsBackDelayMs: null }));
+      (v) => expect(v).toEqual({ enabled: false, postsBack: false, postsBackDelayMs: null, listeningReaction: false }));
   });
 });
