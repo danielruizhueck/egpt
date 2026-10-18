@@ -1942,32 +1942,39 @@ export async function startBeeperBridge(opts = {}) {
     return fresh;
   }
   // Surface each newly-added reaction as a stage-direction through the ONE router
-  // (onIncoming), flagged isReaction:true so the host wraps it in brackets and the
-  // mode gate (I5 revised) decides whether E answers.
+  // (onIncoming), flagged isReaction:true so the host wraps it in brackets. A person's
+  // reaction is input and gates like a text reply to its target (I5 revised).
   async function _maybeEmitReactions(msg) {
     const fresh = _freshReactions(msg);
     if (!fresh.length) return;
     const info = await chatInfo(msg.chatID);
     const network = msg.accountID || info.accountID || 'whatsapp';   // origin network (Beeper accountID); default 'whatsapp'
-    const snippet = htmlToMarkdown(msg.text) || '';
-    // OURS = an account a being speaks through, the ear's excepted (operator 2026-10-11): such a
-    // reaction (the 📩/👀 steer-ack, the 🎧 mark, /react) carries this node's frame as fromNode, so
-    // the spine's own-echo path records it and prompts nobody.
+    const target = htmlToMarkdown(msg.text) || '';
+    // The target's frame names the TARGET's author, not the reactor: off the snippet, and read as the
+    // replyToBeing a text reply to it would carry (dispatchMessage, below).
+    const snippet = stripNodeSignature(target);
+    const replyToBeing = decodeNodeSignature(target) === String(nodeName).trim() ? decodeBeingSignature(target) : null;
+    const replyToBot = wasSentByUs(msg.chatID, msg.id) || !!replyToBeing;
+    // OURS = an account a being speaks through, the ear's excepted (operator 2026-10-11). Its reaction
+    // (/react, 📩/👀, ✅, 🎧 — this node's or a co-account peer's) is OUTPUT (operator 2026-10-18):
+    // dropped here, never input. Empty on a one-account node, where the ear is the voice.
     const ear = new Set((await earIdentities()).map(idKey));
     const ours = new Set(((await speakingIdentities()) ?? []).map(idKey).filter((k) => k && !ear.has(k)));
     for (const { reactor, emoji } of fresh) {
       const name = _reactorName(reactor, network);
+      if (ours.size > 0 && await isOneOf(msg.chatID, idKey(reactor), ours)) {
+        onLog(`beeper: reaction ${emoji} by ${name} → #${msg.id} [${info.title}] — a mouth's own — dropped`);
+        continue;
+      }
       const body = reactionAction({ emoji, targetId: msg.id, snippet });
       onLog(`beeper: reaction ${emoji} by ${name} → #${msg.id} [${info.title}]`);
-      const mine = ours.size > 0 && await isOneOf(msg.chatID, idKey(reactor), ours);
       const from = {
-        ...(mine ? { fromNode: nodeName } : {}),
         chatId: msg.chatID, chatName: info.title,
         chatType: info.type === 'group' ? 'group' : 'private',
         network,   // per-surface authorization namespace
         userId: reactor, username: undefined, firstName: name, senderName: name,
         isSender: false, authorized: isAllowedUser(reactor, network),
-        atEStart: false, atEAnywhere: false, replyToBot: false,
+        atEStart: false, atEAnywhere: false, replyToBot, replyToBeing,
         isReaction: true, isTranscriptFromVoice: false,
         msgKey: msg.id || null,   // the reacted-to message id (referenced as #id in the body)
       };

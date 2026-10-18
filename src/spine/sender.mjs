@@ -247,6 +247,7 @@ export const RETAINED_SEAM = '\n\n— ↓ reply —\n\n';
  *                 yields — a THUNK for the same reason route() is: the no-mouth path must not pay
  *                 for a read it cannot use. Every failure ends with NO REACTION ANYWHERE and a line
  *                 naming why: a missing reaction is cosmetic, one from the wrong account is the bug.
+ *   a mouth with no room in this chat ⇒ nothing, logged (2026-10-18) — never the ear instead.
  * Returns whether it landed (the limb's `ran` is written from it).
  * `{ remove: true }` TAKES ONE BACK OFF the same way — the connection's own bridge, or the mouth on
  * its own copy — and `{ temporary: true }` places one that will be: the 🎧 listening mark
@@ -288,11 +289,11 @@ export function makeOutbound({ bridge, bridgeOf = null, peerMouth = null, onLog 
       async react(msgId, emoji, keyOf, what = 'react', { remove = false, temporary = false } = {}) {
         const says = out.route();                         // null with no mouth wired — never awaited, so that path is untouched
         const mouthChat = says ? await says : null;
-        // A TEMPORARY mark where the mouth is a different account from the chat's holder but has no
-        // room here (not a member, or its route could not be decided) is not placed at all. Live on
-        // do, 2026-09-17: the 🎧 on voice notes in 1:1 chats Rodz is not in came from the operator's
-        // own account. A holder that IS the mouth, or a node with no mouth, marks from its own bridge.
-        if (!mouthChat && temporary && peerMouth?.mouthIsElsewhere?.(chatId, being)) {
+        // A being reacts ONLY through its mouth (operator 2026-10-18): where the mouth is a different
+        // account from the chat's holder but has no room here (not a member, or its route could not
+        // be decided), nothing is placed — from the ear it came back as the operator's own reaction.
+        // A holder that IS the mouth, or a node with no mouth, reacts from its own bridge.
+        if (!mouthChat && peerMouth?.mouthIsElsewhere?.(chatId, being)) {
           onLog(`${what} ${being}/${chatId}: the mouth has no room in this chat — no ${emoji} from either account`);
           return false;
         }

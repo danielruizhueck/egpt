@@ -1135,6 +1135,21 @@ describe('the steer ack rides the same mouth the reply does', () => {
     expect(notes.filter((l) => /could not decide the route/.test(l))).toHaveLength(2);   // asked once per reaction
   });
 
+  // The 2026-10-14 📩/👀 outbreak: a LOCAL mouth not in the chat, so the ack fell back to the ear and
+  // came back as the operator's own reaction. Now neither account acks.
+  it('a LOCAL mouth that is not in this chat: no 📩/👀 from the ear either, and the log says why', async () => {
+    const { ear, mouthBridge, peerMouth } = earAndMouth({ mouthIsMember: false });
+    const notes = [];
+    const turns = createTurns({ brain: steerable(), bridge: ear, peerMouth, log: { line: (s) => notes.push(s) } });
+    turns.setLive(KEY, LIVE);
+
+    expect(await turns.steerLiveTurn({ to: 'e', ev: EV, turnKey: KEY })).toBe(true);
+    await settled();
+    expect(ear.reactions).toEqual([]);
+    expect(mouthBridge.reactions).toEqual([]);
+    expect(notes.filter((l) => /the mouth has no room in this chat/.test(l))).toHaveLength(2);
+  });
+
   // CALL SITE 1's per-being half, locked the way sender.mjs's and reply-actions.mjs's already are
   // (tests/spine-sender.test.mjs, tests/reply-actions.test.mjs): the ack rides the BEING's own
   // connection, because it is the same resolver answering.
@@ -1219,17 +1234,26 @@ describe('the /react limb is placed by the MOUTH, on its own copy — never from
     expect(ran).toHaveLength(1);
   });
 
-  // REGRESSION LOCK 1: a chat the ear's own account answers in is byte-identical to before — the
-  // ear reacts with the ear's id, and the ear's message list is never even read.
-  it('NO mouth for this chat: the ear reacts with its own id, exactly as before, and nothing extra is read', async () => {
-    for (const shape of [{ withMouth: false }, { mouthIsMember: false }]) {
-      const { ear, mouthBridge, earListed, react } = earAndMouth(shape);
-      const { ran } = await react();
-      expect(ear.reactions, JSON.stringify(shape)).toEqual([{ chatId: CHAT_ID, msgId: STEERED_ON_PRIMARY.id, emoji: '👍' }]);
-      expect(mouthBridge.reactions).toEqual([]);
-      expect(earListed).toEqual([]);
-      expect(ran).toHaveLength(1);
-    }
+  // REGRESSION LOCK 1: a node with no second account (the single-account baseline) — the only
+  // account IS the being's voice, so it reacts with its own id, and nothing extra is read.
+  it('NO mouth on this node: the only account reacts with its own id, exactly as before, and nothing extra is read', async () => {
+    const { ear, mouthBridge, earListed, react } = earAndMouth({ withMouth: false });
+    const { ran } = await react();
+    expect(ear.reactions).toEqual([{ chatId: CHAT_ID, msgId: STEERED_ON_PRIMARY.id, emoji: '👍' }]);
+    expect(mouthBridge.reactions).toEqual([]);
+    expect(earListed).toEqual([]);
+    expect(ran).toHaveLength(1);
+  });
+
+  // A being reacts only through its mouth (operator 2026-10-18). From the ear — the operator's own
+  // account — the reaction came back "by An" and was taken as his input.
+  it('the mouth is NOT in this chat: nobody places the 👍, the limb does not land, and the log says why', async () => {
+    const { ear, mouthBridge, logs, react } = earAndMouth({ mouthIsMember: false });
+    const { ran } = await react();
+    expect(ear.reactions).toEqual([]);
+    expect(mouthBridge.reactions).toEqual([]);
+    expect(ran).toEqual([]);
+    expect(logs.join('\n')).toMatch(/the mouth has no room in this chat — no 👍 from either account/);
   });
 
   // REGRESSION LOCK 2: the mouth is present and the target cannot be named or found on its side.

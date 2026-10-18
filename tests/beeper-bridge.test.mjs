@@ -2170,45 +2170,88 @@ describe('beeper bridge — a reaction placed by an account this node speaks thr
     let release;
     const live = new Promise((r) => { release = r; });
     const brain = { calls: [], async turn(b, ev) { this.calls.push(ev); await live; return { text: 'x' }; } };
-    const opens = [], notes = [], pending = [];
+    const opens = [], notes = [], pending = [], fed = [], recorded = [];
     const spine = createSpine({
       bridge: { onMessage() {}, send() {}, stop() {}, wasSentByUs: () => false },
       brain, identity: createIdentity({ now: () => 1000 }), router: { resolve: () => 'e' },
       gating: { async decide() { return { mode: 'on', receives: true, mayReply: true, sendToEgpt: 'mode' }; }, surfaces: () => true },
       sender: { open(chatId, o) { opens.push(o); return { activate() {}, update() {}, async finish() {}, fail() {} }; } },
-      transcript: { async log() {} }, heartbeats: { runDue() {} },
+      transcript: { async log(ev, reply) { if (reply == null) recorded.push(ev); } }, heartbeats: { runDue() {} },
       mesh: { isEnvelope: () => false, async handle() {} },
       fromThisNode, isSelfChat: () => false, clock: { now: () => 1000 }, defaultBeing: 'e', log: { line: (s) => notes.push(s) },
     });
-    const feed = (body, from) => { pending.push(spine.handleInbound({ body, from })); };
-    return { brain, opens, notes, feed, release, settled: () => Promise.all(pending) };
+    const feed = (body, from) => { fed.push(from); pending.push(spine.handleInbound({ body, from })); };
+    return { brain, opens, notes, fed, recorded, feed, release, settled: () => Promise.all(pending) };
   }
   const roster = (items) => fake.chats.set(GROUP, { title: 'eGPT Rodz Lulu An', type: 'group', isMuted: false, accountID: 'whatsapp', participants: { items } });
+  const dropped = (logs) => logs.some((l) => /a mouth's own — dropped/.test(l));
 
-  it('REPRODUCE: the mouth\'s 📩 steer-ack on the operator\'s message, mid-turn on the PRIMARY, queues no second turn', async () => {
+  // A being's reaction is OUTPUT (operator 2026-10-18): it never re-enters, not even as a record.
+  it('REPRODUCE: the mouth\'s 📩 steer-ack on the operator\'s message never reaches the spine — no turn, no ingestion line', async () => {
     roster([{ id: '@anrodriguez:beeper.com', isSelf: true }, { id: RODZ_LID, phoneNumber: '+13472576794', fullName: 'Rodz' }]);
     const s = onSpine();
-    await startBridge({ nodeName: 'kg', speakingIdentities: async () => MOUTH, earIdentities: async () => EAR, onIncoming: s.feed });
+    const logs = [];
+    await startBridge({ nodeName: 'kg', speakingIdentities: async () => MOUTH, earIdentities: async () => EAR, onIncoming: s.feed, onLog: (m) => logs.push(m) });
     fake.emit({ type: 'message.upserted', entries: [opMsg()] });
     await waitFor(() => s.brain.calls.length === 1);   // E's turn on #26445 is live
     fake.emit({ type: 'message.upserted', entries: [reacted(opMsg(), RODZ_LID, '📩')] });
-    await waitFor(() => s.opens.length > 1 || s.notes.some((n) => n.startsWith('echo:')));
-    expect(s.opens.map((o) => o.queued)).toEqual([false]);   // no "⏳ Queued (1 ahead)…"
+    await waitFor(() => dropped(logs));
     s.release();
     await s.settled();
+    expect(s.fed.filter((f) => f.isReaction)).toEqual([]);
+    expect(s.recorded.map((ev) => ev.kind)).toEqual(['text']);
+    expect(s.opens.map((o) => o.queued)).toEqual([false]);
     expect(s.brain.calls.map((ev) => ev.kind)).toEqual(['text']);
   });
 
-  it('the mouth seeing its OWN reaction (its Beeper id, no roster) is ours too — wherever it is the receiving account', async () => {
+  it('the mouth seeing its OWN reaction (its Beeper id, no roster) is dropped on that connection too', async () => {
     roster([{ id: '@dolly-egpt:beeper.com', isSelf: true }, { id: '@whatsapp_lid-1:beeper.local', phoneNumber: '+16468217865' }]);
     const s = onSpine();
-    await startBridge({ nodeName: 'kg', speakingIdentities: async () => MOUTH, earIdentities: async () => EAR, onIncoming: s.feed });
+    const logs = [];
+    await startBridge({ nodeName: 'kg', speakingIdentities: async () => MOUTH, earIdentities: async () => EAR, onIncoming: s.feed, onLog: (m) => logs.push(m) });
     const msg = opMsg({ id: '10006', senderID: '@whatsapp_lid-1:beeper.local', isSender: false });
     fake.emit({ type: 'message.upserted', entries: [msg] });
     await waitFor(() => s.brain.calls.length === 1);
     fake.emit({ type: 'message.upserted', entries: [reacted(msg, '@dolly-egpt:beeper.com', '👀')] });
-    await waitFor(() => s.opens.length > 1 || s.notes.some((n) => n.startsWith('echo:')));
+    await waitFor(() => dropped(logs));
+    expect(s.fed.filter((f) => f.isReaction)).toEqual([]);
     expect(s.opens).toHaveLength(1);
+  });
+
+  // A co-account PEER node's being speaks through the same Rodz account: its 👍 is output too.
+  it('a peer node\'s reaction through Rodz (nothing live here) is dropped, never input', async () => {
+    roster([{ id: '@anrodriguez:beeper.com', isSelf: true }, { id: RODZ_LID, phoneNumber: '+13472576794', fullName: 'Rodz' }]);
+    const s = onSpine();
+    s.release();
+    const logs = [];
+    await startBridge({ nodeName: 'kg', speakingIdentities: async () => MOUTH, earIdentities: async () => EAR, onIncoming: s.feed, onLog: (m) => logs.push(m) });
+    const msg = opMsg({ id: '26450', senderID: '@whatsapp_lid-2:beeper.local', senderName: 'Lulu', isSender: false, text: 'ya llegué' });
+    fake.emit({ type: 'message.upserted', entries: [msg] });
+    await waitFor(() => s.brain.calls.length === 1);
+    fake.emit({ type: 'message.upserted', entries: [reacted(msg, RODZ_LID, '👍')] });
+    await waitFor(() => dropped(logs));
+    await s.settled();
+    expect(s.fed.filter((f) => f.isReaction)).toEqual([]);
+    expect(s.brain.calls).toHaveLength(1);
+  });
+
+  // A person's reaction to a being's post carries what a text reply to it would: replyToBeing off the
+  // post's frame, replyToBot — and the frame stays off the snippet, so it is not read as provenance.
+  it('the operator\'s reaction to a BEING\'s post reaches the spine like a text reply to it would', async () => {
+    roster([{ id: '@anrodriguez:beeper.com', isSelf: true }, { id: RODZ_LID, phoneNumber: '+13472576794', fullName: 'Rodz' }]);
+    const s = onSpine();
+    s.release();
+    await startBridge({ nodeName: 'kg', speakingIdentities: async () => MOUTH, earIdentities: async () => EAR, onIncoming: s.feed });
+    const post = opMsg({ id: '26460', senderID: RODZ_LID, isSender: false, text: `🐶 e: listo${encodeNodeSignature('kg', 'e')}` });
+    fake.emit({ type: 'message.upserted', entries: [post] });
+    await waitFor(() => s.fed.length === 1);
+    fake.emit({ type: 'message.upserted', entries: [reacted(post, '@anrodriguez:beeper.com', '❤️')] });
+    await waitFor(() => s.fed.some((f) => f.isReaction));
+    const r = s.fed.find((f) => f.isReaction);
+    expect(r).toMatchObject({ replyToBeing: 'e', replyToBot: true, atEAnywhere: false });
+    expect(r.fromNode).toBeUndefined();
+    await s.settled();
+    expect(s.recorded.find((ev) => ev.kind === 'reaction')).toMatchObject({ fromNode: null, body: 'reacted ❤️ to #26460 "🐶 e: listo"' });
   });
 
   it('LOCK: the operator\'s own reaction on the ear still wakes E in mode on', async () => {

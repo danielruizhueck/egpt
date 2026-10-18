@@ -554,7 +554,9 @@ export function createRouter({ getAgents = () => ({}), getConfig = () => ({}), d
         // with no `isPresent` resolves precisely as it did before this feature existed.
         // replyToBeing likewise rides off ev (identity.build, from the bridge): a quote-reply to a
         // being's own post is one more hit in this loop, filtered exactly like a handle hit.
-        for (const hit of addressed(ev?.body ?? '', agents, { addressWithoutAt, isVoice: ev?.isVoice, withFallback: !!isPresent || !!isPeerAlive, replyToBeing: ev?.replyToBeing })) {
+        // A REACTION's body quotes its target's words, not the reactor's: it addresses only by
+        // replyToBeing, as a text reply to that message would (operator 2026-10-18).
+        for (const hit of addressed(ev?.kind === 'reaction' ? '' : (ev?.body ?? ''), agents, { addressWithoutAt, isVoice: ev?.isVoice, withFallback: !!isPresent || !!isPeerAlive, replyToBeing: ev?.replyToBeing })) {
           if (ownerOnly && hit.name !== owner.toLowerCase()) continue;
           // SURFACE PIN (operator 2026-07-25): an agent may carry `surface: <name>` so it is an
           // agent ONLY on that surface; on any OTHER surface the @mention falls through (as if
