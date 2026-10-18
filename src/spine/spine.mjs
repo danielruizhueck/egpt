@@ -674,8 +674,8 @@ export function createSpine({
     timed('config', null, () => maybeApplyConfigChange({ mayRestart: false }));
     await timed('refresh', null, () => refreshConfig?.());
     const ev = built ?? identity.build(msg);   // built at arrival, to find the message's lane
-    // An automatic side group's intro carries its origin (ev.canary): a node that does not know the
-    // chat yet links it before this message is routed (commands.linkSideGroup). No canary → no-op.
+    // An automatic side group's intro carries its origin (ev.canary): a node with no conversation in
+    // that chat yet links it before this message is routed (commands.linkSideGroup). No canary → no-op.
     await timed('link', ev, () => commands?.linkSideGroup?.(ev));
     // GUARD (C7.7): the channel is the CONVERSATION (surface + chatId). Resolved once here
     // for the safe-word + the loop counter inside classify; null when no guard is wired.

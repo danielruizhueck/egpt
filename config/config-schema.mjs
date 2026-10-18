@@ -3297,10 +3297,12 @@ export const CONFIG_SCHEMA = {
 
     KEYS:
       automatic
-        true → no being replies in this chat. The first reply opens the group
+        true → no being replies in this chat. The first reply someone asked
+        for (the being addressed, or a reply to it) opens the group
         "SI+<chat title>" (the secondary creates it, inviting the sender of the
         message being answered; no secondary → the primary does), and that
-        reply and every later one goes there, unquoted. A message from one of
+        reply and every later one goes there, unquoted. Until the group exists
+        an unaddressed 'on' turn is not run. A message from one of
         our own accounts makes it on the primary with Rodz. It is a /join-kind
         alias of the chat (same folder and thread, its own transcript), marked
         automatic: true; /send and /end work in it, and after /end or once the

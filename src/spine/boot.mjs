@@ -2861,7 +2861,7 @@ export async function boot({
   const services = {
     identity: createIdentity({ now, timeZone: transcriptTimeZone }),
     // sideGroupFor: a reply in a side_group.automatic chat goes to its SI+ group (commands, below; decide runs once the spine exists).
-    gating: createGating({ getConfig, loadState: _loadState, defaultKey, sideGroupFor: (ev) => commands.autoSideGroup?.(ev) }),
+    gating: createGating({ getConfig, loadState: _loadState, defaultKey, sideGroupFor: (ev, o) => commands.autoSideGroup?.(ev, o) }),
     // Router resolves an @token against the unified `agents:` block (operator 2026-07-02) —
     // the ONE registry, and since 2026-07-25 the ONLY source of off-node reach (a relay agent's
     // relay_channel). defaultBeing = defaultKey: the persona-route + the un-@mentioned

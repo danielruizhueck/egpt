@@ -3921,10 +3921,10 @@ export function createCommands({
   // ── THE AUTOMATIC SIDE GROUP (operator 2026-10-18) ──
   // `side_group: { automatic: true }` on a chat's OWN conversations.yaml entry: the being never replies
   // there. gating.decide asks this before a reply → the chat id of "SI+<group>" (an alias of the chat
-  // marked `automatic: true`; made on the first reply, Rodz + the sender answered); false = withhold the
-  // reply (no group, and only the node_role primary node creates one); null = reply in place.
+  // marked `automatic: true`; made on the first addressed reply, Rodz + the sender answered); false =
+  // withhold the reply (no group: `create` false, or not the node_role primary node); null = in place.
   const autoCreating = new Map();   // surface+chatId → the create in flight, so one reply makes one group
-  async function autoSideGroup(ev) {
+  async function autoSideGroup(ev, { create = true } = {}) {
     if (!loadState || !writeState) return null;
     const surface = surfaceOf(ev);
     let state;
@@ -3938,6 +3938,7 @@ export function createCommands({
       await mutateState(writeState, async () => writeState(dropContact(await loadState(), surface, room)));
       onLog(`automatic: ${room} (the SI+ group of ${ev.chatName || ev.chatId}) is gone — alias dropped`);
     }
+    if (!create) return false;
     if (!forkNodeSelected(null)) { onLog(`automatic: ${ev.chatName || ev.chatId} has no SI+ group on this node and only the node_role primary node makes one — reply withheld`); return false; }
     const key = `${surface}\u0000${ev.chatId}`;
     if (!autoCreating.has(key)) autoCreating.set(key, openAutoSideGroup(ev, surface).finally(() => autoCreating.delete(key)));

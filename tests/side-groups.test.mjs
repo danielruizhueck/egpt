@@ -28,6 +28,7 @@ import { createRouter } from '../src/spine/router.mjs';
 import { ensureContact, recordThread, patchContact, patchBeing, getContact, aliasContact } from '../src/conversations-state.mjs';
 import { shortChatId } from '../src/bridges/chat-id.mjs';
 import { encodeNodeSignature, encodeChatCanary, decodeChatCanary } from '../src/node-signature.mjs';
+import { mentionStatus } from '../src/auto-mode.mjs';
 
 const ORIGIN = 'palma1';
 const TITLE = '🌴FAMILIA PALMA🌴';
@@ -320,7 +321,7 @@ function buildSpine(h, { mode = 'on', node = 'kg', actions = undefined } = {}) {
     bridge: { onMessage() {}, send() {}, stop() {}, wasSentByUs: () => false },
     brain, identity: createIdentity({ now: () => 1000 }),
     router: createRouter({ getAgents: () => AGENTS, defaultBeing: 'e' }),
-    gating: createGating({ getConfig: () => config, loadState: async () => h.getState(), defaultKey: 'e', sideGroupFor: (ev) => h.cmds.autoSideGroup(ev) }),
+    gating: createGating({ getConfig: () => config, loadState: async () => h.getState(), defaultKey: 'e', sideGroupFor: (ev, o) => h.cmds.autoSideGroup(ev, o) }),
     commands: h.cmds, sender, actions, transcript: { async log() {} }, heartbeats: { runDue() {} },
     mesh: { isEnvelope: () => false, async handle() {} },
     fromThisNode: (ev) => ev?.fromNode != null && String(ev.fromNode).toLowerCase() === node,
@@ -329,13 +330,28 @@ function buildSpine(h, { mode = 'on', node = 'kg', actions = undefined } = {}) {
   return { spine, brain, opened };
 }
 const from = (over = {}) => ({ network: 'whatsapp', chatId: ORIGIN, chatName: TITLE, userId: LULU, senderName: 'Lulu', isSender: false, ...over });
-const say = (spine, body, over = {}) => spine.handleInbound({ body, from: from({ msgKey: `k-${body}`, ...over }) });
+// The bridge stamps the mention (atEStart/atEAnywhere) on the arrival; so does this.
+const say = (spine, body, over = {}) => { const { atEStart, atEAnywhere } = mentionStatus(body, ['e']); return spine.handleInbound({ body, from: from({ msgKey: `k-${body}`, atEStart, atEAnywhere, ...over }) }); };
+const ASK = 'e, hola a todos';   // addressed: only a reply someone asked for opens the group
 
 describe('automatic ON: the being never replies in the group', () => {
-  it('the first reply opens "SI+<group>" on the secondary (Rodz + the sender) and goes there', async () => {
+  it('mode on: an unaddressed message opens no group and runs no turn; the first addressed one does; later unaddressed replies go there', async () => {
     const h = harness({ state: seedState({ entry: AUTOMATIC }) });
     const { spine, brain, opened } = buildSpine(h);
     await say(spine, 'hola a todos');
+    expect(h.calls.create).toEqual([]);
+    expect(brain.calls).toEqual([]);
+    expect(opened).toEqual([]);
+    await say(spine, 'e, que opinas?', { userId: PEPE, senderName: 'Pepe' });
+    expect(h.calls.create.map((c) => c.participantIDs)).toEqual([[PEPE]]);
+    await say(spine, 'que bien');
+    expect(opened.map((o) => o.chatId)).toEqual([SIDE, SIDE]);
+  });
+
+  it('the first reply opens "SI+<group>" on the secondary (Rodz + the sender) and goes there', async () => {
+    const h = harness({ state: seedState({ entry: AUTOMATIC }) });
+    const { spine, brain, opened } = buildSpine(h);
+    await say(spine, ASK);
     expect(h.calls.create).toEqual([{ accountID: 'whatsapp', participantIDs: [LULU], type: 'group', title: `SI+${TITLE}`, via: 'secondary' }]);
     expect(h.getState().contacts.whatsapp[SIDE]).toMatchObject({ aliasOf: ORIGIN, automatic: true });
     expect(brain.calls).toEqual([{ being: 'e', chatId: ORIGIN }]);
@@ -345,7 +361,7 @@ describe('automatic ON: the being never replies in the group', () => {
   it('nothing is posted in the origin; the intro goes into the new group carrying the origin as a canary', async () => {
     const h = harness({ state: seedState({ entry: AUTOMATIC }) });
     const { spine } = buildSpine(h);
-    await say(spine, 'hola a todos');
+    await say(spine, ASK);
     expect(h.calls.post).toHaveLength(1);
     expect(h.calls.post[0]).toMatchObject({ chatId: SIDE, via: 'secondary', canary: ORIGIN });
     expect(h.sent).toEqual([]);
@@ -355,7 +371,7 @@ describe('automatic ON: the being never replies in the group', () => {
   it('later replies reuse the same group; no second one', async () => {
     const h = harness({ state: seedState({ entry: AUTOMATIC }) });
     const { spine, opened } = buildSpine(h);
-    await say(spine, 'hola a todos');
+    await say(spine, ASK);
     await say(spine, 'y mañana?', { userId: PEPE, senderName: 'Pepe' });
     expect(h.calls.create).toHaveLength(1);
     expect(opened.map((o) => o.chatId)).toEqual([SIDE, SIDE]);
@@ -364,7 +380,7 @@ describe('automatic ON: the being never replies in the group', () => {
   it('a message inside the SI+ group is answered there (it is the side group, not another origin)', async () => {
     const h = harness({ state: seedState({ entry: AUTOMATIC }) });
     const { spine, opened } = buildSpine(h);
-    await say(spine, 'hola a todos');
+    await say(spine, ASK);
     await say(spine, 'sigo aquí', { chatId: SIDE, chatName: `SI+${TITLE}` });
     expect(h.calls.create).toHaveLength(1);
     expect(opened.map((o) => o.chatId)).toEqual([SIDE, SIDE]);
@@ -381,7 +397,7 @@ describe('automatic ON: the being never replies in the group', () => {
   it('no secondary: the primary creates "SI+<group>" with the sender', async () => {
     const h = harness({ config: cfg({ secondary: false }), state: seedState({ entry: AUTOMATIC }) });
     const { spine, opened } = buildSpine(h);
-    await say(spine, 'hola a todos');
+    await say(spine, ASK);
     expect(h.calls.create.map((c) => [c.via, c.participantIDs, c.title])).toEqual([['primary', [LULU], `SI+${TITLE}`]]);
     expect(opened.map((o) => o.chatId)).toEqual([SIDE]);
   });
@@ -394,7 +410,7 @@ describe('automatic ON: the being never replies in the group', () => {
       execute: async (run, stripped, ev) => { limbs.push(ev.chatId); return { ran: [] }; },
     };
     const { spine } = buildSpine(h, { actions });
-    await say(spine, 'hola a todos');
+    await say(spine, ASK);
     expect(limbs).toEqual([SIDE]);
   });
 
@@ -410,9 +426,9 @@ describe('automatic ON: the being never replies in the group', () => {
     let gone = false;
     const h = harness({ state: seedState({ entry: AUTOMATIC }), chatRaw: async (id) => (gone && id === SIDE ? false : LIVE) });
     const { spine, opened } = buildSpine(h);
-    await say(spine, 'hola a todos');
+    await say(spine, ASK);
     gone = true;
-    await say(spine, 'otra vez');
+    await say(spine, 'e, otra vez');
     expect(h.calls.create).toHaveLength(2);
     expect(opened.map((o) => o.chatId)).toEqual([SIDE, shortChatId(SIDE2_FULL)]);
   });
@@ -420,7 +436,7 @@ describe('automatic ON: the being never replies in the group', () => {
   it('a creation that fails posts nothing anywhere', async () => {
     const h = harness({ state: seedState({ entry: AUTOMATIC }), created: [] });
     const { spine, opened } = buildSpine(h);
-    await say(spine, 'hola a todos');
+    await say(spine, ASK);
     expect(opened).toEqual([]);
     expect(h.calls.post).toEqual([]);
   });
@@ -464,7 +480,7 @@ describe('two nodes on the shared accounts: one creates, the other links', () =>
   it('a non-primary node never creates and posts nothing while no group is linked', async () => {
     const h = harness({ config: cfg({ node_role: 'secondary' }), state: seedState({ entry: AUTOMATIC }) });
     const { spine, brain, opened } = buildSpine(h, { node: 'do' });
-    await say(spine, 'hola a todos');
+    await say(spine, ASK);
     expect(h.calls.create).toEqual([]);
     expect(opened).toEqual([]);
     expect(brain.calls).toEqual([]);
@@ -484,7 +500,7 @@ describe('two nodes on the shared accounts: one creates, the other links', () =>
   it('the canary never re-links a chat with a conversation of its own (the creator\'s own intro coming back)', async () => {
     const h = harness({ state: recordThread(seedState({ entry: AUTOMATIC }), 'whatsapp', ADMIN, 'admin-e-thread', '2026-10-01T00:00:00Z', 'e') });
     const { spine } = buildSpine(h);
-    await say(spine, 'hola a todos');
+    await say(spine, ASK);
     const before = h.getState().contacts.whatsapp[SIDE];
     await say(spine, `intro${SIG}${encodeChatCanary(ORIGIN)}`, { chatId: SIDE, chatName: `SI+${TITLE}`, userId: RODZ_USER_ID, isSender: true });
     await say(spine, `intro${SIG}${encodeChatCanary(ORIGIN)}`, { chatId: ADMIN, chatName: 'eGPT Admin', userId: RODZ_USER_ID });
@@ -527,7 +543,7 @@ describe('no loop: the side group\'s own output wakes nobody', () => {
   it('the intro and E\'s signed reply coming back in the SI+ group wake nobody, even in mode on', async () => {
     const h = harness({ state: seedState({ entry: AUTOMATIC }) });
     const { spine, brain, opened } = buildSpine(h);
-    await say(spine, 'hola a todos');
+    await say(spine, ASK);
     brain.calls.length = 0; opened.length = 0;
     await say(spine, `🔗 intro${SIG}${encodeChatCanary(ORIGIN)}`, { chatId: SIDE, chatName: `SI+${TITLE}`, userId: RODZ_USER_ID, isSender: true });
     await say(spine, `🐶 E: aquí estoy${SIG}`, { chatId: SIDE, chatName: `SI+${TITLE}`, userId: RODZ_USER_ID, isSender: true });
