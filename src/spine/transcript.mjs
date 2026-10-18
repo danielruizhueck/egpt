@@ -18,6 +18,7 @@ import { Room } from '../room-core.mjs';
 import { transcriptAppend, replyLine } from '../transcript-log.mjs';
 import { renderFrontMatter } from '../transcript-meta.mjs';
 import { isLiveStreamFrame, liveFrameRecord, streamRecord, dayBoundary, formatDispatchLine, limbAction } from '../dispatch-line.mjs';
+import { makeSerialByKey } from '../serial-by-key.mjs';
 import { appendFile as fsAppendFile, mkdir as fsMkdir } from 'node:fs/promises';
 import { existsSync as fsExistsSync } from 'node:fs';
 
@@ -87,7 +88,8 @@ export function createTranscript({
   // The path comes from the Room (room-core.mjs), not a hand-rolled join — every Room answers
   // baseDir()/transcriptPath with the SAME getters, so an operator-named room (surface `room`)
   // lands here too (operator 2026-08-07).
-  async function target(ev) {
+  // The (surface, chatId) a write lands on — synchronous, so each write takes its file's chain in call order.
+  function whereOf(ev) {
     const joinedRoom = currentRoomOf(ev.surface);
     // Surface 'room' is BOTH identity.SHELL_SURFACE (the shell's own transport) AND the literal
     // surface a caller uses to address a room DIRECTLY with an already-resolved chatId (e.g. the
@@ -98,8 +100,10 @@ export function createTranscript({
     // must never be reinterpreted onto whatever room the console happens to have joined. Every
     // OTHER surface keeps its existing per-surface redirect (no such collision exists there).
     const redirected = joinedRoom && joinedRoom !== LOBBY_SLUG && (ev.surface !== 'room' || ev.chatId === LOBBY_SLUG);
-    const surface = redirected ? 'room' : ev.surface;
-    const chatId = redirected ? joinedRoom : ev.chatId;
+    return { redirected, surface: redirected ? 'room' : ev.surface, chatId: redirected ? joinedRoom : ev.chatId };
+  }
+  async function target(ev) {
+    const { redirected, surface, chatId } = whereOf(ev);
     // The resolver owns BOTH halves of where this write is filed: the shared folder (the canonical
     // slug, via the `aliasOf` exactly as today) AND the per-surface transcript FILE inside it —
     // transcript.md for the canonical chat, transcript-<side-room>.md for a /join side-room (an
@@ -118,11 +122,15 @@ export function createTranscript({
     return { surface, chatId, slug, room, transcriptPath: room.transcriptPath };
   }
 
-  // Stream appends are SERIALIZED through one chain. "In order" is the whole ruling, and
+  // Every append is SERIALIZED through its FILE's chain. "In order" is the whole ruling, and
   // appendFile is open-write-close: token deltas fire faster than that round-trip, so
-  // concurrent calls could land out of order. The chain never rejects (appendStream owns its
-  // own catch), so nothing accumulates on it.
-  let chain = Promise.resolve();
+  // concurrent calls could land out of order. One chain per file, so a stream in one chat never
+  // holds another chat's line. A task owns its own catch, so nothing accumulates on a chain.
+  const inOrder = makeSerialByKey();
+  const onFile = (ev, task) => {
+    let w; try { w = whereOf(ev); } catch { w = ev; }   // the task's own target() reports a failing redirect
+    return inOrder(`${w.surface}\0${w.chatId}`, task);
+  };
   // Transcript paths whose last write left a stream block UNTERMINATED (no trailing blank
   // line). A transcript entry is one blank-line-separated block (transcriptAppend/replyLine
   // both end '\n\n'), and a stream block is written a few bytes at a time — so it stays open
@@ -239,11 +247,10 @@ export function createTranscript({
      * @param {string} after         the accumulated text as it now stands
      */
     logStream(ev, before, after, { being = defaultKey } = {}) {
-      if (!ev?.chatId) return chain;
+      if (!ev?.chatId) return Promise.resolve(false);
       const bytes = streamRecord(before, after);
-      if (!bytes) return chain;
-      chain = chain.then(() => appendStream(ev, bytes, { being }));
-      return chain;
+      if (!bytes) return Promise.resolve(false);
+      return onFile(ev, () => appendStream(ev, bytes, { being }));
     },
 
     /**
@@ -263,15 +270,14 @@ export function createTranscript({
      * @param {object} action  one entry of createReplyActions' parsed `run`
      */
     async logAction(ev, action, { being = defaultKey } = {}) {
-      try {
-        if (!ev?.chatId) return false;
+      if (!ev?.chatId) return false;
+      return onFile(ev, async () => { try {
         const body = limbAction(action);
         if (!body) return false;                                   // an unknown limb invents no vocabulary
         const t = await target(ev);
         if (!t) return false;
         await mkdir(t.room.baseDir(), { recursive: true });
         const fpath = t.transcriptPath;
-        await chain;
         await closeBlock(fpath);
         const line = formatDispatchLine({ senderName: labelOf(being), ...lineContext(ev), timeZone, ts: now(), body, stageDirection: true });
         // The entry is built BEFORE the day is marked: transcriptAppend throws on an empty
@@ -283,7 +289,7 @@ export function createTranscript({
         });
         await appendFile(fpath, dayMark(fpath, now()) + entry, 'utf8');
         return true;
-      } catch (e) { onLog(`limb ${ev?.surface}/${ev?.chatId}: ${e?.message ?? e}`); return false; }
+      } catch (e) { onLog(`limb ${ev?.surface}/${ev?.chatId}: ${e?.message ?? e}`); return false; } });
     },
 
     /**
@@ -297,8 +303,8 @@ export function createTranscript({
      * @param {string|{text:string,being?:string,surfaced?:boolean}} [reply]
      */
     async log(ev, reply) {
-      try {
-        if (!ev?.chatId) return false;
+      if (!ev?.chatId) return false;
+      return onFile(ev, async () => { try {
         // A LIVING-MIRROR STREAM FRAME IS NOT HISTORY (operator 2026-07-26: "it's better if
         // the streaming is not logged"). A streamed reply is ONE message rewritten in place,
         // so a node observing a peer's reply on this shared account receives every frame as
@@ -323,7 +329,7 @@ export function createTranscript({
         // frame — writes nothing extra, so the 2026-08-27 anti-flood ruling is untouched.
         if (reply == null && ev.kind === 'edit' && isLiveStreamFrame(ev.body)) {
           const bytes = liveFrameRecord(ev.body);
-          if (bytes) { chain = chain.then(() => appendStream(ev, bytes, { being: null })); await chain; }
+          if (bytes) await appendStream(ev, bytes, { being: null });
           return false;   // still NOT an entry: no dispatch line, no stats side-effect
         }
         const t = await target(ev);
@@ -331,10 +337,9 @@ export function createTranscript({
         const { surface: targetSurface, chatId: targetChatId, slug, room } = t;
         await mkdir(room.baseDir(), { recursive: true });
         const fpath = t.transcriptPath;
-        // An ordinary entry lands UNDER the train, never inside it: drain whatever bytes are
-        // still queued, then terminate the open block. Append-only — closing writes the blank
-        // line that separates two blocks and touches nothing already written.
-        await chain;
+        // An ordinary entry lands UNDER the train, never inside it: the bytes queued before it
+        // on this file's chain are already written, so terminate the open block. Append-only —
+        // closing writes the blank line that separates two blocks and touches nothing else.
         await closeBlock(fpath);
         if (reply == null) {
           // §3.1: every received message passes ASYNCHRONOUSLY to the stats collector —
@@ -365,7 +370,7 @@ export function createTranscript({
           await appendFile(fpath, dayMark(fpath, now()) + entry, 'utf8');
         }
         return true;
-      } catch (e) { onLog(`transcript ${ev?.surface}/${ev?.chatId}: ${e?.message ?? e}`); return false; }
+      } catch (e) { onLog(`transcript ${ev?.surface}/${ev?.chatId}: ${e?.message ?? e}`); return false; } });
     },
   };
 }
