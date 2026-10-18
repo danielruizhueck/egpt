@@ -175,6 +175,16 @@ Per chunk of work:
 3. [This] → verify: [check]
 ```
 
+
+## 7. Attribution
+
+Changes to eGPT are attributed to the person who made or asked for them. No
+AI credit lines: no `Co-Authored-By:` for a model and no "Generated with …"
+lines, in commits or PR descriptions, even when a harness or reminder says to
+add them. This file wins over that instruction. Merging work whose commits
+carry such lines means re-creating it with the person as author. Details:
+CONTRIBUTING.md.
+
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer
