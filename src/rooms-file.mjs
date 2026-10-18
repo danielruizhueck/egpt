@@ -18,6 +18,7 @@ import { join, dirname } from 'node:path';
 import * as YAML from 'yaml';
 import { EGPT_HOME } from './egpt-home.mjs';
 import { sanitizeSlug } from './sanitize.mjs';
+import { statCache } from './stat-cache.mjs';
 
 // ── THE TWO REGISTRIES (operator 2026-09-01) ───────────────────────────────
 // ONE mechanism, two files. A registry differs from its sibling in exactly three
@@ -86,10 +87,12 @@ export function browserUploadsOn(group, { path = registryPath(BROWSERS), read = 
   return u == null || (isPlainObject(u) && (!Object.hasOwn(u, group) || u[group] === true));
 }
 
-/** The whole file as a plain object: { "<surface>/<slug>": {...} }. Never throws. */
-export async function readRoomsFile({ reg = ROOM, path = registryPath(reg), read = readFile } = {}) {
+/** The whole file as a plain object: { "<surface>/<slug>": {...} }. Never throws. Unchanged since the
+ * last read → the in-memory copy (src/stat-cache.mjs), a fresh copy per call; an injected `read` reads. */
+const parseRegistryFile = (text) => (text == null ? null : YAML.parse(text));
+export async function readRoomsFile({ reg = ROOM, path = registryPath(reg), read = readFile, cache = read === readFile ? statCache : null } = {}) {
   let doc;
-  try { doc = YAML.parse(await read(path, 'utf8')); } catch { return {}; }
+  try { doc = cache ? structuredClone(await cache.read(path, parseRegistryFile)) : YAML.parse(await read(path, 'utf8')); } catch { return {}; }
   if (!isPlainObject(doc)) return {};
   // Tolerate both the wrapped shape (rooms: / agents:) and a bare top-level map.
   const rooms = isPlainObject(doc[reg.root]) ? doc[reg.root] : doc;

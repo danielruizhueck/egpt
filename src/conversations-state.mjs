@@ -28,6 +28,7 @@ import { mergeRoomBeings, persistRoomBeings, mergeAgentBeings, persistAgentBeing
 import { EGPT_HOME } from './egpt-home.mjs';
 import { makeSerialByKey } from './serial-by-key.mjs';
 import { preferNewer } from './prefer-newer.mjs';
+import { statCache } from './stat-cache.mjs';
 import { shortChatId } from './bridges/chat-id.mjs';
 import { MEDIA_LINE } from './media-kind.mjs';
 
@@ -2190,9 +2191,9 @@ export function buildRebootAnnouncement(personalityName, bundle) {
 const _SLIM_DROP = new Set(['slug', 'pushedName', 'firstSeenAt', 'threadCreatedAt', 'identityInjectedAt', 'threadCwd', 'readonly', 'threadId', 'mode']);
 const _pathBasename = (p) => String(p ?? '').split(/[\\/]/).filter(Boolean).pop() ?? '';
 
-export function serialize(state) {
-  // Build the slimmed plain object first (drop the derived/moved keys), keeping the jid→name
-  // map so we can re-attach names as key comments on the built Document.
+// The slimmed plain object (derived/moved keys dropped) + the jid→name map the key comments carry:
+// what serialize writes, and what writeState's write-through hydrates.
+function _slim(state) {
   const src = state && typeof state === 'object' ? state : emptyState();
   const names = {};   // `${surface}\0${jid}` -> pushedName
   const outContacts = {};
@@ -2216,8 +2217,12 @@ export function serialize(state) {
     }
     outContacts[surface] = outBucket;
   }
-  const slimState = { ...src, contacts: outContacts };
+  return { slimState: { ...src, contacts: outContacts }, names };
+}
 
+export function serialize(state) { return _yaml(_slim(state)); }
+
+function _yaml({ slimState, names }) {
   const doc = new YAML.Document(slimState);
   const contactsNode = doc.get('contacts');
   if (contactsNode && contactsNode.items) {
@@ -2260,15 +2265,27 @@ export function parse(text) {
       }
     }
   }
-  for (const [surface, bucket] of Object.entries(obj.contacts)) {
+  _hydrate(obj.contacts, (surface, jid) => commentByJid[`${surface}\0${jid}`]);
+  return obj;
+}
+
+function _hydrate(contacts, nameOf) {
+  for (const [surface, bucket] of Object.entries(contacts)) {
     if (!bucket || typeof bucket !== 'object' || Array.isArray(bucket)) continue;
     for (const [jid, entry] of Object.entries(bucket)) {
       if (!entry || typeof entry !== 'object' || Array.isArray(entry) || entry.aliasOf) continue;
-      const nm = commentByJid[`${surface}\0${jid}`];
+      const nm = nameOf(surface, jid);
       if (typeof entry.pushedName !== 'string' || (nm != null)) entry.pushedName = nm ?? entry.pushedName ?? '';
       if (typeof entry.slug !== 'string' || !entry.slug) entry.slug = _pathBasename(entry.conversation_path);
     }
   }
+}
+
+// parse(serialize(state)) without the YAML round-trip (writeState's write-through): a JSON copy
+// drops what YAML drops (undefined), and a name comes back trimmed, as a key comment does.
+function _stored({ slimState, names }) {
+  const obj = JSON.parse(JSON.stringify(slimState));
+  _hydrate(obj.contacts, (surface, jid) => names[`${surface}\0${jid}`]?.trim());
   return obj;
 }
 
@@ -2283,11 +2300,13 @@ export function parse(text) {
 // keeps it (and its thread) until the next write moves it. Everything above this line
 // (getBeing, patchBeing, recordThread, brainpool) sees ONE state object and never learns
 // which file backed it.
-export async function readState(yamlPath) {
+// Served from the in-memory copy while the file is unchanged (src/stat-cache.mjs); each read
+// gets its own copy, so a caller mutating it never reaches the next one.
+const _parseFile = (text) => (text == null ? emptyState() : parse(text));
+export async function readState(yamlPath, { cache = statCache } = {}) {
   let state;
   try {
-    const text = await readFile(yamlPath, 'utf8');
-    state = parse(text);
+    state = structuredClone(await cache.read(yamlPath, _parseFile));
   } catch (e) {
     // ENOENT on first daemon run is legitimate (empty registry).
     // Anything else (parse error, permission, IO) must surface so
@@ -2312,14 +2331,19 @@ export async function readState(yamlPath) {
 // the sibling rooms.yaml (an agent's into agents.yaml) and STRIPPED from what this file
 // serializes, so no two of them hold the same key twice. Each half only writes when the
 // row actually differs.
-export async function writeState(yamlPath, state) {
+// WRITE-THROUGH: the in-memory copy becomes what a re-read would parse, stamped with the temp
+// file's stat (a rename keeps it), so the next read neither reads nor parses.
+let _tmpSeq = 0;
+export async function writeState(yamlPath, state, { cache = statCache } = {}) {
   const roomed = await persistRoomBeings(state, { path: roomsPathBeside(yamlPath) });
   const routed = await persistAgentBeings(roomed, { path: agentsPathBeside(yamlPath) });
   await mkdir(dirname(yamlPath), { recursive: true });
-  const body = serialize(routed);
-  const tmp = yamlPath + '.tmp-' + process.pid + '-' + Date.now();
-  await writeFile(tmp, body, 'utf8');
+  const slim = _slim(routed);
+  const tmp = `${yamlPath}.tmp-${process.pid}-${Date.now()}-${++_tmpSeq}`;
+  await writeFile(tmp, _yaml(slim), 'utf8');
+  const written = await stat(tmp);
   await rename(tmp, yamlPath);
+  cache.put(yamlPath, written, _stored(slim), _parseFile);
 }
 
 // ── Migration: conversations.json → conversations.yaml ────────────────────

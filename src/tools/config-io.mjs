@@ -12,6 +12,7 @@ import { EGPT_HOME } from "../egpt-home.mjs";
 import { homedir } from 'node:os';
 import { isDeepStrictEqual } from 'node:util';
 import * as YAML from 'yaml';
+import { statCache } from '../stat-cache.mjs';
 
 // Canonical config lives under ~/.egpt/config/ (operator 2026-06-23).
 export const CONFIG_YAML_PATH = join(EGPT_HOME, 'config', 'config.yaml');
@@ -39,11 +40,14 @@ export async function readConfig() {
 // (identical bytes) hashes the same and never restarts. PARSE-GATED: returns null when the file
 // is absent, unreadable, or does not parse as YAML (a mid-write/partial save) — the spine ignores
 // a null and waits, never restarting onto a broken config.
-export function configContentHashSync(path = CONFIG_YAML_PATH) {
-  let text;
-  try { text = readFileSync(path, 'utf8'); } catch { return null; }
+// Asked on every message and tick, so it reads and hashes only when the file changed (src/stat-cache.mjs).
+const contentHash = (text) => {
+  if (text == null) return null;
   try { YAML.parse(text); } catch { return null; }
   return createHash('sha256').update(text).digest('hex');
+};
+export function configContentHashSync(path = CONFIG_YAML_PATH, { cache = statCache } = {}) {
+  try { return cache.readSync(path, contentHash); } catch { return null; }
 }
 
 export async function writeConfig(cfg) {

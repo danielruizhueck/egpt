@@ -32,6 +32,13 @@ export function createContacts({ loadState, writeState, io = {}, onLog = () => {
    * @returns {Promise<string|null>} the slug, or null when unresolvable (caller treats null as skip)
    */
   async function resolve(surface, chatId, { chatName, agents } = {}) {
+      // A known chat with nothing to change is a READ: answered without the node-wide lock.
+      if (chatId) {
+        try {
+          const seen = ensureContact(await loadState(), surface, chatId, { pushedName: chatName, slugHint: chatName, agents });
+          if (!seen.changed) return seen.slug ?? null;
+        } catch { /* the locked path below reports it */ }
+      }
       // Serialize the whole load→mutate→write against the shared registry so two
       // DIFFERENT conversations' first-seen registrations (now concurrent, per the
       // per-conversation turn FIFO) can't interleave and lose one contact.
