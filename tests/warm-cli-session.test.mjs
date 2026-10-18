@@ -923,6 +923,124 @@ describe('warm-cli-session — a background task finishes', () => {
   });
 });
 
+// A background subagent's output is not the being's reply (live 2026-10-16/17, wren). Shapes recorded
+// from claude 2.1.301: a subagent's events carry parent_tool_use_id = its Agent call's id (plus
+// agent_id); the being's own carry parent_tool_use_id null. Recorded order: subagent text interleaves
+// a top-level turn before that turn's own text streams.
+describe('warm-cli-session — a background subagent\'s text never reaches the reply', () => {
+  const AGENT = 'toolu_01KKNHY19qtXLKgQzS7RzR5e';
+  const ORIGIN = { kind: 'task-notification', producer: 'session-task', runId: 'r1' };
+  const sub = (text) => ({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text }] }, parent_tool_use_id: AGENT, agent_id: 'a1', subagent_type: 'general-purpose', task_description: 'counter' });
+  const top = (content) => ({ type: 'assistant', message: { role: 'assistant', content }, parent_tool_use_id: null });
+  const delta = (text, ptu = null) => ({ type: 'stream_event', event: { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text } }, parent_tool_use_id: ptu });
+  const LEAKS = ['I\'ll start by orienting in the worktree.', 'Noted the refined config shape', 'SUBAGENT_ACK', 'SUBAGENT_DELTA', 'SUBAGENT_LATE'];
+  function subagentClaude() {
+    const lines = [];
+    let proc = null;
+    const out = (o) => proc.stdout.emit('data', JSON.stringify(o) + '\n');
+    const opener = (text) => { out({ type: 'system', subtype: 'init', session_id: 'sess-1' }); out({ type: 'user', isReplay: true, parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'text', text }] } }); };
+    const finish = (text) => { out(delta(text.slice(0, 6))); out(delta(text.slice(6))); out(top([{ type: 'text', text }])); out({ type: 'result', subtype: 'success', result: text, session_id: 'sess-1' }); };
+    const turns = {
+      START: () => {
+        opener('START');
+        out(top([{ type: 'tool_use', id: AGENT, name: 'Agent', input: { description: 'counter', run_in_background: true, prompt: 'p' } }]));
+        out({ type: 'system', subtype: 'background_tasks_changed', tasks: [{ task_id: 'a1', task_type: 'local_agent', description: 'counter' }] });
+        out({ type: 'user', parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: AGENT, content: 'launched' }] } });
+        out(sub(LEAKS[0]));
+        finish('TOP_REPLY_1');
+      },
+      SEND: () => {
+        opener('SEND');
+        out({ type: 'user', parent_tool_use_id: AGENT, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'b1', content: 'x' }] } });
+        out(top([{ type: 'tool_use', id: 'ts', name: 'ToolSearch', input: { query: 'select:SendMessage' } }]));
+        out(sub(`${LEAKS[1]} (\`superchats\` block). Continuing the outbreak investigation first.`));
+        out(top([{ type: 'tool_use', id: 'sm', name: 'SendMessage', input: { to: 'a1', message: 'refined shape' } }]));
+        out({ type: 'user', parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'sm', content: 'sent' }] } });
+        out(sub(LEAKS[2]));
+        out(delta(LEAKS[3], AGENT));   // not seen on 2.1.301 (subagents send whole messages); same rule
+        finish('TOP_REPLY_2');
+      },
+    };
+    const spawn = () => {
+      proc = new EventEmitter();
+      proc.stdout = new EventEmitter(); proc.stdout.setEncoding = () => {};
+      proc.stderr = new EventEmitter(); proc.stderr.setEncoding = () => {};
+      proc.killed = false;
+      proc.kill = () => { proc.killed = true; };
+      proc.stdin = {
+        write: (line) => {
+          const o = JSON.parse(line);
+          lines.push(o);
+          if (o.type === 'control_request') {
+            setImmediate(() => {
+              out({ type: 'control_response', response: { subtype: 'success', request_id: o.request_id } });
+              out({ type: 'result', subtype: 'error_during_execution', is_error: true, origin: ORIGIN, session_id: 'sess-1' });
+            });
+            return;
+          }
+          const text = o.message.content.map((c) => c.text).join('');
+          setImmediate(() => (turns[text] ?? (() => { opener(text); finish(`echo:${text}`); }))());
+        },
+        end: () => {},
+      };
+      return proc;
+    };
+    // The subagent's last words with no turn in flight, then its completion: the CLI's own turn.
+    const subagentDone = () => {
+      out(sub(LEAKS[4]));
+      out({ type: 'system', subtype: 'task_notification', task_id: 'a1', tool_use_id: AGENT, status: 'completed', summary: LEAKS[4] });
+      out({ type: 'system', subtype: 'background_tasks_changed', tasks: [] });
+      out({ type: 'system', subtype: 'init', session_id: 'sess-1' });
+      out(sub('SUBAGENT_IN_SELF_TURN'));
+    };
+    return { spawn, lines, subagentDone };
+  }
+  const settle = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); };
+  const leaked = (texts) => texts.filter((t) => LEAKS.some((l) => t.includes(l)));
+
+  it('THE LIVE CASE: streamed previews and the final text carry only the being\'s own words', async () => {
+    const s = createWarmCliSession({ spawn: subagentClaude().spawn });
+    const u1 = [];
+    const r1 = await s.turn('START', (t) => u1.push(t));
+    expect(u1).toEqual(['TOP_RE', 'TOP_REPLY_1']);
+    expect(r1.text).toBe('TOP_REPLY_1');
+    const u2 = [];
+    const r2 = await s.turn('SEND', (t) => u2.push(t));
+    expect(u2).toEqual(['TOP_RE', 'TOP_REPLY_2']);
+    expect(r2.text).toBe('TOP_REPLY_2');
+    s.close();
+  });
+
+  it('verboseThinking ON: the being\'s own tool stubs and text, none of the subagent\'s', async () => {
+    const s = createWarmCliSession({ spawn: subagentClaude().spawn, verboseThinking: true });
+    const u = [];
+    expect((await s.turn('START', (t) => u.push(t))).text).toBe('Agent(counter)\n\nTOP_REPLY_1');
+    expect((await s.turn('SEND', (t) => u.push(t))).text).toBe('ToolSearch(select:SendMessage)\n\nSendMessage(a1)\n\nTOP_REPLY_2');
+    expect(leaked(u)).toEqual([]);
+    s.close();
+  });
+
+  it('background bookkeeping is unchanged: the task is tracked, its completion wakes the being, the next turn is clean', async () => {
+    const f = subagentClaude();
+    const done = [];
+    const s = createWarmCliSession({ spawn: f.spawn, onBackgroundDone: (i) => done.push(i) });
+    const r1 = await s.turn('START');
+    expect(r1.bgStarted).toBe(1);
+    expect(s.backgroundTasks).toEqual([{ description: 'counter', since: expect.any(Number) }]);
+    await s.turn('SEND');
+    expect(s.background).toBe(1);
+    f.subagentDone();
+    await settle();
+    expect(done).toEqual([{ summaries: ['counter — completed'] }]);
+    expect(f.lines.at(-1)).toMatchObject({ type: 'control_request', request: { subtype: 'interrupt' } });
+    expect(s.background).toBe(0);
+    const u = [];
+    expect(await s.turn('NEXT', (t) => u.push(t))).toEqual({ text: 'echo:NEXT', sessionId: 'sess-1' });
+    expect(leaked(u)).toEqual([]);
+    s.close();
+  });
+});
+
 // THE CLI'S OWN VERDICT (operator 2026-10-16: failure is structural, never the reply text). An API
 // error ends a turn as subtype "success" with is_error:true. MEASURED on claude 2.1.301 with an
 // invalid token: {"type":"result","subtype":"success","is_error":true,"api_error_status":401,

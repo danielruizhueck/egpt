@@ -413,6 +413,8 @@ export function createWarmCliSession(options = {}) {
         else if (ev.subtype === 'init' && !pending && finished.length) startSelfTurn();
       }
       if (ev.type === 'user' && ev.isReplay === true && ev.origin?.kind === 'task-notification') finished.shift();
+      // A subagent's own events (measured 2.1.301): parent_tool_use_id = its Agent call. Not the being's words.
+      if (ev.parent_tool_use_id) continue;
       if (selfTurn?.started && !pending) { if (ev.type === 'result') endSelfTurn(); continue; }
       // THE INJECTION ACK (operator 2026-09-09 — see the header measurement). `isReplay` marks
       // the CLI echoing back a user line it has just TAKEN, which is the only thing in this
