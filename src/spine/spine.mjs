@@ -1382,7 +1382,8 @@ export function createSpine({
     // CHUNK 2 super-channel routing: post to the conversation's super channel when it has one right
     // now (gating.decide's live lookup), else the arrival chat — unchanged otherwise. The transcript/
     // limbs below stay keyed to ev.chatId (the alias shares that one on-disk conversation).
-    const out = sender.open(d.replyChatId ?? ev.chatId, { being: to, replyTo, queued: ahead > 0, queuedAhead: ahead, auto: d.mode === 'auto', origin: ev.chatId });
+    // replyIn null: replyTo is this chat's own id — a local mouth quotes its own copy (sender quoteIn).
+    const out = sender.open(d.replyChatId ?? ev.chatId, { being: to, replyTo, replyIn: null, queued: ahead > 0, queuedAhead: ahead, auto: d.mode === 'auto', origin: ev.chatId });
     return turnBy(turnKey, () => runReplyTurn({ to, ev, d, out, replyTo, turnKey, queued: ahead > 0, pinned, trigger }));
   }
 

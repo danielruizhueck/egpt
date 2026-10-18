@@ -25,7 +25,7 @@
 //      refusal the link can produce (unreachable, no-key, no-match, ambiguous, send-failed, a
 //      handler that threw) must end with the reply posted on THIS node's own account and a loud
 //      log line naming the reason. That is the bulk of this file.
-import { describe, it, expect, afterAll, vi } from 'vitest';
+import { describe, it, expect, afterAll, afterEach, vi } from 'vitest';
 
 // A PRIVATE profile for this file — egpt-home.mjs freezes EGPT_HOME at module load, so it must be
 // set BEFORE the imports below; vi.hoisted is what does that. Private (not the suite's shared
@@ -1610,6 +1610,110 @@ describe("a background status quotes the being's reply in the room the status op
     await open(SAID_ON_PRIMARY.id, null);
     expect(opened(ear)).toEqual([[CHAT_ID, SAID_ON_PRIMARY.id]]);
     expect(earListed).toEqual([]);
+  });
+});
+
+// ── 10c. AN ORDINARY REPLY QUOTES THE MOUTH'S OWN COPY OF WHAT IT ANSWERS (live 2026-10-16) ──────
+// SI+EduWeb: the placeholder opened in the mouth's room carrying the EAR's id, so it quoted nothing.
+// It now quotes the mouth's own copy (quoteIn, as the status does), looked up at most WAIT before the
+// placeholder opens unquoted, once per message.
+describe("an ordinary reply quotes the mouth's own copy of the message it answers", () => {
+  const WAIT = 1000;   // sender.mjs QUOTE_WAIT_MS
+  const TEXT_EV = { surface: 'wa', node: 'wa', chatId: CHAT_ID, chatName: 'Group', senderId: 'u-1', senderName: 'An', msgId: STEERED_ON_PRIMARY.id, ts: 1000, body: STEERED_TEXT, kind: 'text', raw: {} };
+  const node = (shape = {}) => {
+    const n = earAndMouth(shape);
+    const mouthListed = [];
+    const list = n.mouthBridge.listMessagesRaw;
+    n.mouthBridge.listMessagesRaw = (chatId) => { mouthListed.push(chatId); return list(chatId); };
+    const sender = createSender({ bridge: n.ear, bodyEmojiOf: () => '🐶', peerMouth: n.peerMouth, onLog: (m) => n.logs.push(`[mouth] ${m}`) });
+    return { ...n, mouthListed, sender };
+  };
+  // The whole turn, real, as §11's voiceNode: createSpine + createSender + makePeerMouth.
+  const spineNode = (shape) => {
+    const n = node(shape);
+    let cb = null;
+    Object.assign(n.ear, { onMessage(fn) { cb = fn; }, stop() {} });
+    createSpine({
+      bridge: n.ear, peerMouth: n.peerMouth,
+      brain: { async turn() { return { text: 'hola a todos', sessionId: 's1' }; } },
+      identity: { build: (msg) => ({ ...msg, line: msg.body }) }, router: { resolve: () => 'e' },
+      gating: { async decide() { return { mode: 'on', receives: true, mayReply: true, sendToEgpt: 'mode' }; }, surfaces: (d) => d.mayReply },
+      sender: n.sender, transcript: { log() {}, logAction() {} }, heartbeats: { runDue() {} }, store: { recordThread() {} },
+      clock: { now: () => 1000 }, log: { line: (m) => n.logs.push(m) },
+    }).start();
+    return { ...n, say: () => cb(TEXT_EV) };
+  };
+  const opened = (bridge) => bridge.streams.map((s) => [s.chat, s.opts.replyTo]);
+  const open = (sender, opts = {}) => sender.open(CHAT_ID, { being: 'e', replyTo: STEERED_ON_PRIMARY.id, replyIn: null, ...opts });
+  afterEach(() => vi.useRealTimers());
+
+  it("THE REPRODUCTION: the placeholder opens in the mouth's room quoting the MOUTH's copy (1118), never the ear's 2901", async () => {
+    const { ear, mouthBridge, earListed, mouthListed, say } = spineNode();
+    await say();
+    expect(opened(mouthBridge)).toEqual([[SECONDARY_CHAT_ID, STEERED_ON_SECONDARY.id]]);
+    expect(ear.streams).toEqual([]);
+    expect(earListed).toEqual([CHAT_ID]);                 // the key, off the ear's copy
+    expect(mouthListed).toEqual([SECONDARY_CHAT_ID]);     // its own copy, in the mouth's room
+  });
+
+  it('NO mouth, or one not in the chat: the ear quotes its own id and no message list is read', async () => {
+    for (const shape of [{ withMouth: false }, { mouthIsMember: false }]) {
+      const { ear, mouthBridge, earListed, mouthListed, say } = spineNode(shape);
+      await say();
+      expect(opened(ear), JSON.stringify(shape)).toEqual([[CHAT_ID, STEERED_ON_PRIMARY.id]]);
+      expect(mouthBridge.streams).toEqual([]);
+      expect([...earListed, ...mouthListed]).toEqual([]);
+    }
+  });
+
+  it('no mouth wired: the placeholder still opens on the same tick', () => {
+    const { ear, sender } = node({ withMouth: false });
+    open(sender);
+    expect(opened(ear)).toEqual([[CHAT_ID, STEERED_ON_PRIMARY.id]]);
+  });
+
+  it("a peer-spine mouth: unchanged — no quote is asked, and its local fallback quotes the ear's id in the ear's room", async () => {
+    const { mouth, calls } = fakeMouth();
+    mouth.quote = vi.fn();
+    const { bridge, sender } = senderWith(mouth);
+    open(sender);
+    await settled();
+    expect(calls.streams).toHaveLength(1);
+    expect(mouth.quote).not.toHaveBeenCalled();
+    expect(bridge.streams).toEqual([]);
+    calls.streams[0].opts.fallback();
+    expect(opened(bridge)).toEqual([[CHAT_ID, STEERED_ON_PRIMARY.id]]);
+  });
+
+  it('the mouth has no copy: UNQUOTED from the mouth, and the log says why', async () => {
+    const { ear, mouthBridge, logs, sender } = node({ mouthMessages: [] });
+    open(sender);
+    await settled();
+    expect(opened(mouthBridge)).toEqual([[SECONDARY_CHAT_ID, null]]);
+    expect(ear.streams).toEqual([]);
+    expect(logs.join('\n')).toMatch(/reply e\/chat-1: 'secondary' cannot find #2901 on its own copy \(no-match/);
+  });
+
+  it('a lookup that hangs: the placeholder opens UNQUOTED at WAIT, not later', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const { mouthBridge, logs, sender } = node();
+    mouthBridge.listMessagesRaw = () => new Promise(() => {});
+    open(sender);
+    await vi.advanceTimersByTimeAsync(WAIT - 1);
+    expect(mouthBridge.streams).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(opened(mouthBridge)).toEqual([[SECONDARY_CHAT_ID, null]]);
+    expect(logs.join('\n')).toMatch(/reply e\/chat-1: 'secondary' did not find #2901 within 1000ms — unquoted/);
+  });
+
+  it('one message answered by two beings: each room is listed once', async () => {
+    const { mouthBridge, earListed, mouthListed, sender } = node();
+    open(sender);
+    open(sender, { being: 'k' });
+    await settled();
+    expect(opened(mouthBridge)).toEqual([[SECONDARY_CHAT_ID, STEERED_ON_SECONDARY.id], [SECONDARY_CHAT_ID, STEERED_ON_SECONDARY.id]]);
+    expect(earListed).toEqual([CHAT_ID]);
+    expect(mouthListed).toEqual([SECONDARY_CHAT_ID]);
   });
 });
 

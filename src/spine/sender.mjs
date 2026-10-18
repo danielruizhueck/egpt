@@ -357,6 +357,11 @@ export function makeOutbound({ bridge, bridgeOf = null, peerMouth = null, onLog 
   };
 }
 
+// A local mouth's lookup of its own copy of the quoted message (open's quoteIn: two Beeper lists).
+// Past this the placeholder opens unquoted rather than late.
+const QUOTE_WAIT_MS = 1000;
+const QUOTE_MEMO_MAX = 200;
+
 // publicOf(being) / noticeAdmin({ being, chatId, text }) (2026-10-15): a PUBLIC being
 // (agents.<name>.public) takes the plain branch below, and its error lines go to noticeAdmin
 // (boot: the admin channel) instead of the chat.
@@ -364,6 +369,7 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
   if (!bridge) throw new Error('createSender: bridge is required');
   const textOf = (v) => (typeof v === 'string' ? v : v?.text ?? '');
   const outbound = makeOutbound({ bridge, bridgeOf, peerMouth, onLog });
+  const copies = new Map();   // one lookup per message and mouth room, shared by concurrent opens; misses are dropped
   return {
     // `status`: a liveness status message (src/spine/liveness.mjs) — opens on that line instead of THINKING.
     // `replyIn`: the room `replyTo` (an id, or a promise of one) lives in — a local mouth's route answer, or
@@ -454,19 +460,34 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
       // the local stream opens immediately below, exactly as it always has.
       const decided = peerRoute();
       // `replyIn` given: that room's id as-is, a local mouth's own copy (keyOf + quote, as `say`), else unquoted.
+      const what = status ? 'status' : 'reply';
       const quoteIn = async (via) => {
         const id = await replyTo;
         const into = via?.bridge ? via : null;
         if (id == null || (into?.bridge === replyIn?.bridge && into?.chatId === replyIn?.chatId)) return id ?? null;
         if (!into) return null;
-        let hit = null;
-        try { hit = await peerMouth.quote?.(into, await keyOf(id, 'status', replyIn)()); }
-        catch (e) { hit = { reason: 'threw', detail: e?.message ?? String(e) }; }
-        if (hit?.ok) return hit.msgId;
-        onLog(`status ${being}/${chatId}: '${into.connection}' cannot find #${id} on its own copy (${hit?.reason ?? 'no answer'}${hit?.detail ? `: ${hit.detail}` : ''}) — unquoted`);
-        return null;
+        const memo = `${into.connection} ${into.chatId} ${id} ${replyIn?.chatId ?? chatId}`;
+        let look = copies.get(memo);
+        if (!look) {
+          look = (async () => {
+            let hit = null;
+            try { hit = await peerMouth.quote?.(into, await keyOf(id, what, replyIn)()); }
+            catch (e) { hit = { reason: 'threw', detail: e?.message ?? String(e) }; }
+            if (hit?.ok) return hit.msgId;
+            copies.delete(memo);
+            onLog(`${what} ${being}/${chatId}: '${into.connection}' cannot find #${id} on its own copy (${hit?.reason ?? 'no answer'}${hit?.detail ? `: ${hit.detail}` : ''}) — unquoted`);
+            return null;
+          })();
+          if (copies.size >= QUOTE_MEMO_MAX) copies.delete(copies.keys().next().value);
+          copies.set(memo, look);
+        }
+        let timer;
+        const late = new Promise((done) => { timer = setTimeout(() => { onLog(`${what} ${being}/${chatId}: '${into.connection}' did not find #${id} within ${QUOTE_WAIT_MS}ms — unquoted`); done(null); }, QUOTE_WAIT_MS); });
+        try { return await Promise.race([look, late]); } finally { clearTimeout(timer); }
       };
-      const route = replyIn === undefined ? decided : Promise.resolve(decided).then(async (via) => { tag.replyTo = await quoteIn(via); return via; });
+      // No mouth wired and the id in hand: the placeholder opens now, as it always has.
+      const route = (replyIn === undefined || (decided == null && typeof replyTo?.then !== 'function')) ? decided
+        : Promise.resolve(decided).then(async (via) => { tag.replyTo = await quoteIn(via); return via; });
       // What the human has already read, in two parts: `tail` is the block the current
       // frame extends, `head` everything sealed behind a seam. See RETAINED_SEAM.
       let head = '';
