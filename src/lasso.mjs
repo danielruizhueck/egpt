@@ -90,14 +90,25 @@
 // deploy) and a trip is published to EGPT_HOME/state/lasso.json — so "why did egpt stop" is
 // answerable with `cat`, not a debugger. The hot path never does IO: the file is written on
 // the trip only, once.
+//
+// ═══ PER CHAT: THE SEND RATE (operator 2026-10-18: "loop guard has to count how many messages
+// are sent to beeper. a mere sustained rate of 5msg every 3 secs should be stopped.") ═══
+// The same MESSAGES, counted per chat once boot calls bindChats. SUSTAINED = ≥chatMessages in
+// each of the last two chatWindowMs windows, so one burst never trips. A trip PAUSES that chat
+// (onTrip → the loop guard's pause, which RESUME clears) instead of stopping the node; while
+// paused its new lines are DROPPED — answered as said, so no caller re-routes them through
+// another account. Edits and reactions are not counted, as above. Not counted, never held:
+// bypassLasso (the stop path) and systemLine (operator/system lines, e.g. the logging group).
 
-const DEFAULTS = { messages: 18, windowMs: 10_000, edits: 4_000 };
+const DEFAULTS = { messages: 18, windowMs: 10_000, edits: 4_000, chatMessages: 5, chatWindowMs: 3_000 };
 
 /**
  * @param {object} o
  * @param {number} [o.messages]   committed messages allowed per window (<= 0 disables the lasso entirely)
  * @param {number} [o.windowMs]   the sliding window, ms
  * @param {number} [o.edits]      edits allowed per window (<= 0 disables the edit counter only)
+ * @param {number} [o.chatMessages]  per-chat messages per window, sustained over two windows, that pause the chat (<= 0 off)
+ * @param {number} [o.chatWindowMs]  the per-chat window, ms
  * @param {() => number} [o.now]  clock seam (tests drive it — no real waiting)
  * @param {(m: string) => void} [o.onLog]
  * @param {(s: object) => void} [o.writeState]  best-effort publisher for state/lasso.json (async, fire-and-forget)
@@ -107,6 +118,8 @@ export function createLasso({
   messages = DEFAULTS.messages,
   windowMs = DEFAULTS.windowMs,
   edits = DEFAULTS.edits,
+  chatMessages = DEFAULTS.chatMessages,
+  chatWindowMs = DEFAULTS.chatWindowMs,
   now = Date.now,
   onLog = () => {},
   writeState = null,
@@ -116,6 +129,28 @@ export function createLasso({
   const msgs = [];      // ms timestamps of the committed MESSAGES still inside the window
   const eds = [];       // ms timestamps of the committed EDITS still inside the window
   let tripped = null;   // the trip record — set ONCE, and the node is on its way down
+  const perChat = new Map();   // chat key -> its message stamps inside the last two windows
+  let chats = null;            // bindChats: { keyOf, isPaused, onTrip }
+
+  // The per-chat verdict for one NEW message: true = it may leave; false = drop it (the chat is
+  // paused, or this send completed the sustained rate and paused it).
+  function admitChat(chat, opts, port) {
+    if (!chats || !(chatMessages > 0 && chatWindowMs > 0) || opts?.systemLine) return true;
+    const key = chats.keyOf(chat);
+    if (key == null) return true;
+    if (chats.isPaused(key)) { onLog(`dropped a send → ${chat} — the chat is paused`); return false; }
+    const t = now();
+    const w = (perChat.get(key) ?? []).filter((x) => t - x < 2 * chatWindowMs);
+    w.push(t);
+    const recent = w.filter((x) => t - x < chatWindowMs).length;
+    if (recent < chatMessages || w.length - recent < chatMessages) { perChat.set(key, w); return true; }
+    perChat.delete(key);
+    let name = null;
+    try { name = port.getChatName?.(chat) || null; } catch { /* the id names it */ }
+    onLog(`send-rate TRIPPED on ${chat}: ${w.length} messages in ${t - w[0]}ms — pausing the chat`);
+    try { chats.onTrip(key, { chat, name, count: w.length, spanMs: t - w[0] }); } catch (e) { onLog(`chat onTrip threw: ${e?.message ?? e}`); }
+    return false;
+  }
 
   // THE CEILING. true = it may leave. false = the node is stopping (this call tripped it, or
   // an earlier one did). Synchronous: nothing waits, so there is nothing to await.
@@ -194,19 +229,24 @@ export function createLasso({
   // its boot-time value. Everything the port has that is not a counted emit passes straight
   // through — react / deleteStatus / deleteOwn included, deliberately (see the header).
   function wrap(port) {
+    // A per-chat drop: answered as said (see the header), never as a failure.
+    const ok = (chat, opts) => admitChat(chat, opts, port);
+    const droppedStream = () => ({ ...deadStream(), delivered: true, lastError: null });
     const gated = {
       // bypassLasso: the STOP path. It must ALWAYS get out — see the module header.
       send: async (chat, text, opts = {}) =>
-        (opts?.bypassLasso || admit('message')) ? port.send(chat, text, opts) : (refuse('send', chat), null),
+        opts?.bypassLasso ? port.send(chat, text, opts)
+          : !ok(chat, opts) ? { dropped: true }
+          : admit('message') ? port.send(chat, text, opts) : (refuse('send', chat), null),
       postStatus: async (chat, text) =>
-        admit('message') ? port.postStatus(chat, text) : (refuse('postStatus', chat), null),
+        !ok(chat) ? null : admit('message') ? port.postStatus(chat, text) : (refuse('postStatus', chat), null),
       // THE MOUTH's verbatim post (beeper-port.postVerbatim, operator 2026-09-05): a PEER SPINE's
       // finished line, said on this account. It leaves this node's limb like any other message —
       // the ceiling is "any limb", and an unwrapped path here would be a hole straight through it
       // — so it is admitted on the same 'message' budget as send(). No bypassLasso: the stop path
       // is send()'s alone, and nothing arriving over the link is a stop.
       postVerbatim: port.postVerbatim && (async (chat, text) =>
-        admit('message') ? port.postVerbatim(chat, text) : (refuse('postVerbatim', chat), null)),
+        !ok(chat) ? { dropped: true } : admit('message') ? port.postVerbatim(chat, text) : (refuse('postVerbatim', chat), null)),
       // THE MOUTH's verbatim STREAM (beeper-port.startStreamVerbatim, operator 2026-09-05): the
       // peer's reply train, said on this account. Gated EXACTLY like startStream below and for the
       // same reason — ONE 'message' for the placeholder that is opened, then every frame that
@@ -215,11 +255,11 @@ export function createLasso({
       // Leaving it ungated would be a hole straight through a node-wide ceiling, reachable from
       // another process.
       startStreamVerbatim: port.startStreamVerbatim && ((chat, init) =>
-        admit('message') ? gateFrames(port.startStreamVerbatim(chat, init)) : (refuse('startStreamVerbatim', chat), deadStream())),
+        !ok(chat) ? droppedStream() : admit('message') ? gateFrames(port.startStreamVerbatim(chat, init)) : (refuse('startStreamVerbatim', chat), deadStream())),
       sendMedia: port.sendMedia && (async (chat, filePath, opts = {}) =>
-        admit('message') ? port.sendMedia(chat, filePath, opts) : (refuse('sendMedia', chat), false)),
+        !ok(chat, opts) ? true : admit('message') ? port.sendMedia(chat, filePath, opts) : (refuse('sendMedia', chat), false)),
       startStream: port.startStream && ((chat, init, opts = {}) =>
-        admit('message') ? gateFrames(port.startStream(chat, init, opts)) : (refuse('startStream', chat), deadStream())),
+        !ok(chat, opts) ? droppedStream() : admit('message') ? gateFrames(port.startStream(chat, init, opts)) : (refuse('startStream', chat), deadStream())),
       editStatus: port.editStatus && ((chat, msgId, text) =>
         admit('edit') ? port.editStatus(chat, msgId, text) : (refuse('editStatus', chat), null)),
       editOwn: port.editOwn && ((chat, msgId, text, opts = {}) =>
@@ -233,6 +273,9 @@ export function createLasso({
   return {
     wrap,
     gate,
+    // The per-chat pause owner (boot: the loop guard). keyOf(chat) → the chat's key, or null = not
+    // counted; isPaused(key); onTrip(key, { chat, name, count, spanMs }). Unbound ⇒ no per-chat count.
+    bindChats(b) { chats = b; },
     enabled: on,
     stats: () => ({ messages: msgs.length, edits: eds.length, tripped: tripped ? { ...tripped } : null }),
   };

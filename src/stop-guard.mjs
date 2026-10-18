@@ -67,6 +67,15 @@ import { EGPT_HOME } from './egpt-home.mjs';
 // is the one definition the outbound wrap, the inbound envelope and this gate all share).
 import { hasNodeSignature, stripNodeSignature, stripRenderedNodeSignature } from './node-signature.mjs';
 import { THINKING, QUEUED, LIVE_TICK_SUFFIX } from './spine/sender.mjs';
+import { shortChatId } from './bridges/chat-id.mjs';
+
+// A chat paused on EVERY surface — the lasso's send-rate trip (src/lasso.mjs) knows the chat id,
+// not the surface. Channels are `${surface}:${chatId}`; blocked() matches either key.
+export const anyChannel = (chatId) => `*:${shortChatId(chatId)}`;
+const anyOf = (channel) => anyChannel(String(channel).slice(String(channel).indexOf(':') + 1));
+
+// The ONE pause notice, said in the paused chat (spine guardCountNonHuman, boot's send-rate trip).
+export const pauseNotice = (why) => `⏸️ egpt paused this chat — ${why}.\nSay \`resume\` here to let it speak again, or \`resume all\` to clear every paused chat.`;
 
 // THE KILL SWITCH, as a file. Profile ROOT — beside config/ and state/, deliberately
 // visible — so `ls ~/.egpt` shows a stopped node at a glance and `rm ~/.egpt/STOP` is the
@@ -281,7 +290,7 @@ export function createStopGuard({ turns = 6, window = 2, repeats = 3, repeatWind
   const stoppedChannels = new Set();  // channels the loop guard auto-stopped
   const reasons = new Map();          // channel -> why the last auto-stop tripped (the notice says it)
 
-  const blocked = (channel) => stoppedChannels.has(channel);
+  const blocked = (channel) => stoppedChannels.has(channel) || stoppedChannels.has(anyOf(channel));
 
   // Resolve the effective limits for a channel: a per-conversation override
   // ({ turns?, window? } from conversations.yaml) wins over the node defaults.
@@ -350,7 +359,7 @@ export function createStopGuard({ turns = 6, window = 2, repeats = 3, repeatWind
     reasonOf(channel) { return reasons.get(channel) ?? 'a loop'; },
 
     stopChannel(channel) { if (channel != null) { stoppedChannels.add(channel); onLog(`STOP ${channel}`); } },
-    resumeChannel(channel) { stoppedChannels.delete(channel); counts.set(channel, []); reasons.delete(channel); onLog(`RESUME ${channel}`); },
+    resumeChannel(channel) { stoppedChannels.delete(channel); stoppedChannels.delete(anyOf(channel)); counts.set(channel, []); reasons.delete(channel); onLog(`RESUME ${channel}`); },
     resumeAll() { stoppedChannels.clear(); counts.clear(); reasons.clear(); onLog('RESUME ALL'); },
 
     // Apply a parsed control word in a channel context. RESUME only: STOP is the KILL

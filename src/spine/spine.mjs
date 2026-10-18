@@ -28,7 +28,7 @@ import { createLiveness } from './liveness.mjs';
 import { makeOutbound, elapsed } from './sender.mjs';
 import { isBrainFailureResult } from '../brain-errors.mjs';
 import { replyLine, contextSinceLastTurn, promptWithRecentContext, bodyForMessageId, promptWithQuotedMessage, RECENT_CONTEXT_MAX_CHARS } from '../transcript-log.mjs';
-import { isHumanTurn, turnKind, parseStopWord } from '../stop-guard.mjs';
+import { isHumanTurn, turnKind, parseStopWord, pauseNotice } from '../stop-guard.mjs';
 import { mentionHits, withoutAddress, isDeliberateSilence } from '../auto-mode.mjs';
 import { lifecycleExit } from './ingest.mjs';
 import { cleanForSpeech } from '../speech-clean.mjs';
@@ -300,7 +300,7 @@ export function createSpine({
       if (say) {
         try {
           await Promise.race([
-            say({ chatId: ev.chatId, text: `⏸️ egpt paused this chat — ${why}.\nSay \`resume\` here to let it speak again, or \`resume all\` to clear every paused chat.`, opts: { bypassLasso: true }, what: 'guard' }),
+            say({ chatId: ev.chatId, text: pauseNotice(why), opts: { bypassLasso: true }, what: 'guard' }),
             new Promise((r) => { const t = setTimeoutFn(r, 3000); t?.unref?.(); }),
           ]);
         } catch (e) { note(`guard: could not announce the pause in ${channel}: ${e?.message ?? e}`); }

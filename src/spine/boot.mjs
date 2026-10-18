@@ -45,7 +45,7 @@ import {
   CONV_YAML_PATH, readState as readConvState, writeState as writeConvState, slugDir, getContact, residentsOf, LOBBY_SLUG, fixedSlugFor,
   aliasMouthInfo, setAliasMouthChat,
 } from '../conversations-state.mjs';
-import { createStopGuard, STOP_FILE, stopFilePresent, writeStopFile } from '../stop-guard.mjs';
+import { createStopGuard, STOP_FILE, stopFilePresent, writeStopFile, anyChannel, pauseNotice } from '../stop-guard.mjs';
 import { createFloodBan } from '../flood-ban.mjs';
 import { createLasso } from '../lasso.mjs';
 import { CLEAN_EXIT_CODE } from '../daemon-runtime.mjs';
@@ -324,6 +324,7 @@ export function makePeerMouth({ peer, bridge, bridgeOf = null, owns = () => fals
   // A connection that reports no identity of its own can never be keyed against, and saying so
   // once is the difference between an operator finding out and an operator reading it per reply.
   const toldAboutIdentity = new Set();
+  const homeOf = new Map();   // the mouth's room id -> the chat route() was asked about
 
   // THE LOCAL TRANSLATION, whole. Returns the mouth's OWN room for this chat, or null — and null
   // always means "the connection holding the chat says this reply", which is what the caller then
@@ -485,6 +486,8 @@ export function makePeerMouth({ peer, bridge, bridgeOf = null, owns = () => fals
     // the mouth and when the mouth is elsewhere but has no room here; a temporary mark (the 🎧) must
     // tell those apart, because only the first may be placed from the holder (sender.mjs `react`).
     mouthIsElsewhere(chatId, being = null) { return !owns(chatId) && localMouth?.(being, chatId) != null; },
+    // The chat a LOCAL mouth room was routed from — the lasso counts and pauses the two as one.
+    homeChatOf(mouthChatId) { return homeOf.get(mouthChatId) ?? null; },
     // WHICH MOUTH SAYS THIS REPLY, and where. Three answers:
     //   null                       — nobody but the connection holding the chat; it says it.
     //   { bridge, chatId, … }      — a LOCAL connection on the other account, and ITS OWN room id.
@@ -495,7 +498,7 @@ export function makePeerMouth({ peer, bridge, bridgeOf = null, owns = () => fals
       // The connection this chat lives on, asked ONCE and read by every step below (header).
       const on = outbound(null, chatId).bridge;
       const local = await routeLocally(chatId, being, on);
-      if (local) return local;
+      if (local) { homeOf.set(local.chatId, chatId); return local; }
       if (!peer) return null;
       for (const account of peer.accounts) {
         let present = null;
@@ -1997,6 +2000,8 @@ export async function boot({
     messages: Number.isFinite(lassoCfg.messages) ? lassoCfg.messages : 18,
     windowMs: Number.isFinite(lassoCfg.window_ms) ? lassoCfg.window_ms : 10_000,
     edits: Number.isFinite(lassoCfg.edits) ? lassoCfg.edits : 4_000,
+    chatMessages: Number.isFinite(lassoCfg.chat_messages) ? lassoCfg.chat_messages : 5,
+    chatWindowMs: Number.isFinite(lassoCfg.chat_window_ms) ? lassoCfg.chat_window_ms : 3_000,
     onLog: (m) => log.line?.(`[lasso] ${m}`),
     writeState: (s) => { writeFile(join(EGPT_HOME, 'state', 'lasso.json'), `${JSON.stringify(s, null, 2)}\n`, 'utf8').catch(() => {}); },
     onTrip: (t) => { Promise.resolve(stopSwitch.pull({ reason: `lasso: ${t.reason}`, who: 'lasso', where: 'outbound' })).catch(() => {}); },
@@ -2914,7 +2919,7 @@ export async function boot({
     log.line?.(`[alert] ${text}`);
     const selfDm = selfChatId();
     if (!selfDm) return;
-    try { sayOnce({ chatId: selfDm, text, what: 'alert' }).catch((e) => log.line?.(`[alert] could not reach the Self chat: ${e?.message ?? e}`)); }
+    try { sayOnce({ chatId: selfDm, text, opts: { systemLine: true }, what: 'alert' }).catch((e) => log.line?.(`[alert] could not reach the Self chat: ${e?.message ?? e}`)); }
     catch (e) { log.line?.(`[alert] could not reach the Self chat: ${e?.message ?? e}`); }
   };
   // THE ROOM OUTBOX DRAIN (operator 2026-09-22). A sandboxed being cannot reach the operator's
@@ -2986,7 +2991,7 @@ export async function boot({
     if (r.reason === 'unset') { log.line?.(`[${tag}] ${configKey} is not set in config.yaml - the notice stays in this log`); return false; }
     if (r.reason === 'no-chat') { log.line?.(`[${tag}] ${configKey} ${JSON.stringify(r.to)} names no chat on this node - notice not sent`); return false; }
     if (r.reason === 'unresolvable') { log.line?.(`[${tag}] ${configKey} ${JSON.stringify(r.to)} could not be resolved - notice not sent: ${r.error}`); return false; }
-    return sayOnce({ being, chatId: r.chatId, text, what });
+    return sayOnce({ being, chatId: r.chatId, text, opts: { systemLine: true }, what });
   };
   const noticeToAdmin = (text, being) => noticeToChannel({ configKey: 'admin_channel', text, being, what: 'compaction', tag: 'compact' });
   // THE PER-COMMAND AUDIT SINK (operator 2026-10-08): config.log_to_group, resolved + posted by the
@@ -3096,7 +3101,7 @@ export async function boot({
     // resolver reads the default mouth, which is exactly what plain `bridge` was.
     // …and it is SAID through the one placement (sayOnce, above, 2026-09-16): in a chat the mouth is
     // in, `/status` is answered by the mouth, in its own room; in the Self-DM, by the ear.
-    send: (chatId, text) => (shellPort.owns(chatId) ? shellPort.send(chatId, text) : sayOnce({ chatId, text, what: 'command' })),
+    send: (chatId, text) => (shellPort.owns(chatId) ? shellPort.send(chatId, text) : sayOnce({ chatId, text, opts: { systemLine: true }, what: 'command' })),
     transcript: services.transcript,
     onLog: (m) => log.line?.(`[transcript] ${m}`),
   });
@@ -3468,6 +3473,20 @@ export async function boot({
   // `!= null` is the unsigned case (a person): fromOtherNode is false for those too, and they are
   // not our echo.
   const fromThisNode = (ev) => ev?.fromNode != null && !fromOtherNode(getConfig(), ev);
+  // THE SEND-RATE PAUSE (operator 2026-10-18; src/lasso.mjs bindChats): a chat whose Beeper sends
+  // hold ≥5 per 3s over two windows is paused HERE — the pause RESUME clears — said in the chat,
+  // and logged ONCE to log_to_group. A mouth room counts as its home chat; the shell is not Beeper.
+  lasso.bindChats({
+    keyOf: (chat) => (shellPort.owns(chat) ? null : shortChatId(peerMouth?.homeChatOf?.(chat) ?? chat)),
+    isPaused: (key) => guard.blocked(anyChannel(key)),
+    onTrip: (key, { chat, name, count, spanMs }) => {
+      const why = `${count} messages in ${(spanMs / 1000).toFixed(1)}s`;
+      guard.stopChannel(anyChannel(key));
+      const home = peerMouth?.homeChatOf?.(chat) ?? chat;
+      Promise.resolve(sayOnce({ chatId: home, text: pauseNotice(`send-rate guard: ${why}`), opts: { bypassLasso: true }, what: 'guard' })).catch((e) => log.line?.(`[guard] could not announce the pause in ${home}: ${e?.message ?? e}`));
+      Promise.resolve(logToGroup(`${getConfig()?.node_name ?? '?'} · send-rate guard paused ${name ?? home}: ${why}`)).catch(() => {});
+    },
+  });
 
   // PHASE 4 — room brain-member relay (design B: re-entry). Deliver a received room message to
   // each brain member (config.yaml members[]) whose mode admits it; each reply streams into the

@@ -2663,6 +2663,17 @@ export const CONFIG_SCHEMA = {
         limb's 400ms edit debounce, so one streamed reply is already several
         hundred (one per streamed token delta) and a room fan-out multiplies that.
         A runaway is unbounded by definition and crosses it in milliseconds anyway.
+      chat_messages
+        DEFAULT: 5 — PER CHAT (operator 2026-10-18: "a mere sustained rate of 5msg
+        every 3 secs should be stopped"): messages to ONE Beeper chat in each of
+        two consecutive chat_window_ms windows pause THAT chat — the loop guard's
+        pause, cleared by RESUME / RESUME ALL — instead of stopping the node. One
+        burst never trips it. While paused its new lines are dropped; one line goes
+        to log_to_group and the pause notice to the chat. System lines (command
+        replies, alerts, log_to_group/admin notices) are neither counted nor held.
+        0 or negative = off.
+      chat_window_ms
+        DEFAULT: 3000 — the per-chat window, in ms.
 
     18/10000ms (operator 2026-07-26) is NOT a loosening of the prior 20/5000ms: that allowed a
     sustained 4 messages/second, this allows 1.8/s — less than half — while the longer window
