@@ -2664,16 +2664,33 @@ export const CONFIG_SCHEMA = {
         hundred (one per streamed token delta) and a room fan-out multiplies that.
         A runaway is unbounded by definition and crosses it in milliseconds anyway.
       chat_messages
-        DEFAULT: 5 — PER CHAT (operator 2026-10-18: "a mere sustained rate of 5msg
-        every 3 secs should be stopped"): messages to ONE Beeper chat in each of
-        two consecutive chat_window_ms windows pause THAT chat — the loop guard's
-        pause, cleared by RESUME / RESUME ALL — instead of stopping the node. One
-        burst never trips it. While paused its new lines are dropped; one line goes
-        to log_to_group and the pause notice to the chat. System lines (command
-        replies, alerts, log_to_group/admin notices) are neither counted nor held.
-        0 or negative = off.
+        DEFAULT: 5 — PER CHAT, SUSTAINED (operator 2026-10-18: "a mere sustained rate
+        of 5msg every 3 secs should be stopped"): messages to ONE Beeper chat in each
+        of two consecutive chat_window_ms windows pause THAT chat — the loop guard's
+        pause, cleared by RESUME / RESUME ALL — instead of stopping the node. Every
+        chat_* rule pauses the same way: while paused its new lines are dropped; one
+        line naming the rule goes to log_to_group and the pause notice to the chat.
+        System lines (command replies, alerts, log_to_group/admin notices) are
+        neither counted nor held. 0 or negative = off (each chat_* count/window).
       chat_window_ms
-        DEFAULT: 3000 — the per-chat window, in ms.
+        DEFAULT: 3000 — the sustained rule's window, in ms.
+      chat_similar_count
+        DEFAULT: 5 — PER CHAT, SIMILAR ("five equal sends or more in 2s"; "just
+        changing a timestamp … should also trip it"): near-identical messages inside
+        chat_similar_window_ms. Near-identical = equal after folding case, spacing,
+        ids and every digit-bearing token, or word overlap ≥ chat_similar_ratio.
+        Text only: a ⏳ placeholder or a captionless media post is no line.
+      chat_similar_window_ms
+        DEFAULT: 2000.
+      chat_similar_ratio
+        DEFAULT: 0.85 — word-token overlap (src/text-similarity.mjs similarity).
+        0 or negative = the fold alone.
+      chat_burst_count
+        DEFAULT: 10 — PER CHAT, BURST ("even 12 in a second … it MUST" trip):
+        messages of any content inside chat_burst_window_ms. A requested burst
+        trips too — safety first.
+      chat_burst_window_ms
+        DEFAULT: 2000.
 
     18/10000ms (operator 2026-07-26) is NOT a loosening of the prior 20/5000ms: that allowed a
     sustained 4 messages/second, this allows 1.8/s — less than half — while the longer window
@@ -2692,6 +2709,17 @@ export const CONFIG_SCHEMA = {
     turns (ev.fromNode), so bot↔bot loops are ITS job and the lasso is the
     catastrophic backstop for a runaway that outruns even that — which is why this
     ceiling is set above ordinary traffic rather than at the incident's rate.
+  `,
+
+  stop_phrase: `
+    THE KILL PHRASE (src/stop-guard.mjs isStopPhrase, gated in src/spine/spine.mjs
+    classify). Operator 2026-10-18: "a keyword, say EGPT STOP if on allowed_users
+    should stop that node". A message that IS the phrase (whole text, case- and
+    spacing-insensitive), in ANY chat, from an allowed user's human turn (the STOP
+    safe word's own test: authorized + provenance) pulls the same kill switch:
+    EGPT_HOME/STOP + clean exit. Every node hearing the chat stops. Not on the
+    shell console. A non-allowed sender's phrase is logged and ignored.
+    DEFAULT: "EGPT STOP". "" = off.
   `,
 
   turn_timeout_ms: `

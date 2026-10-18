@@ -388,7 +388,7 @@ describe('(B) STOP warns in the chat it came from, and the post can never wedge 
 // --- the wiring, in isolation: a fake switch proves the two spine call sites -------------
 // `isSelfChat` defaults to TRUE here so each case below isolates the ONE gate it is about
 // (provenance, authorization, vocabulary); the Self gate itself is locked explicitly.
-function buildSpine({ guard = null, stopSwitch = null, wasSentByUs = () => false, mesh = null, isSelfChat = () => true } = {}) {
+function buildSpine({ guard = null, stopSwitch = null, wasSentByUs = () => false, mesh = null, isSelfChat = () => true, stopPhrase, log } = {}) {
   const bridge = { onMessage() {}, send() {}, stop() {}, wasSentByUs };
   const brain = { calls: [], async turn(b, ev) { this.calls.push({ b, ev }); return { text: 'x' }; } };
   const identity = { build: (msg) => ({ ...msg }) };
@@ -402,7 +402,7 @@ function buildSpine({ guard = null, stopSwitch = null, wasSentByUs = () => false
   const sender = { open() { return { activate() {}, update() {}, async finish() {}, fail() {} }; } };
   const spine = createSpine({
     bridge, brain, identity, router, gating, sender, transcript, heartbeats,
-    mesh, guard, stopSwitch, isSelfChat, clock: { now: () => 1000 },
+    mesh, guard, stopSwitch, isSelfChat, stopPhrase, log, clock: { now: () => 1000 },
   });
   return { spine, heartbeats, brain, transcript };
 }
@@ -539,6 +539,85 @@ describe('(C) provenance gates the kill switch: only a human turn may pull it', 
     const { spine } = buildSpine({ guard: createStopGuard(), stopSwitch: sw });
     await spine.handleInbound(stopMsg({ backlog: true }));
     expect(sw.pulls).toHaveLength(0);
+  });
+});
+
+// === (F) THE KILL PHRASE (operator 2026-10-18: "although a keyword, say EGPT STOP if on
+//     allowed_users should stop that node"). config stop_phrase (default "EGPT STOP"), the WHOLE
+//     message, in ANY chat — the same switch, the same identity test as the safe word. =========
+describe('(F) the kill phrase: "EGPT STOP" from an allowed user, in any chat, stops the node', () => {
+  it('in a GROUP chat from an allowed user: the STOP file is written, warned there, clean exit', async () => {
+    const { app, spy, exits } = await bootNode();
+    await spy.onIncoming('  egpt   Stop ', { ...BEEPER_FROM, chatName: 'a group' });
+    expect(existsSync(STOP_PATH)).toBe(true);
+    const body = await fs.readFile(STOP_PATH, 'utf8');
+    expect(body).toContain('reason: stop phrase');
+    expect(body).toContain('An <u-1>');
+    expect(body).toContain('!room:beeper.com');
+    expect(exits).toEqual([0]);
+    expect(spy.sent.filter((s) => s.chatId === '!room:beeper.com' && s.text.includes('egpt is stopping'))).toHaveLength(1);
+    app.stop();
+  });
+
+  it('from a sender NOT in allowed_users: ignored, and logged', async () => {
+    const { app, spy, exits, logs } = await bootNode();
+    await spy.onIncoming('EGPT STOP', { ...BEEPER_FROM, userId: 'stranger', senderName: 'Mallory', authorized: false, msgKey: 'm9' });
+    expect(existsSync(STOP_PATH)).toBe(false);
+    expect(exits).toEqual([]);
+    expect(logs.join('\n')).toMatch(/stop phrase from Mallory .* ignored/);
+    app.stop();
+  });
+
+  it('only the WHOLE message is the phrase', async () => {
+    const { app, spy, exits } = await bootNode();
+    await spy.onIncoming('EGPT STOP now', { ...BEEPER_FROM });
+    await spy.onIncoming('please egpt stop', { ...BEEPER_FROM, msgKey: 'm2' });
+    expect(existsSync(STOP_PATH)).toBe(false);
+    expect(exits).toEqual([]);
+    app.stop();
+  });
+
+  it('config stop_phrase replaces the default; "" turns the phrase off', async () => {
+    let { app, spy, exits } = await bootNode({ config: { ...CONFIG, stop_phrase: 'Halt kg' } });
+    await spy.onIncoming('EGPT STOP', { ...BEEPER_FROM });
+    expect(existsSync(STOP_PATH)).toBe(false);
+    await spy.onIncoming('halt KG', { ...BEEPER_FROM, msgKey: 'm2' });
+    expect(existsSync(STOP_PATH)).toBe(true);
+    expect(exits).toEqual([0]);
+    app.stop();
+    await fs.rm(STOP_PATH, { force: true });
+    ({ app, spy, exits } = await bootNode({ config: { ...CONFIG, stop_phrase: '' } }));
+    await spy.onIncoming('EGPT STOP', { ...BEEPER_FROM });
+    expect(existsSync(STOP_PATH)).toBe(false);
+    expect(exits).toEqual([]);
+    app.stop();
+  });
+
+  it('the SHELL console does not pull it (no allowed_users there)', async () => {
+    const { app, exits } = await bootNode();
+    await app.spine.handleInbound(shellMsg('EGPT STOP'));
+    expect(existsSync(STOP_PATH)).toBe(false);
+    expect(exits).toEqual([]);
+    app.stop();
+  });
+
+  it('provenance: a peer node\'s line, our own echo, a brain member and a backlog replay never pull it', async () => {
+    const msg = (over = {}) => ({ surface: 'whatsapp', chatId: 'g', chatName: 'group', senderName: 'An', isSender: true, authorized: true, msgId: 'm', body: 'EGPT STOP', kind: 'text', raw: {}, ...over });
+    for (const [what, over, opts] of [
+      ['peer node', { fromNode: 'do' }, {}],
+      ['our echo', {}, { wasSentByUs: () => true }],
+      ['brain member', { fromMember: { id: 'chatgpt', kind: 'brain' } }, {}],
+      ['backlog', { backlog: true }, {}],
+    ]) {
+      const sw = fakeSwitch();
+      const { spine } = buildSpine({ guard: createStopGuard(), stopSwitch: sw, isSelfChat: () => false, ...opts });
+      await spine.handleInbound(msg(over));
+      expect(sw.pulls, what).toHaveLength(0);
+    }
+    const sw = fakeSwitch();                 // the positive lock, outside Self
+    const { spine } = buildSpine({ guard: createStopGuard(), stopSwitch: sw, isSelfChat: () => false });
+    await spine.handleInbound(msg());
+    expect(sw.pulls).toMatchObject([{ chatId: 'g', reason: 'stop phrase "EGPT STOP"' }]);
   });
 });
 

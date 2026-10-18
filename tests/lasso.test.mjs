@@ -484,7 +484,8 @@ describe('boot() — an over-ceiling emit pulls the SAME kill switch the safe wo
   it('ships 18 messages / 10000ms and 4000 edits when the config carries no lasso: block at all', async () => {
     const { app } = await bootNode({});   // {} → boot.mjs's OWN fallback literals, not a test override
     try {
-      const out = await Promise.all(Array.from({ length: 19 }, (_, i) => app.bridge.send('!room:beeper.com', `x${i}`)));
+      // one chat each: 19 to ONE chat would trip that chat's own rules (similar / burst) first
+      const out = await Promise.all(Array.from({ length: 19 }, (_, i) => app.bridge.send(`!room${i}:beeper.com`, `x${i}`)));
       expect(out.filter((r) => r != null)).toHaveLength(18);   // the 19th is refused
       const state = await waitForLassoState();
       expect(state.limit).toMatchObject({ messages: 18, edits: 4000, window_ms: 10000 });

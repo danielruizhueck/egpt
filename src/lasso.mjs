@@ -93,14 +93,34 @@
 //
 // ═══ PER CHAT: THE SEND RATE (operator 2026-10-18: "loop guard has to count how many messages
 // are sent to beeper. a mere sustained rate of 5msg every 3 secs should be stopped.") ═══
-// The same MESSAGES, counted per chat once boot calls bindChats. SUSTAINED = ≥chatMessages in
-// each of the last two chatWindowMs windows, so one burst never trips. A trip PAUSES that chat
-// (onTrip → the loop guard's pause, which RESUME clears) instead of stopping the node; while
-// paused its new lines are DROPPED — answered as said, so no caller re-routes them through
-// another account. Edits and reactions are not counted, as above. Not counted, never held:
-// bypassLasso (the stop path) and systemLine (operator/system lines, e.g. the logging group).
+// The same MESSAGES, counted per chat once boot calls bindChats. THREE RULES, each off at <= 0
+// (operator, later that day: "one quick burst, even 12 in a second … it MUST" trip; "five equal
+// sends or more in 2s"; "just changing a timestamp … should also trip it"):
+//   similar   — ≥chatSimilarCount near-identical lines inside chatSimilarWindowMs (equal after
+//               foldLine, or text-similarity's overlap ≥ chatSimilarRatio)
+//   burst     — ≥chatBurstCount messages of any content inside chatBurstWindowMs
+//   sustained — ≥chatMessages in each of the last two chatWindowMs windows
+// A trip PAUSES that chat (onTrip → the loop guard's pause, which RESUME clears) instead of
+// stopping the node; while paused its new lines are DROPPED — answered as said, so no caller
+// re-routes them through another account. Edits and reactions are not counted, as above. Not
+// counted, never held: bypassLasso (the stop path) and systemLine (operator/system lines).
+import { normalizeTokens, similarity } from './text-similarity.mjs';
 
-const DEFAULTS = { messages: 18, windowMs: 10_000, edits: 4_000, chatMessages: 5, chatWindowMs: 3_000 };
+const DEFAULTS = {
+  messages: 18, windowMs: 10_000, edits: 4_000,
+  chatMessages: 5, chatWindowMs: 3_000,
+  chatSimilarCount: 5, chatSimilarWindowMs: 2_000, chatSimilarRatio: 0.85,
+  chatBurstCount: 10, chatBurstWindowMs: 2_000,
+};
+
+// Near-identical, folded: case, whitespace, Matrix ids, and every token carrying a digit
+// (counters, timestamps, ids) — a loop that only bumps a timestamp is still one line.
+const foldLine = (text) => String(text ?? '').toLowerCase()
+  .replace(/[!$@][\w-]+:[\w.-]+/g, '#')
+  .replace(/[\p{L}\p{N}_-]+/gu, (w) => (/\p{N}/u.test(w) ? '#' : w))
+  .replace(/#(?:[\s:.,/]*#)+/g, '#')
+  .replace(/\s+/g, ' ')
+  .trim();
 
 /**
  * @param {object} o
@@ -109,6 +129,11 @@ const DEFAULTS = { messages: 18, windowMs: 10_000, edits: 4_000, chatMessages: 5
  * @param {number} [o.edits]      edits allowed per window (<= 0 disables the edit counter only)
  * @param {number} [o.chatMessages]  per-chat messages per window, sustained over two windows, that pause the chat (<= 0 off)
  * @param {number} [o.chatWindowMs]  the per-chat window, ms
+ * @param {number} [o.chatSimilarCount]     near-identical messages per chatSimilarWindowMs that pause the chat (<= 0 off)
+ * @param {number} [o.chatSimilarWindowMs]
+ * @param {number} [o.chatSimilarRatio]     token overlap that counts as near-identical (<= 0: the fold alone)
+ * @param {number} [o.chatBurstCount]       messages of any content per chatBurstWindowMs that pause the chat (<= 0 off)
+ * @param {number} [o.chatBurstWindowMs]
  * @param {() => number} [o.now]  clock seam (tests drive it — no real waiting)
  * @param {(m: string) => void} [o.onLog]
  * @param {(s: object) => void} [o.writeState]  best-effort publisher for state/lasso.json (async, fire-and-forget)
@@ -120,6 +145,11 @@ export function createLasso({
   edits = DEFAULTS.edits,
   chatMessages = DEFAULTS.chatMessages,
   chatWindowMs = DEFAULTS.chatWindowMs,
+  chatSimilarCount = DEFAULTS.chatSimilarCount,
+  chatSimilarWindowMs = DEFAULTS.chatSimilarWindowMs,
+  chatSimilarRatio = DEFAULTS.chatSimilarRatio,
+  chatBurstCount = DEFAULTS.chatBurstCount,
+  chatBurstWindowMs = DEFAULTS.chatBurstWindowMs,
   now = Date.now,
   onLog = () => {},
   writeState = null,
@@ -129,26 +159,56 @@ export function createLasso({
   const msgs = [];      // ms timestamps of the committed MESSAGES still inside the window
   const eds = [];       // ms timestamps of the committed EDITS still inside the window
   let tripped = null;   // the trip record — set ONCE, and the node is on its way down
-  const perChat = new Map();   // chat key -> its message stamps inside the last two windows
-  let chats = null;            // bindChats: { keyOf, isPaused, onTrip }
+  const perChat = new Map();   // chat key -> [{ t, fold, tokens }] inside the longest rule window
+  let chats = null;            // bindChats: { keyOf, lineOf?, isPaused, onTrip }
+  const live = (n, ms) => n > 0 && ms > 0;
+  const similarOn = live(chatSimilarCount, chatSimilarWindowMs);
+  const burstOn = live(chatBurstCount, chatBurstWindowMs);
+  const sustainedOn = live(chatMessages, chatWindowMs);
+  const keepMs = Math.max(similarOn ? chatSimilarWindowMs : 0, burstOn ? chatBurstWindowMs : 0, sustainedOn ? 2 * chatWindowMs : 0);
+  const near = (a, b) => a.fold === b.fold || (chatSimilarRatio > 0 && similarity(a.tokens, b.tokens) >= chatSimilarRatio);
+
+  // The rule this message completes, as [rule, the messages that make it], or null.
+  function chatRule(w, me) {
+    const within = (ms) => w.filter((e) => me.t - e.t < ms);
+    if (similarOn && me.fold) {
+      const same = within(chatSimilarWindowMs).filter((e) => e.fold && near(e, me));
+      if (same.length >= chatSimilarCount) return ['similar', same];
+    }
+    if (burstOn) {
+      const all = within(chatBurstWindowMs);
+      if (all.length >= chatBurstCount) return ['burst', all];
+    }
+    if (sustainedOn) {
+      const two = within(2 * chatWindowMs);
+      const recent = two.filter((e) => me.t - e.t < chatWindowMs).length;
+      if (recent >= chatMessages && two.length - recent >= chatMessages) return ['sustained', two];
+    }
+    return null;
+  }
 
   // The per-chat verdict for one NEW message: true = it may leave; false = drop it (the chat is
-  // paused, or this send completed the sustained rate and paused it).
-  function admitChat(chat, opts, port) {
-    if (!chats || !(chatMessages > 0 && chatWindowMs > 0) || opts?.systemLine) return true;
+  // paused, or this send completed a rule and paused it).
+  function admitChat(chat, text, opts, port) {
+    if (!chats || !(keepMs > 0) || opts?.systemLine) return true;
     const key = chats.keyOf(chat);
     if (key == null) return true;
     if (chats.isPaused(key)) { onLog(`dropped a send → ${chat} — the chat is paused`); return false; }
     const t = now();
-    const w = (perChat.get(key) ?? []).filter((x) => t - x < 2 * chatWindowMs);
-    w.push(t);
-    const recent = w.filter((x) => t - x < chatWindowMs).length;
-    if (recent < chatMessages || w.length - recent < chatMessages) { perChat.set(key, w); return true; }
+    const fold = foldLine(chats.lineOf ? chats.lineOf(text) : text);
+    const me = { t, fold, tokens: similarOn && chatSimilarRatio > 0 ? normalizeTokens(fold) : null };
+    const w = (perChat.get(key) ?? []).filter((e) => t - e.t < keepMs);
+    w.push(me);
+    const hit = chatRule(w, me);
+    if (!hit) { perChat.set(key, w); return true; }
     perChat.delete(key);
+    const [rule, run] = hit;
+    const spanMs = t - run[0].t;
+    const why = `${rule}: ${run.length} ${rule === 'similar' ? 'near-identical ' : ''}messages in ${(spanMs / 1000).toFixed(1)}s`;
     let name = null;
     try { name = port.getChatName?.(chat) || null; } catch { /* the id names it */ }
-    onLog(`send-rate TRIPPED on ${chat}: ${w.length} messages in ${t - w[0]}ms — pausing the chat`);
-    try { chats.onTrip(key, { chat, name, count: w.length, spanMs: t - w[0] }); } catch (e) { onLog(`chat onTrip threw: ${e?.message ?? e}`); }
+    onLog(`send-rate TRIPPED on ${chat} — ${why} — pausing the chat`);
+    try { chats.onTrip(key, { chat, name, rule, count: run.length, spanMs, why }); } catch (e) { onLog(`chat onTrip threw: ${e?.message ?? e}`); }
     return false;
   }
 
@@ -230,23 +290,23 @@ export function createLasso({
   // through — react / deleteStatus / deleteOwn included, deliberately (see the header).
   function wrap(port) {
     // A per-chat drop: answered as said (see the header), never as a failure.
-    const ok = (chat, opts) => admitChat(chat, opts, port);
+    const ok = (chat, text, opts) => admitChat(chat, text, opts, port);
     const droppedStream = () => ({ ...deadStream(), delivered: true, lastError: null });
     const gated = {
       // bypassLasso: the STOP path. It must ALWAYS get out — see the module header.
       send: async (chat, text, opts = {}) =>
         opts?.bypassLasso ? port.send(chat, text, opts)
-          : !ok(chat, opts) ? { dropped: true }
+          : !ok(chat, text, opts) ? { dropped: true }
           : admit('message') ? port.send(chat, text, opts) : (refuse('send', chat), null),
       postStatus: async (chat, text) =>
-        !ok(chat) ? null : admit('message') ? port.postStatus(chat, text) : (refuse('postStatus', chat), null),
+        !ok(chat, text) ? null : admit('message') ? port.postStatus(chat, text) : (refuse('postStatus', chat), null),
       // THE MOUTH's verbatim post (beeper-port.postVerbatim, operator 2026-09-05): a PEER SPINE's
       // finished line, said on this account. It leaves this node's limb like any other message —
       // the ceiling is "any limb", and an unwrapped path here would be a hole straight through it
       // — so it is admitted on the same 'message' budget as send(). No bypassLasso: the stop path
       // is send()'s alone, and nothing arriving over the link is a stop.
       postVerbatim: port.postVerbatim && (async (chat, text) =>
-        !ok(chat) ? { dropped: true } : admit('message') ? port.postVerbatim(chat, text) : (refuse('postVerbatim', chat), null)),
+        !ok(chat, text) ? { dropped: true } : admit('message') ? port.postVerbatim(chat, text) : (refuse('postVerbatim', chat), null)),
       // THE MOUTH's verbatim STREAM (beeper-port.startStreamVerbatim, operator 2026-09-05): the
       // peer's reply train, said on this account. Gated EXACTLY like startStream below and for the
       // same reason — ONE 'message' for the placeholder that is opened, then every frame that
@@ -255,11 +315,11 @@ export function createLasso({
       // Leaving it ungated would be a hole straight through a node-wide ceiling, reachable from
       // another process.
       startStreamVerbatim: port.startStreamVerbatim && ((chat, init) =>
-        !ok(chat) ? droppedStream() : admit('message') ? gateFrames(port.startStreamVerbatim(chat, init)) : (refuse('startStreamVerbatim', chat), deadStream())),
+        !ok(chat, init) ? droppedStream() : admit('message') ? gateFrames(port.startStreamVerbatim(chat, init)) : (refuse('startStreamVerbatim', chat), deadStream())),
       sendMedia: port.sendMedia && (async (chat, filePath, opts = {}) =>
-        !ok(chat, opts) ? true : admit('message') ? port.sendMedia(chat, filePath, opts) : (refuse('sendMedia', chat), false)),
+        !ok(chat, opts?.caption, opts) ? true : admit('message') ? port.sendMedia(chat, filePath, opts) : (refuse('sendMedia', chat), false)),
       startStream: port.startStream && ((chat, init, opts = {}) =>
-        !ok(chat, opts) ? droppedStream() : admit('message') ? gateFrames(port.startStream(chat, init, opts)) : (refuse('startStream', chat), deadStream())),
+        !ok(chat, init, opts) ? droppedStream() : admit('message') ? gateFrames(port.startStream(chat, init, opts)) : (refuse('startStream', chat), deadStream())),
       editStatus: port.editStatus && ((chat, msgId, text) =>
         admit('edit') ? port.editStatus(chat, msgId, text) : (refuse('editStatus', chat), null)),
       editOwn: port.editOwn && ((chat, msgId, text, opts = {}) =>
@@ -274,7 +334,8 @@ export function createLasso({
     wrap,
     gate,
     // The per-chat pause owner (boot: the loop guard). keyOf(chat) → the chat's key, or null = not
-    // counted; isPaused(key); onTrip(key, { chat, name, count, spanMs }). Unbound ⇒ no per-chat count.
+    // counted; lineOf(text) → what was said (boot: normalizeLine — a ⏳ placeholder is ''); isPaused(key);
+    // onTrip(key, { chat, name, rule, count, spanMs, why }). Unbound ⇒ no per-chat count.
     bindChats(b) { chats = b; },
     enabled: on,
     stats: () => ({ messages: msgs.length, edits: eds.length, tripped: tripped ? { ...tripped } : null }),

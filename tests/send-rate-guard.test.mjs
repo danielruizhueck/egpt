@@ -8,6 +8,11 @@
 // account; the turn counter (stop-guard noteBeing) never saw those as turns. This counts what
 // actually LEAVES for Beeper, per chat. SUSTAINED = ≥5 in each of two consecutive 3 s windows.
 // A trip pauses THAT chat in the loop guard (the pause RESUME clears) and drops its later sends.
+//
+// Operator 2026-10-18, later: "one quick burst, even 12 in a second, doesn't trip it" — "on the
+// contrary, it MUST." / "five equal sends or more in 2s" / "it might be going on a crazy loop just
+// changing a timestamp, so that should also trip it". So two more rules: BURST (≥10 in 2 s, any
+// content) and SIMILAR (≥5 near-identical in 2 s).
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 const _PRIVATE_HOME = vi.hoisted(() => {
   const tmp = process.env.TEMP || process.env.TMP || process.env.TMPDIR || '/tmp';
@@ -18,11 +23,14 @@ const _PRIVATE_HOME = vi.hoisted(() => {
 import { promises as fs } from 'node:fs';
 import { dirname } from 'node:path';
 import { createLasso } from '../src/lasso.mjs';
-import { createStopGuard, anyChannel } from '../src/stop-guard.mjs';
+import { createStopGuard, anyChannel, normalizeLine } from '../src/stop-guard.mjs';
 import { createSpine } from '../src/spine/spine.mjs';
 import { createIdentity } from '../src/spine/identity.mjs';
 
 const flush = () => new Promise((r) => setImmediate(r));
+
+// Distinct content per n: letters only, so the digit fold never makes two of them equal.
+const word = (n) => { let s = ''; do { s = String.fromCharCode(97 + (n % 26)) + s; n = Math.floor(n / 26); } while (n > 0); return s; };
 
 function fakeClock(start = 1_000_000) {
   let t = start;
@@ -54,22 +62,23 @@ function fakePort(clock) {
 }
 
 // The lasso bound to a REAL loop guard, the way boot binds it.
-function rig({ keyOf = (c) => c } = {}) {
+function rig({ keyOf = (c) => c, limits = {} } = {}) {
   const clock = fakeClock();
   const guard = createStopGuard({ now: clock.now });
   const trips = [];
   const nodeTrips = [];
   const port = fakePort(clock);
-  const lasso = createLasso({ now: clock.now, onTrip: (t) => nodeTrips.push(t) });
+  const lasso = createLasso({ now: clock.now, onTrip: (t) => nodeTrips.push(t), ...limits });
   lasso.bindChats({
     keyOf,
+    lineOf: normalizeLine,
     isPaused: (key) => guard.blocked(anyChannel(key)),
     onTrip: (key, info) => { trips.push({ key, ...info }); guard.stopChannel(anyChannel(key)); },
   });
   const bridge = lasso.wrap(port);
-  const sends = (chat, n, at, step = 100, opts = {}) => Promise.all(Array.from({ length: n }, (_, i) => {
+  const sends = (chat, n, at, step = 100, opts = {}, text = (ms) => `line ${word(ms)}`) => Promise.all(Array.from({ length: n }, (_, i) => {
     clock.set(at + i * step);
-    return bridge.send(chat, `m ${at + i * step}`, opts);
+    return bridge.send(chat, text(at + i * step, i), opts);
   }));
   return { clock, guard, trips, nodeTrips, port, bridge, sends };
 }
@@ -83,7 +92,7 @@ describe('send-rate guard — the lasso counts each chat\'s sends', () => {
     expect(second.slice(0, 4).every((r) => r?.ok)).toBe(true);
     expect(second[4]).toMatchObject({ dropped: true });   // the send that completes the rate is not sent
     expect(sentTo(port, '!flood')).toHaveLength(9);
-    expect(trips).toEqual([{ key: '!flood', chat: '!flood', name: 'Flood Room', count: 10, spanMs: 3400 }]);
+    expect(trips).toEqual([{ key: '!flood', chat: '!flood', name: 'Flood Room', rule: 'sustained', count: 10, spanMs: 3400, why: 'sustained: 10 messages in 3.4s' }]);
     expect(guard.blocked(anyChannel('!flood'))).toBe(true);
     expect(guard.blocked('whatsapp:!flood')).toBe(true);  // the prompt chokepoint's own key sees it
     expect(nodeTrips).toEqual([]);                        // the node is NOT stopped
@@ -111,12 +120,92 @@ describe('send-rate guard — the lasso counts each chat\'s sends', () => {
     expect(trips).toEqual([]);
   });
 
-  it('one burst is not a sustained rate: 12 in one second, then quiet, never trips', async () => {
+  // The 6ad1494 lock was "one burst never trips"; the operator reversed it the same day.
+  it('BURST: 12 different messages in one second trip at the 10th — any content', async () => {
+    const { trips, port, sends, nodeTrips } = rig();
+    const out = await sends('!burst', 12, 0, 80);
+    expect(out.slice(0, 9).every((r) => r?.ok)).toBe(true);
+    expect(out[9]).toMatchObject({ dropped: true });
+    expect(sentTo(port, '!burst')).toHaveLength(9);
+    expect(trips).toMatchObject([{ key: '!burst', rule: 'burst', count: 10, spanMs: 720, why: 'burst: 10 messages in 0.7s' }]);
+    expect(nodeTrips).toEqual([]);
+  });
+
+  it('SIMILAR: 5 messages differing only in a timestamp within 2 s trip at the 5th', async () => {
     const { trips, port, sends } = rig();
-    await sends('!burst', 12, 0, 80);
-    await sends('!burst', 4, 4000, 200);
-    expect(sentTo(port, '!burst')).toHaveLength(16);
+    const out = await sends('!tick', 5, 0, 100, {}, (ms, i) => `Heartbeat OK at 2026-10-18T12:30:0${i}.${ms}Z (run #${i})`);
+    expect(out.slice(0, 4).every((r) => r?.ok)).toBe(true);
+    expect(out[4]).toMatchObject({ dropped: true });
+    expect(sentTo(port, '!tick')).toHaveLength(4);
+    expect(trips).toMatchObject([{ key: '!tick', rule: 'similar', count: 5, spanMs: 400, why: 'similar: 5 near-identical messages in 0.4s' }]);
+  });
+
+  it('SIMILAR: above chat_similar_ratio counts too — one word changing in a long line', async () => {
+    const { trips, sends } = rig();
+    const names = ['alfa', 'bravo', 'charlie', 'delta', 'echo'];
+    await sends('!near', 5, 0, 300, {}, (ms, i) => `the deploy on node kg is still waiting for the lock held by ${names[i]}`);
+    expect(trips).toMatchObject([{ rule: 'similar', count: 5 }]);
+  });
+
+  it('5 DIFFERENT messages in 2 s do not trip similar — but they count toward the burst', async () => {
+    const { trips, sends } = rig();
+    await sends('!chat', 5, 0, 100);
     expect(trips).toEqual([]);
+    await sends('!chat', 5, 500, 100);       // the 10th inside 2 s
+    expect(trips).toMatchObject([{ rule: 'burst', count: 10 }]);
+  });
+
+  it('status placeholders are not a repeated line: six ⏳ streams in a second do not trip similar', async () => {
+    const { trips, bridge, clock } = rig();
+    for (let i = 0; i < 6; i++) { clock.set(i * 150); bridge.startStream('!room', i ? `⏳ Queued (${i} ahead)…` : '⏳ Thinking…'); }
+    expect(trips).toEqual([]);
+  });
+
+  it('a media caption is its text; captionless media counts only toward burst/sustained', async () => {
+    let r = rig();
+    for (let i = 0; i < 5; i++) { r.clock.set(i * 100); await r.bridge.sendMedia('!m', `/tmp/shot-${i}.png`, { caption: `screenshot ${i}` }); }
+    expect(r.trips).toMatchObject([{ rule: 'similar', count: 5 }]);
+    r = rig();
+    for (let i = 0; i < 5; i++) { r.clock.set(i * 100); await r.bridge.sendMedia('!m', `/tmp/shot-${i}.png`); }
+    expect(r.trips).toEqual([]);
+  });
+
+  it('every rule reads its own limits, and <= 0 turns each one off', async () => {
+    const same = (ms, i) => `same line ${i}`;
+    // all three off: 12 identical in a second is let through
+    let r = rig({ limits: { chatSimilarCount: 0, chatBurstCount: 0, chatMessages: 0 } });
+    await r.sends('!a', 12, 0, 80, {}, same);
+    expect(sentTo(r.port, '!a')).toHaveLength(12);
+    expect(r.trips).toEqual([]);
+    // similar off: identical lines now trip only the burst
+    r = rig({ limits: { chatSimilarCount: 0 } });
+    await r.sends('!a', 12, 0, 80, {}, same);
+    expect(r.trips).toMatchObject([{ rule: 'burst', count: 10 }]);
+    // burst off: 12 different in a second pass
+    r = rig({ limits: { chatBurstCount: -1 } });
+    await r.sends('!a', 12, 0, 80);
+    expect(r.trips).toEqual([]);
+    // a window <= 0 is off too
+    r = rig({ limits: { chatBurstWindowMs: 0, chatSimilarWindowMs: 0 } });
+    await r.sends('!a', 12, 0, 80, {}, same);
+    expect(r.trips).toEqual([]);
+    // custom count + window
+    r = rig({ limits: { chatSimilarCount: 3, chatSimilarWindowMs: 1000 } });
+    await r.sends('!a', 3, 0, 600, {}, same);            // 1.2 s end to end: outside the 1 s window
+    expect(r.trips).toEqual([]);
+    r = rig({ limits: { chatSimilarCount: 3, chatSimilarWindowMs: 1000 } });
+    await r.sends('!a', 3, 0, 300, {}, same);
+    expect(r.trips).toMatchObject([{ rule: 'similar', count: 3 }]);
+    r = rig({ limits: { chatBurstCount: 4, chatBurstWindowMs: 500 } });
+    await r.sends('!a', 4, 0, 100);
+    expect(r.trips).toMatchObject([{ rule: 'burst', count: 4 }]);
+    // ratio <= 0: only a line equal after the fold is similar, not a merely close one
+    r = rig({ limits: { chatSimilarRatio: 0 } });
+    const names = ['alfa', 'bravo', 'charlie', 'delta', 'echo'];
+    await r.sends('!a', 5, 0, 300, {}, (ms, i) => `the deploy on node kg is still waiting for the lock held by ${names[i]}`);
+    expect(r.trips).toEqual([]);
+    await r.sends('!b', 5, 0, 300, {}, same);
+    expect(r.trips).toMatchObject([{ key: '!b', rule: 'similar' }]);
   });
 
   it('streaming edits, liveness pulses, status edits and reactions are not messages', async () => {
@@ -173,7 +262,7 @@ describe('send-rate guard — the lasso counts each chat\'s sends', () => {
     const { trips, port, bridge, clock } = rig({ keyOf: (c) => homeOf[c] ?? c });
     for (let i = 0; i < 10; i++) {
       clock.set((i < 5 ? 0 : 3000) + (i % 5) * 100);
-      await bridge.send(i % 2 ? '!mouth-room' : '!home', `m ${i}`);
+      await bridge.send(i % 2 ? '!mouth-room' : '!home', `m ${word(i)}`);
     }
     expect(trips).toMatchObject([{ key: '!home', chat: '!mouth-room', count: 10 }]);
     expect(await bridge.send('!home', 'x')).toMatchObject({ dropped: true });   // the fallback account is held too
@@ -262,7 +351,7 @@ function memIo() {
 let app = null;
 afterEach(() => { try { app?.stop(); } catch {} app = null; vi.useRealTimers(); });
 
-async function bootNode() {
+async function bootNode(lasso = undefined) {
   const { start, built } = fakeTransport();
   const lines = [];
   let convState = emptyState();
@@ -272,6 +361,7 @@ async function bootNode() {
       networks: { whatsapp: { chat_ids: [SELF_DM], allowed_users: ['+16468217865'] } },
       beeper: { primary: { account: 'an@example.com', token: 'TOK' } },
       agents: { egpt: { configuration: 'egpt', default: true, handles: ['e'], name: 'E' } },
+      lasso,
     }),
     startBridge: start,
     makeSession: (o) => ({ sessionId: o.sessionId ?? 's', async turn(m) { return { text: `↩ ${m}` }; }, close() {} }),
@@ -289,7 +379,7 @@ async function bootNode() {
 const T0 = Date.UTC(2026, 9, 18, 12, 0);
 async function flood(chat, at) {
   const out = [];
-  for (let i = 0; i < 5; i++) { vi.setSystemTime(T0 + at + i * 100); out.push(await app.bridge.send(chat, `loop ${at + i}`)); }
+  for (let i = 0; i < 5; i++) { vi.setSystemTime(T0 + at + i * 100); out.push(await app.bridge.send(chat, `loop ${word(at + i)}`)); }
   return out;
 }
 
@@ -319,7 +409,7 @@ describe('boot — the send-rate trip, wired', () => {
 
     const log = t.sentTo(ADMIN_ROOM);
     expect(log).toHaveLength(1);
-    expect(log[0].text).toContain('kg · send-rate guard paused Flood Room: 10 messages in 3.4s');
+    expect(log[0].text).toContain('kg · send-rate guard paused Flood Room — sustained: 10 messages in 3.4s');
     const inChat = t.sentTo('!flood');
     expect(inChat).toHaveLength(10);                    // 9 being lines + the ⏸️ notice
     expect(inChat.at(-1).text).toMatch(/paused this chat[\s\S]*resume/);
@@ -344,5 +434,30 @@ describe('boot — the send-rate trip, wired', () => {
     await app.logToGroup('kg · /status in Self by An');
     expect(t.sentTo(ADMIN_ROOM)).toHaveLength(before + 1);
     expect(await app.bridge.send(ADMIN_ROOM, 'being line')).toMatchObject({ dropped: true });
+  });
+
+  it('reads each per-chat rule from config.yaml lasso:, names the rule it tripped, and <= 0 turns rules off', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(T0);
+    let t = await bootNode({ chat_burst_count: 3, chat_burst_window_ms: 1000, chat_similar_count: 2, chat_similar_window_ms: 500 });
+    const out = [];
+    for (let i = 0; i < 3; i++) { vi.setSystemTime(T0 + i * 100); out.push(await app.bridge.send('!flood', `line ${word(i)}`)); }
+    expect(out[2]).toMatchObject({ dropped: true });
+    vi.setSystemTime(T0 + 1000); await app.bridge.send('!other', 'all good');
+    vi.setSystemTime(T0 + 1100); expect(await app.bridge.send('!other', 'All good ')).toMatchObject({ dropped: true });
+    for (let i = 0; i < 2; i++) { vi.setSystemTime(T0 + 3000 + i * 100); app.bridge.startStream('!third', '⏳ Thinking…'); }
+    await flush(); await flush();
+    const log = t.sentTo(ADMIN_ROOM).map((s) => s.text);
+    expect(log).toEqual([
+      expect.stringContaining('kg · send-rate guard paused Flood Room — burst: 3 messages in 0.2s'),
+      expect.stringContaining('kg · send-rate guard paused !other — similar: 2 near-identical messages in 0.1s'),
+    ]);   // and the ⏳ placeholders (boot's lineOf: the loop guard's normalizeLine) are not a similar line
+    expect(t.sentTo('!flood').at(-1).text).toMatch(/send-rate guard, burst: 3 messages[\s\S]*resume/);
+    app.stop();
+
+    t = await bootNode({ chat_similar_count: 0, chat_burst_count: 0, chat_messages: 0 });
+    for (let i = 0; i < 12; i++) { vi.setSystemTime(T0 + 10_000 + i * 80); expect((await app.bridge.send('!flood', 'same line'))?.ok).toBe(true); }
+    await flush();
+    expect(t.sentTo(ADMIN_ROOM)).toEqual([]);
   });
 });

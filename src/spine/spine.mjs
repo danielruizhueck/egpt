@@ -28,7 +28,8 @@ import { createLiveness } from './liveness.mjs';
 import { makeOutbound, elapsed } from './sender.mjs';
 import { isBrainFailureResult } from '../brain-errors.mjs';
 import { replyLine, contextSinceLastTurn, promptWithRecentContext, bodyForMessageId, promptWithQuotedMessage, RECENT_CONTEXT_MAX_CHARS } from '../transcript-log.mjs';
-import { isHumanTurn, turnKind, parseStopWord, pauseNotice } from '../stop-guard.mjs';
+import { isHumanTurn, turnKind, parseStopWord, pauseNotice, isStopPhrase, STOP_PHRASE } from '../stop-guard.mjs';
+import { SHELL_SURFACE } from './identity.mjs';
 import { mentionHits, withoutAddress, isDeliberateSilence } from '../auto-mode.mjs';
 import { lifecycleExit } from './ingest.mjs';
 import { cleanForSpeech } from '../speech-clean.mjs';
@@ -144,6 +145,7 @@ export function createSpine({
   advice,                              // optional §2c advice service (mode: auto — /ask + operator-answer routing)
   guard = null,                        // optional §2c stop-guard: the per-channel loop-breaker + RESUME (createStopGuard, boot-wired). Null = pipe runs unguarded (tests).
   stopSwitch = null,                   // optional §2c KILL SWITCH (boot-wired): { present(): does EGPT_HOME/STOP exist, async pull(why): warn in why.chatId (capped, best-effort) + write the file + take the SERVICE down }. Two call sites, both on paths that already exist — tick() (the operator touched the file; no chatId, so nothing to warn) and classify() (the chat safe word, which carries its chat). Null = no kill switch (tests).
+  stopPhrase = () => STOP_PHRASE,      // () => the kill phrase (boot: config stop_phrase; unset → STOP_PHRASE, '' → off)
   isSelfChat = () => false,            // (ev) => is this message in THE SELF CHAT — the operator's own command channel (boot: networks.whatsapp.chat_ids[0]). The ONLY chat the safe word is honoured in (operator 2026-07-26). Default false = FAIL-CLOSED: an un-wired spine has no chat kill switch at all, which is the safe direction for a switch that takes the service down.
   // A RELAY CHANNEL IS TRANSIT, NOT A CONVERSATION (operator 2026-08-31: "when a message arrived
   // to a 'egpt-mesh-*' channel, it must be treated as a transit message. the log if required is in
@@ -788,6 +790,22 @@ export function createSpine({
     return d.receives && d.mayReply && !(d.mode === 'auto' && ev.isSender);
   }
 
+  // THE KILL SWITCH, pulled from a chat (the STOP safe word, the kill phrase).
+  async function pullStop(ev, reason) {
+    note(`STOP from ${ev.senderName ?? ev.senderId ?? '?'} @ ${guardChannel(ev)} — writing the STOP file and stopping the service`);
+    // AWAITED: pull warns in this chat before it exits (boot caps that post so it can
+    // never wedge the stop). Awaiting keeps the message's turn open until the node
+    // has actually left, so a test — and the pump — see the whole sequence.
+    await stopSwitch.pull({
+      reason,
+      who: `${ev.senderName ?? 'unknown'} <${ev.senderId ?? '?'}>`,
+      where: `${ev.surface} / ${ev.chatName ?? '?'} (${ev.chatId})`,
+      // WHERE TO WARN — the chat the STOP came from, carried so boot can post there
+      // (writeStopFile ignores these two; it only reads reason/who/where/at).
+      surface: ev.surface, chatId: ev.chatId,
+    });
+  }
+
   // What IS this message, and what should happen to it? Classification only — plus the
   // readings classification itself needs (the gate, the guard's verdict). It writes NOTHING
   // to the transcript. Returns the action to run once the message is on the record, or null
@@ -821,6 +839,13 @@ export function createSpine({
     // (2026-08-14), but STOP must still lead every other dispatch branch regardless of what
     // else might one day claim isCommand true for a plain line. STOP/RESUME are reserved
     // words, never swallowed by a command handler.
+    //
+    // THE KILL PHRASE (stop-guard isStopPhrase, config stop_phrase): the same switch, in ANY chat,
+    // behind the safe word's own identity test (authorized + humanTurn); never the shell console.
+    if (stopSwitch && isStopPhrase(ev.body, stopPhrase())) {
+      if (ev.authorized && humanTurn(ev) && ev.surface !== SHELL_SURFACE) return () => pullStop(ev, `stop phrase "${String(ev.body ?? '').trim()}"`);
+      note(`stop phrase from ${ev.senderName ?? ev.senderId ?? '?'} @ ${guardChannel(ev)} — not an allowed user's human turn, ignored`);
+    }
     if (ev.authorized) {
       const word = parseStopWord(ev.body);
       // STOP — THE KILL SWITCH (operator 2026-07-25: "if i write 'stop' all activity,
@@ -848,20 +873,7 @@ export function createSpine({
       // (which hardcodes authorized:true, so scoping is what actually closes it) — "stop" is
       // ORDINARY TEXT and flows on to the normal dispatch.
       if (stopSwitch && word === 'stop' && humanTurn(ev) && isSelfChat(ev)) {
-        return async () => {
-          note(`STOP from ${ev.senderName ?? ev.senderId ?? '?'} @ ${guardChannel(ev)} — writing the STOP file and stopping the service`);
-          // AWAITED: pull warns in this chat before it exits (boot caps that post so it can
-          // never wedge the stop). Awaiting keeps the message's turn open until the node
-          // has actually left, so a test — and the pump — see the whole sequence.
-          await stopSwitch.pull({
-            reason: `chat safe word "${String(ev.body ?? '').trim()}"`,
-            who: `${ev.senderName ?? 'unknown'} <${ev.senderId ?? '?'}>`,
-            where: `${ev.surface} / ${ev.chatName ?? '?'} (${ev.chatId})`,
-            // WHERE TO WARN — the chat the STOP came from, carried so boot can post there
-            // (writeStopFile ignores these two; it only reads reason/who/where/at).
-            surface: ev.surface, chatId: ev.chatId,
-          });
-        };
+        return () => pullStop(ev, `chat safe word "${String(ev.body ?? '').trim()}"`);
       }
       // RESUME / RESUME ALL — unchanged: clear a channel the LOOP COUNTER auto-stopped
       // (the only per-channel pause left). Without these an auto-stopped channel could
