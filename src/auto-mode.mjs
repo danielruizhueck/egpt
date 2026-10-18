@@ -73,6 +73,12 @@ export function superModeOf(raw, { onInvalid = () => {}, fallback = 'on' } = {})
   return m;
 }
 
+// config.super_chats → is SI on? Exactly when `triggers` holds a non-blank phrase (operator
+// 2026-10-18: "no phrase then it is not enabled"). THE one switch for every SI reader. PURE.
+export function superChatsOn(superChats) {
+  return Array.isArray(superChats?.triggers) && superChats.triggers.some((t) => String(t ?? '').trim());
+}
+
 // PER-BEING per-chat mode (generalizes the E-only mode to EVERY being — E,
 // Wren, Don, L — across every surface). A being's mode in a chat decides whether
 // it RECEIVES that chat's messages and when it REPLIES, exactly like E's mode;

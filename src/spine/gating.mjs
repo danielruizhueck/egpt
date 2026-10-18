@@ -21,7 +21,7 @@
 // so an un-migrated config is a no-op. The old config.auto_modes route is GONE —
 // modes live in the agents registry + conversations.yaml.
 import { getBeing, isSuperChannel, superChannelFor } from '../conversations-state.mjs';
-import { receives, replyAllowed, mayEmitChat, isSilenceReply, isAutoMode, DEFAULT_AUTO_MODE, superModeOf } from '../auto-mode.mjs';
+import { receives, replyAllowed, mayEmitChat, isSilenceReply, isAutoMode, DEFAULT_AUTO_MODE, superModeOf, superChatsOn } from '../auto-mode.mjs';
 
 const _send = (v) => (v === 'always' || v === 'mode') ? v : null;
 
@@ -103,9 +103,9 @@ export function createGating({ getConfig = () => ({}), loadState = null, default
     // super channel). LIVE lookup off the same state read — /end drops the alias, so this reverts
     // to the arrival chat automatically with no un-pin to undo. No super channel, or a DEFINITELY dead
     // one (superChannelAlive → false) → ev.chatId.
-    let superId = state && c.super_chats?.enabled && superChannelFor(state, ev.surface, ev.chatId);
+    let superId = state && superChatsOn(c.super_chats) && superChannelFor(state, ev.surface, ev.chatId);
     let replyChatId = null;   // resolved below (siphon may set it first)
-    // SI ON-REPLY, NO CHANNEL YET (super_chats.enabled + a being ABOUT TO REPLY + !backlog):
+    // SI ON-REPLY, NO CHANNEL YET (SI on + a being ABOUT TO REPLY + !backlog):
     //   · automatic ON  → AUTO-CREATE through the EXISTING ensureSuperChannel (node-role gate,
     //     idempotency, invite-the-members, AND the canary intro the peer links from), then re-resolve
     //     off a FRESH read → the reply routes to the just-created channel (the chunk-2 line below).
@@ -114,7 +114,7 @@ export function createGating({ getConfig = () => ({}), loadState = null, default
     //     + recovery blurb), or null when admin is unresolvable → fall through to the base chat.
     // Skipped for a backlog wake (wouldReachABeing reuses decide but dispatches nothing). A create
     // failure NEVER blocks the reply. Both seams unwired (standalone gating/tests) → inert.
-    if (!superId && mayReply && !ev.backlog && c.super_chats?.enabled) {
+    if (!superId && mayReply && !ev.backlog && superChatsOn(c.super_chats)) {
       if (c.super_chats?.automatic && ensureSuperChannel) {
         try {
           await ensureSuperChannel(ev);
@@ -131,7 +131,7 @@ export function createGating({ getConfig = () => ({}), loadState = null, default
     // to the base chat / was siphoned to admin). INSIDE an SI group there is nothing to signal — everyone
     // is already a member — so NO auto-reaction (inSuper → null); the being may place its own if it wishes.
     // null also when SI is off or the being isn't replying.
-    const siReaction = (mayReply && c.super_chats?.enabled && !inSuper) ? (superId ? '✅' : '❌') : null;
+    const siReaction = (mayReply && superChatsOn(c.super_chats) && !inSuper) ? (superId ? '✅' : '❌') : null;
     return { mode, receives: receives(mode), mayReply, sendToEgpt, replyChatId, siReaction };
   }
 

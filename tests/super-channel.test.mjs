@@ -6,13 +6,13 @@
 // reroute any replies (chunk 2) or implement respect-exit / mention-reinvite (chunk 3).
 //
 // WHAT THIS LOCKS:
-//   · an inbound super_chats.trigger phrase from ANY participant (not operator-only), when enabled,
-//     summons the channel through the EXISTING phraseCommand → runPhrase path;
+//   · an inbound super_chats.triggers phrase from ANY participant (not operator-only) summons the
+//     channel through the EXISTING phraseCommand → runPhrase path;
 //   · a first summon CREATES <chat>-super, ALIASES it to the conversation (same alias kind /join
 //     writes), INVITES Rodz + the summoner, posts config.super.opener ONCE, and sets the channel's
 //     auto-mode to config.super.mode;
 //   · a second summon REUSES it (no re-create, no duplicate opener);
-//   · super disabled/unset, or trigger empty ⇒ ordinary chat (phraseCommand returns null);
+//   · no trigger phrase ⇒ SI is off: ordinary chat (phraseCommand returns null);
 //   · the mode lands on the SHARED entry (a super channel is an alias; mode resolves THROUGH aliasOf
 //     to the primary — there is no per-alias mode slot).
 //
@@ -51,7 +51,11 @@ const CHAT_TITLE = 'Proyecto X';
 const ADMIN_CHAT = '!egptAdmin';   // the resolved admin_channel (eGPT Admin) the siphon routes to (PART C)
 const SUPER_TITLE = `${CHAT_TITLE}${SUPER_SUFFIX_DEFAULT}`;   // 'Proyecto X-super'
 
-function cfg({ superBlock = { enabled: true }, node_role = 'primary', node_name = 'kg' } = {}) {
+const ON = { triggers: ['SI chat'] };
+// Every shape that leaves SI OFF: no non-blank phrase, whatever else is set.
+const OFF_SHAPES = [null, {}, { triggers: [] }, { triggers: [''] }, { triggers: ['  ', null] }, { enabled: true }, { enabled: true, automatic: true, triggers: [] }];
+
+function cfg({ superBlock = ON, node_role = 'primary', node_name = 'kg' } = {}) {
   return {
     beeper: { primary: { phone: AN }, secondary: { phone: RODZ } },
     node_name, node_role,
@@ -112,42 +116,29 @@ function harness({ config, state, resolveSecondaryChatIdByTitle = () => SEC_SUPE
 // An INBOUND message (no `authorized`/`isSender`, chat is not a configured Self-DM ⇒ NOT operator).
 const inbound = (body = '…', extra = {}) => ({ chatId: C_CHAT, surface: 'whatsapp', chatName: CHAT_TITLE, senderId: SUMMONER, body, ...extra });
 
-// ── super_chats.trigger: ONE exact phrase, ANY sender; empty/unset ⇒ no summon (operator 2026-10-18) ──
-describe('phraseCommand — super_chats.trigger is the one summon phrase', () => {
-  const withTrigger = (trigger, enabled = true) => cfg({ superBlock: { enabled, trigger } });
+// ── super_chats.triggers: a LIST of exact phrases, ANY sender; no phrase ⇒ SI off (operator 2026-10-18) ──
+describe('phraseCommand — super_chats.triggers are the summon phrases', () => {
+  const TWO = cfg({ superBlock: { triggers: ['SI chat', 'abre SI'] } });
 
-  it('trigger "SI chat": the whole message (any case, trimmed) summons, from a NON-operator', () => {
-    const { cmds } = harness({ config: withTrigger('SI chat') });
-    expect(cmds.phraseCommand(inbound('si chat'))).toBe('super');
-    expect(cmds.phraseCommand(inbound('SI CHAT'))).toBe('super');
-    expect(cmds.phraseCommand(inbound('  SI chat  '))).toBe('super');
+  it('each phrase, as the whole message (any case, trimmed), summons from a NON-operator', () => {
+    const { cmds } = harness({ config: TWO });
+    for (const body of ['si chat', 'SI CHAT', '  SI chat  ', 'abre si', ' ABRE SI ']) expect(cmds.phraseCommand(inbound(body))).toBe('super');
   });
 
   it('EXACT whole-message only: prefix / contains / typo do not summon, nor does "…"', () => {
-    const { cmds } = harness({ config: withTrigger('SI chat') });
-    expect(cmds.phraseCommand(inbound('SI chat now'))).toBe(null);
-    expect(cmds.phraseCommand(inbound('say SI chat'))).toBe(null);
-    expect(cmds.phraseCommand(inbound('SI cha'))).toBe(null);
-    expect(cmds.phraseCommand(inbound('…'))).toBe(null);
+    const { cmds } = harness({ config: TWO });
+    for (const body of ['SI chat now', 'say SI chat', 'SI cha', 'abre SI ya', '…', '...', '']) expect(cmds.phraseCommand(inbound(body))).toBe(null);
   });
 
-  it('trigger "" ⇒ nothing summons, "…" / "..." / an empty body included', () => {
-    const { cmds } = harness({ config: withTrigger('') });
-    for (const body of ['…', '...', '', '   ', 'SI chat']) expect(cmds.phraseCommand(inbound(body))).toBe(null);
-  });
-
-  it('trigger UNSET ⇒ the evicted "…" default does NOT summon', () => {
-    const { cmds } = harness({ config: cfg() });              // enabled, no trigger key
-    for (const body of ['…', '...', '……', '']) expect(cmds.phraseCommand(inbound(body))).toBe(null);
-  });
-
-  it('disabled, or no super_chats block ⇒ nothing summons even with a trigger set', () => {
-    expect(harness({ config: withTrigger('SI chat', false) }).cmds.phraseCommand(inbound('SI chat'))).toBe(null);
-    expect(harness({ config: cfg({ superBlock: null }) }).cmds.phraseCommand(inbound('…'))).toBe(null);
+  it('no phrase ⇒ OFF: nothing summons, a leftover enabled: true included', () => {
+    for (const superBlock of OFF_SHAPES) {
+      const { cmds } = harness({ config: cfg({ superBlock }) });
+      for (const body of ['…', '...', '', '   ', 'SI chat']) expect(cmds.phraseCommand(inbound(body))).toBe(null);
+    }
   });
 
   it('REGRESSION: the operator fork triggers are unchanged beside it', () => {
-    const config = { ...withTrigger('SI chat'), join: { triggers: ['dame un segundo'] } };
+    const config = { ...TWO, join: { triggers: ['dame un segundo'] } };
     const { cmds } = harness({ config });
     const op = (body) => ({ ...inbound(body), authorized: true });
     expect(cmds.phraseCommand(op('Dame un segundo'))).toBe('join');
@@ -391,7 +382,7 @@ describe('/end in a super channel', () => {
 // gating-dispatch.test.mjs. Here we only lock the create-time title/opener and that summon stores NOTHING.
 describe('config.super — suffix / opener overrides, mode never stored', () => {
   it('config.super.suffix and config.super.opener override the built-in fallbacks', async () => {
-    const { cmds, calls } = harness({ config: cfg({ superBlock: { enabled: true, suffix: ' ⭐', opener: 'hola {chat}' } }) });
+    const { cmds, calls } = harness({ config: cfg({ superBlock: { ...ON, suffix: ' ⭐', opener: 'hola {chat}' } }) });
     await cmds.runPhrase(inbound('…'), 'super');
     expect(calls.create[0].title).toBe(`${CHAT_TITLE} ⭐`);
     expect(calls.post[0].text).toBe(`hola ${CHAT_TITLE}`);
@@ -399,7 +390,7 @@ describe('config.super — suffix / opener overrides, mode never stored', () => 
 
   it('a configured mode (string, YAML-boolean, or invalid) still stores NOTHING — the mode is intrinsic', async () => {
     for (const mode of ['mute', true, false, 'bogus']) {
-      const { cmds, getState } = harness({ config: cfg({ superBlock: { enabled: true, mode } }) });
+      const { cmds, getState } = harness({ config: cfg({ superBlock: { ...ON, mode } }) });
       await cmds.runPhrase(inbound('…'), 'super');
       expect(getBeing(getState(), 'whatsapp', C_CHAT, 'e').mode).toBeNull();       // origin never flipped
       expect(getBeing(getState(), 'whatsapp', SUPER_CHAT, 'e').mode).toBeNull();   // alias resolves through → same
@@ -441,7 +432,7 @@ describe('/agents mode in an alias room — stored on the alias, read by the gat
   const TITLE = 'SPOILER ALERT: chat de EyAy';
   const SUPER_ALIAS = { aliasOf: ORIGIN, transcript: 'SPOILER ALERT chat de EyAy-super', super: true };
   const liveCfg = {
-    ...cfg({ superBlock: { enabled: true, mode: 'on' } }),
+    ...cfg({ superBlock: { ...ON, mode: 'on' } }),
     agents: { egpt: { default: true, handles: ['e', 'egpt'] }, codex: { handles: ['c', 'codex'] }, ken: { handles: ['k', 'ken'] } },
   };
   const seed = () => {
@@ -507,7 +498,7 @@ describe('/agents mode in an alias room — stored on the alias, read by the gat
 
 // ── (1) AUTO-CREATE ON REPLY: gating.decide creates + routes when automatic is ON (PART B) ──────────
 describe('SI core — auto-create on reply, gated on super_chats.automatic (PART B)', () => {
-  const AUTO = { enabled: true, automatic: true };
+  const AUTO = { ...ON, automatic: true };
   // Gating wired WITH the create seam, reading/writing the SAME harness state. chatRaw → LIVE_ROSTER so
   // the just-created channel reads ALIVE and routing honours it (superChannelAlive).
   const mkGate = (h, superBlock = AUTO) => createGating({
@@ -532,9 +523,9 @@ describe('SI core — auto-create on reply, gated on super_chats.automatic (PART
     expect(d2.replyChatId).toBe(SUPER_CHAT);
   });
 
-  it('automatic OFF (default): enabled + reply + no channel → NO auto-create (siphon handles it, PART C)', async () => {
-    const h = harness({ config: cfg({ superBlock: { enabled: true } }) });   // automatic unset ⇒ false
-    const g = mkGate(h, { enabled: true });
+  it('automatic OFF (default): on + reply + no channel → NO auto-create (siphon handles it, PART C)', async () => {
+    const h = harness({ config: cfg({ superBlock: ON }) });   // automatic unset ⇒ false
+    const g = mkGate(h, ON);
     await g.decide('e', replyEv);
     expect(h.calls.create).toHaveLength(0);                  // the automatic gate held
   });
@@ -556,19 +547,19 @@ describe('SI core — auto-create on reply, gated on super_chats.automatic (PART
   });
 
   it('SI DISABLED → decide never creates (even automatic:true), reply stays in base', async () => {
-    const h = harness({ config: cfg({ superBlock: { enabled: false, automatic: true } }) });
-    const g = mkGate(h, { enabled: false, automatic: true });
+    const h = harness({ config: cfg({ superBlock: { triggers: [], automatic: true } }) });
+    const g = mkGate(h, { triggers: [], automatic: true });
     const d = await g.decide('e', replyEv);
     expect(h.calls.create).toHaveLength(0);
     expect(d.replyChatId).toBe(C_CHAT);
   });
 
-  it('REGRESSION: an EXISTING super alias but enabled:false → reply reverts to the base group (the IF gate)', async () => {
+  it('REGRESSION: an EXISTING super alias but no trigger phrase → reply reverts to the base group (the IF gate)', async () => {
     const h = harness({ config: cfg({ superBlock: AUTO }) });
     const dOn = await mkGate(h, AUTO).decide('e', replyEv);          // SI on: auto-create + route to the side-room
     expect(dOn.replyChatId).toBe(SUPER_CHAT);
     expect(superChannelFor(h.getState(), 'whatsapp', C_CHAT)).toBe(SUPER_CHAT);   // alias now stored
-    const dOff = await mkGate(h, { enabled: false }).decide('e', replyEv);        // SI off: alias still stored
+    const dOff = await mkGate(h, { triggers: [] }).decide('e', replyEv);        // SI off: alias still stored
     expect(dOff.replyChatId).toBe(C_CHAT);                           // reply goes to the group, NOT the side-room
     expect(dOff.siReaction).toBe(null);
   });
@@ -584,7 +575,7 @@ describe('SI core — auto-create on reply, gated on super_chats.automatic (PART
 
 // ── (2) CREATE ON THE EAR: works with NO secondary/mouth (the one-account baseline) ─────────────────
 describe('SI core — create on the EAR (one-account baseline: no secondary/mouth)', () => {
-  const baseCfg = (over = {}) => ({ beeper: { primary: { phone: AN } }, node_name: 'kg', node_role: 'primary', super_chats: { enabled: true }, ...over });
+  const baseCfg = (over = {}) => ({ beeper: { primary: { phone: AN } }, node_name: 'kg', node_role: 'primary', super_chats: ON, ...over });
 
   it('the create targets the EAR account (chatAccountId), NOT a resolveRodz-gated secondary', async () => {
     const { cmds, calls } = harness({ config: baseCfg() });
@@ -667,7 +658,7 @@ describe('SI core — peer-link from the intro canary', () => {
   });
 
   it('SI disabled → nothing linked even with a canary', async () => {
-    const { cmds, getState } = harness({ config: cfg({ superBlock: { enabled: false } }) });
+    const { cmds, getState } = harness({ config: cfg({ superBlock: { triggers: [] } }) });
     const primaryJid = getContact(getState(), 'whatsapp', C_CHAT).jid;
     await cmds.linkSuperChannel(intro(primaryJid));
     expect(getState().contacts.whatsapp[SUPER_CHAT]).toBeUndefined();
@@ -682,7 +673,7 @@ describe('SI core — peer-link from the intro canary', () => {
 
 // ── (5) PART C — SIPHON to admin: automatic OFF + no channel ⇒ the reply goes to eGPT Admin ──────────
 describe('SI PART C — siphonReplyToAdmin (automatic off, no channel): reply to admin, base chat clean', () => {
-  const OFF = { enabled: true };                            // automatic unset ⇒ false
+  const OFF = ON;                                         // automatic unset ⇒ false
 
   it('returns the admin chat id (so gating routes the reply THERE) and posts the warning once per chat', async () => {
     const { cmds, adminPosts } = harness({ config: cfg({ superBlock: OFF }) });
@@ -696,16 +687,10 @@ describe('SI PART C — siphonReplyToAdmin (automatic off, no channel): reply to
     expect(adminPosts).toHaveLength(1);
   });
 
-  it('the warning names super_chats.trigger; with none it says so and names no phrase', async () => {
-    const { cmds, adminPosts } = harness({ config: cfg({ superBlock: { enabled: true, trigger: 'SI chat' } }) });
+  it('the warning names the first trigger phrase', async () => {
+    const { cmds, adminPosts } = harness({ config: cfg({ superBlock: { triggers: ['', ' SI chat ', 'abre SI'] } }) });
     await cmds.siphonReplyToAdmin({ chatId: C_CHAT, surface: 'whatsapp', chatName: CHAT_TITLE });
     expect(adminPosts[0]).toContain('send "SI chat" in that chat');
-    for (const superBlock of [OFF, { enabled: true, trigger: '' }]) {
-      const h = harness({ config: cfg({ superBlock }) });
-      await h.cmds.siphonReplyToAdmin({ chatId: C_CHAT, surface: 'whatsapp', chatName: CHAT_TITLE });
-      expect(h.adminPosts[0]).toMatch(/no super_chats\.trigger is set/i);
-      expect(h.adminPosts[0]).not.toMatch(/send "|…/);
-    }
   });
 
   it('admin_channel UNRESOLVABLE → returns null (gating falls back to the base chat), nothing posted', async () => {
@@ -734,8 +719,8 @@ describe('SI PART C — siphonReplyToAdmin (automatic off, no channel): reply to
 
   it('automatic ON ⇒ NO siphon (it auto-creates instead); a channel that EXISTS ⇒ NO siphon', async () => {
     // automatic ON: the create branch runs, siphon never called.
-    const h1 = harness({ config: cfg({ superBlock: { enabled: true, automatic: true } }) });
-    const g1 = createGating({ getConfig: () => cfg({ superBlock: { enabled: true, automatic: true } }), loadState: async () => h1.getState(), defaultKey: 'e', chatRaw: async () => LIVE_ROSTER, ensureSuperChannel: (ev) => h1.cmds.ensureSuperChannel(ev), siphonReplyToAdmin: (ev) => h1.cmds.siphonReplyToAdmin(ev) });
+    const h1 = harness({ config: cfg({ superBlock: { ...ON, automatic: true } }) });
+    const g1 = createGating({ getConfig: () => cfg({ superBlock: { ...ON, automatic: true } }), loadState: async () => h1.getState(), defaultKey: 'e', chatRaw: async () => LIVE_ROSTER, ensureSuperChannel: (ev) => h1.cmds.ensureSuperChannel(ev), siphonReplyToAdmin: (ev) => h1.cmds.siphonReplyToAdmin(ev) });
     const d1 = await g1.decide('e', { chatId: C_CHAT, surface: 'whatsapp', chatName: CHAT_TITLE, kind: 'message', mention: { atEAnywhere: true } });
     expect(d1.replyChatId).toBe(SUPER_CHAT);
     expect(h1.adminPosts).toHaveLength(0);
@@ -785,7 +770,7 @@ describe('SI PART D — superMemberGate (membership of an existing SI channel)',
   });
 
   it('SI disabled → no gate even with a channel', async () => {
-    const { cmds, sent } = harness({ config: cfg({ superBlock: { enabled: false } }), state: withChannel() });
+    const { cmds, sent } = harness({ config: cfg({ superBlock: { triggers: [] } }), state: withChannel() });
     expect(await cmds.superMemberGate(at(OUTSIDER))).toBe(false);
     expect(sent).toHaveLength(0);
   });
@@ -844,31 +829,68 @@ describe('SI — the ✓/❌ state reaction decision (gating.decide → d.siReac
   const replyEv = { chatId: C_CHAT, surface: 'whatsapp', chatName: CHAT_TITLE, kind: 'message', mention: { atEAnywhere: true } };
 
   it('a channel EXISTS (superChannelFor set) → ✅', async () => {
-    expect((await gate(withChannel(), { enabled: true }).decide('e', replyEv)).siReaction).toBe('✅');
+    expect((await gate(withChannel(), ON).decide('e', replyEv)).siReaction).toBe('✅');
   });
 
-  it('enabled + NO channel → ❌', async () => {
-    expect((await gate(seedState(), { enabled: true }).decide('e', replyEv)).siReaction).toBe('❌');
+  it('on + NO channel → ❌', async () => {
+    expect((await gate(seedState(), ON).decide('e', replyEv)).siReaction).toBe('❌');
   });
 
   // PROD FIX (2026-10-13): a message arriving IN the SI channel gets NO auto-reaction — not ✅, not ❌.
   // Everyone in the group is already a member; there is nothing to signal. The ✅/❌ is a BASE-chat signal.
   it('a message arriving IN the SI channel → NO reaction (null), neither ✅ nor ❌', async () => {
     const inSuperEv = { chatId: SUPER_CHAT, surface: 'whatsapp', chatName: SUPER_TITLE, kind: 'message', mention: { atEAnywhere: true } };
-    expect((await gate(withChannel(), { enabled: true }).decide('e', inSuperEv)).siReaction).toBe(null);
+    expect((await gate(withChannel(), ON).decide('e', inSuperEv)).siReaction).toBe(null);
   });
 
   it('a channel AUTO-CREATED this turn (automatic on) → ✅ (superId is set after the create)', async () => {
-    const h = harness({ config: cfg({ superBlock: { enabled: true, automatic: true } }) });
-    const g = createGating({ getConfig: () => cfg({ superBlock: { enabled: true, automatic: true } }), loadState: async () => h.getState(), defaultKey: 'e', chatRaw: async () => LIVE_ROSTER, ensureSuperChannel: (ev) => h.cmds.ensureSuperChannel(ev) });
+    const h = harness({ config: cfg({ superBlock: { ...ON, automatic: true } }) });
+    const g = createGating({ getConfig: () => cfg({ superBlock: { ...ON, automatic: true } }), loadState: async () => h.getState(), defaultKey: 'e', chatRaw: async () => LIVE_ROSTER, ensureSuperChannel: (ev) => h.cmds.ensureSuperChannel(ev) });
     expect((await g.decide('e', replyEv)).siReaction).toBe('✅');
   });
 
   it('SI DISABLED → no reaction (null)', async () => {
-    expect((await gate(withChannel(), { enabled: false }).decide('e', replyEv)).siReaction).toBe(null);
+    expect((await gate(withChannel(), { triggers: [] }).decide('e', replyEv)).siReaction).toBe(null);
   });
 
   it('a being that is NOT about to reply (unmentioned in a mention chat) → no reaction (null)', async () => {
-    expect((await gate(withChannel(), { enabled: true }).decide('e', { ...replyEv, mention: {} })).siReaction).toBe(null);
+    expect((await gate(withChannel(), ON).decide('e', { ...replyEv, mention: {} })).siReaction).toBe(null);
+  });
+});
+
+// ── (8) SI OFF (no trigger phrase) — today's disabled behaviour everywhere (operator 2026-10-18) ──────
+describe('SI OFF — no phrase: no summon, siphon, member gate, SI reaction, auto-create or peer-link', () => {
+  const OUTSIDER = '@whatsapp_lid-leftuser:beeper.local';   // NOT in LIVE_ROSTER
+  const withChannel = () => aliasContact(seedState(), 'whatsapp', SUPER_CHAT, getContact(seedState(), 'whatsapp', C_CHAT).jid, { transcript: sanitizeSlug(SUPER_TITLE), super: true });
+  const replyEv = { chatId: C_CHAT, surface: 'whatsapp', chatName: CHAT_TITLE, kind: 'message', senderId: OUTSIDER, mention: { atEAnywhere: true } };
+  const shapes = OFF_SHAPES.flatMap((s) => [true, false].map((automatic) => (s === null ? null : { ...s, automatic })));
+
+  it('decide: the reply stays in the base chat, no ✅/❌, nothing created or siphoned, with or without a channel', async () => {
+    for (const superBlock of shapes) {
+      for (const state of [seedState(), withChannel()]) {
+        const h = harness({ config: cfg({ superBlock }), state });
+        const g = createGating({
+          getConfig: () => cfg({ superBlock }), loadState: async () => h.getState(), defaultKey: 'e', chatRaw: async () => LIVE_ROSTER,
+          ensureSuperChannel: (ev) => h.cmds.ensureSuperChannel(ev), siphonReplyToAdmin: (ev) => h.cmds.siphonReplyToAdmin(ev),
+        });
+        const d = await g.decide('e', replyEv);
+        expect(d.mayReply).toBe(true);
+        expect(d.replyChatId).toBe(C_CHAT);
+        expect(d.siReaction).toBe(null);
+        expect(h.calls.create).toHaveLength(0);
+        expect(h.adminPosts).toHaveLength(0);
+      }
+    }
+  });
+
+  it('no member gate on an existing channel, and a canary intro links nothing', async () => {
+    for (const superBlock of shapes) {
+      const h = harness({ config: cfg({ superBlock }), state: withChannel() });
+      expect(await h.cmds.superMemberGate(replyEv)).toBe(false);
+      expect(h.sent).toHaveLength(0);
+      const h2 = harness({ config: cfg({ superBlock }) });
+      await h2.cmds.linkSuperChannel({ chatId: SUPER_CHAT_FULL, surface: 'whatsapp', chatName: SUPER_TITLE, canary: getContact(h2.getState(), 'whatsapp', C_CHAT).jid, body: '🌟 …' });
+      expect(h2.getState().contacts.whatsapp[SUPER_CHAT]).toBeUndefined();
+    }
   });
 });

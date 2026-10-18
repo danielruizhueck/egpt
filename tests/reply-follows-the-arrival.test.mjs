@@ -1177,13 +1177,13 @@ describe('the 🎧 listening mark: boot hands each connection the one placement'
 });
 
 // ── THE ✓/❌ SI-STATE REACTION (operator 2026-10-13) ──────────────────────────────────────────────
-// When super_chats.enabled and a being is about to REPLY, a reaction lands on the TRIGGERING message
+// When SI is on (super_chats.triggers set) and a being is about to REPLY, a reaction lands on the TRIGGERING message
 // in the base chat signalling the SI state: ✅ this conversation HAS an SI channel, ❌ it has none. It
 // rides the SAME outbound.react seam the steer 📩/👀 ack uses, is placed ONCE per message, and is
 // best-effort — a react fault never breaks the reply. Driven end-to-end through kg's two accounts, in
 // the chat both are in: the MOUTH places it on its own copy. A one-account node places none (2026-10-18).
 describe('the ✓/❌ SI-state reaction lands on the triggering message', () => {
-  const SI = (shape = KG) => { const c = shape(); c.super_chats = { enabled: true }; return c; };
+  const SI = (shape = KG, block = { triggers: ['SI chat'] }) => { const c = shape(); if (block) c.super_chats = block; return c; };
   const SI_CHAN = '!both-super';   // the SI channel aliased to the base chat
   // The base chat known + (optionally) its SI channel aliased to it, super:true.
   const seed = ({ withChannel, base = BOTH_AS_PRIMARY } = {}) => {
@@ -1225,12 +1225,28 @@ describe('the ✓/❌ SI-state reaction lands on the triggering message', () => 
     app.stop();
   });
 
-  it('SI disabled → NO SI reaction at all', async () => {
-    const { app, byConnection, replies } = await bootWith(KG(), { state: seed({ withChannel: true }) });   // no super_chats
-    hola(byConnection.primary);
-    await waitFor(() => replies().length > 0);   // the reply landed
-    expect([...byConnection.primary.reactions, ...byConnection.secondary.reactions].filter((r) => r.key === '✅' || r.key === '❌')).toEqual([]);
-    app.stop();
+  // SI OFF (no phrase; a leftover enabled: true included), even with a channel aliased: the reply goes
+  // to the base chat through the normal mouth (secondary when present, else primary), no ✅/❌.
+  const OFF_BLOCKS = [null, { triggers: [] }, { triggers: [''] }, { enabled: true, automatic: true }];
+  it('SI OFF → NO SI reaction, and the reply lands in the base chat via the mouth (secondary)', async () => {
+    for (const block of OFF_BLOCKS) {
+      const { app, byConnection, replies } = await bootWith(SI(KG, block), { state: seed({ withChannel: true }) });
+      hola(byConnection.primary);
+      await waitFor(() => replies().length > 0);
+      expect(replies()).toEqual([{ connection: 'secondary', chatId: BOTH_AS_SECONDARY }]);
+      expect([...byConnection.primary.reactions, ...byConnection.secondary.reactions].filter((r) => r.key === '✅' || r.key === '❌')).toEqual([]);
+      app.stop();
+    }
+  });
+
+  it('SI OFF on a ONE-account node → the reply lands in the base chat via primary', async () => {
+    for (const block of OFF_BLOCKS) {
+      const { app, byConnection, replies } = await bootWith(SI(SINGLE, block), { state: seed({ withChannel: true, base: AN_GROUP }) });
+      deliver(byConnection.primary, AN_GROUP, 'hola', { atE: true });
+      await waitFor(() => replies().length > 0);
+      expect(replies()).toEqual([{ connection: 'primary', chatId: AN_GROUP }]);
+      app.stop();
+    }
   });
 
   it('a reaction-place FAILURE never breaks the reply (best-effort, swallowed)', async () => {
