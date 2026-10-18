@@ -27,7 +27,7 @@ function conversationsYaml({ conversationPathOf, homeDirMsys }) {   // the paths
       `    "${chatId(i)}": # ${nameOf(i)}`,
       `      conversation_path: ${conversationPathOf('whatsapp', slugOf(i))}`,
       `      home_dir: ${homeDirMsys()}`,
-      '      guard: { turns: 6, window: 2 }',
+      '      loop_guard: { inbound: { turns: 6, window: 2 } }',
       '      agents:',
       '        egpt:',
       '          mode: on',

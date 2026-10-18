@@ -48,7 +48,7 @@ import {
 } from '../conversations-state.mjs';
 import { createStopGuard, STOP_FILE, stopFilePresent, writeStopFile, anyChannel, pauseNotice, normalizeLine } from '../stop-guard.mjs';
 import { createFloodBan } from '../flood-ban.mjs';
-import { createSendGuard, loopGuardConfig } from '../loop-guard.mjs';
+import { createSendGuard, loopGuardConfig, inboundOverrideOf, legacyEntryCount } from '../loop-guard.mjs';
 import { CLEAN_EXIT_CODE } from '../daemon-runtime.mjs';
 
 import { createIdentity, surfaceOf, SHELL_SURFACE } from './identity.mjs';
@@ -3505,7 +3505,7 @@ export async function boot({
   // message resets both; provenance decides who is human, not the display name (a mesh envelope
   // posted AS the operator counts). Replaces the flood-guard + mesh breaker. Config
   // `loop_guard.inbound: { turns, window }` (turns -1 = the whole guard off, window minutes -1 = pure
-  // consecutive count). guardOverride reads the conversation's own `guard:` block
+  // consecutive count). guardOverride reads the conversation's own `loop_guard.inbound` block
   // (conversations.yaml) so a busy relay room can loosen/disable it — else the node defaults apply.
   const guard = createStopGuard({
     turns: Number.isFinite(loopGuard.inbound.turns) ? loopGuard.inbound.turns : 6,
@@ -3513,9 +3513,13 @@ export async function boot({
     onLog: (m) => log.line?.(`[guard] ${m}`),
   });
   const guardOverride = async (surface, chatId) => {
-    try { const g = getContact(await _loadState(), surface, chatId)?.entry?.guard; return (g && typeof g === 'object') ? g : null; }
+    try { return inboundOverrideOf(getContact(await _loadState(), surface, chatId)?.entry); }
     catch { return null; }
   };
+  try {
+    const n = legacyEntryCount(await _loadState());
+    if (n) log.line?.(`[loop_guard] deprecated per-conversation guard: on ${n} conversations.yaml entr${n === 1 ? 'y' : 'ies'} — read as loop_guard.inbound for one release; migration 0044 moves them`);
+  } catch { /* the registry's own readers report a broken file */ }
   // OUR OWN FRAME, told apart from a peer's — the guard's third bucket (stop-guard turnKind
   // 'echo'). THE EXISTING definition of "who are we": node-names.mjs fromOtherNode over
   // ownNodeNamesOf, read through getConfig() so a hot reload moves it like everything else. The

@@ -148,7 +148,7 @@ describe('readState / writeState — the in-memory registry', () => {
         whatsapp: {
           'chat-a': { slug: 'a-2607030000', pushedName: '  Spaced\nName  ', firstSeenAt: '2026-07-03T00:00:00Z', threadId: 'dead', mode: 'on', gone: undefined, agents: { egpt: { mode: 'on', threadId: 'live', allowed_users: ['u-1', 'u-2'] } } },
           'chat-b': { aliasOf: 'chat-a' },
-          'chat-c': { slug: 'c-2607030000', pushedName: '', conversation_path: '.egpt/conversations/whatsapp/c-2607030000', home_dir: '/c/Users/x', guard: { turns: -1 }, n: 12, flag: false, nil: null },
+          'chat-c': { slug: 'c-2607030000', pushedName: '', conversation_path: '.egpt/conversations/whatsapp/c-2607030000', home_dir: '/c/Users/x', loop_guard: { inbound: { turns: -1 } }, n: 12, flag: false, nil: null },
         },
         room: { radio: { slug: 'radio', pushedName: 'radio', agents: { egpt: { access_level: 'all', threadId: 'room-t' } } } },
       },

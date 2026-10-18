@@ -140,6 +140,22 @@ export function loopGuardConfig(cfg, { onDeprecated = () => {} } = {}) {
   return out;
 }
 
+/** A registry entry's own override of the inbound half: loop_guard.inbound, else its pre-0044 block. */
+export function inboundOverrideOf(entry) {
+  if (isMap(entry?.loop_guard?.inbound)) return entry.loop_guard.inbound;
+  const old = entry?.[LEGACY_BLOCKS.inbound];
+  return isMap(old) ? old : null;
+}
+
+/** How many registry entries (state.contacts) still carry the pre-0044 block. */
+export function legacyEntryCount(state) {
+  let n = 0;
+  for (const bucket of Object.values(state?.contacts ?? {})) {
+    for (const entry of Object.values(isMap(bucket) ? bucket : {})) if (isMap(entry?.[LEGACY_BLOCKS.inbound])) n++;
+  }
+  return n;
+}
+
 // Near-identical, folded: case, whitespace, Matrix ids, and every token carrying a digit
 // (counters, timestamps, ids) — a loop that only bumps a timestamp is still one line.
 const foldLine = (text) => String(text ?? '').toLowerCase()

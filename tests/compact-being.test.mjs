@@ -91,7 +91,7 @@ describe('compact-being — deterministic trigger', () => {
         egpt: { threadId: 'sess-e' },
         scribe: { threadId: 'sess-scribe' },
       },
-      guard: { turns: 3, window: 60 },          // a contact-level override, NOT a resident
+      loop_guard: { inbound: { turns: 3, window: 60 } },   // a contact-level override, NOT a resident
     } } } };
     const got = compactableConversations(state, 'haiku');
     expect(got.map(c => c.sessionId).sort()).toEqual(['sess-e', 'sess-scribe']);

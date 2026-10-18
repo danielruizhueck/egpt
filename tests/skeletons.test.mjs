@@ -255,13 +255,13 @@ describe('config/skeletons/conversations.yaml (the registry)', () => {
     // start with '#'. Strip the '#' from the option lines an operator would.
     const on = (t, key) => t.replace(new RegExp(`^(\\s*)#(${key}:.*)$`, 'm'), '$1$2');
     let t = text;
-    for (const k of ['posts_back_delay_ms', 'guard', 'privileged_browser', 'mode', 'send_to_egpt']) t = on(t, k);
+    for (const k of ['posts_back_delay_ms', 'loop_guard', 'privileged_browser', 'mode', 'send_to_egpt']) t = on(t, k);
 
     const state = parseConvState(t);
     const entry = getContact(state, 'whatsapp', 'EXAMPLE_CHAT_ID').entry;
     // the flat pair — read by src/spine/transcription.mjs and src/spine/boot.mjs
     expect(entry.posts_back_delay_ms).toBe(-1);
-    expect(entry.guard).toEqual({ turns: -1 });
+    expect(entry.loop_guard).toEqual({ inbound: { turns: -1 } });
     // read by src/spine/being-link.mjs through the config resolver; uploads are per browser group (browsers.yaml)
     expect(entry.privileged_browser).toBe(true);
     expect(text).not.toMatch(/browser_uploads/);

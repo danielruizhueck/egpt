@@ -35,10 +35,10 @@ contacts:
       # default: config.yaml transcription_service.posts_back_delay_ms
       #posts_back_delay_ms: -1
 
-      # loop-breaker override; node default config.yaml loop_guard.inbound: {turns: 6, window: 2}
+      # loop-breaker override (the inbound half); node default config.yaml loop_guard.inbound: {turns: 6, window: 2}
       # turns = non-human turns within `window` MINUTES before pausing; turns -1/0 turns
       # the WHOLE guard off here, repetition included. window -1 = pure consecutive count.
-      #guard: { turns: -1 }
+      #loop_guard: { inbound: { turns: -1 } }
 
       # boxed beings get the unfiltered browser (file:, any upload). Folder uploads are per
       # browser group: browsers.yaml uploads:

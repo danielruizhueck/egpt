@@ -6,7 +6,7 @@
 # add only the block you need. Each block is read by its own service.
 #
 # NOT the REGISTRY (~/.egpt/config/conversations.yaml, one entry per
-# conversation: reply mode, thread, guard). See config/skeletons/conversations
+# conversation: reply mode, thread, loop_guard). See config/skeletons/conversations
 # .yaml. Here: the conversation as a room. There: which agent replies and how.
 #
 # ONE NAMESPACE, THREE RUNGS - nearest the room wins:

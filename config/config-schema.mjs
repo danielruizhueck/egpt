@@ -2646,8 +2646,9 @@ export const CONFIG_SCHEMA = {
                     chat_similar_ratio: 0.85, chat_burst_count: 10, chat_burst_window_ms: 2000 }
 
     BACK-COMPAT (one release): a half absent here is read from its pre-0044
-    top-level block, with one deprecation line in the log. migrations/0044 moves
-    those blocks under loop_guard:.
+    top-level block, and an entry's override from its pre-0044 entry-level block,
+    with one deprecation line each per boot. migrations/0044 moves them all under
+    loop_guard:.
 
     KEYS:
       inbound.turns
@@ -2734,8 +2735,8 @@ export const CONFIG_SCHEMA = {
     what "said the same thing again" means, not a tuning knob.
 
     PER-CONVERSATION OVERRIDE: a contact/room entry in conversations.yaml may
-    carry its own  guard: { turns: -1 }  to loosen or disable it for that channel
-    (e.g. a busy relay room).
+    carry its own  loop_guard: { inbound: { turns: -1 } }  to loosen or disable it
+    for that channel (e.g. a busy relay room).
 
     RESUME / RESUME ALL (from an authorized sender, on any surface) clear a
     channel this counter auto-stopped — the only way back short of a restart.

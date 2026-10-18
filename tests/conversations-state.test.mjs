@@ -671,12 +671,13 @@ describe('residentsOf — resident beings vs flat blocks', () => {
   // resident named "guard" — the exact trap `readonly` and `agents` are in that set for.
   // Found while documenting the option in config/skeletons/conversations.yaml: the skeleton
   // tells operators to set `guard:`, which armed it.
-  it('an entry with a guard override lists no phantom "guard" resident', () => {
+  it('an entry with a guard / loop_guard override lists no phantom resident', () => {
     const entry = {
       conversation_path: '.egpt/conversations/whatsapp/g-2606291919',
       home_dir: '/c/Users/an',
       posts_back_delay_ms: -1,
       guard: { turns: -1, window: 30 },
+      loop_guard: { inbound: { turns: -1, window: 30 } },
       egpt: { mode: 'auto', threadId: 'x' },
     };
     expect(residentsOf(entry)).toEqual(['egpt']);
@@ -916,8 +917,9 @@ describe('YAML parse / serialize round-trip', () => {
       '      home_dir: /c/Users/an',
       '      # --- per-conversation options (uncomment to configure) ---',
       '      # transcribe: false     # default: true',
-      '      guard:',
-      '        turns: 40             # trailing note on a LIVE key',
+      '      loop_guard:',
+      '        inbound:',
+      '          turns: 40           # trailing note on a LIVE key',
       '',
     ].join('\n');
 
@@ -927,7 +929,7 @@ describe('YAML parse / serialize round-trip', () => {
     expect(parse(after).contacts.whatsapp['26087681749235@lid']).toMatchObject({
       conversation_path: '.egpt/conversations/whatsapp/diego-2605200133',
       home_dir: '/c/Users/an',
-      guard: { turns: 40 },
+      loop_guard: { inbound: { turns: 40 } },
     });
     // ... and every authored comment is gone.
     expect(after).not.toContain('uncomment to configure');

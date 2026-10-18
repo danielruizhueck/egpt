@@ -1,5 +1,5 @@
-// 0044 — one loop_guard: block; plus the one-release read of the pre-0044 keys (src/loop-guard.mjs
-// loopGuardConfig) and the rename's own check: no "lasso" left outside this file, the migration
+// 0044 — one loop_guard: block, in config.yaml and every registry entry; plus the one-release read
+// of the pre-0044 keys (src/loop-guard.mjs loopGuardConfig / inboundOverrideOf) and the rename's own check: no "lasso" left outside this file, the migration
 // and the legacy-key constant.
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, statSync, existsSync } from 'node:fs';
@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as YAML from 'yaml';
-import { loopGuardConfig, LEGACY_BLOCKS } from '../src/loop-guard.mjs';
+import { loopGuardConfig, inboundOverrideOf, legacyEntryCount, LEGACY_BLOCKS } from '../src/loop-guard.mjs';
 
 // egpt-home.mjs reads EGPT_HOME once at load: set it first, import what derives from it after.
 const bootHome = join(tmpdir(), `egpt-0044-boot-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -57,6 +57,8 @@ const logs = [];
 const ctx = () => ({ id: '0044', egptHome, platform: 'win32', dryRun: false, log: (l) => logs.push(l) });
 const write = (text) => { mkdirSync(join(egptHome, 'config'), { recursive: true }); writeFileSync(cfgPath(), text); };
 const read = () => readFileSync(cfgPath(), 'utf8');
+const writeReg = (name, text) => writeFileSync(join(egptHome, 'config', name), text);
+const readReg = (name) => readFileSync(join(egptHome, 'config', name), 'utf8');
 const vaults = () => (existsSync(join(egptHome, 'disposable')) ? readdirSync(join(egptHome, 'disposable')) : []);
 
 beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'egpt-0044-')); egptHome = join(root, '.egpt'); logs.length = 0; write(lf(REVE)); });
@@ -120,7 +122,7 @@ describe('0044 — guard: / lasso: → one loop_guard: block', () => {
     await (await plan(ctx())).apply();
     const p = await plan(ctx());
     expect(p.satisfied).toBe(true);
-    expect(p.notes.join()).toMatch(/moved already/);
+    expect(p.notes.join()).toMatch(/no `guard:` or `lasso:` left/);
   });
 
   it('a node with neither old key is satisfied', async () => {
@@ -139,6 +141,68 @@ describe('0044 — guard: / lasso: → one loop_guard: block', () => {
     await expect(plan(ctx())).rejects.toThrow(/0044 refuses: `guard:` .* is not a mapping/);
     write('guard: [unclosed\r\n');
     await expect(plan(ctx())).rejects.toThrow(/0044 refuses: .*config\.yaml does not parse/);
+  });
+
+  it('conversations.yaml entries: guard: → loop_guard.inbound, every other byte kept, one backup', async () => {
+    write(lf(['node_name: kg', 'loop_guard:', '  inbound: { turns: 60 }']));
+    const conv = lf([
+      'contacts:',
+      '  whatsapp:',
+      '    yz3kJjWXsQJofK9naaVb: # @anrodz',
+      '      conversation_path: .egpt/conversations/whatsapp/@anrodz-2606291919',
+      '      home_dir: /c/Users/an',
+      '    vcRg7Jh6cLBnQaceeyCP:',
+      '      guard:',
+      '        turns: -1',
+      '      conversation_path: .egpt/conversations/whatsapp/egpt-mesh-do-kg-2607051633',
+      '      home_dir: /c/Users/an',
+      '  telegram:',
+      '    -1001234:',
+      '      guard: { turns: -1, window: 30 }',
+      '      home_dir: /c/Users/an',
+    ]);
+    writeReg('conversations.yaml', conv);
+    const p = await plan(ctx());
+    expect(p.satisfied).toBe(false);
+    await p.apply();
+    expect(readReg('conversations.yaml')).toBe(lf([
+      'contacts:',
+      '  whatsapp:',
+      '    yz3kJjWXsQJofK9naaVb: # @anrodz',
+      '      conversation_path: .egpt/conversations/whatsapp/@anrodz-2606291919',
+      '      home_dir: /c/Users/an',
+      '    vcRg7Jh6cLBnQaceeyCP:',
+      '      loop_guard:',
+      '        inbound:',
+      '          turns: -1',
+      '      conversation_path: .egpt/conversations/whatsapp/egpt-mesh-do-kg-2607051633',
+      '      home_dir: /c/Users/an',
+      '  telegram:',
+      '    -1001234:',
+      '      loop_guard:',
+      '        inbound: { turns: -1, window: 30 }',
+      '      home_dir: /c/Users/an',
+    ]));
+    const [vault] = vaults();
+    expect(readdirSync(join(egptHome, 'disposable', vault))).toEqual(['conversations.yaml']);
+    expect(readFileSync(join(egptHome, 'disposable', vault, 'conversations.yaml'), 'utf8')).toBe(conv);
+    expect(readdirSync(join(egptHome, 'config')).sort()).toEqual(['config.yaml', 'conversations.yaml']);
+    expect((await plan(ctx())).satisfied).toBe(true);
+  });
+
+  it('rooms.yaml and agents.yaml rows too, CRLF kept, beside the config.yaml move', async () => {
+    writeReg('rooms.yaml', crlf(['rooms:', '  room/lobby:', '    guard: { turns: -1 }', '    members: []']));
+    writeReg('agents.yaml', crlf(['agents:', '  agent/wren:', '    # quiet', '    guard:', '      turns: 3', '    agents:', '      wren: { threadId: t }']));
+    await (await plan(ctx())).apply();
+    expect(readReg('rooms.yaml')).toBe(crlf(['rooms:', '  room/lobby:', '    loop_guard:', '      inbound: { turns: -1 }', '    members: []']));
+    expect(readReg('agents.yaml')).toBe(crlf(['agents:', '  agent/wren:', '    loop_guard:', '      # quiet', '      inbound:', '        turns: 3', '    agents:', '      wren: { threadId: t }']));
+    expect(YAML.parse(read()).loop_guard).toEqual({ inbound: { turns: 60, window: 2 } });
+    expect(readdirSync(join(egptHome, 'disposable', vaults()[0])).sort()).toEqual(['agents.yaml', 'config.yaml', 'rooms.yaml']);
+  });
+
+  it('refuses an entry that states both guard: and loop_guard:', async () => {
+    writeReg('conversations.yaml', lf(['contacts:', '  whatsapp:', '    abc:', '      guard: { turns: -1 }', '      loop_guard: { inbound: { turns: 6 } }']));
+    await expect(plan(ctx())).rejects.toThrow(/0044 refuses: conversations\.yaml contacts\.whatsapp\.abc states `loop_guard:` AND `guard:`/);
   });
 
   it('through the runner, on a node whose ledger records 0001-0043: applied and recorded', async () => {
@@ -174,6 +238,14 @@ describe('loopGuardConfig — the pre-0044 keys are still read for one release',
     expect(seen).toEqual([expect.stringMatching(/guard: ignored, loop_guard\.inbound is set/)]);
   });
 
+  it('an entry override: loop_guard.inbound, else the old entry-level guard:, else null', () => {
+    expect(inboundOverrideOf({ loop_guard: { inbound: { turns: -1 } }, guard: { turns: 9 } })).toEqual({ turns: -1 });
+    expect(inboundOverrideOf({ guard: { turns: -1 } })).toEqual({ turns: -1 });
+    expect(inboundOverrideOf({ loop_guard: {} })).toBe(null);
+    expect(inboundOverrideOf(undefined)).toBe(null);
+    expect(legacyEntryCount({ contacts: { whatsapp: { a: { guard: { turns: -1 } }, b: { loop_guard: { inbound: {} } } }, room: { r: { guard: {} } } } })).toBe(2);
+  });
+
   it('the new block alone, or nothing at all: no deprecation line', () => {
     const seen = [];
     expect(loopGuardConfig({ loop_guard: { outbound: { edits: 9 } } }, { onDeprecated: (m) => seen.push(m) })).toEqual({ inbound: {}, outbound: { edits: 9 } });
@@ -205,6 +277,27 @@ describe('boot() reads an old block, logged once', () => {
       const dep = lines.filter((l) => l.includes('deprecated config.yaml key'));
       expect(dep).toHaveLength(1);
       expect(dep[0]).toMatch(/\[loop_guard\] .*guard: read as loop_guard\.inbound; lasso: read as loop_guard\.outbound/);
+    } finally { app.stop(); }
+  });
+});
+
+describe('boot() on old per-conversation guard: entries', () => {
+  it('says so ONCE per boot, whatever the number of entries', async () => {
+    rmSync(join(bootHome, 'STOP'), { force: true });   // the boot test above stopped this profile
+    const { emptyState } = await import('../src/conversations-state.mjs');
+    const state ={ ...emptyState(), contacts: { whatsapp: { a: { guard: { turns: -1 } }, b: { guard: { turns: -1 } }, c: { loop_guard: { inbound: { turns: 3 } } } } } };
+    const lines = [];
+    const app = await boot({
+      readConfig: () => ({ whatsapp: {}, node_name: 'kg', loop_guard: {}, agents: { egpt: { configuration: 'egpt', handles: ['e'], default: true } } }),
+      startBridge: async () => ({ async send() { return { ok: true }; }, startStreamMessage() { return { delivered: false, update() {}, async finish() {} }; }, isAlive: () => true, stop() {} }),
+      makeSession: () => ({ sessionId: 's', async turn() { return { text: 'ok' }; }, close() {} }),
+      loadState: async () => structuredClone(state),
+      writeState: async () => {},
+      ingest: false, tickMs: 0, exit: () => {}, log: { line: (s) => lines.push(s) },
+    });
+    try {
+      const dep = lines.filter((l) => l.includes('deprecated'));
+      expect(dep).toEqual([expect.stringMatching(/^\[loop_guard\] deprecated per-conversation guard: on 2 conversations\.yaml entries .*0044/)]);
     } finally { app.stop(); }
   });
 });

@@ -122,7 +122,7 @@ describe('residentsOf — agents.<name> keys, PLUS a recognized-but-inert legacy
   });
 
   it('a contact-level block that merely resembles a being (no being-vocabulary field) is NOT a resident', () => {
-    const entry = { slug: 'x', agents: { e: { mode: 'on' } }, guard: { turns: 3, window: 60 } };
+    const entry = { slug: 'x', agents: { e: { mode: 'on' } }, loop_guard: { inbound: { turns: 3, window: 60 } } };
     expect(residentsOf(entry)).toEqual(['e']);
   });
 });
