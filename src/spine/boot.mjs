@@ -24,7 +24,7 @@ import { peerSpineFrom, createMouthReceiver, speakThroughPeer, startPeerStream, 
 // The cross-account chat key itself — minted in the bridge, beside the payloads it reads. The
 // LOCAL mouth below keys with the same primitive the peer link keys with; there is one definition
 // of "which of MY chats is that ONE real chat" and both transports ask it.
-import { crossAccountChatKey } from '../bridges/beeper.mjs';
+import { crossAccountChatKey, LISTENING_REACTION } from '../bridges/beeper.mjs';
 import { htmlToMarkdown } from '../html-to-markdown.mjs';
 import { mergeAudit } from './audit-merge.mjs';
 import { createWarmPool } from '../warm-sessions.mjs';
@@ -1096,6 +1096,7 @@ export async function boot({
   setTimeout: setTimeoutFn = globalThis.setTimeout,          // the KILL SWITCH warning's cap seam (below); injected so a test can drive the 3s timer instead of waiting for it
   fetch: fetchFn = (...a) => globalThis.fetch(...a),         // the /book calendar feed + SES seam; tests inject a fake so no request leaves
   cliHost = connectCliHost(),         // the daemon holding every claude session (src/cli-host.mjs); null = this spine spawns them
+  backgroundFile = null,              // state/background.json's path when ingest is off (tests); ingest on → EGPT_HOME/state/background.json
 } = {}) {
   // === THE KILL SWITCH (operator 2026-07-25) — THE FIRST THING boot DOES ===============
   // "if a file named STOP exists in .egpt it *also* stops". Checked before the config is
@@ -2536,7 +2537,8 @@ export async function boot({
   // node-wide outbound ceiling the echo (echoGate, above) and every port send already go
   // through; a note reaching the station counts as an outbound message, never a second budget.
   const radioRelay = createRadioNoteRelay({ resolveConvRoom, getConfig, gate: lasso.gate, onLog: (m) => log.line?.(`[radio] ${m}`) });
-  bridge.onMedia((m) => { radioRelay.noteMedia(m); return media.save(m); });
+  const onMediaSaved = (m) => { radioRelay.noteMedia(m); return media.save(m); };   // a resumed voice note's audio too (background resume)
+  bridge.onMedia(onMediaSaved);
 
   // The operator-console LIMB (plans/2607191835-SHELL-LIMB-S1-PLAN.md Phase 1, direction
   // inverted 2026-08-26): a second SURFACE, SERVING ws://127.0.0.1:23375 and holding it from
@@ -3126,8 +3128,8 @@ export async function boot({
   };
   // Every warm session's live background tasks, with the conversation each would wake in.
   const liveBackground = () => pool.stats().keys.flatMap((k) => pool.background(k).map((t) => ({ ...(brain.convOfKey(k) ?? { being: '?', chatId: k }), ...t })));
-  // What this node is handling, in state/background.json (src/spine/background.mjs). Real-node only.
-  const background = ingest ? createBackgroundRegistry({ path: join(EGPT_HOME, 'state', 'background.json'), node: node_name, liveAgents: liveBackground, now, onLog: (m) => log.line?.(`[background] ${m}`) }) : null;
+  // What this node is handling, in state/background.json (src/spine/background.mjs). Real-node only (tests: backgroundFile).
+  const background = (ingest || backgroundFile) ? createBackgroundRegistry({ path: backgroundFile ?? join(EGPT_HOME, 'state', 'background.json'), node: node_name, liveAgents: liveBackground, now, onLog: (m) => log.line?.(`[background] ${m}`) }) : null;
   await background?.load();
   const commands = createCommands({
     getConfig,
@@ -3581,6 +3583,24 @@ export async function boot({
   spine.start();
   spine.tick();   // fire the first beat immediately so alive.txt exists at once
 
+  // After adoption (a resumed note's turn must not open a key adoption is about to fill): reconcile the list,
+  // then end each voice note the last spine left pending as a live one would (src/spine/background.mjs).
+  // Audio only where that connection saves media (a per-chat ear does not); 🎧 off through the one placement.
+  const afterAdoption = () => {
+    if (!background) return;
+    background.reconcile();
+    background.resume({
+      transcribe: tx.transcribe, audioCfg: tx.cliCfg,
+      wake: { wakeWords, voiceWakeWords, addressWithoutAt },
+      deliver: (body, from) => spine.handleInbound({ body, from }),
+      saveAudio: (m, from) => ((from.connection ?? null) === null || inboundConnections.includes(from.connection) ? onMediaSaved(m) : null),
+      unlisten: (from) => {
+        rememberArrival(from.chatId, from.connection);
+        const out = outbound(null, from.chatId);
+        return out.react(from.msgKey, LISTENING_REACTION, out.keyOf(from.msgKey, 'listening'), 'listening', { remove: true });
+      },
+    }).catch((e) => log.line?.(`[background] resume failed: ${e?.message ?? e}`));
+  };
   // ADOPT what the daemon held across the restart (src/cli-host.mjs): each session goes back into the
   // warm pool as it was — same process, background agents and all; what it emitted meanwhile is
   // replayed into it, so a finished task or reply wakes the being through the usual path. After the
@@ -3598,11 +3618,8 @@ export async function boot({
         log.line?.(`[cli-host] adopted ${h.key} pid ${a.pid}${a.background?.length ? ` (${a.background.length} background task(s))` : ''}${a.orphan ? ' — a turn still running' : ''}`);
       } catch (e) { log.line?.(`[cli-host] could not adopt ${h.key}, ending it: ${e?.message ?? e}`); cliHost.kill(h.hid); }
     }
-  })().catch((e) => log.line?.(`[cli-host] adoption failed: ${e?.message ?? e}`)).finally(() => background?.reconcile());
-  else background?.reconcile();
-  // Voice notes the last spine left being transcribed: resumed through the same transcription service.
-  background?.resume({ transcribe: tx.transcribe, audioCfg: tx.cliCfg, deliver: (body, from) => spine.handleInbound({ body, from }) })
-    .catch((e) => log.line?.(`[background] resume failed: ${e?.message ?? e}`));
+  })().catch((e) => log.line?.(`[cli-host] adoption failed: ${e?.message ?? e}`)).finally(afterAdoption);
+  else afterAdoption();
 
   // Feed the shell surface into the SAME dispatch (handleInbound is the spine's documented
   // direct-caller seam — the identical path bridge.onMessage/enqueue runs). Registered

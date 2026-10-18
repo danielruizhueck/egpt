@@ -4795,6 +4795,16 @@ describe('beeper bridge — a voice note is two lines: its arrival now, its tran
     await waitFor(() => incoming.length === 1);
   });
 
+  it('…and the onMedia meta its outcome saves the audio with, caption aside — what a restart saves into media/', async () => {
+    const { incoming, arrivals, media } = await startBridge({ transcribe: async () => 'Mira marico' });
+    fake.emit({ type: 'message.upserted', entries: [note()] });
+    await waitFor(() => incoming.length === 1, 3000);
+    expect(media).toHaveLength(1);
+    const { caption, ...saved } = media[0];
+    expect(caption).toBe('Mira marico');
+    expect(arrivals[0].from.voiceMedia).toEqual({ ...saved, caption: null });
+  });
+
   for (const [why, transcribe, reason] of [
     ['throws', async () => { throw new Error('worker timed out'); }, 'worker timed out'],
     ['returns nothing', async () => null, 'no transcript'],

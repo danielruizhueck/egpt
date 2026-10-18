@@ -10,6 +10,7 @@ import { existsSync as fsExistsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { transcribeVoiceNote, voiceTranscriptBody, voiceFailedBody } from '../incoming-media.mjs';
 import { elapsed } from './sender.mjs';
+import { mentionStatus } from '../auto-mode.mjs';
 
 const iso = (ms) => (Number.isFinite(ms) ? new Date(ms).toISOString() : null);   // rides the tick: never throws
 const sameNote = (a, b) => a.surface === b.surface && a.chatId === b.chatId && String(a.msgId) === String(b.msgId);
@@ -26,6 +27,7 @@ export function createBackgroundRegistry({ path, node = null, liveAgents = () =>
   let reconciled = false;
   let written = null;
   let chain = Promise.resolve();
+  let side = Promise.resolve();   // resumed outcomes still being delivered
 
   function persist() {
     chain = chain.then(async () => {
@@ -57,8 +59,8 @@ export function createBackgroundRegistry({ path, node = null, liveAgents = () =>
   // The spine's ingestion point: a recorded arrival is pending, its outcome settles it.
   function noteVoice(ev) {
     if (ev?.voiceLine === 'arrival' && ev.raw?.voicePath) {
-      const { voicePath, ...from } = ev.raw;
-      const note = { surface: ev.surface, chatId: ev.chatId, chatName: ev.chatName ?? null, msgId: ev.msgId, sender: ev.senderName ?? null, file: voicePath, arrivedAt: iso(ev.ts ?? now()), node, from };
+      const { voicePath, voiceMedia = null, ...from } = ev.raw;
+      const note = { surface: ev.surface, chatId: ev.chatId, chatName: ev.chatName ?? null, msgId: ev.msgId, sender: ev.senderName ?? null, file: voicePath, arrivedAt: iso(ev.ts ?? now()), node, media: voiceMedia, from };
       doc.transcriptions = [...doc.transcriptions.filter((t) => !sameNote(t, note)), note];
       persist();
     } else if (ev?.voiceLine === 'outcome') settle(ev);
@@ -70,27 +72,38 @@ export function createBackgroundRegistry({ path, node = null, liveAgents = () =>
     persist();
   }
 
-  // After a restart: each note the last spine left pending gets its outcome line — through the same
-  // transcription service when this node can still decode it, else "(voice note not transcribed: restart)".
-  // Recorded as backlog: older than this spine, so it never dispatches.
-  async function resume({ transcribe, audioCfg = {}, deliver }) {
+  // After a restart: each note the last spine left pending ends as a live one would — through the same
+  // transcription service when this node can still decode it (else "(voice note not transcribed: restart)"),
+  // its audio saved first (saveAudio: the bridge's onMedia meta, caption = transcription), its outcome
+  // dispatched with the bridge's mention read (it was in flight, not old: backlog only if its arrival was),
+  // then the stale 🎧 taken off (unlisten, best-effort, never awaited).
+  async function resume({ transcribe, audioCfg = {}, wake = null, deliver, saveAudio = null, unlisten = null }) {
     const notes = previous;
     previous = [];
     for (const n of notes) {
       const where = `#${n.msgId} in ${n.chatName ?? n.chatId}`;
+      const ours = n.node === node;
       let body;
-      if (n.node !== node || !n.file || !existsSync(n.file)) {
-        onLog(`${where}: ${n.node !== node ? `node ${n.node}'s decode, not this node's` : `audio ${n.file ?? '(none)'} is gone`} — closed with a failure line`);
+      if (!ours || !n.file || !existsSync(n.file)) {
+        onLog(`${where}: ${!ours ? `node ${n.node}'s decode, not this node's` : `audio ${n.file ?? '(none)'} is gone`} — closed with a failure line`);
         body = voiceFailedBody('restart');
       } else {
         const meta = {};
         const text = await transcribeVoiceNote({ localPath: n.file, audioCfg, transcribe, onLog: (m) => onLog(`${where}: ${m}`), meta });
         body = text ? voiceTranscriptBody(text, { durationSec: meta.durationSec }) : voiceFailedBody(meta.error ?? 'no transcript');
         onLog(`${where}: resumed after the restart — ${text ? 'transcribed' : 'no transcript'}`);
+        if (n.media && saveAudio) {
+          try { await saveAudio({ ...n.media, caption: text || null }, n.from); }
+          catch (e) { onLog(`${where}: audio not saved — ${e?.message ?? e}`); }
+        }
       }
-      try { await deliver(body, { ...n.from, voiceLine: 'outcome', isTranscriptFromVoice: true, backlog: true }); }
-      catch (e) { onLog(`${where}: outcome not delivered — ${e?.message ?? e}`); }
-      settle(n);
+      const heard = wake ? mentionStatus(body, wake.wakeWords, { addressWithoutAt: wake.addressWithoutAt, voiceWake: wake.voiceWakeWords }) : {};
+      const delivered = Promise.resolve()
+        .then(() => deliver(body, { ...n.from, voiceLine: 'outcome', isTranscriptFromVoice: true, ...heard }))
+        .catch((e) => onLog(`${where}: outcome not delivered — ${e?.message ?? e}`))
+        .finally(() => settle(n));
+      side = Promise.all([side, delivered]);
+      if (ours && unlisten) Promise.resolve().then(() => unlisten(n.from)).catch((e) => onLog(`${where}: 🎧 not removed — ${e?.message ?? e}`));
     }
   }
 
@@ -122,5 +135,10 @@ export function createBackgroundRegistry({ path, node = null, liveAgents = () =>
     return lines.length ? [`${node ?? 'this node'} is handling:`, ...lines].join('\n') : '';
   }
 
-  return { load, noteVoice, resume, reconcile, sync, status, flush: () => chain };
+  async function flush() {
+    for (let s = null; s !== side;) { s = side; await s; }
+    await chain;
+  }
+
+  return { load, noteVoice, resume, reconcile, sync, status, flush };
 }

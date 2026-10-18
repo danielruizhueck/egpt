@@ -1397,6 +1397,33 @@ export async function startBeeperBridge(opts = {}) {
     return src || null;
   }
 
+  // What onMedia is handed for one attachment; null when the download policy skips its kind. A pending
+  // voice note's arrival carries it too (`voiceMedia`), so a restart saves the audio the same way.
+  function mediaMeta(msg, info, att, localPath, caption) {
+    const mime = att?.mimeType || att?.mimetype || att?.mime || '';
+    const extHint = String(att?.fileName || '').split('.').pop();
+    const kind = mediaKind(mime, extHint);
+    if (!shouldDownload(mediaDownloadPolicy, kind)) return null;
+    return {
+      chatID: msg.chatID,
+      chatName: info.title,
+      chatType: info.type === 'group' ? 'group' : 'private',
+      // Origin network (Beeper accountID) — SAME derivation dispatchMessage
+      // uses for `from.network`, so the media service buckets the file under
+      // the identical surface as the transcript (identity.surfaceOf); without
+      // it a non-WhatsApp attachment fell to media's 'whatsapp' default.
+      network: msg.accountID || info.accountID || 'whatsapp',
+      msgId: msg.id ?? null,
+      senderName: senderDisplay(msg),   // leak-safe: pushed name / non-private id, never the saved label (media index.md is model-readable)
+      isSender: !!msg.isSender,
+      ts: _msgTimestampMs(msg) ?? Date.now(), kind, mime,
+      fileName: att?.fileName ?? null,
+      localPath,
+      caption,
+      isVoiceNote: !!att?.isVoiceNote,
+    };
+  }
+
   // CONTRACT C2 — hand each attachment to the host's onMedia so it lands in the
   // chat's media/ folder. Gated by whatsapp.media.download ('off' / 'images_docs'
   // / 'all'). Re-uses an already-downloaded voice path so a voice note isn't
@@ -1412,33 +1439,14 @@ export async function startBeeperBridge(opts = {}) {
     if (mediaDownloadPolicy === 'off') return saved;
     const atts = Array.isArray(msg.attachments) ? msg.attachments : [];
     if (!atts.length) return saved;
-    const ts = _msgTimestampMs(msg) ?? Date.now();
     for (const att of atts) {
-      const mime = att?.mimeType || att?.mimetype || att?.mime || '';
-      const extHint = String(att?.fileName || '').split('.').pop();
-      const kind = mediaKind(mime, extHint);
-      if (!shouldDownload(mediaDownloadPolicy, kind)) continue;
+      const meta = mediaMeta(msg, info, att, null, (att === voiceAtt) ? voiceCaption : (htmlToMarkdown(att?.caption) || htmlToMarkdown(msg.text) || null));
+      if (!meta) continue;
       const localPath = (att === voiceAtt && voicePath) ? voicePath : await attachmentToLocalPath(att);
       if (!localPath) { onLog(`beeper: media download failed [${info.title}] att=${att?.id ?? '?'}`); continue; }
+      const { kind } = meta;
       try {
-        const r = await onMedia({
-          chatID: msg.chatID,
-          chatName: info.title,
-          chatType: info.type === 'group' ? 'group' : 'private',
-          // Origin network (Beeper accountID) — SAME derivation dispatchMessage
-          // uses for `from.network`, so the media service buckets the file under
-          // the identical surface as the transcript (identity.surfaceOf); without
-          // it a non-WhatsApp attachment fell to media's 'whatsapp' default.
-          network: msg.accountID || info.accountID || 'whatsapp',
-          msgId: msg.id ?? null,
-          senderName: senderDisplay(msg),   // leak-safe: pushed name / non-private id, never the saved label (media index.md is model-readable)
-          isSender: !!msg.isSender,
-          ts, kind, mime,
-          fileName: att?.fileName ?? null,
-          localPath,
-          caption: (att === voiceAtt) ? voiceCaption : (htmlToMarkdown(att?.caption) || htmlToMarkdown(msg.text) || null),
-          isVoiceNote: !!att?.isVoiceNote,
-        });
+        const r = await onMedia({ ...meta, localPath });
         // onMedia returns the saved path (string) OR, for a video (Route A), an
         // augmented descriptor { savedPath, framePaths, transcript } — the host
         // extracted keyframes + transcribed the audio so we can hand them to E.
@@ -2508,7 +2516,8 @@ export async function startBeeperBridge(opts = {}) {
       isReaction: false,
       // a voice note's ARRIVAL carries no transcript (yet); its outcome line, below, does
       isTranscriptFromVoice: isVoice && !_voicePending,
-      ...(_voicePending ? { voiceLine: 'arrival', voicePath: _voicePath } : {}),   // the file a restart resumes from (spine/background.mjs)
+      // …and what a restart resumes it from (spine/background.mjs): the file whisper reads, the audio's onMedia meta
+      ...(_voicePending ? { voiceLine: 'arrival', voicePath: _voicePath, voiceMedia: typeof onMedia === 'function' ? mediaMeta(msg, info, _voiceAtt, _voicePath, null) : null } : {}),
       msgKey: msg.id || null,
       // THE CROSS-ACCOUNT IDENTITY of this message (crossAccountMsgKey, above): the content hash
       // and the message's OWN timestamp — the only two fields the co-account node's view of this

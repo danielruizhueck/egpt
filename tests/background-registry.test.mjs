@@ -4,7 +4,7 @@
 //
 // The defect: a voice note's arrival line is written at once and its transcription is pending only
 // in the bridge's memory, so a spine restart mid-transcription left the arrival without an outcome.
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -13,6 +13,8 @@ import { createSpine } from '../src/spine/spine.mjs';
 import { createTranscript } from '../src/spine/transcript.mjs';
 import { createBackgroundRegistry } from '../src/spine/background.mjs';
 import { createCommands, AGENTS_USAGE } from '../src/spine/commands.mjs';
+import { createGating } from '../src/spine/gating.mjs';
+import { ensureContact, patchBeing } from '../src/conversations-state.mjs';
 import { voiceArrivalBody, voiceTranscriptBody } from '../src/incoming-media.mjs';
 
 const T = (hh, mm) => Date.UTC(2026, 9, 18, hh, mm);
@@ -42,16 +44,17 @@ const memIo = (files) => ({
 });
 const transcriptText = (files) => [...files.entries()].find(([p]) => p.endsWith('transcript.md'))?.[1] ?? '';
 
-// One spine over the REAL identity + transcript writer (in-memory fs); `files` survives a "restart".
-function buildSpine({ files, background, at = T(16, 12) }) {
+// One spine over the REAL identity, gate and transcript writer (in-memory fs); `files` survives a "restart".
+function buildSpine({ files, background, at = T(16, 12), mode = 'on' }) {
   let now = at;
   let cb = null;
   const bridge = { onMessage(fn) { cb = fn; }, send() {}, stop() {} };
   const brain = { calls: [], async turn(being, ev) { this.calls.push(ev); return { text: 'ok', being, sessionId: 's1' }; } };
+  const state = patchBeing(ensureContact({ contacts: {} }, 'whatsapp', FROM.chatId, { pushedName: CHAT }).state, 'whatsapp', FROM.chatId, 'e', { mode });
   const spine = createSpine({
     bridge, brain, identity: createIdentity({ now: () => now }),
     router: { resolve: () => 'e' },
-    gating: { async decide() { return { mode: 'on', receives: true, mayReply: true, sendToEgpt: 'mode' }; }, surfaces: () => true },
+    gating: createGating({ getConfig: () => ({}), loadState: async () => state, defaultKey: 'e' }),
     sender: { open() { return { activate() {}, update() {}, fail() {}, async finish() {} }; } },
     transcript: createTranscript({ contacts: { resolve: async () => 'diego' }, io: memIo(files) }),
     heartbeats: { runDue() {} }, clock: { now: () => 1000 }, turnTimeoutMs: 0,
@@ -75,25 +78,35 @@ const fakeTranscriber = (text, durationSec = 11) => {
   return { calls, transcribe: async (path, cfg, log, meta) => { calls.push({ path, cfg }); if (meta) meta.durationSec = durationSec; return text; } };
 };
 
+// The onMedia meta the bridge would hand with the outcome (beeper.mjs mediaMeta), minus the caption.
+const MEDIA = (audio) => ({ chatID: FROM.chatId, chatName: CHAT, chatType: 'private', network: 'whatsapp', msgId: '31503', senderName: 'Diego Pérez', isSender: false, ts: T(16, 12), kind: 'audio', mime: 'audio/ogg', fileName: null, localPath: audio, isVoiceNote: true });
 // Live before the restart: the note arrives (bridge names its audio file), chatter lands under it.
-async function arriveThenDie(dir, audio) {
+async function arriveThenDie(dir, audio, { from = {}, mode = 'on' } = {}) {
   const files = new Map();
   const { reg } = registry(dir);
   await reg.load();
-  const live = buildSpine({ files, background: reg });
-  await live.emit(voiceArrivalBody({ durationSec: 11 }), { ...FROM, isTranscriptFromVoice: false, voiceLine: 'arrival', voicePath: audio });
+  const live = buildSpine({ files, background: reg, mode });
+  await live.emit(voiceArrivalBody({ durationSec: 11 }), { ...FROM, isTranscriptFromVoice: false, voiceLine: 'arrival', voicePath: audio, voiceMedia: MEDIA(audio), ...from });
   live.at(T(16, 13));
   await live.emit('jaja', { ...FROM, userId: 'u-bea', senderName: 'Bea', msgKey: '31504' });
   await reg.flush();
   return { files, before: transcriptText(files) };
 }
-async function restart(dir, files, { transcribe, at = T(16, 20) } = {}) {
+// boot's lists for the persona: handles e/egpt, and `e` among its voice_handles (a spoken name wakes only through those).
+const WAKE = { wakeWords: ['e', 'egpt'], voiceWakeWords: ['e'], addressWithoutAt: true };
+async function restart(dir, files, { transcribe, at = T(16, 20), mode = 'on', saveAudio = null, unlisten = null } = {}) {
   const { reg, lines } = registry(dir);
   await reg.load();
-  const next = buildSpine({ files, background: reg, at });
-  await reg.resume({ transcribe, audioCfg: { model: 'large-v3' }, deliver: (body, from) => next.spine.handleInbound({ body, from }) });
+  const next = buildSpine({ files, background: reg, at, mode });
+  const order = [];
+  await reg.resume({
+    transcribe, audioCfg: { model: 'large-v3' }, wake: WAKE,
+    deliver: (body, from) => { order.push('outcome'); return next.spine.handleInbound({ body, from }); },
+    saveAudio: saveAudio && (async (m, f) => { order.push('media'); return saveAudio(m, f); }),
+    unlisten: unlisten && (async (f) => { order.push('unlisten'); return unlisten(f); }),
+  });
   await reg.flush();
-  return { reg, lines, next };
+  return { reg, lines, next, order };
 }
 
 describe('a voice note pending across a spine restart', () => {
@@ -114,8 +127,98 @@ describe('a voice note pending across a spine restart', () => {
     expect(after.startsWith(before)).toBe(true);                       // append-only: byte prefix intact
     expect(after.slice(before.length)).toContain('Diego Pérez@[Diego Pérez].wa (16:20): [re #31503] (voice transcription, 11s) Mira marico…');
     expect(tx.calls).toEqual([{ path: audio, cfg: { model: 'large-v3' } }]);   // THE transcription service, the same file
-    expect(next.brain.calls).toHaveLength(0);                           // older than this spine: recorded, never dispatched
     expect(readReg(dir).transcriptions).toEqual([]);
+  });
+
+  it('REPRODUCE: the resumed transcription is dispatched like a fresh one — it was in flight, not old', async () => {
+    const dir = home();
+    const audio = join(dir, 'note.ogg');
+    writeFileSync(audio, 'OggS');
+    const { files } = await arriveThenDie(dir, audio);
+    const { next } = await restart(dir, files, { transcribe: fakeTranscriber('Mira marico…').transcribe });
+    expect(next.brain.calls.map((ev) => [ev.line, ev.backlog])).toEqual([['Diego Pérez@[Diego Pérez].wa (16:20): [re #31503] (voice transcription, 11s) Mira marico…', false]]);
+  });
+
+  it('a mention-gated (accum) chat: "e, …" prompts the being once; a note that names nobody is only recorded', async () => {
+    for (const [said, prompted] of [['e, qué hora es?', 1], ['qué hora es?', 0]]) {
+      const dir = home();
+      const audio = join(dir, 'note.ogg');
+      writeFileSync(audio, 'OggS');
+      const { files, before } = await arriveThenDie(dir, audio, { mode: 'accum' });
+      const { next } = await restart(dir, files, { transcribe: fakeTranscriber(said).transcribe, mode: 'accum' });
+      expect(transcriptText(files).slice(before.length), said).toContain(`[re #31503] (voice transcription, 11s) ${said}`);
+      expect(next.brain.calls.length, said).toBe(prompted);
+    }
+  });
+
+  it('a note whose ARRIVAL was already backlog (older than the last spine) stays backlog: recorded, not dispatched', async () => {
+    const dir = home();
+    const audio = join(dir, 'note.ogg');
+    writeFileSync(audio, 'OggS');
+    const { files, before } = await arriveThenDie(dir, audio, { from: { backlog: true } });
+    const { next } = await restart(dir, files, { transcribe: fakeTranscriber('e, hola').transcribe });
+    expect(transcriptText(files).slice(before.length)).toContain('[re #31503] (voice transcription, 11s) e, hola');
+    expect(next.brain.calls).toHaveLength(0);
+  });
+
+  it("the audio is saved into media/ as a live outcome does: the bridge's meta, the transcription as caption, before the outcome line", async () => {
+    const dir = home();
+    const audio = join(dir, 'note.ogg');
+    writeFileSync(audio, 'OggS');
+    const { files } = await arriveThenDie(dir, audio);
+    const saved = [];
+    const { order } = await restart(dir, files, { transcribe: fakeTranscriber('Mira marico…').transcribe, saveAudio: (m, f) => saved.push([m, f.msgKey]) });
+    expect(saved).toEqual([[{ ...MEDIA(audio), caption: 'Mira marico…' }, '31503']]);
+    expect(order.slice(0, 2)).toEqual(['media', 'outcome']);
+  });
+
+  it('no transcript: the audio is still saved, caption-less; the file gone: nothing to save', async () => {
+    const dir = home();
+    const audio = join(dir, 'note.ogg');
+    writeFileSync(audio, 'OggS');
+    const { files } = await arriveThenDie(dir, audio);
+    const saved = [];
+    await restart(dir, files, { transcribe: fakeTranscriber(null).transcribe, saveAudio: (m) => saved.push(m) });
+    expect(saved).toEqual([{ ...MEDIA(audio), caption: null }]);
+    const gone = home();
+    const g = await arriveThenDie(gone, join(gone, 'gone.ogg'));
+    const none = [];
+    await restart(gone, g.files, { transcribe: fakeTranscriber('x').transcribe, saveAudio: (m) => none.push(m) });
+    expect(none).toEqual([]);
+  });
+
+  it("the stale 🎧 comes off once the resumed decode ends — transcribed, failed or file gone — after the outcome line, never for another node's note", async () => {
+    const withAudio = (dir) => { const a = join(dir, 'n.ogg'); writeFileSync(a, 'OggS'); return a; };
+    for (const [why, audioOf, text, node, expected] of [
+      ['transcribed', withAudio, 'hola', null, 1],
+      ['no transcript', withAudio, null, null, 1],
+      ['file gone', (dir) => join(dir, 'gone.ogg'), 'x', null, 1],
+      ['another node', withAudio, 'x', 'do', 0],
+    ]) {
+      const dir = home();
+      const { files } = await arriveThenDie(dir, audioOf(dir));
+      if (node) { const r = readReg(dir); r.transcriptions[0].node = node; writeFileSync(fileOf(dir), JSON.stringify(r)); }
+      const off = [];
+      const { order } = await restart(dir, files, { transcribe: fakeTranscriber(text).transcribe, unlisten: (f) => off.push([f.chatId, f.msgKey]) });
+      expect(off, why).toEqual(Array(expected).fill([FROM.chatId, '31503']));
+      if (expected) expect(order.indexOf('unlisten'), why).toBeGreaterThan(order.indexOf('outcome'));
+    }
+  });
+
+  it('a 🎧 removal that throws or hangs never holds the outcome line or the registry', async () => {
+    for (const unlisten of [async () => { throw new Error('no such reaction'); }, () => new Promise(() => {})]) {
+      const dir = home();
+      const audio = join(dir, 'n.ogg');
+      writeFileSync(audio, 'OggS');
+      const { files, before } = await arriveThenDie(dir, audio);
+      const { reg, lines } = registry(dir);
+      await reg.load();
+      const next = buildSpine({ files, background: reg, at: T(16, 20) });
+      await reg.resume({ transcribe: fakeTranscriber('hola').transcribe, wake: WAKE, deliver: (body, from) => next.spine.handleInbound({ body, from }), unlisten });
+      await vi.waitFor(() => expect(transcriptText(files).slice(before.length)).toContain('[re #31503] (voice transcription, 11s) hola'));
+      await vi.waitFor(() => expect(readReg(dir).transcriptions).toEqual([]));
+      if (lines.some((l) => /no such reaction/.test(l))) expect(lines.some((l) => /🎧.*no such reaction/.test(l))).toBe(true);
+    }
   });
 
   it('the file is gone: the failure line is appended, nothing earlier rewritten, nothing transcribed', async () => {
