@@ -206,11 +206,13 @@ export function createSpine({
   // Randomness for the auto-mode humanization (dwell + typing time), injected so
   // tests are deterministic. Defaults to Math.random.
   rng = Math.random,
+  probe = null,                        // optional lag probe (src/spine/lag-probe.mjs): times the fast-phase steps + the tick
 } = {}) {
   for (const [name, dep] of Object.entries({ bridge, brain, identity, router, gating, sender, transcript, heartbeats })) {
     if (!dep) throw new Error(`createSpine: missing required dependency '${name}'`);
   }
   const note = (s) => { try { log.line?.(s); } catch {} };
+  const timed = probe?.time ?? ((name, ev, fn) => fn());
   // The chat goes to the resolver too (operator 2026-09-11/09-12) — the same argument sender.mjs
   // and reply-actions.mjs pass. Asked about the being alone it answers with the being's MOUTH, so
   // on a node whose mouth is the second account the voice attach rode a connection that does not
@@ -651,14 +653,14 @@ export function createSpine({
     // CONFIG REFRESH ON MESSAGE ARRIVAL: before anything else, so every config-dependent
     // read for this message (gating, brainpool, transcription) sees the freshest scan — a changed
     // config.yaml included (a restart it needs is left to the tick).
-    maybeApplyConfigChange({ mayRestart: false });
-    await refreshConfig?.();
+    timed('config', null, () => maybeApplyConfigChange({ mayRestart: false }));
+    await timed('refresh', null, () => refreshConfig?.());
     const ev = identity.build(msg);
     // SI PEER-LINK (2026-10-13): a canary-stamped super-channel intro arriving in a side-group this
     // node has no alias for yet links the SAME channel (commands.linkSuperChannel decodes ev.canary →
     // its own base conversation → writes the super alias). BEFORE classify so this message's own routing
     // already sees it; idempotent and a no-op on every message without an intro canary (ev.canary null).
-    await commands?.linkSuperChannel?.(ev);
+    await timed('link', ev, () => commands?.linkSuperChannel?.(ev));
     // GUARD (C7.7): the channel is the CONVERSATION (surface + chatId). Resolved once here
     // for the safe-word + the loop counter inside classify; null when no guard is wired.
     //
@@ -706,7 +708,7 @@ export function createSpine({
     // early. `isEnvelope` is the SAME predicate humanTurn is built with, one derivation above —
     // never a second way to ask.
     const channel = (guard && !isEnvelope(ev)) ? guardChannel(ev) : null;
-    const act = await classify(ev, channel);
+    const act = await timed('classify', ev, () => classify(ev, channel));
     if (!act) return;                  // 'off' — not received (C4): not recorded, not processed
     // TRANSIT IS NOT RECORDED (operator 2026-08-31: "the log if required is in beeper itself").
     // A relay channel carries envelopes between spines; a second copy here is not a log, it is a
@@ -740,7 +742,7 @@ export function createSpine({
     // isEnvelope into it would be unreachable — and hoisting the widened test above the envelope
     // branch would kill mesh routing outright. That ordering is what keeps "skipping the record"
     // from ever becoming "skipping the routing".
-    if (!isTransit(ev) && !isEnvelope(ev)) await transcript.log(ev);   // ←── THE INGESTION POINT (C1.2). The only one.
+    if (!isTransit(ev) && !isEnvelope(ev)) await timed('transcript', ev, () => transcript.log(ev));   // ←── THE INGESTION POINT (C1.2). The only one.
     background?.noteVoice(ev);
     // Radio relay: a genuine inbound voice note, in a room joined to a radio, airs on the
     // station (createRadioNoteRelay owns the rest of the gate — joined+enabled, sender→speaker,
@@ -751,7 +753,7 @@ export function createSpine({
     if (radioRelay && ev.isVoice && humanTurn(ev)) {
       radioRelay(ev).catch((e) => note(`radio relay ${ev.surface}/${ev.chatId}: ${e?.message ?? e}`));
     }
-    return act();
+    return timed('act', ev, act);
   }
 
   // THE CHAT DECISION'S TWO READS, shared by classify (below) and the wake notice's question —
@@ -1873,7 +1875,7 @@ export function createSpine({
   let timer = null;
   function start() {
     bridge.onMessage(enqueue);
-    if (tickMs > 0) timer = setIntervalFn(tick, tickMs);
+    if (tickMs > 0) timer = setIntervalFn(() => timed('tick', null, tick), tickMs);
     note(`spine: started (tick ${tickMs}ms)`);
   }
   function stop() {
