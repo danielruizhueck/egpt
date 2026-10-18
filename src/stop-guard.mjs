@@ -6,7 +6,8 @@
 // and a being's own room fan-out. So a pause here is definite: a stopped channel never
 // reaches a brain at all.
 //
-// THE WHOLE RECOGNISED VOCABULARY IS THREE PHRASES:  STOP | RESUME | RESUME ALL.
+// THE WHOLE RECOGNISED VOCABULARY IS THREE PHRASES:  STOP | RESUME | RESUME ALL — plus the
+// configurable kill phrase (isStopPhrase, default "EGPT STOP"), the same switch as STOP.
 //
 // TWO SEPARATE THINGS, deliberately not conflated (operator 2026-07-25):
 //
@@ -132,6 +133,16 @@ export function parseStopWord(text) {
   if (t === 'resume all' || t === 'resumeall') return 'resume_all';
   if (t === 'resume') return 'resume';
   return null;
+}
+
+// THE KILL PHRASE (operator 2026-10-18: "a keyword, say EGPT STOP if on allowed_users should stop
+// that node") — config stop_phrase; unlike STOP it counts in ANY chat (the spine's gate). The whole
+// message, case- and spacing-insensitive, trailing '.'/'!' as above. '' = off.
+export const STOP_PHRASE = 'EGPT STOP';
+const foldPhrase = (s) => String(s ?? '').trim().toLowerCase().replace(/[.!\s]+$/, '').replace(/\s+/g, ' ');
+export function isStopPhrase(text, phrase = STOP_PHRASE) {
+  const want = foldPhrase(phrase ?? STOP_PHRASE);
+  return want !== '' && foldPhrase(text) === want;
 }
 
 // isHumanTurn — the provenance gate. A turn RESETS the loop counter only when it is a

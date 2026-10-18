@@ -46,7 +46,7 @@ import {
   CONV_YAML_PATH, readState as readConvState, writeState as writeConvState, slugDir, getContact, residentsOf, LOBBY_SLUG, fixedSlugFor,
   aliasMouthInfo, setAliasMouthChat,
 } from '../conversations-state.mjs';
-import { createStopGuard, STOP_FILE, stopFilePresent, writeStopFile, anyChannel, pauseNotice } from '../stop-guard.mjs';
+import { createStopGuard, STOP_FILE, stopFilePresent, writeStopFile, anyChannel, pauseNotice, normalizeLine } from '../stop-guard.mjs';
 import { createFloodBan } from '../flood-ban.mjs';
 import { createLasso } from '../lasso.mjs';
 import { CLEAN_EXIT_CODE } from '../daemon-runtime.mjs';
@@ -2005,6 +2005,11 @@ export async function boot({
     edits: Number.isFinite(lassoCfg.edits) ? lassoCfg.edits : 4_000,
     chatMessages: Number.isFinite(lassoCfg.chat_messages) ? lassoCfg.chat_messages : 5,
     chatWindowMs: Number.isFinite(lassoCfg.chat_window_ms) ? lassoCfg.chat_window_ms : 3_000,
+    chatSimilarCount: Number.isFinite(lassoCfg.chat_similar_count) ? lassoCfg.chat_similar_count : 5,
+    chatSimilarWindowMs: Number.isFinite(lassoCfg.chat_similar_window_ms) ? lassoCfg.chat_similar_window_ms : 2_000,
+    chatSimilarRatio: Number.isFinite(lassoCfg.chat_similar_ratio) ? lassoCfg.chat_similar_ratio : 0.85,
+    chatBurstCount: Number.isFinite(lassoCfg.chat_burst_count) ? lassoCfg.chat_burst_count : 10,
+    chatBurstWindowMs: Number.isFinite(lassoCfg.chat_burst_window_ms) ? lassoCfg.chat_burst_window_ms : 2_000,
     onLog: (m) => log.line?.(`[lasso] ${m}`),
     writeState: (s) => { writeFile(join(EGPT_HOME, 'state', 'lasso.json'), `${JSON.stringify(s, null, 2)}\n`, 'utf8').catch(() => {}); },
     onTrip: (t) => { Promise.resolve(stopSwitch.pull({ reason: `lasso: ${t.reason}`, who: 'lasso', where: 'outbound' })).catch(() => {}); },
@@ -3484,17 +3489,18 @@ export async function boot({
   // not our echo.
   const fromThisNode = (ev) => ev?.fromNode != null && !fromOtherNode(getConfig(), ev);
   // THE SEND-RATE PAUSE (operator 2026-10-18; src/lasso.mjs bindChats): a chat whose Beeper sends
-  // hold ≥5 per 3s over two windows is paused HERE — the pause RESUME clears — said in the chat,
-  // and logged ONCE to log_to_group. A mouth room counts as its home chat; the shell is not Beeper.
+  // trip a per-chat rule (similar / burst / sustained) is paused HERE — the pause RESUME clears —
+  // said in the chat, and logged ONCE to log_to_group. A mouth room counts as its home chat; the
+  // shell is not Beeper. A line is compared as the loop guard reads it (normalizeLine).
   lasso.bindChats({
     keyOf: (chat) => (shellPort.owns(chat) ? null : shortChatId(peerMouth?.homeChatOf?.(chat) ?? chat)),
+    lineOf: normalizeLine,
     isPaused: (key) => guard.blocked(anyChannel(key)),
-    onTrip: (key, { chat, name, count, spanMs }) => {
-      const why = `${count} messages in ${(spanMs / 1000).toFixed(1)}s`;
+    onTrip: (key, { chat, name, why }) => {
       guard.stopChannel(anyChannel(key));
       const home = peerMouth?.homeChatOf?.(chat) ?? chat;
-      Promise.resolve(sayOnce({ chatId: home, text: pauseNotice(`send-rate guard: ${why}`), opts: { bypassLasso: true }, what: 'guard' })).catch((e) => log.line?.(`[guard] could not announce the pause in ${home}: ${e?.message ?? e}`));
-      Promise.resolve(logToGroup(`${getConfig()?.node_name ?? '?'} · send-rate guard paused ${name ?? home}: ${why}`)).catch(() => {});
+      Promise.resolve(sayOnce({ chatId: home, text: pauseNotice(`send-rate guard, ${why}`), opts: { bypassLasso: true }, what: 'guard' })).catch((e) => log.line?.(`[guard] could not announce the pause in ${home}: ${e?.message ?? e}`));
+      Promise.resolve(logToGroup(`${getConfig()?.node_name ?? '?'} · send-rate guard paused ${name ?? home} — ${why}`)).catch(() => {});
     },
   });
 
@@ -3573,7 +3579,7 @@ export async function boot({
   });
   // backgroundWork: what a restart drain waits for. Held by the daemon, it survives a spine restart, so
   // there is nothing to wait for; spawned by this spine (no daemon host), it dies with it.
-  const spine = createSpine({ bridge, bridgeOf: rawBridgeOf, peerMouth, brain, turns, ...services, commands, mesh, actions, backgroundWork: () => (cliHost ? [] : liveBackground()), background, advice, guard, guardOverride, fromThisNode, say: sayOnce, logToGroup: (text) => logToGroup(`${getConfig()?.node_name ?? '?'} · ${text}`), stopSwitch, isSelfChat, isTransit: (ev) => isRelayChannelChat(getConfig(), ev), roomRelay, readTranscript, refreshConfig: heartbeatLoader.reload, applyConfig, configBootHash, readConfigHash, requestRestart: () => announceAndExit(43), radioRelay: radioRelay.relay, synthesize: vx.synthesize, voice: vx.voice, defaultBeing: defaultKey, labelOf, timeZone: transcriptTimeZone, clock: { now }, log, turnTimeoutMs, livenessEveryMs, tickMs: effectiveTickMs, setInterval: setIntervalFn, clearInterval: clearIntervalFn, probe: lagProbe });
+  const spine = createSpine({ bridge, bridgeOf: rawBridgeOf, peerMouth, brain, turns, ...services, commands, mesh, actions, backgroundWork: () => (cliHost ? [] : liveBackground()), background, advice, guard, guardOverride, fromThisNode, say: sayOnce, logToGroup: (text) => logToGroup(`${getConfig()?.node_name ?? '?'} · ${text}`), stopSwitch, isSelfChat, isTransit: (ev) => isRelayChannelChat(getConfig(), ev), roomRelay, readTranscript, refreshConfig: heartbeatLoader.reload, applyConfig, configBootHash, readConfigHash, requestRestart: () => announceAndExit(43), radioRelay: radioRelay.relay, synthesize: vx.synthesize, voice: vx.voice, defaultBeing: defaultKey, labelOf, timeZone: transcriptTimeZone, clock: { now }, log, turnTimeoutMs, livenessEveryMs, tickMs: effectiveTickMs, setInterval: setIntervalFn, clearInterval: clearIntervalFn, probe: lagProbe, stopPhrase: () => getConfig()?.stop_phrase });
   // Bind the advice service's answer-routing dispatch now that the spine exists: an
   // operator answer in the advice channel re-enters the pipe as a turn in the origin chat.
   advice.useDispatch(spine.handleInbound);
