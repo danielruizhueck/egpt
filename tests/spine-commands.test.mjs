@@ -2036,17 +2036,6 @@ describe('/agents across two nodes — only the host answers; `all` refused, `fo
     expect(dn.audit).toEqual([`/agents in ${CHAT} by someone → no zzz in node do`]);
   });
 
-  // A peer being kg names (route-less relay) is do's: kg must not answer for it too.
-  it('a peer being declared on kg is not kg\'s: `/agents mode accum don` is answered by do alone', async () => {
-    const kg = node({ ...KG_CFG, agents: { ...KG_CFG.agents, 'do-beings': { configuration: 'relay', handles: ['d', 'don'] } } }, KG_BEINGS);
-    const dn = node(DO_CFG, DO_BEINGS);
-    for (const n of [kg, dn]) await n.cmds.run({ chatId: CHAT, surface: SURFACE, body: '/agents mode accum don', authorized: true });
-    expect(kg.sent).toEqual([]);
-    expect(kg.writes).toHaveLength(0);
-    expect(kg.audit).toEqual([`/agents in ${CHAT} by someone → no don in node kg`]);
-    expect(dn.sent.map((x) => x.text)).toEqual(['✅ don (egpt) mode here → accum']);
-  });
-
   it('`/agents mode accum all`: ONE refusal, from the primary only, naming `force all`; nothing changes anywhere', async () => {
     const { kg, dn } = await both('/agents mode accum all');
     expect(kg.sent).toHaveLength(1);

@@ -46,11 +46,6 @@ function localAgentKey(agents, name) {
   return hit ? hit[0] : null;
 }
 
-// A relay with no route: it names a being on another node and forwards nothing.
-export function isPeerBeing(agent) {
-  return String(agent?.configuration ?? '').toLowerCase() === 'relay' && !agent.relay_channel && !Array.isArray(agent.paths);
-}
-
 // Is this sender on ANY allowed_users list (networks.*, agents.*.conversation_defaults)? "*" names nobody.
 export function isKnownSender(senderId, config = {}) {
   const lists = [
@@ -520,7 +515,6 @@ export function createRouter({ getAgents = () => ({}), getConfig = () => ({}), d
         const globalAllowed = Array.isArray(agent?.conversation_defaults?.allowed_users) ? agent.conversation_defaults.allowed_users : null;
         return allowedUsersPermits(convAllowed ?? globalAllowed, ev?.senderId);
       };
-      let elsewhere = null;                        // the first peer-being hit (isPeerBeing), if any
       // ONE membership answer per identity per resolve() call (never per hit) — same discipline as
       // the conv-state read above. Only ever consulted for a hit that actually carries a guard, so
       // a message addressing nobody, or addressing an ordinary handle, costs nothing.
@@ -582,10 +576,6 @@ export function createRouter({ getAgents = () => ({}), getConfig = () => ({}), d
           // the tunnel re-addresses it onto surface `room`.
           if (hit.agent.surface != null
               && surfaceOf(String(hit.agent.surface).toLowerCase()) !== String(org?.surface ?? '').toLowerCase()) continue;
-          // A PEER BEING (operator 2026-10-18): a relay with no route (configuration: relay, handles,
-          // no relay_channel/paths) names a being on another node. Nothing to forward, and the line
-          // is not the persona's: recorded, prompts nobody (the fall-through below), in any mode.
-          if (isPeerBeing(hit.agent)) { elsewhere ??= hit; continue; }
           // ALLOWED_USERS GATE (operator 2026-08-15): "we should control by access_level and who
           // is able to trigger the agent … i think the 'dangerous' key is mistake" — replaces the
           // evicted TYPE-FILE `dangerous:true` reachability mechanism (meta-engineer.yaml, gone;
@@ -728,13 +718,11 @@ export function createRouter({ getAgents = () => ({}), getConfig = () => ({}), d
       // `fallthrough: true` — NOBODY was explicitly addressed; this is the persona default, not a
       // real @mention. The per-being echo gate (spine.mjs) reads it so a being's own plain signed
       // line never wakes the persona by default (only an explicit cross-being address does).
-      // `denied: true` — that being's allowed_users refuses this sender, or the line addressed only a
-      // peer being: the line is recorded, and the gate (gating.decide) wakes nobody, whatever the
-      // mode or mention.
+      // `denied: true` — that being's allowed_users refuses this sender: the line is recorded, and
+      // the gate (gating.decide) wakes nobody, whatever the mode or mention.
       if (!targets.length) {
         const being = owner ?? defaultBeing;
-        if (elsewhere) onLog(`"${elsewhere.token ?? elsewhere.name}" addresses ${elsewhere.name}, a being on another node — ${ev?.surface}/${ev?.chatId} recorded, prompts nobody`);
-        targets.push({ being, mention: ev?.mention, address: null, fallthrough: true, ...(!elsewhere && permits(being, agents[being]) ? {} : { denied: true }) });
+        targets.push({ being, mention: ev?.mention, address: null, fallthrough: true, ...(permits(being, agents[being]) ? {} : { denied: true }) });
       }
       return { ...targets[0], targets };
     },

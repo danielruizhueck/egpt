@@ -1594,10 +1594,6 @@ export const CONFIG_SCHEMA = {
         For a relay agent, configuration is the literal "relay" (a STRING; an
         inline map is never a relay), or simply absent.
 
-        A relay with no relay_channel and no paths is a PEER BEING: its handles
-        name a being on another node. A line addressed to one is recorded and
-        wakes nobody here, in any mode; nothing is forwarded.
-
         A configuration that is neither — a list, a number, an empty map, a
         path-shaped string — THROWS at resolution, naming the agent. It is
         never silently swapped for a default.
