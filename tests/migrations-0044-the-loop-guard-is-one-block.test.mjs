@@ -311,7 +311,7 @@ describe('the rename is complete', () => {
     const p = join(dir, n);
     const st = statSync(p);
     if (st.isDirectory()) return SKIP_DIRS.has(n) ? [] : walk(p);
-    return TEXT.test(n) ? [p] : [];
+    return TEXT.test(n) && !/\.disposable\.md$/i.test(n) ? [p] : [];   // gitignored scratch notes are history, not code
   });
 
   it('no "lasso" outside 0044 and the legacy-key constant', () => {
