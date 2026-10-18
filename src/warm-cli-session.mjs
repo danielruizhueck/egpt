@@ -703,6 +703,6 @@ export function createWarmCliSession(options = {}) {
     // Background tasks still running — the pool will not idle-evict while this is > 0.
     get background() { return background.size; },
     // …and what they are, with when each started (the spine's liveness status and its ask).
-    get backgroundTasks() { return [...background.values()].map((t) => ({ ...t })); },
+    get backgroundTasks() { return [...background].map(([taskId, t]) => ({ taskId, ...t })); },
   };
 }

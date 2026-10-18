@@ -83,6 +83,7 @@ import { createBookLimb } from './book.mjs';
 import { createAdvice } from './advice.mjs';
 import { createMedia } from './media.mjs';
 import { createTranscription } from './transcription.mjs';
+import { createBackgroundRegistry } from './background.mjs';
 import { createVoiceSynthesis } from './synthesis.mjs';
 import { uploadNote, radioNoteFilename, pickSpeaker } from '../radio-relay.mjs';
 import { extFromMeta } from '../media-save.mjs';
@@ -3123,9 +3124,15 @@ export async function boot({
     }
     return earBridge;
   };
+  // Every warm session's live background tasks, with the conversation each would wake in.
+  const liveBackground = () => pool.stats().keys.flatMap((k) => pool.background(k).map((t) => ({ ...(brain.convOfKey(k) ?? { being: '?', chatId: k }), ...t })));
+  // What this node is handling, in state/background.json (src/spine/background.mjs). Real-node only.
+  const background = ingest ? createBackgroundRegistry({ path: join(EGPT_HOME, 'state', 'background.json'), node: node_name, liveAgents: liveBackground, now, onLog: (m) => log.line?.(`[background] ${m}`) }) : null;
+  await background?.load();
   const commands = createCommands({
     getConfig,
     floodBan,                                         // /unban + /bans — the SAME in-memory instance the bridges observe into
+    background,                                       // the operator's bare /agents lists it
     send: commandTranscript.send,
     exit: announceAndExit,
     writeRewindTarget: (ref) => writeFile(join(EGPT_HOME, 'rewind-target.txt'), ref, 'utf8'),
@@ -3556,7 +3563,7 @@ export async function boot({
   };
   // backgroundWork: what a restart drain waits for. Held by the daemon, it survives a spine restart, so
   // there is nothing to wait for; spawned by this spine (no daemon host), it dies with it.
-  const spine = createSpine({ bridge, bridgeOf: rawBridgeOf, peerMouth, brain, turns, ...services, commands, mesh, actions, backgroundWork: () => (cliHost ? [] : pool.stats().keys.flatMap((k) => pool.background(k).map((t) => ({ ...(brain.convOfKey(k) ?? { being: '?', chatId: k }), ...t })))), advice, guard, guardOverride, fromThisNode, say: sayOnce, logToGroup: (text) => logToGroup(`${getConfig()?.node_name ?? '?'} · ${text}`), stopSwitch, isSelfChat, isTransit: (ev) => isRelayChannelChat(getConfig(), ev), roomRelay, readTranscript, refreshConfig: heartbeatLoader.reload, applyConfig, configBootHash, readConfigHash, requestRestart: () => announceAndExit(43), radioRelay: radioRelay.relay, synthesize: vx.synthesize, voice: vx.voice, defaultBeing: defaultKey, labelOf, timeZone: transcriptTimeZone, clock: { now }, log, turnTimeoutMs, livenessEveryMs, tickMs: effectiveTickMs, setInterval: setIntervalFn, clearInterval: clearIntervalFn });
+  const spine = createSpine({ bridge, bridgeOf: rawBridgeOf, peerMouth, brain, turns, ...services, commands, mesh, actions, backgroundWork: () => (cliHost ? [] : liveBackground()), background, advice, guard, guardOverride, fromThisNode, say: sayOnce, logToGroup: (text) => logToGroup(`${getConfig()?.node_name ?? '?'} · ${text}`), stopSwitch, isSelfChat, isTransit: (ev) => isRelayChannelChat(getConfig(), ev), roomRelay, readTranscript, refreshConfig: heartbeatLoader.reload, applyConfig, configBootHash, readConfigHash, requestRestart: () => announceAndExit(43), radioRelay: radioRelay.relay, synthesize: vx.synthesize, voice: vx.voice, defaultBeing: defaultKey, labelOf, timeZone: transcriptTimeZone, clock: { now }, log, turnTimeoutMs, livenessEveryMs, tickMs: effectiveTickMs, setInterval: setIntervalFn, clearInterval: clearIntervalFn });
   // Bind the advice service's answer-routing dispatch now that the spine exists: an
   // operator answer in the advice channel re-enters the pipe as a turn in the origin chat.
   advice.useDispatch(spine.handleInbound);
@@ -3591,7 +3598,11 @@ export async function boot({
         log.line?.(`[cli-host] adopted ${h.key} pid ${a.pid}${a.background?.length ? ` (${a.background.length} background task(s))` : ''}${a.orphan ? ' — a turn still running' : ''}`);
       } catch (e) { log.line?.(`[cli-host] could not adopt ${h.key}, ending it: ${e?.message ?? e}`); cliHost.kill(h.hid); }
     }
-  })().catch((e) => log.line?.(`[cli-host] adoption failed: ${e?.message ?? e}`));
+  })().catch((e) => log.line?.(`[cli-host] adoption failed: ${e?.message ?? e}`)).finally(() => background?.reconcile());
+  else background?.reconcile();
+  // Voice notes the last spine left being transcribed: resumed through the same transcription service.
+  background?.resume({ transcribe: tx.transcribe, audioCfg: tx.cliCfg, deliver: (body, from) => spine.handleInbound({ body, from }) })
+    .catch((e) => log.line?.(`[background] resume failed: ${e?.message ?? e}`));
 
   // Feed the shell surface into the SAME dispatch (handleInbound is the spine's documented
   // direct-caller seam — the identical path bridge.onMessage/enqueue runs). Registered

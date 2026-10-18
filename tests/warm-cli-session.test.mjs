@@ -860,7 +860,7 @@ describe('warm-cli-session — a background task finishes', () => {
     const s = createWarmCliSession({ spawn: f.spawn });
     const t0 = Date.now();
     await s.turn('START BG');
-    expect(s.backgroundTasks).toEqual([{ description: 'Run delayed echo', since: expect.any(Number) }]);
+    expect(s.backgroundTasks).toEqual([{ taskId: 'b1', description: 'Run delayed echo', since: expect.any(Number) }]);
     const since = s.backgroundTasks[0].since;
     expect(since).toBeGreaterThanOrEqual(t0);
     await new Promise((r) => setTimeout(r, 5));
@@ -1026,7 +1026,7 @@ describe('warm-cli-session — a background subagent\'s text never reaches the r
     const s = createWarmCliSession({ spawn: f.spawn, onBackgroundDone: (i) => done.push(i) });
     const r1 = await s.turn('START');
     expect(r1.bgStarted).toBe(1);
-    expect(s.backgroundTasks).toEqual([{ description: 'counter', since: expect.any(Number) }]);
+    expect(s.backgroundTasks).toEqual([{ taskId: 'a1', description: 'counter', since: expect.any(Number) }]);
     await s.turn('SEND');
     expect(s.background).toBe(1);
     f.subagentDone();

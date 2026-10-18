@@ -4784,6 +4784,17 @@ describe('beeper bridge — a voice note is two lines: its arrival now, its tran
     expect(incoming[0].from).toMatchObject({ msgKey: '31503', voiceLine: 'outcome', isTranscriptFromVoice: true });
   });
 
+  it('the arrival names the audio file the transcriber reads — what a restart resumes from (spine/background.mjs)', async () => {
+    const heard = deferred();
+    let read = null;
+    const { incoming, arrivals } = await startBridge({ transcribe: (p) => { read = p; return heard.p; } });
+    fake.emit({ type: 'message.upserted', entries: [note()] });
+    await waitFor(() => arrivals.length === 1 && read != null, 3000);
+    expect(arrivals[0].from.voicePath).toBe(read);
+    heard.resolve('Mira marico');
+    await waitFor(() => incoming.length === 1);
+  });
+
   for (const [why, transcribe, reason] of [
     ['throws', async () => { throw new Error('worker timed out'); }, 'worker timed out'],
     ['returns nothing', async () => null, 'no transcript'],

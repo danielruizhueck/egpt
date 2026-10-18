@@ -2508,7 +2508,7 @@ export async function startBeeperBridge(opts = {}) {
       isReaction: false,
       // a voice note's ARRIVAL carries no transcript (yet); its outcome line, below, does
       isTranscriptFromVoice: isVoice && !_voicePending,
-      ...(_voicePending ? { voiceLine: 'arrival' } : {}),
+      ...(_voicePending ? { voiceLine: 'arrival', voicePath: _voicePath } : {}),   // the file a restart resumes from (spine/background.mjs)
       msgKey: msg.id || null,
       // THE CROSS-ACCOUNT IDENTITY of this message (crossAccountMsgKey, above): the content hash
       // and the message's OWN timestamp — the only two fields the co-account node's view of this

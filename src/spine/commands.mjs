@@ -568,6 +568,7 @@ export function resolveSecondaryParticipantId(config, selfIds = []) {
 export function createCommands({
   getConfig = () => ({}),
   floodBan = null,                       // the media-flood auto-ban (src/flood-ban.mjs) — /unban clears, /bans lists; the SAME instance the bridges observe into. Null (standalone) → both commands say it isn't wired.
+  background = null,                     // the node's background-work registry (src/spine/background.mjs) — the operator's bare /agents lists it
   send: rawSend,                         // (chatId, text) -> deliver a plain system reply
   exit = (code) => process.exit(code),
   writeRewindTarget,
@@ -1081,6 +1082,8 @@ export function createCommands({
     const agentsMatch = /^\/agents(?:=(\S+))?(?:\s+(.+?))?\s*$/i.exec(line);
     if (agentsMatch) {
       if (!isOperator(ev) && AGENTS_BARE_CMD.test(line)) return await agentsPublic(ev);
+      const handling = AGENTS_BARE_CMD.test(line) ? background?.status() : '';
+      if (handling) { await send?.(ev.chatId, `${handling}\n\n${AGENTS_USAGE}`); return; }
       const raw = (agentsMatch[2] ?? '').trim().split(/\s+/).filter(Boolean);
       const { args, slug, retired } = normalizeAgentsArgs(raw);
       // The retired object-first order gets its own line back, rebuilt into the new one —
