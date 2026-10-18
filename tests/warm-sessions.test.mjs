@@ -670,6 +670,24 @@ describe('warm-session pool — background work', () => {
     expect(pool.background('nope')).toEqual([]);
   });
 
+  it('pending counts runs in flight + queued; a run is uncounted by the time its caller resumes', async () => {
+    const done = [];
+    const makeSession = () => ({ close() {}, turn: () => new Promise((r) => done.push(r)) });
+    const pool = createWarmPool({ makeSession });
+    expect(pool.pending('k')).toBe(0);
+    const first = pool.run('k', 'a');
+    const second = pool.run('k', 'b');
+    expect(pool.pending('k')).toBe(2);
+    await sleep(2);
+    done.shift()({ text: 'a' });
+    await first;
+    expect(pool.pending('k')).toBe(1);                // only the queued run, already as `first` resumes
+    await sleep(2);
+    done.shift()({ text: 'b' });
+    await second;
+    expect(pool.pending('k')).toBe(0);
+  });
+
   it('LRU passes over a session with background work in flight', async () => {
     const { makeSession, made } = fakeFactory();
     const pool = createWarmPool({ makeSession, max: 2 });

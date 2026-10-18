@@ -3306,7 +3306,10 @@ export const CONFIG_SCHEMA = {
         context, so it can write its working state to handoffs/{agent}.handoff.md in its
         conversation folder and resume from there after the /compact at ratio. It fires
         ONCE per thread, not on every loop tick between warn and compact. {agent} is
-        replaced with the being's handle. The handoff turn is
+        replaced with the being's handle, {YYMMDD-HHMM} with the node-local time of the
+        warn (stamped once: the welcome and the notice's {path} reuse it). The file the
+        prompt names (its first *.md token, relative to the being's cwd) IS the handoff
+        path the notice and the welcome point at. The handoff turn is
         NON-FATAL: a failed one logs a line and the compaction proceeds (losing a
         handoff never blocks the compact), and its output is not posted to chat.
         DEFAULT: unset — no handoff turn (today's behaviour). The reference text is:
@@ -3318,11 +3321,20 @@ export const CONFIG_SCHEMA = {
         GRACEFUL COMPACTION, step ③ (operator 2026-10-04). Appended AFTER the re-fed
         identity on the FIRST post-compact turn (the identity re-feeds on compaction
         as it does at start/refresh/rethread), pointing the being at the handoff it
-        wrote. {agent} is replaced with the being's handle. It rides ONLY a
+        wrote. {agent} is replaced with the being's handle, {YYMMDD-HHMM} with the
+        stamp of the warn that wrote the handoff. It rides ONLY a
         compaction-triggered re-feed, never a plain /agents refresh.
         DEFAULT: unset — re-feed with no welcome (today's behaviour). The reference
         text is: "hi, you have just been compacted. please read your handoff at
         handoffs/{agent}.handoff.md and continue where you left off."
+      compact_after_handoff
+        DEFAULT: true (operator 2026-10-17). When the handoff turn succeeds (it ran and
+        replied with text) and the conversation is idle — no turn in flight or queued
+        on its warm session, no live background task — the /compact (and then the
+        welcome) runs right away instead of waiting for ratio. With work pending, it
+        compacts at the next quiet tick past the warn threshold. A failed or empty
+        handoff turn waits for ratio. false = compact only at ratio. critical_ratio is
+        unaffected.
   `,
 
   compaction_warn_notice: `
@@ -3336,8 +3348,9 @@ export const CONFIG_SCHEMA = {
     PLACEHOLDERS (resolved like {agent} already is elsewhere):
       {agent}    the being's handle (first segment of the warm key)
       {percent}  current fullness = round(tokens / window * 100)
-      {path}     the handoff file the being writes — its conversation folder +
-                 handoffs/{agent}.handoff.md, so the operator can open it
+      {path}     the handoff file the being writes — the file compaction.handoff_prompt
+                 names, resolved and joined to the being's cwd, so the operator can open
+                 it (handoffs/{agent}.handoff.md when the prompt names none)
 
     DEFAULT: unset — the operator's reference wording is used:
     "the conversation is at {percent}%, handoff being written, compaction next. you

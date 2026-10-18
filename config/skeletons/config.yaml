@@ -355,11 +355,13 @@ turn_timeout_ms: 600000
 # warm: { max: 6, idle_ttl_by_class: { conversation: 15m } }  # -1 = never evict, 0 = always
 # compaction: { enabled: true, ratio: 0.20, cooling_ms: 120000 }
 # Graceful compaction (all OPTIONAL; unset = today's behavior - no handoff turn, re-feed with no
-# welcome). {agent} is replaced with the being's handle. Full reference: config/config-schema.mjs.
+# welcome). {agent} is replaced with the being's handle, {YYMMDD-HHMM} with the warn's local time
+# (one stamp, so prompt, notice and welcome name the same file). Full reference: config/config-schema.mjs.
 # TWO THRESHOLDS: warn_gap sets a WARN threshold that many % below ratio; at WARN the being writes
 # its handoff and the admin channel gets compaction_warn_notice (below); at ratio the /compact runs.
 # compaction:
 #   warn_gap: 0.03   # WARN threshold = ratio - warn_gap of the window (default 0.03); 0 = no early warning
+#   compact_after_handoff: true   # handoff written + conversation idle -> /compact right away (default true); false = only at ratio
 #   # written at the WARN threshold so the being saves its working state and can resume after /compact:
 #   handoff_prompt: "You are about to be compacted. Write a concise handoff of your current working state - what you are doing, the key context, and your next steps - to handoffs/{agent}.handoff.md, so you can pick up seamlessly after compaction."
 #   # appended AFTER the re-fed identity on the first post-compact turn:

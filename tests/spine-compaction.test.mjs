@@ -2,12 +2,14 @@
 // conversation, /compact its warm session (native, in place) if it's over ratio.
 // Manual scheduler + fake pool + injected dueFor — no timers, no session files.
 import { describe, it, expect } from 'vitest';
+import { join } from 'node:path';
 import { createCompaction } from '../src/spine/compaction.mjs';
+import { createWarmPool } from '../src/warm-sessions.mjs';
 
 function makeScheduler() {
   const s = {
-    fn: null, setCount: 0, clearCount: 0,
-    set(fn) { s.setCount++; s.fn = fn; return { id: s.setCount }; },
+    fn: null, ms: null, setCount: 0, clearCount: 0,
+    set(fn, ms) { s.setCount++; s.fn = fn; s.ms = ms; return { id: s.setCount }; },
     clear() { s.clearCount++; s.fn = null; },
     async fire() { const f = s.fn; s.fn = null; if (f) await f(); },
   };
@@ -371,5 +373,162 @@ describe('compaction: compactNow (on demand, /agents compact)', () => {
     const r = c.compactNow(TARGET.key);
     expect(r.inFlight).toBe(true);
     await r.done;
+  });
+});
+
+// ONE HANDOFF PATH (live 2026-10-17: prompt, notice and welcome named three different files).
+// {YYMMDD-HHMM} is resolved ONCE at warn, node-local, and the prompt, the notice's {path} and the
+// welcome all carry that one string, even when the compact lands later.
+describe('compaction: one handoff path for prompt, notice and welcome', () => {
+  const cfg = (prompt, welcome) => ({
+    compaction: { handoff_prompt: prompt, welcome, compact_after_handoff: false },
+    compaction_warn_notice: 'read it here: {path}',
+  });
+  const run = async (config) => {
+    const pool = fakePool(), sched = makeScheduler();
+    let t = new Date(2026, 9, 17, 22, 21), notice, welcome;
+    let state = { due: false, tokens: 36_000, threshold: 40_000 };
+    const c = createCompaction({ pool, getConfig: () => config, scheduler: sched, dueFor: () => state, now: () => t });
+    const tgt = { ...TARGET, noticeWarn: async ({ text }) => { notice = text; }, armIdentityRefresh: async (w) => { welcome = w; } };
+    c.afterTurn(tgt); await sched.fire();                    // WARN at 22:21
+    t = new Date(2026, 9, 17, 23, 5);                        // the compact lands later
+    state = { due: true, tokens: 50_000, threshold: 40_000 };
+    c.afterTurn(tgt); await sched.fire();
+    return { prompt: pool.runs[0].msg, notice, welcome, msgs: pool.runs.map((r) => r.msg) };
+  };
+
+  it('the three name the same timestamped file, stamped at warn time', async () => {
+    const r = await run(cfg(
+      'write to handoffs/{agent}.{YYMMDD-HHMM}.handoff.md, so you can resume',
+      'read your handoff at handoffs/{agent}.{YYMMDD-HHMM}.handoff.md and continue'));
+    const rel = 'handoffs/e.261017-2221.handoff.md';
+    expect(r.msgs).toEqual([`write to ${rel}, so you can resume`, '/compact']);
+    expect(r.notice).toBe(`read it here: ${join('/c', rel)}`);
+    expect(r.welcome).toBe(`read your handoff at ${rel} and continue`);
+  });
+
+  it('a template without the timestamp token has no timestamp', async () => {
+    const r = await run(cfg('write handoffs/{agent}.handoff.md now', 'read handoffs/{agent}.handoff.md'));
+    expect(r.prompt).toBe('write handoffs/e.handoff.md now');
+    expect(r.notice).toBe(`read it here: ${join('/c', 'handoffs/e.handoff.md')}`);
+    expect(r.welcome).toBe('read handoffs/e.handoff.md');
+  });
+});
+
+// COMPACT RIGHT AFTER THE HANDOFF (operator 2026-10-17, compaction.compact_after_handoff, default on):
+// a handoff turn that succeeded on an idle conversation is followed by the /compact at once; with
+// work pending, the next quiet tick past warn compacts; a failed/empty handoff or the switch off
+// keeps the old rule (compact at ratio).
+describe('compaction: compact right after the handoff', () => {
+  const CFG = { compaction: { handoff_prompt: 'HANDOFF {agent}', welcome: 'WELCOME {agent}' } };
+  const WARN = () => ({ due: false, tokens: 36_000, threshold: 40_000 });
+  const DUE = () => ({ due: true, tokens: 50_000, threshold: 40_000 });
+  const handoffPool = (over = {}) => ({
+    runs: [],
+    run(key, msg) { this.runs.push(msg); return Promise.resolve({ text: msg === '/compact' ? '' : 'handoff written' }); },
+    busy: () => false, pending: () => 0, background: () => [],
+    ...over,
+  });
+  const setup = ({ pool, config = CFG, dueFor = WARN, criticalOver } = {}) => {
+    const sched = makeScheduler(), armed = [];
+    let state = dueFor;
+    const c = createCompaction({ pool, getConfig: () => config, scheduler: sched, dueFor: () => state(), ...(criticalOver ? { criticalOver } : {}) });
+    const tick = async (next) => { if (next) state = next; c.afterTurn({ ...TARGET, armIdentityRefresh: async (w) => { armed.push(w); } }); await sched.fire(); };
+    return { sched, armed, tick };
+  };
+
+  it('idle: /compact right after the handoff, then the welcome', async () => {
+    const pool = handoffPool();
+    const { armed, tick } = setup({ pool });
+    await tick();
+    expect(pool.runs).toEqual(['HANDOFF e', '/compact']);
+    expect(armed).toEqual(['WELCOME e']);
+  });
+
+  it('a turn queued or in flight: no immediate compact; the next quiet tick past warn compacts', async () => {
+    for (const over of [{ pending: () => 1 }, { busy: () => true }]) {
+      const pool = handoffPool(over);
+      const { tick } = setup({ pool });
+      await tick();
+      expect(pool.runs).toEqual(['HANDOFF e']);
+      await tick();                                            // quiet again, still short of ratio
+      expect(pool.runs).toEqual(['HANDOFF e', '/compact']);
+    }
+  });
+
+  it('live background work: no immediate compact', async () => {
+    const pool = handoffPool({ background: () => [{ description: 'audit', since: 1 }] });
+    const { tick } = setup({ pool });
+    await tick();
+    expect(pool.runs).toEqual(['HANDOFF e']);
+  });
+
+  it('a failed or empty handoff: no immediate compact, and it waits for ratio', async () => {
+    const failing = { run(key, msg) { this.runs.push(msg); return msg === '/compact' ? Promise.resolve({ text: '' }) : Promise.reject(new Error('boom')); } };
+    const empty = { run(key, msg) { this.runs.push(msg); return Promise.resolve({ text: '  ' }); } };
+    for (const over of [failing, empty]) {
+      const pool = handoffPool(over);
+      const { tick } = setup({ pool });
+      await tick();
+      await tick();                                            // a second warn-only tick: still waiting
+      expect(pool.runs).toEqual(['HANDOFF e']);
+      await tick(DUE);
+      expect(pool.runs).toEqual(['HANDOFF e', '/compact']);
+    }
+  });
+
+  it('the switch off: compact only at ratio (the old rule)', async () => {
+    const pool = handoffPool();
+    const { tick } = setup({ pool, config: { compaction: { ...CFG.compaction, compact_after_handoff: false } } });
+    await tick();
+    await tick();
+    expect(pool.runs).toEqual(['HANDOFF e']);
+    await tick(DUE);
+    expect(pool.runs).toEqual(['HANDOFF e', '/compact']);
+  });
+
+  it('critical_ratio unchanged: armed with no wait, compacts even with work pending', async () => {
+    const pool = handoffPool({ pending: () => 1, background: () => [{ description: 'audit', since: 1 }] });
+    const { sched, tick } = setup({ pool, config: { compaction: { ...CFG.compaction, critical_ratio: 0.9 } }, dueFor: DUE, criticalOver: () => true });
+    await tick();
+    expect(sched.ms).toBe(0);
+    expect(pool.runs).toEqual(['HANDOFF e', '/compact']);
+  });
+
+  describe('with the real warm pool', () => {
+    const sessions = () => {
+      const made = [];
+      let release = null;
+      const makeSession = () => {
+        const s = { turns: [], close() {}, turn(msg) { s.turns.push(msg); if (msg === 'HANDOFF e') return new Promise((r) => { release = () => r({ text: 'written' }); }); return Promise.resolve({ text: 'ok' }); } };
+        made.push(s);
+        return s;
+      };
+      return { made, makeSession, release: () => release() };
+    };
+    const settle = () => new Promise((r) => setImmediate(r));
+
+    it('idle: the /compact follows the handoff on the same session', async () => {
+      const s = sessions();
+      const { tick } = setup({ pool: createWarmPool({ makeSession: s.makeSession }) });
+      const fired = tick();
+      await settle();
+      s.release();
+      await fired;
+      expect(s.made[0].turns).toEqual(['HANDOFF e', '/compact']);
+    });
+
+    it('a message queued behind the handoff turn blocks the immediate compact', async () => {
+      const s = sessions();
+      const pool = createWarmPool({ makeSession: s.makeSession });
+      const { tick } = setup({ pool });
+      const fired = tick();
+      await settle();
+      const human = pool.run(TARGET.key, 'hello', () => {}, { klass: 'conversation' });
+      s.release();
+      await fired;
+      await human;
+      expect(s.made[0].turns).toEqual(['HANDOFF e', 'hello']);
+    });
   });
 });

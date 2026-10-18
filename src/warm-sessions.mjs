@@ -253,8 +253,10 @@ export function createWarmPool({
     // clobbers the ttl the last real turn set). A changed config re-stamps here, so
     // it takes effect on the NEXT _armIdle. null = no override (fall to the class TTL).
     if (idleTtlMs !== undefined) e.idleTtlMs = idleTtlMs;
+    e.runs = (e.runs ?? 0) + 1;   // in flight + queued, read by pending()
     const p = e.chain.then(() => _doTurn(key, message, onUpdate, timeoutMs ?? dispatchTimeoutMs));
-    e.chain = p.then(() => {}, () => {});   // keep the per-key chain alive across failures
+    const settled = () => { e.runs--; };
+    e.chain = p.then(settled, settled);   // keep the per-key chain alive across failures
     return p;
   }
 
@@ -356,9 +358,11 @@ export function createWarmPool({
   function has(key) { return _s.has(key); }
   function background(key) { return _s.get(key)?.session.backgroundTasks ?? []; }
   function busy(key) { return _s.get(key)?.busy === true; }
+  // Runs on `key` not yet settled (in flight + queued). A run's caller resumes already uncounted.
+  function pending(key) { return _s.get(key)?.runs ?? 0; }
   function evict(key) { _evict(key, 'manual'); }
   function close() { for (const k of [..._s.keys()]) _evict(k, 'pool close'); }
   function stats() { return { size: _s.size, max, keys: [..._s.keys()] }; }
 
-  return { run, adopt, steer, interrupt, has, busy, background, evict, close, stats };
+  return { run, adopt, steer, interrupt, has, busy, pending, background, evict, close, stats };
 }
