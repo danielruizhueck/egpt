@@ -54,6 +54,7 @@ function fakeStart({ onSend = null, hangSend = false } = {}) {
   const start = async (opts) => {
     spy.started = true;                       // ← the "did the bridge dial Beeper" assertion
     spy.onIncoming = opts.onIncoming;
+    spy.isAllowedUser = opts.isAllowedUser;
     return {
       async send(text, o) {
         spy.sent.push({ text, chatId: o?.chatId, ...(onSend ? onSend() : {}) });
@@ -618,6 +619,98 @@ describe('(F) the kill phrase: "EGPT STOP" from an allowed user, in any chat, st
     const { spine } = buildSpine({ guard: createStopGuard(), stopSwitch: sw, isSelfChat: () => false });
     await spine.handleInbound(msg());
     expect(sw.pulls).toMatchObject([{ chatId: 'g', reason: 'stop phrase "EGPT STOP"' }]);
+  });
+});
+
+// === (G) ADMIN CHATS TAKE THE PHRASE, NOT THE WORD (operator 2026-10-18: "merge the PR from
+//     em/stop-admin-channels, but into EGPT STOP from an allowed_user in any group"). Ported from
+//     0a2fc04's (E): its bare "stop" in every networks.whatsapp.chat_ids entry is superseded —
+//     an admin chat is a group like any other, it takes stop_phrase; bare "stop" stays Self-only. ==
+const ADMIN_2 = '!ops:beeper.com';
+const ADMIN_3 = 'mgmtXYZmgmtXYZmgmtXY';   // listed FULL-form below, delivered SHORT by the bridge
+const MULTI = { ...CONFIG, networks: {
+  whatsapp: { chat_ids: [SELF_CHAT, ADMIN_2, `!${ADMIN_3}:beeper.local`], allowed_users: ['u-1'] },
+  telegram: { allowed_users: ['tg-op'] },
+} };
+const stopping = (spy) => spy.sent.filter((s) => s.text.includes('egpt is stopping'));
+// `authorized` as src/bridges/beeper.mjs stamps it, from boot's own isAllowedUser.
+const asBridge = (spy, from) => ({ ...from, authorized: !!from.isSender || spy.isAllowedUser(from.userId, from.network) });
+describe('(G) admin chats: "EGPT STOP" from an allowed user stops the node, bare "stop" outside Self does not', () => {
+  it('"EGPT STOP" in an admin chat that is not Self (chat_ids[1]) pulls it, and warns THERE', async () => {
+    const { app, spy, exits } = await bootNode({ config: MULTI });
+    await spy.onIncoming('EGPT STOP', { ...BEEPER_FROM, chatId: ADMIN_2, chatName: 'ops' });
+    expect(existsSync(STOP_PATH)).toBe(true);
+    expect(await fs.readFile(STOP_PATH, 'utf8')).toContain(ADMIN_2);
+    expect(exits).toEqual([0]);
+    expect(stopping(spy).map((s) => s.chatId)).toEqual([ADMIN_2]);
+    app.stop();
+  });
+
+  it('…and alike in the full-form admin entry and in a non-admin group', async () => {
+    for (const chatId of [ADMIN_3, '!room:beeper.com']) {
+      await fs.rm(STOP_PATH, { force: true });
+      const { app, spy, exits } = await bootNode({ config: MULTI });
+      await spy.onIncoming('egpt stop', { ...BEEPER_FROM, chatId });
+      expect(existsSync(STOP_PATH), chatId).toBe(true);
+      expect(exits, chatId).toEqual([0]);
+      app.stop();
+    }
+  });
+
+  it('bare "stop" in an admin chat other than Self, or in a group, is ordinary text', async () => {
+    const { app, spy, exits } = await bootNode({ config: MULTI });
+    await spy.onIncoming('stop', { ...BEEPER_FROM, chatId: ADMIN_2, msgKey: 'w1' });
+    await spy.onIncoming('STOP', { ...BEEPER_FROM, chatId: ADMIN_3, msgKey: 'w2' });
+    await spy.onIncoming('stop', { ...BEEPER_FROM, msgKey: 'w3' });
+    expect(existsSync(STOP_PATH)).toBe(false);
+    expect(exits).toEqual([]);
+    expect(stopping(spy)).toHaveLength(0);
+    app.stop();
+  });
+
+  it('bare "stop" in Self still pulls it with several admin chats configured', async () => {
+    const { app, spy, exits } = await bootNode({ config: MULTI });
+    await spy.onIncoming('stop', { ...SELF_FROM });
+    expect(existsSync(STOP_PATH)).toBe(true);
+    expect(exits).toEqual([0]);
+    app.stop();
+  });
+
+  it('a NON-human "EGPT STOP" in an admin chat does not pull it — a brain member\'s re-entered reply, a peer node\'s line', async () => {
+    const { app, spy, exits } = await bootNode({ config: MULTI });
+    await spy.onIncoming('EGPT STOP', { ...BEEPER_FROM, chatId: ADMIN_2, isSender: true, fromMember: { id: 'chatgpt', kind: 'brain' }, msgKey: 'mn1' });
+    await spy.onIncoming('EGPT STOP', { ...BEEPER_FROM, chatId: ADMIN_2, isSender: true, fromNode: 'do', msgKey: 'mn2' });
+    expect(existsSync(STOP_PATH)).toBe(false);
+    expect(exits).toEqual([]);
+    app.stop();
+  });
+
+  it('the shell console cannot pull it, not even naming an admin chat', async () => {
+    const { app, spy, exits } = await bootNode({ config: MULTI });
+    await app.spine.handleInbound(shellMsg('EGPT STOP', { chatId: ADMIN_2 }));
+    await app.spine.handleInbound(shellMsg('stop', { chatId: ADMIN_3 }));
+    expect(existsSync(STOP_PATH)).toBe(false);
+    expect(exits).toEqual([]);
+    expect(stopping(spy)).toHaveLength(0);
+    app.stop();
+  });
+
+  it('an allowed user is the account owner or on the chat\'s own network allowed_users — nobody else (ignored + logged)', async () => {
+    for (const [who, over, pulls] of [
+      ['account owner (isSender), on no list', { userId: 'owner-jid', isSender: true }, true],
+      ['networks.whatsapp.allowed_users', { userId: 'u-1' }, true],
+      ['networks.telegram.allowed_users, in a telegram chat', { userId: 'tg-op', network: 'telegram' }, true],
+      ['only on networks.telegram.allowed_users, in a whatsapp chat', { userId: 'tg-op' }, false],
+      ['on no list', { userId: 'stranger', senderName: 'Mallory' }, false],
+    ]) {
+      await fs.rm(STOP_PATH, { force: true });
+      const { app, spy, exits, logs } = await bootNode({ config: MULTI });
+      await spy.onIncoming('EGPT STOP', asBridge(spy, { ...BEEPER_FROM, chatId: ADMIN_2, isSender: false, ...over }));
+      expect(existsSync(STOP_PATH), who).toBe(pulls);
+      expect(exits, who).toEqual(pulls ? [0] : []);
+      if (!pulls) expect(logs.join('\n'), who).toMatch(/stop phrase from .* not an allowed user's human turn, ignored/);
+      app.stop();
+    }
   });
 });
 

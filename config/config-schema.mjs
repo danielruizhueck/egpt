@@ -2726,6 +2726,10 @@ export const CONFIG_SCHEMA = {
     safe word's own test: authorized + provenance) pulls the same kill switch:
     EGPT_HOME/STOP + clean exit. Every node hearing the chat stops. Not on the
     shell console. A non-allowed sender's phrase is logged and ignored.
+    ALLOWED USER = the message's \`authorized\` flag (src/bridges/beeper.mjs): the
+    sender id is on networks.<the chat's own network>.allowed_users (no borrowing
+    another network's list), or the sender is the owner (isSender) of the Beeper
+    account the message arrived on.
     DEFAULT: "EGPT STOP". "" = off.
   `,
 
@@ -2871,7 +2875,9 @@ export const CONFIG_SCHEMA = {
     unconditionally authorized — enough to take the node down. In every OTHER chat,
     group, and on the shell surface, "stop" is now ordinary text. No Self chat
     configured → the chat safe word is simply unavailable (fail-closed); the STOP
-    file is still the way out.
+    file is still the way out. The other admin chats (chat_ids[1..]) and every
+    group take stop_phrase instead (operator 2026-10-18, superseding 0a2fc04's
+    2026-10-15 widening of the bare word to every chat_ids entry).
 
     WHAT COUNTS AS THE WORD: the WHOLE trimmed message, case-insensitive, trailing
     '.'/'!' tolerated. "stop it", "please stop", "stopping" are ordinary text.
