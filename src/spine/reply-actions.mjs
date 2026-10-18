@@ -499,6 +499,15 @@ export function createReplyActions({ bridge, bridgeOf = null, peerMouth = null, 
         // The target is named by the EAR's id, so the key is read off the ear's own copy — and only
         // when a mouth is actually going to place it (sender.mjs makeOutbound `react`).
         const out = outbound(being, ev.chatId);
+        // NO MOUTH ON THIS NODE (operator 2026-10-18): the only account is the operator's, so the
+        // reaction is said as a quoted line, "👌 (E)" — ordinary own output, never a reaction. No
+        // being in its frame, so its echo wakes nobody (not even the being it quotes).
+        if (!peerMouth) {
+          const text = `${a.emoji} (${labelOf(being) ?? being})`;
+          const ok = await out.say(async (on, room, replyTo) => { const r = await on.send?.(room, text, { replyTo }); return !(r?.blocked || r == null); }, { msgId: a.targetId, text, what: 'react' });
+          if (!ok) onLog(`react: ${text} → #${a.targetId} not delivered`);
+          return !!ok;
+        }
         const ok = await out.react(a.targetId, a.emoji, out.keyOf(a.targetId, 'react'));
         if (!ok) onLog(`react: ${a.emoji} → #${a.targetId} failed`);
         return !!ok;

@@ -241,7 +241,9 @@ export const RETAINED_SEAM = '\n\n— ↓ reply —\n\n';
  * (turns.mjs) and the /react limb (reply-actions.mjs). Live on kg the limb reacted on the EAR —
  * `bridge` above — so the 👍 came from the operator's own account while the reply came from the
  * mouth; the steer ack already asked route() first. Moved here from turns.mjs so both ask it:
- *   no mouth    ⇒ `bridge` reacts with the local `msgId`, exactly as before. A throw propagates:
+ *   no mouth    ⇒ nothing is placed, logged (2026-10-18): the only account is the operator's.
+ *                 A removal still runs on `bridge` (a stale 🎧 from before).
+ *   holder IS the mouth ⇒ `bridge` reacts with the local `msgId`. A throw propagates:
  *                 each caller already had its own handling for that.
  *   a mouth     ⇒ the mouth reacts on ITS OWN copy, named by the cross-account key `keyOf()`
  *                 yields — a THUNK for the same reason route() is: the no-mouth path must not pay
@@ -287,12 +289,16 @@ export function makeOutbound({ bridge, bridgeOf = null, peerMouth = null, onLog 
       bridge: bridgeOf ? (bridgeOf(being, chatId) ?? bridge) : bridge,
       route: () => (peerMouth ? Promise.resolve().then(() => peerMouth.route(chatId, being)).catch((e) => { onLog(`mouth: could not decide the route for ${chatId} — posting locally: ${e?.message ?? e}`); return null; }) : null),
       async react(msgId, emoji, keyOf, what = 'react', { remove = false, temporary = false } = {}) {
-        const says = out.route();                         // null with no mouth wired — never awaited, so that path is untouched
+        // NO MOUTH ON THIS NODE — one account, the operator's (operator 2026-10-18): a reaction from
+        // it is his own, so none is placed (taking one off still works: a stale 🎧 from before).
+        // The /react limb says it as a quoted line instead.
+        if (!peerMouth && !remove) { onLog(`${what} ${being}/${chatId}: no mouth account on this node — no ${emoji} placed`); return false; }
+        const says = out.route();
         const mouthChat = says ? await says : null;
         // A being reacts ONLY through its mouth (operator 2026-10-18): where the mouth is a different
         // account from the chat's holder but has no room here (not a member, or its route could not
         // be decided), nothing is placed — from the ear it came back as the operator's own reaction.
-        // A holder that IS the mouth, or a node with no mouth, reacts from its own bridge.
+        // A holder that IS the mouth reacts from its own bridge.
         if (!mouthChat && peerMouth?.mouthIsElsewhere?.(chatId, being)) {
           onLog(`${what} ${being}/${chatId}: the mouth has no room in this chat — no ${emoji} from either account`);
           return false;

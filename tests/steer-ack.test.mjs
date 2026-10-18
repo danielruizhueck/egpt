@@ -258,7 +258,9 @@ describe('turns.steerLiveTurn — 📩 is the bridge, 👀 is the model', () => 
     const notes = [];
     const bridge = { async react(chatId, msgId, emoji) { reactions.push({ chatId, msgId, emoji }); return true; } };
     const brain = { async allowNewInput() { return 'any'; }, steer: steerImpl };
-    const turns = createTurns({ brain, bridge, log: { line: (s) => notes.push(s) } });
+    // A node with a mouth whose account holds the chat (with none, nothing is placed — 2026-10-18).
+    const peerMouth = { route: async () => null, mouthIsElsewhere: () => false };
+    const turns = createTurns({ brain, bridge, peerMouth, log: { line: (s) => notes.push(s) } });
     turns.setLive(KEY, LIVE);
     return { turns, reactions, notes };
   }

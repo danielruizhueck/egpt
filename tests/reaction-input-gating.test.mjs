@@ -7,6 +7,7 @@ import { createRouter } from '../src/spine/router.mjs';
 import { createGating } from '../src/spine/gating.mjs';
 import { createIdentity } from '../src/spine/identity.mjs';
 import { createSpine } from '../src/spine/spine.mjs';
+import { encodeNodeSignature } from '../src/node-signature.mjs';
 
 const OP = '+16468217865';
 const base = { chatId: '!g', chatName: 'grupo', chatType: 'group', network: 'whatsapp', userId: OP, senderName: 'An', authorized: true, atEStart: false, atEAnywhere: false };
@@ -15,13 +16,14 @@ const reactionTo = (snippet, extra = {}) => ({ body: `reacted 👍 to #m1 "${sni
 const textReply = (body, extra = {}) => ({ body, from: { ...base, msgKey: `t-${Math.random()}`, replyToId: 'm1', replyToBot: false, ...extra } });
 const toBeing = { replyToBeing: 'egpt', replyToBot: true };
 
-function build(mode) {
+// `sent`: ids this account sent (bridge wasSentByUs) — the one-account node sends the beings' posts.
+function build(mode, { sent = [] } = {}) {
   const agents = {
     egpt: { configuration: 'egpt', handles: ['e', 'egpt'], default: true, mode },
     wren: { configuration: 'egpt', handles: ['wren'], mode },
   };
   let cb = null;
-  const bridge = { onMessage(fn) { cb = fn; }, send() {}, emit(m) { return cb(m); }, stop() {} };
+  const bridge = { onMessage(fn) { cb = fn; }, send() {}, emit(m) { return cb(m); }, stop() {}, wasSentByUs: (_c, id) => sent.includes(id) };
   const brain = { calls: [], async turn(being, ev) { this.calls.push({ being, kind: ev.kind }); return { text: 'ok', sessionId: 's', being }; } };
   const transcript = { entries: [], async log(ev, reply) { if (reply == null) this.entries.push(ev.kind); } };
   const opens = [];
@@ -31,7 +33,7 @@ function build(mode) {
     bridge, brain, sender, transcript, defaultBeing: 'egpt',
     router: createRouter({ getAgents: () => agents, getConfig: () => config, defaultBeing: 'egpt' }),
     gating: createGating({ getConfig: () => config, defaultKey: 'egpt' }),
-    identity: createIdentity({ now: () => 1 }),
+    identity: createIdentity({ now: () => 1 }), fromThisNode: (ev) => ev.fromNode === 'kg',
     heartbeats: { runDue() {} }, readTranscript: async () => '', clock: { now: () => 1 },
   });
   spine.start();
@@ -39,9 +41,9 @@ function build(mode) {
 }
 
 // Same message, same attributes: the reaction and the text reply must take the same decision.
-async function both(mode, r, t) {
-  const a = build(mode); await a.bridge.emit(r);
-  const b = build(mode); await b.bridge.emit(t);
+async function both(mode, r, t, opts) {
+  const a = build(mode, opts); await a.bridge.emit(r);
+  const b = build(mode, opts); await b.bridge.emit(t);
   return { reaction: a, text: b };
 }
 
@@ -75,6 +77,17 @@ describe('a person\'s reaction gates like a text reply to the same message', () 
     expect(reaction.recorded).toEqual(['reaction']);
   });
 
+  // The being's post was sent by THIS account (a one-account node, or the ear's own fallback). A
+  // reaction's msgId is its TARGET, so "did we send it" said echo and swallowed the person's ❤️.
+  it("REPRODUCE: a reaction to a post THIS account sent is still a person's — mention wakes as a reply does; on wakes", async () => {
+    const sent = ['m1'];
+    const m = await both('mention', reactionTo('🐶 e: listo', toBeing), textReply('👍', toBeing), { sent });
+    expect(m.text.brain.calls.map((c) => c.being)).toEqual(['egpt']);
+    expect(m.reaction.brain.calls.map((c) => c.being)).toEqual(['egpt']);
+    const on = await both('on', reactionTo('🐶 e: listo', toBeing), textReply('👍', toBeing), { sent });
+    expect(on.reaction.brain.calls.map((c) => c.being)).toEqual(['egpt']);
+  });
+
   it('mute: recorded, no turn — off: not even recorded', async () => {
     const mute = build('mute'); await mute.bridge.emit(reactionTo('🐶 e: listo', toBeing));
     expect(mute.brain.calls).toEqual([]);
@@ -82,5 +95,21 @@ describe('a person\'s reaction gates like a text reply to the same message', () 
     const off = build('off'); await off.bridge.emit(reactionTo('🐶 e: listo', toBeing));
     expect(off.brain.calls).toEqual([]);
     expect(off.recorded).toEqual([]);
+  });
+});
+
+// A one-account node says a being's /react as "👌 (E)", quoting the target, under a NODE-only frame.
+// Its echo is own output (the bridge stamps fromNode) and names no author, so it wakes nobody — not
+// even the being whose post it quotes.
+describe('the one-account "👌 (E)" line comes back as own output and wakes nobody', () => {
+  it("quoting wren's post, in mention: no turn for wren or anyone", async () => {
+    const s = build('mention', { sent: ['m1', 'r1'] });
+    await s.bridge.emit({
+      body: `👌 (E)${encodeNodeSignature('kg')}`,
+      from: { ...base, isSender: true, fromNode: 'kg', msgKey: 'r1', replyToId: 'm1', replyToBeing: 'wren', replyToBot: true },
+    });
+    expect(s.brain.calls).toEqual([]);
+    expect(s.opens).toEqual([]);
+    expect(s.recorded).toEqual(['text']);
   });
 });

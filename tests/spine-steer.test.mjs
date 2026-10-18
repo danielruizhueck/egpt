@@ -116,6 +116,7 @@ function build(brainOpts = {}, bridgeOpts = {}) {
   const notes = [];
   const spine = createSpine({
     bridge, brain,
+    peerMouth: { route: async () => null, mouthIsElsewhere: () => false },   // the mouth holds the chat: acks are placed (none without a mouth)
     identity: fakeIdentity, router: fakeRouter, gating: fakeGating,
     sender,
     transcript: { async log(ev, reply) { logged.push({ body: ev.body, reply: reply ? (reply.text ?? '') : null }); } },

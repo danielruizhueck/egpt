@@ -234,7 +234,7 @@ export function createSpine({
   // The shared turn machinery, or our own private one (see the option's note above). Built with
   // the SAME bridge/bridgeOf pair `outbound` uses, because the steer-ack react it owns is one of
   // the spine's own direct bridge sends and must ride the acked being's connection.
-  const turns = injectedTurns ?? createTurns({ brain, bridge, bridgeOf, log });
+  const turns = injectedTurns ?? createTurns({ brain, bridge, bridgeOf, peerMouth, log });
   // COMMANDS KEEP THE NODE-WIDE ORDER the single pump gave them: a handler rewrites
   // conversations.yaml / rooms.yaml without the registry lock. Chats run at once now; commands do not.
   const inCommandOrder = makeSerialByKey();
@@ -256,7 +256,9 @@ export function createSpine({
   // human turn), and by handleFast's guard-channel derivation (an envelope carries no channel at
   // all). Hoisted rather than repeated, because those two answers must never be able to disagree.
   const isEnvelope = (ev) => !!mesh?.isEnvelope?.(ev);
-  const wasSentByUs = (e) => !!bridge.wasSentByUs?.(e.chatId, e.msgId);
+  // A REACTION's msgId is its TARGET, so it says nothing about who reacted — and no being's reaction
+  // reaches the spine (dropped at the bridge, or said as text). Every reaction here is a person's.
+  const wasSentByUs = (e) => e.kind !== 'reaction' && !!bridge.wasSentByUs?.(e.chatId, e.msgId);
   const humanTurn = (ev) => isHumanTurn(ev, { isEnvelope, wasSentByUs });
   // …and the THREE-WAY reading the loop guard needs (stop-guard turnKind): 'human' resets,
   // 'being' counts, and 'echo' — THIS node's own output re-entering — does neither. Built from

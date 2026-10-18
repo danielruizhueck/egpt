@@ -394,10 +394,13 @@ function fakeBridge(over = {}) {
     ...over,
   };
 }
+// A node WITH a mouth, whose account holds this chat: reactions are placed from the holder. A node
+// with NO mouth (one account, the operator's) says /react as a quoted line instead (2026-10-18).
+const MOUTH_HOLDS = { route: async () => null, mouthIsElsewhere: () => false };
 
 describe('createReplyActions.execute — confined + fail-closed', () => {
   const mk = (bridge, opts = {}) => createReplyActions({
-    bridge, bodyEmojiOf: () => '🐶', labelOf: () => 'egpt',
+    bridge, peerMouth: MOUTH_HOLDS, bodyEmojiOf: () => '🐶', labelOf: () => 'egpt',
     resolveConvDir: opts.resolveConvDir ?? (async () => null),
     onLog: opts.onLog ?? (() => {}),
   });
@@ -408,6 +411,15 @@ describe('createReplyActions.execute — confined + fail-closed', () => {
     const { run, stripped } = a.parse('/react #7 🔥', EV);
     await a.execute(run, stripped, EV, { being: 'e' });
     expect(b.calls.react).toEqual([{ chat: EV.chatId, id: '7', emoji: '🔥' }]);
+  });
+
+  it('NO mouth on this node: /react is a quoted line "🔥 (egpt)" from the only account, never a reaction', async () => {
+    const b = fakeBridge();
+    const a = createReplyActions({ bridge: b, bodyEmojiOf: () => '🐶', labelOf: () => 'egpt', onLog: () => {} });
+    const { ran } = await a.execute(a.parse('/react #7 🔥', EV).run, [], EV, { being: 'e' });
+    expect(b.calls.react).toEqual([]);
+    expect(b.calls.send).toEqual([{ chat: EV.chatId, text: '🔥 (egpt)', opts: { replyTo: '7' } }]);
+    expect(ran.map((x) => x.type)).toEqual(['react']);
   });
 
   it('reply routes through send() with replyTo + persona stamp opts', async () => {
@@ -507,7 +519,7 @@ describe('createReplyActions.execute — confined + fail-closed', () => {
       editOwn: async () => true,
       wasSentByUs: async () => false,      // the /edit target is NOT one of ours → fail-closed
     };
-    const actions = createReplyActions({ bridge, onLog: () => {} });
+    const actions = createReplyActions({ bridge, peerMouth: MOUTH_HOLDS, onLog: () => {} });
     const { run } = parseReplyActions('/react #12 👍\n/edit #13 nope', EV);
     expect(run).toHaveLength(2);
     const { ran } = await actions.execute(run, [], EV);
@@ -536,7 +548,7 @@ describe('createReplyActions.execute — bridgeOf: per-being connection routing 
     const mainBridge = fakeBridge();
     const rodzBridge = fakeBridge();
     const bridgeOf = (being) => (being === 'rodz' ? rodzBridge : null);   // null for e → falls back to the default `bridge`
-    const a = createReplyActions({ bridge: mainBridge, bridgeOf, bodyEmojiOf: () => '🐶', labelOf: (b) => b, resolveConvDir: async () => null, onLog: () => {} });
+    const a = createReplyActions({ bridge: mainBridge, bridgeOf, peerMouth: MOUTH_HOLDS, bodyEmojiOf: () => '🐶', labelOf: (b) => b, resolveConvDir: async () => null, onLog: () => {} });
 
     await a.execute(a.parse('/react #7 🔥', EV).run, [], EV, { being: 'e' });
     await a.execute(a.parse('/reply #9 hola', EV).run, [], EV, { being: 'rodz' });
@@ -549,7 +561,7 @@ describe('createReplyActions.execute — bridgeOf: per-being connection routing 
 
   it('bridgeOf absent or nullish for a being: falls back to the default `bridge`, never throws', async () => {
     const b = fakeBridge();
-    const a = createReplyActions({ bridge: b, bridgeOf: () => null, bodyEmojiOf: () => '🐶', labelOf: () => 'e', resolveConvDir: async () => null, onLog: () => {} });
+    const a = createReplyActions({ bridge: b, bridgeOf: () => null, peerMouth: MOUTH_HOLDS, bodyEmojiOf: () => '🐶', labelOf: () => 'e', resolveConvDir: async () => null, onLog: () => {} });
     await a.execute(a.parse('/react #7 🔥', EV).run, [], EV, { being: 'e' });
     expect(b.calls.react).toEqual([{ chat: EV.chatId, id: '7', emoji: '🔥' }]);
   });
@@ -574,7 +586,7 @@ describe('createReplyActions.execute — a limb rides the connection that HOLDS 
   // ⇒ the connection holding it; no chat ⇒ the being's own mouth.
   const rawBridgeOf = (ear, mouth) => (_being, chatId = null) => (chatId ? ear : mouth);
   const mkTwo = (ear, mouth, over = {}) => createReplyActions({
-    bridge: mouth, bridgeOf: rawBridgeOf(ear, mouth),
+    bridge: mouth, bridgeOf: rawBridgeOf(ear, mouth), peerMouth: MOUTH_HOLDS,
     bodyEmojiOf: () => '🐶', labelOf: () => 'e', resolveConvDir: async () => null, onLog: () => {}, ...over,
   });
 

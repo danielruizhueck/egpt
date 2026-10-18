@@ -4172,7 +4172,9 @@ describe('beeper bridge — 🎧 listening mark: placed where the decode runs, t
   // the receiving connection's own surface, with boot's makePeerMouth when there is a mouth. Its route
   // is fixed here — the mouth is in this chat, in MOUTH_ROOM; how that room is found is locked in
   // tests/mouth-routing.test.mjs. `ref.bridge` is read at call time, as boot's late binding is.
-  function placementFor(ref, mouth = null, logs = []) {
+  // No `mouth` here means the receiving connection IS the mouth (it holds the chat); `noMouth` is the
+  // one-account node, which places no 🎧 at all (2026-10-18).
+  function placementFor(ref, mouth = null, logs = [], { noMouth = false } = {}) {
     const ear = {
       react: (c, m, e) => ref.bridge.sendReaction(c, m, e),
       unreact: (c, m, e) => ref.bridge.removeReaction(c, m, e),
@@ -4180,16 +4182,16 @@ describe('beeper bridge — 🎧 listening mark: placed where the decode runs, t
     };
     const peerMouth = mouth
       ? { ...makePeerMouth({ peer: null, bridge: ear, localMouth: () => null }), route: async () => ({ connection: 'secondary', home: 'primary', bridge: mouth, chatId: MOUTH_ROOM }) }
-      : null;
+      : noMouth ? null : { route: async () => null, mouthIsElsewhere: () => false };
     return (chatId) => makeOutbound({ bridge: ear, peerMouth, onLog: (m) => logs.push(m) })(null, chatId);
   }
 
   // One connection receiving the note, wired to `tx` and to the placement. The ear's own list serves
   // the note (the key the mouth is told is read off it). The chat's verdict has the 🎧 on unless a test says otherwise.
   const LISTEN = (listeningReaction) => async () => ({ enabled: true, postsBack: false, listeningReaction });
-  async function ear({ tx, mouth = null, logs = [], extra = {} } = {}) {
+  async function ear({ tx, mouth = null, logs = [], extra = {}, noMouth = false } = {}) {
     const ref = {};
-    const started = await startBridge({ transcribe: tx.transcribe, outboundFor: placementFor(ref, mouth, logs), resolveTranscriptionService: LISTEN(true), ...extra });
+    const started = await startBridge({ transcribe: tx.transcribe, outboundFor: placementFor(ref, mouth, logs, { noMouth }), resolveTranscriptionService: LISTEN(true), ...extra });
     ref.bridge = started.bridge;
     return started;
   }
@@ -4317,9 +4319,8 @@ describe('beeper bridge — 🎧 listening mark: placed where the decode runs, t
     expect(logs.join('\n')).toMatch(/could not place the 🎧 \(no-match/);
   });
 
-  // REGRESSION LOCK, the one-connection node: no mouth, so the connection's own bridge places and
-  // removes the mark on its own id — exactly as react() already does without a mouth.
-  it('NO mouth: the receiving connection places and removes the 🎧 on its own id', async () => {
+  // The receiving connection IS the mouth: it places and removes the mark on its own id.
+  it('the receiving connection is the mouth: it places and removes the 🎧 on its own id', async () => {
     const { incoming, arrivals } = await ear({ tx: chain({ profile: DO, own: DO_OWN }) });
     emitNote('note-solo');
     await waitFor(() => incoming.length === 1, 3000);
@@ -4328,6 +4329,17 @@ describe('beeper bridge — 🎧 listening mark: placed where the decode runs, t
     expect(fake.reactions[0]).toMatchObject({ chatID: CHAT('chat-1'), messageID: 'note-solo', reactionKey: LISTENING_REACTION });
     expect(fake.unreactions[0]).toMatchObject({ chatID: CHAT('chat-1'), messageID: 'note-solo', reactionKey: LISTENING_REACTION });
     expect(arrivals[0].from.voiceListening).toBe(true);   // what a restart's removal goes by
+  });
+
+  // The one-account node (2026-10-18): the only account is the operator's — no 🎧, the note still lands.
+  it('NO mouth on this node: no 🎧 placed or removed, the transcript lands', async () => {
+    const logs = [];
+    const { incoming } = await ear({ tx: chain({ profile: DO, own: DO_OWN }), noMouth: true, logs });
+    emitNote('note-solo');
+    await waitFor(() => incoming.length === 1, 3000);
+    expect(incoming[0].text).toBe('(voice transcription) fake transcript');
+    expect([fake.reactions, fake.unreactions]).toEqual([[], []]);
+    expect(logs.join('\n')).toMatch(/no mouth account on this node — no 🎧 placed/);
   });
 
   // A failure AFTER the decode (the echo's debounce arm throws) leaves no mark behind: the mark came

@@ -9,6 +9,8 @@ import { createSender, RETAINED_SEAM } from '../src/spine/sender.mjs';
 import { createGating } from '../src/spine/gating.mjs';
 
 // --- fakes: each port/service as a tiny recorder ------------------------------
+// A node with a mouth whose account holds the chat: /react is a reaction (with no mouth, a quoted line).
+const MOUTH_HOLDS = { route: async () => null, mouthIsElsewhere: () => false };
 function fakeBridge() {
   let cb = null;
   return {
@@ -228,7 +230,7 @@ describe('spine — emitted reply actions', () => {
     const brain = { calls: [], async turn(being, ev) { this.calls.push({ being, ev }); return { text: replyText, sessionId: 's1' }; } };
     const transcript = fakeTranscript();
     const limbs = fakeLimbs();
-    const actions = createReplyActions({ bridge: limbs, bodyEmojiOf: () => '🐶', labelOf: () => 'egpt', resolveConvDir: async () => null, onLog: () => {} });
+    const actions = createReplyActions({ bridge: limbs, peerMouth: MOUTH_HOLDS, bodyEmojiOf: () => '🐶', labelOf: () => 'egpt', resolveConvDir: async () => null, onLog: () => {} });
     const spine = createSpine({
       bridge, brain, store: fakeStore(),
       identity: fakeIdentity, router: fakeRouter, gating: fakeGating({}),
@@ -985,7 +987,7 @@ describe('spine — /reply handled BEFORE posting (no visible token, no delete+r
         return { text: replyText, sessionId: 's1', verbose };
       },
     };
-    const actions = createReplyActions({ bridge, bodyEmojiOf: () => '🐶', labelOf: () => 'egpt', resolveConvDir: async () => null, onLog: () => {} });
+    const actions = createReplyActions({ bridge, peerMouth: MOUTH_HOLDS, bodyEmojiOf: () => '🐶', labelOf: () => 'egpt', resolveConvDir: async () => null, onLog: () => {} });
     const spine = createSpine({
       bridge, brain, store: fakeStore(),
       identity: fakeIdentity, router: fakeRouter, gating: fakeGating({}),

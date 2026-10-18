@@ -1106,17 +1106,19 @@ describe('the steer ack rides the same mouth the reply does', () => {
     await out.finish({ text: 'done' });
   });
 
-  it('NO peer configured: nothing is asked and both reactions go out here — the single-account path', async () => {
+  // The single-account path (operator 2026-10-18): the only account is the operator's, so the
+  // mechanical acks are skipped, never posted as reactions or text.
+  it('NO mouth on this node: the steer still lands, and neither 📩 nor 👀 is placed — logged', async () => {
     const bridge = fakeBridge();
-    const turns = createTurns({ brain: steerable(), bridge });
+    const notes = [];
+    const turns = createTurns({ brain: steerable(), bridge, log: { line: (s) => notes.push(s) } });
     turns.setLive(KEY, LIVE);
 
     expect(await turns.steerLiveTurn({ to: 'e', ev: EV, turnKey: KEY })).toBe(true);
     await settled();
-    expect(bridge.reactions).toEqual([
-      { chatId: CHAT_ID, msgId: STEERED_ON_PRIMARY.id, emoji: '📩' },
-      { chatId: CHAT_ID, msgId: STEERED_ON_PRIMARY.id, emoji: '👀' },
-    ]);
+    expect(bridge.reactions).toEqual([]);
+    expect(bridge.sent).toEqual([]);
+    expect(notes.filter((l) => /no mouth account on this node/.test(l))).toHaveLength(2);
   });
 
   it('a route that THROWS acks HERE — the fail-safe direction: the primary can never be the wrong answer', async () => {
@@ -1155,7 +1157,8 @@ describe('the steer ack rides the same mouth the reply does', () => {
   // connection, because it is the same resolver answering.
   it('the ack rides the BEING\'s own connection when the node holds more than one', async () => {
     const main = fakeBridge(), rodz = fakeBridge();
-    const turns = createTurns({ brain: steerable(), bridge: main, bridgeOf: (b) => (b === 'rodz' ? rodz : null) });
+    const holderIsMouth = { route: async () => null, mouthIsElsewhere: () => false };
+    const turns = createTurns({ brain: steerable(), bridge: main, bridgeOf: (b) => (b === 'rodz' ? rodz : null), peerMouth: holderIsMouth });
     turns.setLive('rodz:wa:chat-1', LIVE);
 
     expect(await turns.steerLiveTurn({ to: 'rodz', ev: EV, turnKey: 'rodz:wa:chat-1' })).toBe(true);
@@ -1234,12 +1237,13 @@ describe('the /react limb is placed by the MOUTH, on its own copy — never from
     expect(ran).toHaveLength(1);
   });
 
-  // REGRESSION LOCK 1: a node with no second account (the single-account baseline) — the only
-  // account IS the being's voice, so it reacts with its own id, and nothing extra is read.
-  it('NO mouth on this node: the only account reacts with its own id, exactly as before, and nothing extra is read', async () => {
+  // A node with no second account (the single-account baseline, operator 2026-10-18): the only
+  // account is the operator's, so the being's reaction is a quoted line "👍 (e)", never a reaction.
+  it('NO mouth on this node: the /react is a quoted line from the only account, no reaction anywhere', async () => {
     const { ear, mouthBridge, earListed, react } = earAndMouth({ withMouth: false });
     const { ran } = await react();
-    expect(ear.reactions).toEqual([{ chatId: CHAT_ID, msgId: STEERED_ON_PRIMARY.id, emoji: '👍' }]);
+    expect(ear.reactions).toEqual([]);
+    expect(ear.sent).toEqual([{ chat: CHAT_ID, text: '👍 (e)', opts: { replyTo: STEERED_ON_PRIMARY.id } }]);
     expect(mouthBridge.reactions).toEqual([]);
     expect(earListed).toEqual([]);
     expect(ran).toHaveLength(1);
@@ -1812,14 +1816,15 @@ describe('the one placement takes a reaction back off, on the account that place
     expect(logs.join('\n')).toMatch(/took the 🎧 off its own copy/);
   });
 
-  // REGRESSION LOCK: no mouth ⇒ the connection's own bridge, by its own id, exactly as react() adds.
-  it('NO mouth: the connection\'s own bridge places and removes it, and no message list is read', async () => {
+  // No mouth (one account, the operator's — 2026-10-18): the 🎧 is never placed; taking one off
+  // (a stale mark from before) still goes to the connection's own bridge, by its own id.
+  it('NO mouth: the 🎧 is not placed; a removal still reaches the own bridge, and no message list is read', async () => {
     const { ear, mouthBridge, peerMouth, earListed } = earAndMouth({ withMouth: false, earMessages: [NOTE_ON_EAR], mouthMessages: [NOTE_ON_MOUTH] });
     const out = makeOutbound({ bridge: ear, peerMouth })(null, CHAT_ID);
     const keyOf = out.keyOf(NOTE_ON_EAR.id, 'listening');
-    expect(await out.react(NOTE_ON_EAR.id, '🎧', keyOf, 'listening', { temporary: true })).toBe(true);
+    expect(await out.react(NOTE_ON_EAR.id, '🎧', keyOf, 'listening', { temporary: true })).toBe(false);
     expect(await out.react(NOTE_ON_EAR.id, '🎧', keyOf, 'listening', { remove: true })).toBe(true);
-    expect(ear.reactions).toEqual([{ chatId: CHAT_ID, msgId: '7004', emoji: '🎧' }]);
+    expect(ear.reactions).toEqual([]);
     expect(ear.unreactions).toEqual([{ chatId: CHAT_ID, msgId: '7004', emoji: '🎧' }]);
     expect(mouthBridge.reactions).toEqual([]);
     expect(earListed).toEqual([]);

@@ -43,7 +43,7 @@ import { dirname, join } from 'node:path';
 import { createSender } from '../src/spine/sender.mjs';
 // Read back rather than re-derived: a test that computed its own key would pass while the two
 // ends drifted. Used only to PROVE the 1:1 below really is a chat the participant key refuses.
-import { crossAccountChatKey } from '../src/bridges/beeper.mjs';
+import { crossAccountChatKey, crossAccountMsgKey } from '../src/bridges/beeper.mjs';
 import { encodeNodeSignature } from '../src/node-signature.mjs';
 
 let boot, emptyState, ensureContact, aliasContact, getContact;
@@ -179,9 +179,11 @@ const SAID = {
 // shape, 2026-09-15): no body, one attachment; the id and the mxc id are per account, the size,
 // mimeType and timestamp are not. The 🎧 listening mark is placed on the MOUTH's copy of it.
 const voiceNote = (id) => ({ id, timestamp: '2026-09-11T14:04:00.000Z', type: 'VOICE', text: null, attachments: [{ type: 'audio', mimeType: 'audio/ogg; codecs=opus', fileSize: 22740, isVoiceNote: true, id: `mxc://local.beeper.com/${id}` }] });
+// …and one text message there, the trigger the ✅/❌ SI-state reaction is placed on (mouth's copy).
+const HOLA = { text: 'hola', timestamp: '2026-09-11T14:04:30.000Z' };
 const LISTED = {
-  [BOTH_AS_PRIMARY]: [voiceNote('ear-note')],
-  [BOTH_AS_SECONDARY]: [voiceNote('mouth-note')],
+  [BOTH_AS_PRIMARY]: [voiceNote('ear-note'), { id: 'ear-hola', ...HOLA }],
+  [BOTH_AS_SECONDARY]: [voiceNote('mouth-note'), { id: 'mouth-hola', ...HOLA }],
 };
 
 // What each install reports as its OWN account's identities — `/v1/accounts`, every identifier on
@@ -1165,11 +1167,11 @@ describe('the 🎧 listening mark: boot hands each connection the one placement'
     app.stop();
   });
 
-  it('a ONE-connection node: its own bridge places and removes it', async () => {
+  // The only account is the operator's (2026-10-18): no 🎧 from it.
+  it('a ONE-connection node: no 🎧 is placed', async () => {
     const { app, byConnection } = await bootWith(SINGLE());
-    expect(await place(byConnection.primary, AN_GROUP, 'solo-note')).toEqual({ up: true, down: true });
-    expect(byConnection.primary.reactions).toEqual([{ chatId: AN_GROUP, id: 'solo-note', key: '🎧' }]);
-    expect(byConnection.primary.unreactions).toEqual([{ chatId: AN_GROUP, id: 'solo-note', key: '🎧' }]);
+    expect(await place(byConnection.primary, AN_GROUP, 'solo-note')).toEqual({ up: false, down: false });
+    expect(byConnection.primary.reactions).toEqual([]);
     app.stop();
   });
 });
@@ -1178,50 +1180,66 @@ describe('the 🎧 listening mark: boot hands each connection the one placement'
 // When super_chats.enabled and a being is about to REPLY, a reaction lands on the TRIGGERING message
 // in the base chat signalling the SI state: ✅ this conversation HAS an SI channel, ❌ it has none. It
 // rides the SAME outbound.react seam the steer 📩/👀 ack uses, is placed ONCE per message, and is
-// best-effort — a react fault never breaks the reply. Driven end-to-end through a one-connection node
-// (SINGLE) so the reaction lands on the ear with no mouth-translation in the way.
+// best-effort — a react fault never breaks the reply. Driven end-to-end through kg's two accounts, in
+// the chat both are in: the MOUTH places it on its own copy. A one-account node places none (2026-10-18).
 describe('the ✓/❌ SI-state reaction lands on the triggering message', () => {
-  const SI = () => { const c = SINGLE(); c.super_chats = { enabled: true }; return c; };
-  const SI_CHAN = '!an-group-super';   // the SI channel aliased to AN_GROUP
-  // AN_GROUP known + (optionally) its SI channel aliased to it, super:true.
-  const seed = ({ withChannel } = {}) => {
-    let st = ensureContact(emptyState(), 'whatsapp', AN_GROUP, { pushedName: 'an-group' }).state;
-    if (withChannel) st = aliasContact(st, 'whatsapp', SI_CHAN, getContact(st, 'whatsapp', AN_GROUP).jid, { transcript: 'x', super: true });
+  const SI = (shape = KG) => { const c = shape(); c.super_chats = { enabled: true }; return c; };
+  const SI_CHAN = '!both-super';   // the SI channel aliased to the base chat
+  // The base chat known + (optionally) its SI channel aliased to it, super:true.
+  const seed = ({ withChannel, base = BOTH_AS_PRIMARY } = {}) => {
+    let st = ensureContact(emptyState(), 'whatsapp', base, { pushedName: 'base' }).state;
+    if (withChannel) st = aliasContact(st, 'whatsapp', SI_CHAN, getContact(st, 'whatsapp', base).jid, { transcript: 'x', super: true });
     return st;
   };
   const reactionKeys = (spy, chatId) => spy.reactions.filter((r) => r.chatId === chatId).map((r) => r.key);
+  // The trigger as the ear hears it, carrying its cross-account key (beeper.mjs mints both).
+  const hola = (spy) => spy.onIncoming('hola', {
+    chatId: BOTH_AS_PRIMARY, chatName: 'both', network: 'whatsapp', userId: DANDO, senderName: 'Dando', authorized: true,
+    msgKey: 'ear-hola', msgHash: crossAccountMsgKey(HOLA), msgTs: Date.parse(HOLA.timestamp), atEStart: true, atEAnywhere: true,
+  });
 
-  it('a channel EXISTS → ✅ on the triggering message in the base chat', async () => {
+  it('a channel EXISTS → ✅ on the mouth\'s copy of the triggering message, none from the ear', async () => {
     const { app, byConnection } = await bootWith(SI(), { state: seed({ withChannel: true }) });
-    deliver(byConnection.primary, AN_GROUP, 'hola', { atE: true });
-    await waitFor(() => reactionKeys(byConnection.primary, AN_GROUP).includes('✅'));
-    expect(reactionKeys(byConnection.primary, AN_GROUP)).toEqual(['✅']);   // exactly ONE, and it is the checkmark
+    hola(byConnection.primary);
+    await waitFor(() => reactionKeys(byConnection.secondary, BOTH_AS_SECONDARY).includes('✅'));
+    expect(byConnection.secondary.reactions).toEqual([{ chatId: BOTH_AS_SECONDARY, id: 'mouth-hola', key: '✅' }]);   // exactly ONE
+    expect(byConnection.primary.reactions).toEqual([]);
     app.stop();
   });
 
-  it('NO channel (enabled) → ❌ on the triggering message', async () => {
+  it('NO channel (enabled) → ❌ on the mouth\'s copy of the triggering message', async () => {
     const { app, byConnection } = await bootWith(SI(), { state: seed() });
+    hola(byConnection.primary);
+    await waitFor(() => reactionKeys(byConnection.secondary, BOTH_AS_SECONDARY).includes('❌'));
+    expect(reactionKeys(byConnection.secondary, BOTH_AS_SECONDARY)).toEqual(['❌']);
+    expect(byConnection.primary.reactions).toEqual([]);
+    app.stop();
+  });
+
+  it('a ONE-account node signals no SI state by reaction; the reply still lands', async () => {
+    const { app, byConnection, replies } = await bootWith(SI(SINGLE), { state: seed({ withChannel: true, base: AN_GROUP }) });
     deliver(byConnection.primary, AN_GROUP, 'hola', { atE: true });
-    await waitFor(() => reactionKeys(byConnection.primary, AN_GROUP).includes('❌'));
-    expect(reactionKeys(byConnection.primary, AN_GROUP)).toEqual(['❌']);
+    await waitFor(() => replies().length > 0);
+    expect(replies().length).toBeGreaterThan(0);
+    expect(byConnection.primary.reactions).toEqual([]);
     app.stop();
   });
 
   it('SI disabled → NO SI reaction at all', async () => {
-    const { app, byConnection } = await bootWith(SINGLE(), { state: seed({ withChannel: true }) });   // no super_chats
-    deliver(byConnection.primary, AN_GROUP, 'hola', { atE: true });
-    await waitFor(() => byConnection.primary.streams.length || byConnection.primary.sent.length);   // the reply landed
-    expect(reactionKeys(byConnection.primary, AN_GROUP).filter((k) => k === '✅' || k === '❌')).toEqual([]);
+    const { app, byConnection, replies } = await bootWith(KG(), { state: seed({ withChannel: true }) });   // no super_chats
+    hola(byConnection.primary);
+    await waitFor(() => replies().length > 0);   // the reply landed
+    expect([...byConnection.primary.reactions, ...byConnection.secondary.reactions].filter((r) => r.key === '✅' || r.key === '❌')).toEqual([]);
     app.stop();
   });
 
   it('a reaction-place FAILURE never breaks the reply (best-effort, swallowed)', async () => {
     const { app, byConnection, replies } = await bootWith(SI(), { state: seed({ withChannel: true }) });
-    byConnection.primary.reactThrows = true;                 // every sendReaction now throws
-    deliver(byConnection.primary, AN_GROUP, 'hola', { atE: true });
+    byConnection.secondary.reactThrows = true;               // the mouth's every sendReaction now throws
+    hola(byConnection.primary);
     await waitFor(() => replies().length > 0);               // the reply STILL goes out
     expect(replies().length).toBeGreaterThan(0);
-    expect(reactionKeys(byConnection.primary, AN_GROUP)).toEqual([]);   // the reaction itself never landed
+    expect([...byConnection.primary.reactions, ...byConnection.secondary.reactions]).toEqual([]);   // the reaction itself never landed
     app.stop();
   });
 });
