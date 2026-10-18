@@ -1,0 +1,224 @@
+// On-mode ambient turns post nothing up front (operator 2026-10-18): "if mode is 'on' then '...'
+// should not be posted in channel, only logged." A turn the being was NOT addressed in (no handle,
+// not a reply to it) runs with no ⏳ placeholder; a silence posts nothing, a real reply posts once.
+// Addressed turns and every other mode keep the immediate ⏳.
+import { describe, it, expect } from 'vitest';
+import { createRouter } from '../src/spine/router.mjs';
+import { createGating } from '../src/spine/gating.mjs';
+import { createSpine } from '../src/spine/spine.mjs';
+import { createSender, THINKING } from '../src/spine/sender.mjs';
+import { createReplyActions } from '../src/spine/reply-actions.mjs';
+import { mentionStatus } from '../src/auto-mode.mjs';
+
+const MOUTH_HOLDS = { route: async () => null, mouthIsElsewhere: () => false };
+const CHAT = { surface: 'whatsapp', node: 'wa', chatId: '!g', chatName: 'grupo', kind: 'text', raw: { chatType: 'group' }, senderId: 'u-1', senderName: 'An' };
+let seq = 0;
+const msg = (body, extra = {}) => ({
+  ...CHAT, body, msgId: `m${++seq}`, ts: 1,
+  mention: { ...mentionStatus(body, ['e', 'egpt']), replyToBot: extra.replyToBeing != null },
+  ...extra,
+});
+
+function streamingBridge() {
+  let cb = null;
+  const streams = [], sent = [], reactions = [];
+  return {
+    streams, sent, reactions,
+    onMessage(fn) { cb = fn; }, emit(m) { return cb(m); }, stop() {},
+    send(chat, text, opts) { sent.push({ chat, text, opts }); return { ok: true }; },
+    startStream(chat, init, opts) {
+      const h = { chat, init, opts, frames: [], finals: [], delivered: false, confirmedId: `${chat}#${streams.length + 1}`, update(t) { h.frames.push(t); }, async finish(t) { h.finals.push(t); h.delivered = true; } };
+      streams.push(h);
+      return h;
+    },
+    react(chat, msgId, emoji) { reactions.push({ chat, msgId, emoji }); return true; },
+  };
+}
+
+function build({ mode = 'on', reply = 'ok', partials = [], tasks = [] } = {}) {
+  const agents = { egpt: { configuration: 'egpt', handles: ['e', 'egpt'], default: true, mode } };
+  const config = { agents };
+  const bridge = streamingBridge();
+  const brain = {
+    calls: [], tasks,
+    async turn(being, ev, onPartial) { this.calls.push({ being, ev }); for (const p of partials) onPartial?.(p); return { text: reply, sessionId: 's' }; },
+    background() { return brain.tasks; },
+  };
+  const transcript = { entries: [], async log(ev, r) { this.entries.push({ ev, reply: r }); } };
+  const notes = [];
+  const onLog = (s) => notes.push(s);
+  const spine = createSpine({
+    bridge, brain, transcript, defaultBeing: 'egpt',
+    sender: createSender({ bridge, bodyEmojiOf: () => '🐶', labelOf: () => 'E', onLog }),
+    actions: createReplyActions({ bridge, peerMouth: MOUTH_HOLDS, bodyEmojiOf: () => '🐶', labelOf: () => 'E', onLog }),
+    router: createRouter({ getAgents: () => agents, getConfig: () => config, defaultBeing: 'egpt' }),
+    gating: createGating({ getConfig: () => config, defaultKey: 'egpt' }),
+    identity: { build: (m) => ({ ...m, line: m.body }) },
+    heartbeats: { runDue() {} }, readTranscript: async () => '', clock: { now: () => 1 },
+    log: { line: onLog },
+  });
+  spine.start();
+  const replies = () => transcript.entries.filter((e) => e.reply != null).map((e) => e.reply);
+  const quiet = () => notes.filter((s) => s.includes('nothing posted'));
+  return { bridge, brain, replies, quiet };
+}
+
+describe('on mode, not addressed — no placeholder up front', () => {
+  it("REPRODUCE: a '…' silence posts NOTHING (no ⏳, no ✓, no edit) and logs one line", async () => {
+    const b = build({ reply: '…' });
+    await b.bridge.emit(msg('qué calor hace hoy'));
+    expect(b.brain.calls).toHaveLength(1);
+    expect(b.bridge.streams).toEqual([]);
+    expect(b.bridge.sent).toEqual([]);
+    expect(b.quiet()).toHaveLength(1);
+    expect(b.replies()).toEqual([expect.objectContaining({ text: '…', surfaced: false })]);   // recorded as today
+  });
+
+  it("REPRODUCE (live 'E: ⏳ Thinking… → E: …'): a streamed '…' partial opens nothing either", async () => {
+    const b = build({ reply: '...', partials: ['.', '..', '...'] });
+    await b.bridge.emit(msg('jaja'));
+    expect(b.bridge.streams).toEqual([]);
+    expect(b.bridge.sent).toEqual([]);
+    expect(b.quiet()).toHaveLength(1);
+  });
+
+  it('an empty turn posts nothing as well (no "<received silence>")', async () => {
+    const b = build({ reply: '' });
+    await b.bridge.emit(msg('ok'));
+    expect(b.bridge.streams).toEqual([]);
+    expect(b.bridge.sent).toEqual([]);
+    expect(b.quiet()).toHaveLength(1);
+  });
+
+  it('a real reply is posted ONCE, opening on its first text — never on ⏳ Thinking…', async () => {
+    const b = build({ reply: 'Hola a todos', partials: ['Hola', 'Hola a todos'] });
+    await b.bridge.emit(msg('buenas'));
+    expect(b.bridge.streams).toHaveLength(1);
+    const [s] = b.bridge.streams;
+    expect(s.init).toBe('Hola ⏳');
+    expect(s.opts).toMatchObject({ replyTo: expect.stringMatching(/^m\d+$/), bodyEmoji: '🐶' });
+    expect(s.frames).toEqual(['Hola a todos ⏳']);
+    expect(s.finals).toEqual(['Hola a todos']);
+    expect(b.bridge.sent).toEqual([]);
+    expect(b.quiet()).toEqual([]);
+  });
+
+  it('a real reply with no stream at all opens on the reply itself', async () => {
+    const b = build({ reply: 'Hola' });
+    await b.bridge.emit(msg('buenas'));
+    expect(b.bridge.streams.map((s) => [s.init, s.finals])).toEqual([['Hola', ['Hola']]]);
+    expect(b.bridge.sent).toEqual([]);
+  });
+
+  it('a /react-only turn: the reaction lands, no message is posted', async () => {
+    seq = 40;
+    const b = build({ reply: '/react #m41 👍' });
+    await b.bridge.emit(msg('lo logré!'));
+    expect(b.bridge.reactions).toEqual([{ chat: '!g', msgId: 'm41', emoji: '👍' }]);
+    expect(b.bridge.streams).toEqual([]);
+    expect(b.bridge.sent).toEqual([]);
+  });
+
+  it('a silent turn that leaves background work still opens the ⚙️ status', async () => {
+    const b = build({ reply: '…', tasks: [{ description: 'Crawl the site', since: 1 }] });
+    await b.bridge.emit(msg('alguien sabe?'));
+    expect(b.bridge.streams.map((s) => s.init)).toEqual(['⚙️ working in background: Crawl the site ⏳']);
+    expect(b.bridge.sent).toEqual([]);
+  });
+});
+
+describe('addressed, or any other mode — unchanged: immediate ⏳', () => {
+  for (const [what, m] of [
+    ['@handle', () => msg('@e hola')],
+    ['handle at the start', () => msg('e hola')],
+    ['a reply to the being', () => msg('y esto?', { replyToBeing: 'egpt' })],
+  ]) {
+    it(`on mode, ${what}: ⏳ placeholder first, the reply edits it`, async () => {
+      const b = build({ reply: 'Hola' });
+      await b.bridge.emit(m());
+      expect(b.bridge.streams).toHaveLength(1);
+      expect(b.bridge.streams[0].init).toBe(THINKING);
+      expect(b.bridge.streams[0].finals).toEqual(['Hola']);
+    });
+  }
+
+  it("on mode, addressed '…': the ⏳ resolves to ✓ as today", async () => {
+    const b = build({ reply: '…' });
+    await b.bridge.emit(msg('@e hola'));
+    expect(b.bridge.streams[0].init).toBe(THINKING);
+    expect(b.bridge.streams[0].finals).toEqual(['✓']);
+    expect(b.quiet()).toEqual([]);
+  });
+
+  for (const mode of ['mention', 'accum']) {
+    it(`${mode} mode, @handle: ⏳ placeholder first, a '…' is posted`, async () => {
+      const b = build({ mode, reply: '…' });
+      await b.bridge.emit(msg('@e hola'));
+      expect(b.bridge.streams[0].init).toBe(THINKING);
+      expect(b.bridge.streams[0].finals).toEqual(['…']);
+    });
+  }
+});
+
+describe('sender — ambient open', () => {
+  function fakeBridge() {
+    const streams = [], sent = [];
+    return {
+      streams, sent,
+      send(chat, text, opts) { sent.push({ chat, text, opts }); return { ok: true }; },
+      startStream(chat, init, opts) {
+        const h = { chat, init, opts, frames: [], finals: [], delivered: false, update(t) { h.frames.push(t); }, async finish(t) { h.finals.push(t); h.delivered = true; } };
+        streams.push(h); return h;
+      },
+    };
+  }
+
+  it('holds a dots-only partial, opens on the first real text, streams from there', async () => {
+    const bridge = fakeBridge();
+    const out = createSender({ bridge }).open('!c', { being: 'e', replyTo: 'm1', ambient: true, queued: true, queuedAhead: 1 });
+    out.activate();
+    out.update('…');
+    expect(bridge.streams).toEqual([]);
+    out.update('Mirá');
+    out.update('Mirá esto');
+    expect(bridge.streams.map((s) => s.init)).toEqual(['Mirá ⏳']);
+    expect(bridge.streams[0].frames).toEqual(['Mirá esto ⏳']);
+    await out.finish({ text: 'Mirá esto' });
+    expect(bridge.streams[0].finals).toEqual(['Mirá esto']);
+    expect(bridge.sent).toEqual([]);
+  });
+
+  it("a withheld silence after a held '…' posts nothing and logs one line", async () => {
+    const bridge = fakeBridge();
+    const log = [];
+    const out = createSender({ bridge, onLog: (s) => log.push(s) }).open('!c', { being: 'e', ambient: true });
+    out.update('…');
+    expect(out.pulse(20_000)).toBe(true);
+    await out.finish({ text: '…' }, { surface: false });
+    expect(bridge.streams).toEqual([]);
+    expect(bridge.sent).toEqual([]);
+    expect(log).toHaveLength(1);
+    expect(out.confirmedId).toBe(null);
+  });
+
+  it('a local mouth says the late reply in its own room; a silence reaches neither account', async () => {
+    const ear = fakeBridge(), mouth = fakeBridge();
+    const peerMouth = { route: async () => ({ bridge: mouth, chatId: 'mouth-room', connection: 'rodz' }) };
+    const sender = createSender({ bridge: ear, peerMouth });
+    const silent = sender.open('!c', { being: 'e', ambient: true });
+    await silent.finish({ text: '...' }, { surface: false });
+    const said = sender.open('!c', { being: 'e', ambient: true });
+    said.update('Hola');
+    await said.finish({ text: 'Hola' });
+    expect(ear.streams).toEqual([]);
+    expect(ear.sent).toEqual([]);
+    expect(mouth.streams.map((s) => [s.chat, s.init, s.finals])).toEqual([['mouth-room', 'Hola ⏳', ['Hola']]]);
+  });
+
+  it('a failed ambient turn still says so, once', async () => {
+    const bridge = fakeBridge();
+    const out = createSender({ bridge }).open('!c', { being: 'e', ambient: true });
+    await out.fail(new Error('boom'));
+    expect(bridge.streams.map((s) => [s.init, s.finals])).toEqual([['… ❌ Sending failed.', ['… ❌ Sending failed.']]]);
+  });
+});

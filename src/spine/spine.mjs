@@ -32,7 +32,7 @@ import { isBrainFailureResult } from '../brain-errors.mjs';
 import { replyLine, contextSinceLastTurn, promptWithRecentContext, bodyForMessageId, promptWithQuotedMessage, RECENT_CONTEXT_MAX_CHARS } from '../transcript-log.mjs';
 import { isHumanTurn, turnKind, parseStopWord, pauseNotice, isStopPhrase, STOP_PHRASE } from '../stop-guard.mjs';
 import { SHELL_SURFACE } from './identity.mjs';
-import { mentionHits, withoutAddress, isDeliberateSilence } from '../auto-mode.mjs';
+import { mentionHits, withoutAddress, isDeliberateSilence, replyAllowed } from '../auto-mode.mjs';
 import { lifecycleExit } from './ingest.mjs';
 import { cleanForSpeech } from '../speech-clean.mjs';
 
@@ -1256,7 +1256,7 @@ export function createSpine({
       // not just mentions; see openAndRunReply). If a train is already in flight for this
       // conversation, the placeholder opens in the QUEUED state and the turn WAITS its turn
       // on turnBy; when it reaches the front it activates and streams.
-      const turn = openAndRunReply({ to, ev, d, turnKey, pinned, trigger });
+      const turn = openAndRunReply({ to, ev, d, mention, turnKey, pinned, trigger });
       return withRelay(turn);
     }
 
@@ -1373,11 +1373,14 @@ export function createSpine({
   // exist. Quoting from the START is also what removes the delete+repost churn for the common
   // case: E's /reply at the message it is answering is now GENUINELY redundant, so it strips
   // instead of tearing the placeholder down and posting a fresh quote in its place.
-  function openAndRunReply({ to, ev, d, turnKey, pinned = false, trigger = null }) {
+  function openAndRunReply({ to, ev, d, mention, turnKey, pinned = false, trigger = null }) {
     const replyTo = ev.msgId ?? null;
     const ahead = bumpTrain(turnKey);
     // replyIn null: replyTo is this chat's own id — a local mouth quotes its own copy (sender quoteIn).
-    const out = sender.open(ev.chatId, { being: to, replyTo, replyIn: null, replyKey: { msgKey: ev.msgHash, timestamp: ev.msgTs }, queued: ahead > 0, queuedAhead: ahead, auto: d.mode === 'auto', origin: ev.chatId });
+    // ambient: an 'on' turn the mention gate would not admit (no handle, not a reply to the being)
+    // opens no ⏳ — a silence then posts nothing (operator 2026-10-18).
+    const ambient = d.mode === 'on' && !replyAllowed('mention', mention ?? {});
+    const out = sender.open(ev.chatId, { being: to, replyTo, replyIn: null, replyKey: { msgKey: ev.msgHash, timestamp: ev.msgTs }, queued: ahead > 0, queuedAhead: ahead, auto: d.mode === 'auto', ambient, origin: ev.chatId });
     return turnBy(turnKey, () => runReplyTurn({ to, ev, d, out, replyTo, turnKey, queued: ahead > 0, pinned, trigger }));
   }
 
@@ -1407,7 +1410,7 @@ export function createSpine({
     const { key: turnKey, pinned } = await turns.keyOf(being, ev);
     note(`wake ${where}: ${what}`);
     if (finished) liveness.endStatus(being, chatId, `✓ background work done: ${what}`);
-    return openAndRunReply({ to: being, ev, d, turnKey, pinned });
+    return openAndRunReply({ to: being, ev, d, mention: WAKE_MENTION, turnKey, pinned });
   }
   // The being's own thread continuing — gated as a reply to it, so mute/off/paused still hold.
   const WAKE_MENTION = { replyToBot: true };
@@ -1427,7 +1430,8 @@ export function createSpine({
     return Promise.all(extras.map(async (t) => {
       const being = t.being ?? defaultBeing;
       try {
-        const d = await gating.decide(gateAs(t, being), ev, t.mention ?? ev.mention);
+        const mention = t.mention ?? ev.mention;
+        const d = await gating.decide(gateAs(t, being), ev, mention);
         if (!d.receives || !d.mayReply) return;
         // …and a relay target reached by FAN-OUT is treated exactly as the primary one is (see the
         // mesh branch in dispatchChat): `@e y @don, vengan` forwards `y @don, vengan` on E's turn
@@ -1439,7 +1443,7 @@ export function createSpine({
         // keyed NARROWER than the warm key it guards is the corruption case for it too. ONE
         // derivation now (turns.keyOf) — this used to be a second copy of the line above it.
         const scope = await turns.keyOf(being, ev);
-        await openAndRunReply({ to: being, ev, d, turnKey: scope.key, pinned: scope.pinned, trigger: triggerFor(ev, t) });
+        await openAndRunReply({ to: being, ev, d, mention, turnKey: scope.key, pinned: scope.pinned, trigger: triggerFor(ev, t) });
       } catch (e) { note(`fan-out ${being}/${ev.chatId}: ${e?.message ?? e}`); }
     })).then(() => {});
   }

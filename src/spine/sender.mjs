@@ -5,6 +5,8 @@
 // arrive it edits in place into the answer. A send failure ends it with
 // "… ❌ Sending failed."; an 'on'/'auto'-mode '...' silence resolves it to the quiet limb mark
 // '✓' (posts nothing new, never deleted) — in mention/mention-direct/accum the '...' surfaces.
+// An 'on' turn nobody addressed (`ambient`, operator 2026-10-18) opens nothing until it has text:
+// its silence posts nothing at all, only a log line.
 //
 // No SEPARATE knee-jerk message: a per-turn "📨 Sending to E..." piled up and
 // cross-deleted in busy chats (its id-resolution races the next turn's). The reply's
@@ -39,6 +41,8 @@ const noReplyMark = () => `⚠️ no reply (turn failed/empty)`;
 // a silence the bridge invented is indistinguishable from one the being chose.
 // When the bridge has nothing from the model, it says so in its OWN voice.
 const BRIDGE_SILENCE = '<received silence (error?)>';
+// A partial that may still become the '…' silence: an ambient turn posts nothing while it is this.
+const SILENCE_SO_FAR = /^[\s.…]*$/;
 // A LIMB-ONLY turn is not silence (operator 2026-09-01, reading his own SPOILER transcript:
 // "the bridge acted on it but forgot that the reply was non empty" ... "then bridge can say
 // 'processing command' (/react is a command), something like that, so that there is legible
@@ -383,7 +387,7 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
     // null for this chat's own connection. Given, the quote is resolved for the room the stream opens in.
     // `replyKey`: replyTo's cross-account key ({ msgKey, timestamp }) when the caller holds it (the
     // inbound event's own) — the mouth is told it as is, with no list read to compute it.
-    open(chatId, { being = defaultKey, replyTo = null, replyIn = undefined, replyKey = null, queued = false, queuedAhead = 0, auto = false, origin = null, status = null } = {}) {
+    open(chatId, { being = defaultKey, replyTo = null, replyIn = undefined, replyKey = null, queued = false, queuedAhead = 0, auto = false, ambient = false, origin = null, status = null } = {}) {
       const { bridge: bridgeForThisBeing, route: peerRoute, keyOf } = outbound(being, chatId);
       // ROUTED-TARGET FALLBACK (never a silent drop): a send the sending account can't place on the
       // routed room (a super/alias room it isn't a member of → resolveChatId null → DROPPED) re-sends
@@ -567,23 +571,31 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
         ? openLocalStream(via.bridge, via.chatId, text)
         : via ? peerMouth.startStream(via, text ?? placeholderText(), { fallback: () => openLocalStream(undefined, undefined, text), render: renderForPeer }) : openLocalStream(undefined, undefined, text));
       let streamVia = null;                            // the route answer the placeholder was opened through
-      const openStream = (mouthChat = null) => {
+      let started = false;                             // an open was asked for (ambient: not before there is text)
+      const openStream = (mouthChat = null, init = undefined) => {
+        started = true;
         if (streamOpened) return stream;
         streamOpened = true;
         openedAt = now();
         streamVia = mouthChat;
         if (mouthChat?.bridge) streamMouth = mouthChat;
-        stream = mint(mouthChat);
         const already = shown();
-        if (already) stream?.update?.(`${already} ${LIVE_FRAME_MARK}`);
+        // ambient: the message opens on `init`, else the text so far — never on the ⏳ placeholder
+        stream = mint(mouthChat, ambient ? (init ?? `${already} ${LIVE_FRAME_MARK}`) : undefined);
+        if (already && !ambient) stream?.update?.(`${already} ${LIVE_FRAME_MARK}`);
         return stream;
       };
-      if (!route) openStream();
-      // …and a placeholder that cannot be opened is LOGGED, never an unhandled rejection: on the
-      // no-peer path a throwing startStream propagates out of open() as it always has, but on this
-      // path there is no caller left to catch it. finish() then finds no stream and posts the
-      // reply fresh, which is the branch it already has for a bridge with no streaming at all.
-      else route.then((peerChat) => openStream(peerChat)).catch((e) => onLog(`mouth: could not open the placeholder for ${chatId} — the reply will be posted whole: ${e?.message ?? e}`));
+      const start = () => {
+        if (started) return;
+        started = true;
+        if (!route) openStream();
+        // …and a placeholder that cannot be opened is LOGGED, never an unhandled rejection: on the
+        // no-peer path a throwing startStream propagates out of open() as it always has, but on this
+        // path there is no caller left to catch it. finish() then finds no stream and posts the
+        // reply fresh, which is the branch it already has for a bridge with no streaming at all.
+        else route.then((peerChat) => openStream(peerChat)).catch((e) => onLog(`mouth: could not open the placeholder for ${chatId} — the reply will be posted whole: ${e?.message ?? e}`));
+      };
+      if (!ambient) start();
       // fallbackResult (operator 2026-08-10, voice-reply-as-a-reply-to-the-text chunk): set
       // ONLY when the §7 fallback below fires (a FRESH send, not an edit-in-place) — its own
       // confirmedId then supersedes the stream's, which never delivered.
@@ -598,7 +610,12 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
         // arguments included — so with no stream yet (a peer route being resolved, or a peer
         // route outright) the running text was silently never accumulated, and a fallback post
         // would have carried only the settled value with the narration above it lost.
-        update(partial) { const t = textOf(partial); if (!t) return; const frame = `${absorb(t)} ${LIVE_FRAME_MARK}`; push(frame); },
+        update(partial) {
+          const t = textOf(partial); if (!t) return;
+          // ambient: nothing is posted while the text may still be the '…' silence; the first other text opens it
+          if (ambient && !started) { if (!SILENCE_SO_FAR.test(t)) { absorb(t); start(); } return; }
+          const frame = `${absorb(t)} ${LIVE_FRAME_MARK}`; push(frame);
+        },
         // LIVENESS: the live frame again with the time since `ms` ago, never absorbed into what was
         // read. `label` relabels a status. false = past the edit window.
         pulse(ms, label = null) {
@@ -634,6 +651,11 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
           // "A polite silence is '...' or '…'" — so the withheld turn reads as
           // a deliberate silence rather than a message that disappeared.
           if (!surface) {
+            // ambient, nothing posted: a withheld turn posts nothing — logged only (operator 2026-10-18)
+            if (ambient && !started) {
+              onLog(`sender: ${being}/${chatId} on-mode ambient turn withheld (${commands?.length ? commands.map((v) => `/${v}`).join(' ') : JSON.stringify(t.trim().slice(0, 40))}) — nothing posted`);
+              return;
+            }
             // A WITHHELD TURN RESOLVES THE PLACEHOLDER IT ACTUALLY OPENED — which, on a peer
             // route, is the one on the peer's account. The rule this branch exists for is that a
             // placeholder must never be left stuck (operator 2026-08-24, "nothing is ever
@@ -684,6 +706,7 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
             return;
           }
           const body = alreadyRead(settled) ? shown() : absorb(settled);
+          if (ambient && !started) openStream(peerChat, body);   // ambient, nothing posted yet: the reply opens on itself
           // AND THAT IS THE WHOLE MOUTH DECISION, spent. A peer stream settles the message the peer
           // has been editing; a local one settles this account's. Either way `delivered` says
           // whether it was said, and the §7 line below — unchanged, and the only fallback in this
@@ -701,7 +724,8 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
         async fail() {                                 // visible failure: the message ends with ❌
           ended = true;
           try {
-            if (route) await route;                    // …after the mouth decision, so the placeholder that was opened is the one this EDITS rather than posting a fresh ❌ beside it
+            const peerChat = route ? await route : null;   // …after the mouth decision, so the placeholder that was opened is the one this EDITS rather than posting a fresh ❌ beside it
+            if (ambient && !started) openStream(peerChat, FAIL_SUFFIX);   // ambient, nothing posted yet: the failure is the message
             // The failure ends the placeholder wherever it lives — the peer's account on a peer
             // route, this one otherwise — because that is where a human is watching a "⏳" that
             // must not be left thinking forever. Only a turn that never opened a stream at all
