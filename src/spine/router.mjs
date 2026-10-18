@@ -35,6 +35,7 @@ import { mentionHits } from '../auto-mode.mjs';
 import { VOICE_MARK } from '../incoming-media.mjs';
 import { getBeing, getContact, allowedUsersPermits, defaultBeingOf } from '../conversations-state.mjs';
 import { surfaceOf, SHELL_SURFACE } from './identity.mjs';
+import { fromOtherNode } from './node-names.mjs';
 
 // A local (non-relay) agent's map key, matched case-insensitively; null when there is none.
 function localAgentKey(agents, name) {
@@ -718,11 +719,14 @@ export function createRouter({ getAgents = () => ({}), getConfig = () => ({}), d
       // `fallthrough: true` — NOBODY was explicitly addressed; this is the persona default, not a
       // real @mention. The per-being echo gate (spine.mjs) reads it so a being's own plain signed
       // line never wakes the persona by default (only an explicit cross-being address does).
-      // `denied: true` — that being's allowed_users refuses this sender: the line is recorded, and
-      // the gate (gating.decide) wakes nobody, whatever the mode or mention.
+      // `denied: true` — that being's allowed_users refuses this sender, or the message replies to
+      // another node's signed post (operator 2026-10-18: addressed to its signer, that node's to
+      // wake): the line is recorded, and the gate (gating.decide) wakes nobody, whatever the mode.
       if (!targets.length) {
         const being = owner ?? defaultBeing;
-        targets.push({ being, mention: ev?.mention, address: null, fallthrough: true, ...(permits(being, agents[being]) ? {} : { denied: true }) });
+        const elsewhere = fromOtherNode(cfg, { fromNode: ev?.replyToNode ?? null });
+        if (elsewhere) onLog(`reply: ${ev?.surface}/${ev?.chatId} quotes node <${ev.replyToNode}>'s post — addressed there; recorded, prompts nobody`);
+        targets.push({ being, mention: ev?.mention, address: null, fallthrough: true, ...(!elsewhere && permits(being, agents[being]) ? {} : { denied: true }) });
       }
       return { ...targets[0], targets };
     },

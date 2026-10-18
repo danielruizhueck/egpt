@@ -1939,7 +1939,8 @@ export async function startBeeperBridge(opts = {}) {
     // The target's frame names the TARGET's author, not the reactor: off the snippet, and read as the
     // replyToBeing a text reply to it would carry (dispatchMessage, below).
     const snippet = stripNodeSignature(target);
-    const replyToBeing = decodeNodeSignature(target) === String(nodeName).trim() ? decodeBeingSignature(target) : null;
+    const replyToNode = decodeNodeSignature(target);
+    const replyToBeing = replyToNode === String(nodeName).trim() ? decodeBeingSignature(target) : null;
     const replyToBot = wasSentByUs(msg.chatID, msg.id) || !!replyToBeing;
     // OURS = an account a being speaks through, the ear's excepted (operator 2026-10-11). Its reaction
     // (/react, 📩/👀, ✅, 🎧 — this node's or a co-account peer's) is OUTPUT (operator 2026-10-18):
@@ -1960,7 +1961,7 @@ export async function startBeeperBridge(opts = {}) {
         network,   // per-surface authorization namespace
         userId: reactor, username: undefined, firstName: name, senderName: name,
         isSender: false, authorized: isAllowedUser(reactor, network),
-        atEStart: false, atEAnywhere: false, replyToBot, replyToBeing,
+        atEStart: false, atEAnywhere: false, replyToBot, replyToBeing, replyToNode,
         isReaction: true, isTranscriptFromVoice: false,
         msgKey: msg.id || null,   // the reacted-to message id (referenced as #id in the body)
       };
@@ -2363,10 +2364,12 @@ export async function startBeeperBridge(opts = {}) {
     //      quote-reply to a being is exactly such a message.
     const replyToId = msg.linkedMessageID ?? msg.replyToMessageID ?? msg.quotedMessageID ?? null;
     let replyToBeing = null;
+    let replyToNode = null;   // the quoted frame's node, any node (router: another node's post is addressed there)
     if (replyToId) {
       const quoted = _seenText.get(msgKeyOf(chatID, replyToId))
         ?? (await listMessagesRaw(chatID)).find((m) => m?.id != null && String(m.id) === String(replyToId))?.text;
-      if (decodeNodeSignature(quoted) === String(nodeName).trim()) replyToBeing = decodeBeingSignature(quoted);
+      replyToNode = decodeNodeSignature(quoted);
+      if (replyToNode === String(nodeName).trim()) replyToBeing = decodeBeingSignature(quoted);
     }
     const replyToBot = !!(replyToId && wasSentByUs(chatID, replyToId)) || !!replyToBeing;
 
@@ -2537,6 +2540,7 @@ export async function startBeeperBridge(opts = {}) {
       replyToBot,                           // true when this is a reply to a message WE sent (gates a reply without @e)
       replyToId,                            // the quoted message id (→ `↩#<id>` in the dispatch line), null when not a reply
       replyToBeing,                         // the being key in the quoted message's frame (this node's), null otherwise — the router addresses it
+      replyToNode,                          // the node in the quoted message's frame, null when unsigned
       isReaction: false,
       // a voice note's ARRIVAL carries no transcript (yet); its outcome line, below, does
       isTranscriptFromVoice: isVoice && !_voicePending,
@@ -2552,7 +2556,7 @@ export async function startBeeperBridge(opts = {}) {
       msgHash: crossAccountMsgKey(msg),
       msgTs: tsMs,
     };
-    onLog(`beeper: incoming [${info.title}] ${msg.senderName}: ${JSON.stringify((text || '').slice(0, 60))} (atE=${st.atEAnywhere}${replyToBot ? ' replyToBot' : ''}${replyToBeing ? ` replyToBeing=${replyToBeing}` : ''}${replyToId ? ` ↩${replyToId}` : ''}${isVoice ? ' voice' : ''})`);
+    onLog(`beeper: incoming [${info.title}] ${msg.senderName}: ${JSON.stringify((text || '').slice(0, 60))} (atE=${st.atEAnywhere}${replyToBot ? ' replyToBot' : ''}${replyToBeing ? ` replyToBeing=${replyToBeing}` : ''}${replyToNode && !replyToBeing ? ` replyToNode=${replyToNode}` : ''}${replyToId ? ` ↩${replyToId}` : ''}${isVoice ? ' voice' : ''})`);
     // Hand off to the host WITHOUT awaiting the reply turn. The host (spine) enqueues
     // this message synchronously — so the order messages REACH here is the order the
     // spine sees (dispatches now run concurrently, so that is arrival order only up to

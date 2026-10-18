@@ -2248,7 +2248,7 @@ describe('beeper bridge — a reaction placed by an account this node speaks thr
     fake.emit({ type: 'message.upserted', entries: [reacted(post, '@anrodriguez:beeper.com', '❤️')] });
     await waitFor(() => s.fed.some((f) => f.isReaction));
     const r = s.fed.find((f) => f.isReaction);
-    expect(r).toMatchObject({ replyToBeing: 'e', replyToBot: true, atEAnywhere: false });
+    expect(r).toMatchObject({ replyToBeing: 'e', replyToNode: 'kg', replyToBot: true, atEAnywhere: false });
     expect(r.fromNode).toBeUndefined();
     await s.settled();
     expect(s.recorded.find((ev) => ev.kind === 'reaction')).toMatchObject({ fromNode: null, body: 'reacted ❤️ to #26460 "🐶 e: listo"' });
@@ -2650,6 +2650,7 @@ describe('beeper bridge — a quote-reply to a being\'s post names that being (o
     fake.emit(quoteReply('peer-1', 're peer'));
     const m = await arrival(incoming, 're peer');
     expect(m.from.replyToBeing ?? null).toBe(null);   // peer-node frame fails the node check → names nobody here
+    expect(m.from.replyToNode).toBe('do');            // …but says whose it is: the router addresses it there
     expect(m.from.replyToBot).toBe(false);            // …so a bare reply does not wake E (mention rules unchanged)
     expect(m.from.replyToId).toBe('peer-1');
   });
@@ -2700,10 +2701,11 @@ describe('beeper bridge — a quote-reply to a being\'s post names that being (o
       { id: '2', text: `el primo del día es 1637${encodeNodeSignature('kg')}` },
       { id: '3', text: `🤝 don: aquí${encodeNodeSignature('do', 'egpt')}` },   // a co-account spine's being: that spine's to wake
     ]);
-    for (const id of ['1', '2', '3']) {
+    for (const [id, node] of [['1', null], ['2', 'kg'], ['3', 'do']]) {
       fake.emit(quoteReply(id, `re ${id}`));
       const m = await arrival(incoming, `re ${id}`);
       expect(m.from.replyToBeing ?? null, id).toBe(null);
+      expect(m.from.replyToNode, id).toBe(node);
       expect(m.from.replyToBot, id).toBe(false);
       expect(m.from.replyToId, id).toBe(id);
     }
