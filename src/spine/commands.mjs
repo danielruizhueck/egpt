@@ -23,7 +23,7 @@ import { loadPermissionLevel, ACCESS_LEVELS, isAccessLevel } from './permission-
 // over a single already-extracted token is the house single-token lookup (src/spine/mesh.mjs's
 // findAgentByToken, src/spine/heartbeat-loader.mjs's `agent:`); `addressableTokens` LISTS the
 // valid handles in the not-hosted log line. See agentsCmd's HANDLE → KEY block.
-import { addressed, addressableTokens, isKnownSender, wakeTokens, voiceWakeTokens } from './router.mjs';
+import { addressed, addressableTokens, isKnownSender, wakeTokens, voiceWakeTokens, isPeerBeing } from './router.mjs';
 import { superChannelAlive, resolveMode } from './gating.mjs';
 import { stat as fsStat, readFile as fsReadFile, writeFile as fsWriteFile, mkdir as fsMkdir, readdir as fsReaddir, rm as fsRm, rename as fsRename } from 'node:fs/promises';
 import { readdirSync } from 'node:fs';
@@ -1705,7 +1705,8 @@ export function createCommands({
       // name it has. A being config DOES declare is never reachable this way — it is addressed by
       // the handles it answers to, which is what keeps another node's `egpt` out of this.
       const configKey = (n) => Object.keys(agentsMap).some((k) => !k.startsWith('_') && k.toLowerCase() === n);
-      const key = addressed(typed, agentsMap, { addressWithoutAt: true })[0]?.name
+      const hit = addressed(typed, agentsMap, { addressWithoutAt: true })[0];
+      const key = (hit && !isPeerBeing(hit.agent) ? hit.name : null)   // a peer being is its own node's
         ?? (!configKey(typed) ? residents.find((h) => String(h).toLowerCase() === typed) : null)
         ?? null;
       if (!key) {

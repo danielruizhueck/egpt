@@ -59,7 +59,7 @@ import { createGating } from './gating.mjs';
 // createRouter + THE wake vocabulary. wakeTokens is the ONE rule for "which @tokens address this
 // agent" (declared `handles:`, else the map key) — imported, not re-implemented, so the persona
 // wake set boot hands the ports and the router's own @token scan can never disagree again.
-import { createRouter, wakeTokens, voiceWakeTokens, fallbackWake, strangerAgentFor } from './router.mjs';
+import { createRouter, wakeTokens, voiceWakeTokens, fallbackWake, strangerAgentFor, isPeerBeing } from './router.mjs';
 import { createTranscript } from './transcript.mjs';
 // createSender: the reply path. makeOutbound: the ONE answer to "which connection does this
 // outbound go out on" (sender.mjs's header), asked by makePeerMouth below rather than copied.
@@ -2563,7 +2563,7 @@ export async function boot({
       // an agent addressable by nothing cannot double-answer — and a purely guarded agent (every
       // token under fallback_handle) never appears here either, which is the shape being advised.
       const unconditional = wakeTokens(name, agent);
-      if (!unconditional.length) continue;
+      if (!unconditional.length || isPeerBeing(agent)) continue;   // a peer being answers nothing here
       log.line?.(`[router] '${name}' wakes on ${unconditional.map((h) => `@${h}`).join(' ')} unconditionally and this node wakes on ${inboundOwned.size} connections — in any chat two of its accounts are both in, ONE mention wakes it TWICE and the chat gets two answers. To make exactly one answer, move those handles into fallback_handle: { handle: [...], unless_present: <one of this node's own account numbers> } — the account whose number you name is the one that answers, and the other stays silent wherever the two share a chat.`);
     }
   }
