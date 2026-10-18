@@ -369,6 +369,9 @@ export async function createBeeperBridgePort(opts = {}, { start = startBeeperBri
     async listMessagesRaw(chat, opts) {
       return real.listMessagesRaw ? await real.listMessagesRaw(chat, opts) : [];
     },
+    // …and the ones it has SEEN arrive (no GET), plus a wait for the next — a fake without them: none.
+    recentMessages(chat) { return real.recentMessages ? real.recentMessages(chat) : []; },
+    awaitMessage(chat, test, ms) { return real.awaitMessage ? real.awaitMessage(chat, test, ms) : Promise.resolve(null); },
 
     isAlive: () => real.isAlive(),
     stop: () => real.stop(),

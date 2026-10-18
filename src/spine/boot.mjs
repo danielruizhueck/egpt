@@ -25,7 +25,7 @@ import { peerSpineFrom, createMouthReceiver, speakThroughPeer, startPeerStream, 
 // The cross-account chat key itself — minted in the bridge, beside the payloads it reads. The
 // LOCAL mouth below keys with the same primitive the peer link keys with; there is one definition
 // of "which of MY chats is that ONE real chat" and both transports ask it.
-import { crossAccountChatKey, LISTENING_REACTION } from '../bridges/beeper.mjs';
+import { crossAccountChatKey, crossAccountMsgKey, _msgTimestampMs, LISTENING_REACTION } from '../bridges/beeper.mjs';
 import { htmlToMarkdown } from '../html-to-markdown.mjs';
 import { mergeAudit } from './audit-merge.mjs';
 import { createWarmPool } from '../warm-sessions.mjs';
@@ -317,6 +317,7 @@ export function makeShellAwareBridge(bridge, shellPort) {
 // guess, never a dropped reply: every refusal below names the connection, the reason, and which
 // connection is going to speak instead. The Self-DM is the honest, permanent case — Rodz is not a
 // participant, there is no room on that account to translate to, and the ear answers forever.
+const COPY_WAIT_MS = 1000;   // ownCopy: how long the mouth's own copy of a message may trail the ear's (= sender QUOTE_WAIT_MS)
 export function makePeerMouth({ peer, bridge, bridgeOf = null, owns = () => false, localMouth = null, speak = speakThroughPeer, stream = startPeerStream, reactor = reactThroughPeer, mouthRoomFor = null, rememberMouthRoom = null, onLog = () => {} } = {}) {
   if (!peer && !localMouth) return null;      // no peer_spine and no second account ⇒ no mouth ⇒ createSender is handed none ⇒ nothing changes
   // THE ONE RESOLVER (sender.mjs makeOutbound), built once. No peerMouth is handed to it, so its
@@ -458,14 +459,24 @@ export function makePeerMouth({ peer, bridge, bridgeOf = null, owns = () => fals
   //
   // THE LOOKUP ITSELF is shared with the /reply limb's quote (2026-09-16, `quote` below): which of
   // the mouth's OWN messages a cross-account key names. One lookup, two things done with the id.
+  // ITS OWN ARRIVAL names the copy with no GET (the bridge's recentMessages). Not seen yet → the list,
+  // and meanwhile the copy itself if it lands: it can trail the ear's arrival by most of a second.
   const ownCopy = async ({ bridge: on, chatId, connection }, { msgKey, timestamp = 0 } = {}) => {
     const want = String(msgKey ?? '').trim();
     if (!want) return { ok: false, reason: 'no-key', detail: 'the message carries no cross-account key' };
+    const seen = findMessageByKey(on?.recentMessages?.(chatId) ?? [], want, timestamp);
+    if (seen.ok) return seen;
     if (!on?.listMessagesRaw) return { ok: false, reason: 'no-list', detail: `'${connection}' cannot list its messages` };
-    let messages = [];
-    try { messages = await on.listMessagesRaw(chatId); }
-    catch (e) { return { ok: false, reason: 'unavailable', detail: e?.message ?? String(e) }; }
-    return findMessageByKey(messages, want, timestamp);
+    const arrived = Promise.resolve(on.awaitMessage?.(chatId, (m) => crossAccountMsgKey(m) === want && (!timestamp || _msgTimestampMs(m) === timestamp), COPY_WAIT_MS))
+      .then((m) => (m?.id != null ? { ok: true, msgId: String(m.id) } : null), () => null);
+    const listed = (async () => {
+      let messages = [];
+      try { messages = await on.listMessagesRaw(chatId); }
+      catch (e) { return { ok: false, reason: 'unavailable', detail: e?.message ?? String(e) }; }
+      const hit = findMessageByKey(messages, want, timestamp);
+      return hit.ok ? hit : ((await arrived) ?? hit);
+    })();
+    return Promise.race([listed, arrived.then((a) => a ?? listed)]);
   };
   // `remove` takes a reaction back OFF the mouth's own copy, found the same way (the 🎧 listening
   // mark, 2026-09-16 — sender.mjs makeOutbound `react`).

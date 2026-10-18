@@ -374,7 +374,9 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
     // `status`: a liveness status message (src/spine/liveness.mjs) — opens on that line instead of THINKING.
     // `replyIn`: the room `replyTo` (an id, or a promise of one) lives in — a local mouth's route answer, or
     // null for this chat's own connection. Given, the quote is resolved for the room the stream opens in.
-    open(chatId, { being = defaultKey, replyTo = null, replyIn = undefined, queued = false, queuedAhead = 0, auto = false, origin = null, status = null } = {}) {
+    // `replyKey`: replyTo's cross-account key ({ msgKey, timestamp }) when the caller holds it (the
+    // inbound event's own) — the mouth is told it as is, with no list read to compute it.
+    open(chatId, { being = defaultKey, replyTo = null, replyIn = undefined, replyKey = null, queued = false, queuedAhead = 0, auto = false, origin = null, status = null } = {}) {
       const { bridge: bridgeForThisBeing, route: peerRoute, keyOf } = outbound(being, chatId);
       // ROUTED-TARGET FALLBACK (never a silent drop): a send the sending account can't place on the
       // routed room (a super/alias room it isn't a member of → resolveChatId null → DROPPED) re-sends
@@ -471,7 +473,7 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
         if (!look) {
           look = (async () => {
             let hit = null;
-            try { hit = await peerMouth.quote?.(into, await keyOf(id, what, replyIn)()); }
+            try { hit = await peerMouth.quote?.(into, replyKey?.msgKey ? replyKey : await keyOf(id, what, replyIn)()); }
             catch (e) { hit = { reason: 'threw', detail: e?.message ?? String(e) }; }
             if (hit?.ok) return hit.msgId;
             copies.delete(memo);

@@ -1641,7 +1641,7 @@ describe("an ordinary reply quotes the mouth's own copy of the message it answer
       sender: n.sender, transcript: { log() {}, logAction() {} }, heartbeats: { runDue() {} }, store: { recordThread() {} },
       clock: { now: () => 1000 }, log: { line: (m) => n.logs.push(m) },
     }).start();
-    return { ...n, say: () => cb(TEXT_EV) };
+    return { ...n, say: (extra = {}) => cb({ ...TEXT_EV, ...extra }) };
   };
   const opened = (bridge) => bridge.streams.map((s) => [s.chat, s.opts.replyTo]);
   const open = (sender, opts = {}) => sender.open(CHAT_ID, { being: 'e', replyTo: STEERED_ON_PRIMARY.id, replyIn: null, ...opts });
@@ -1714,6 +1714,40 @@ describe("an ordinary reply quotes the mouth's own copy of the message it answer
     expect(opened(mouthBridge)).toEqual([[SECONDARY_CHAT_ID, STEERED_ON_SECONDARY.id], [SECONDARY_CHAT_ID, STEERED_ON_SECONDARY.id]]);
     expect(earListed).toEqual([CHAT_ID]);
     expect(mouthListed).toEqual([SECONDARY_CHAT_ID]);
+  });
+
+  // ── FROM DATA ALREADY AT HAND (2026-10-18: the quote held the placeholder ~1s on two GETs) ──
+  const KEY = { msgKey: STEERED_KEY, timestamp: STEERED_TS };
+  it("the event carries its own cross-account key: the ear's list is never read", async () => {
+    const { ear, mouthBridge, earListed, say } = spineNode();
+    await say({ msgHash: STEERED_KEY, msgTs: STEERED_TS });
+    expect(opened(mouthBridge)).toEqual([[SECONDARY_CHAT_ID, STEERED_ON_SECONDARY.id]]);
+    expect(ear.streams).toEqual([]);
+    expect(earListed).toEqual([]);
+  });
+
+  it('the mouth already saw its copy arrive: the placeholder opens quoting it while a slow list never returns', async () => {
+    const { mouthBridge, mouthListed, sender } = node();
+    mouthBridge.recentMessages = () => [STEERED_ON_SECONDARY];
+    mouthBridge.listMessagesRaw = () => new Promise(() => {});
+    open(sender, { replyKey: KEY });
+    await settled();
+    expect(opened(mouthBridge)).toEqual([[SECONDARY_CHAT_ID, STEERED_ON_SECONDARY.id]]);
+    expect(mouthListed).toEqual([]);
+  });
+
+  it("its copy lands after the placeholder was asked for: taken on arrival, not after the list", async () => {
+    const { mouthBridge, sender } = node();
+    const waiters = [];
+    mouthBridge.recentMessages = () => [];
+    mouthBridge.awaitMessage = (_chat, test) => new Promise((r) => waiters.push({ test, r }));
+    mouthBridge.listMessagesRaw = () => new Promise(() => {});
+    open(sender, { replyKey: KEY });
+    await settled();
+    expect(mouthBridge.streams).toEqual([]);            // not yet: no copy, list still out
+    for (const w of waiters) if (w.test(STEERED_ON_SECONDARY)) w.r(STEERED_ON_SECONDARY);
+    await settled();
+    expect(opened(mouthBridge)).toEqual([[SECONDARY_CHAT_ID, STEERED_ON_SECONDARY.id]]);
   });
 });
 

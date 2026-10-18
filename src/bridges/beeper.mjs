@@ -1766,6 +1766,34 @@ export async function startBeeperBridge(opts = {}) {
     } catch (e) { onLog(`beeper: could not list the messages of ${chatID} — ${e?.message ?? e}`); return []; }
   }
 
+  // THIS ACCOUNT'S OWN RECENT ARRIVALS, per chat, raw (2026-10-18): a mouth names its copy of a
+  // message the ear just heard from these (boot ownCopy) instead of listing the chat, and waits for a
+  // copy still on its way. Fed by the WS before dispatch; bounded per chat and in chats.
+  const ARRIVALS_PER_CHAT = 30, ARRIVAL_CHATS = 300;
+  const _arrivals = new Map();         // chatID -> raw entries, oldest first
+  const _arrivalWaiters = new Set();   // { chatID, test, done }
+  function noteArrival(msg) {
+    const chatID = msg?.chatID;
+    if (!chatID || msg.id == null || msg.type === 'REACTION') return;
+    const list = (_arrivals.get(chatID) ?? []).filter((m) => String(m.id) !== String(msg.id));
+    list.push(msg);
+    if (list.length > ARRIVALS_PER_CHAT) list.shift();
+    _arrivals.delete(chatID);
+    _arrivals.set(chatID, list);
+    _capMap(_arrivals, ARRIVAL_CHATS);
+    for (const w of [..._arrivalWaiters]) if (w.chatID === chatID && w.test(msg)) w.done(msg);
+  }
+  // The next arrival in `chatId` that passes `test`, or null after `ms`.
+  function awaitMessage(chatId, test, ms) {
+    return new Promise((resolve) => {
+      let timer = null;
+      const w = { chatID: shortChatId(chatId), test, done: (m) => { clearTimeout(timer); _arrivalWaiters.delete(w); resolve(m); } };
+      _arrivalWaiters.add(w);
+      timer = setTimeout(() => w.done(null), ms);
+      timer.unref?.();
+    });
+  }
+
   // The newest id currently in the chat — snapshot BEFORE a send to arm
   // resolveSentMessageId's `afterId` floor. null (empty chat / GET failure) =
   // no floor, i.e. today's accept-any behavior (degraded, never blocking).
@@ -2614,6 +2642,7 @@ export async function startBeeperBridge(opts = {}) {
           // (a null check otherwise) — it decides nothing about any other message, and the
           // message still rides on into dispatch exactly as it would have.
           _earProbe.heard(msg.text);
+          noteArrival(msg);
           // Dispatch IMMEDIATELY — never behind another message's transcription (see
           // `_transcribing` above dispatchMessage: the serialization that used to live here
           // now sits on the transcribe itself). Errors are logged, never swallowed.
@@ -2736,6 +2765,9 @@ export async function startBeeperBridge(opts = {}) {
     // steer ack, and a cached page would hand back a list that predates the very message being
     // pointed at. Returns [] on any failure — the caller refuses rather than guessing.
     listMessagesRaw: (chatId, opts) => listMessagesRaw(chatId, opts),
+    // …and the ones this account has SEEN arrive, with no GET (noteArrival above).
+    recentMessages: (chatId) => [...(_arrivals.get(shortChatId(chatId)) ?? [])],
+    awaitMessage: (chatId, test, ms) => awaitMessage(chatId, test, ms),
     // MEMBERSHIP (operator 2026-08-31, router.mjs fallback_handle): true | false | null (UNKNOWN).
     // Cached + TTL'd + free for a 1:1 — see chatHasParticipant above.
     chatHasParticipant: (chatId, identity) => chatHasParticipant(chatId, identity),

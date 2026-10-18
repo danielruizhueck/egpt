@@ -4937,3 +4937,28 @@ describe('beeper bridge — a voice note is two lines: its arrival now, its tran
     expect(lines.do).toEqual(lines.kg);
   });
 });
+
+// ── THE ACCOUNT'S OWN ARRIVALS (2026-10-18): a mouth names its copy of a message from what its WS
+// already delivered (boot ownCopy), with no GET, and can wait for a copy still on its way. ──
+describe('beeper bridge — recentMessages / awaitMessage', () => {
+  it('every arrival is kept per chat, newest last, a re-upsert replacing its own entry; no GET', async () => {
+    const { bridge, incoming } = await startBridge();
+    const gets = fake.msgListGets();
+    const a = liveMsg({ id: 'r-1', text: 'uno' });
+    fake.emit({ type: 'message.upserted', entries: [a, liveMsg({ id: 'r-2', text: 'dos' })] });
+    await waitFor(() => incoming.length === 2);
+    fake.emit({ type: 'message.upserted', entries: [{ ...a, text: 'uno (edited)' }] });
+    await waitFor(() => bridge.recentMessages(CHAT('chat-1')).some((m) => m.text === 'uno (edited)'));
+    expect(bridge.recentMessages(CHAT('chat-1')).map((m) => m.id)).toEqual(['r-2', 'r-1']);
+    expect(bridge.recentMessages(CHAT('other'))).toEqual([]);
+    expect(fake.msgListGets()).toBe(gets);
+  });
+
+  it('awaitMessage resolves on the next matching arrival, or null at the timeout', async () => {
+    const { bridge } = await startBridge();
+    const waiting = bridge.awaitMessage(CHAT('chat-1'), (m) => m.text === 'the one', 5000);
+    fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: 'w-1', text: 'not it' }), liveMsg({ id: 'w-2', text: 'the one' })] });
+    expect((await waiting)?.id).toBe('w-2');
+    expect(await bridge.awaitMessage(CHAT('chat-1'), () => true, 20)).toBe(null);
+  });
+});
