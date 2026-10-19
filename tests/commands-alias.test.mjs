@@ -15,6 +15,7 @@ import * as YAML from 'yaml';
 import { createSpine } from '../src/spine/spine.mjs';
 import { createRouter } from '../src/spine/router.mjs';
 import { createCommands } from '../src/spine/commands.mjs';
+import { COMMANDS } from '../src/interpreter.mjs';
 import { ensureContact, recordThread } from '../src/conversations-state.mjs';
 import { shortChatId } from '../src/bridges/chat-id.mjs';
 
@@ -238,6 +239,22 @@ describe('the file: live, validated, optional', () => {
     expect(calls.ran).toEqual(['/join viaje']);
     expect(calls.create.map((c) => c.title)).toEqual(['SI+C-viaje']);
     expect(calls.audit).toEqual(["alias 'aparte' → /join in C by Lulu"]);
+  });
+});
+
+// Dispatched by the spine but unregistered until 2026-10-19: an alias to one was refused, /help omitted them.
+describe('/tab /close /activate /bans /unban are registry commands', () => {
+  const ALIASED = [['pestaña', '/tab', '1'], ['cierra', '/close', '2'], ['activa', '/activate', 'cgpt1'], ['baneos', '/bans', ''], ['perdona', '/unban', 'Lulu']];
+
+  it('each is a wired registry entry, and an alias to each is accepted and runs it', async () => {
+    for (const [, cmd] of ALIASED) expect(COMMANDS.find((e) => e.cmd === cmd), cmd).toMatchObject({ wired: true });
+    writeAliases(ALIASED.map(([alias, cmd]) => `${alias}: ${cmd}`).join('\n') + '\n');
+    const { say, calls } = build();
+    for (const [alias, , rest] of ALIASED) await say(operator(`${alias} ${rest}`.trim()));
+    expect(aliasLogs(calls)).toEqual([]);
+    expect(calls.ran).toEqual(ALIASED.map(([, cmd, rest]) => `${cmd} ${rest}`.trim()));
+    expect(calls.audit).toEqual(ALIASED.map(([alias, cmd]) => `alias '${alias}' → ${cmd} in C by An`));
+    expect(calls.brain).toEqual([]);
   });
 });
 
