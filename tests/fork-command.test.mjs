@@ -242,11 +242,10 @@ describe('/join — alias model, node_role gate', () => {
     expect(calls.create[0].title).toBe(SIDE_GROUP_PREFIX + GROUP_TITLE_DEFAULT.replace('{name}', name).replace('{group}', 'Proyecto X'));
   });
 
-  it('SILENT on a non-primary-role node (no override)', async () => {
-    const { cmds, sent, calls } = harness({ config: cfg({ node_name: 'do', node_role: 'secondary' }) });
+  it('node_role picks nothing (2026-10-19): the node that runs /join creates, a node_role secondary too', async () => {
+    const { cmds, calls } = harness({ config: cfg({ node_name: 'do', node_role: 'secondary' }) });
     await cmds.run({ ...EV });
-    expect(calls.create).toHaveLength(0);
-    expect(sent).toHaveLength(0);
+    expect(calls.create).toHaveLength(1);
   });
 
   // REPRODUCE-FIRST (operator 2026-10-06): a chat whose contact is KNOWN but where NO being has ever
@@ -265,13 +264,12 @@ describe('/join — alias model, node_role gate', () => {
     expect(sent).toHaveLength(0);                                           // known contact → no refusal reply
   });
 
-  // REGRESSION LOCK: the relaxed contact guard must sit AFTER the node gate, so a non-selected node
-  // still stands down SILENTLY even in the newly-allowed no-being case.
-  it('REGRESSION: a non-selected node stays SILENT even with the relaxed guard (no being) — no createGroup, no reply', async () => {
+  // The relaxed contact guard holds on a node_role secondary too (2026-10-19: no node gate any more).
+  it('a node_role secondary with a KNOWN contact and NO being thread: creates too, no reply', async () => {
     const stateNoBeing = ensureContact({ contacts: {} }, 'whatsapp', C_CHAT, { pushedName: 'Proyecto X' }).state;
     const { cmds, sent, calls } = harness({ config: cfg({ node_name: 'do', node_role: 'secondary' }), state: stateNoBeing });
     await cmds.run({ ...EV });
-    expect(calls.create).toHaveLength(0);
+    expect(calls.create).toHaveLength(1);
     expect(sent).toHaveLength(0);
   });
 
@@ -286,13 +284,13 @@ describe('/join — alias model, node_role gate', () => {
     expect(logs.some((l) => /not a known conversation/i.test(l))).toBe(true);
   });
 
-  it('a node name is no longer an override (2026-10-19, the handle picks the node): `/join do` names the group "do"; a secondary still stands down', async () => {
+  it('a node name is no longer an override (2026-10-19, the handle picks the node): `/join do` names the group "do", on whichever node runs it', async () => {
     const kg = harness({ config: cfg({ node_name: 'kg', node_role: 'primary', peer_nodes: ['do'] }) });
     await kg.cmds.run({ ...EV, body: '/join do' });
     expect(kg.calls.create.map((c) => c.title)).toEqual(['SI+egpt do de Proyecto X']);
     const dolly = harness({ config: cfg({ node_name: 'do', node_role: 'secondary' }) });
     await dolly.cmds.run({ ...EV, body: '/join do' });
-    expect(dolly.calls.create).toHaveLength(0);
+    expect(dolly.calls.create.map((c) => c.title)).toEqual(['SI+egpt do de Proyecto X']);
   });
 
   it('Rodz unresolvable → logs only (no chat reply), creates nothing', async () => {
@@ -387,13 +385,12 @@ describe('/split — new conversation with each resident being\'s thread COPIED 
     expect(getContact(st, 'whatsapp', SPLIT_CHAT).entry.parent_chat).toBe(C_CHAT);
   });
 
-  it('SILENT on a non-primary-role node, `/split do` included (a node name is no override)', async () => {
+  it('node_role picks nothing (2026-10-19): a node_role secondary runs /split, `/split do` included (a node name is no override)', async () => {
     for (const body of ['/split', '/split do']) {
       seedSourceThreads('e');
-      const silent = harness({ config: cfg({ node_name: 'do', node_role: 'secondary' }) });
-      await silent.cmds.run({ ...EV, body });
-      expect(silent.calls.create, body).toHaveLength(0);
-      expect(silent.sent, body).toHaveLength(0);
+      const dolly = harness({ config: cfg({ node_name: 'do', node_role: 'secondary' }) });
+      await dolly.cmds.run({ ...EV, body });
+      expect(dolly.calls.create, body).toHaveLength(1);
     }
   });
 });

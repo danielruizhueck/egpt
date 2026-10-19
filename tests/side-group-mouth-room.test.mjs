@@ -363,7 +363,11 @@ describe('the other node links every side group from its opener; its beings\' re
 
   it('REPRODUCE automatic: do links the group and records R; don\'s next reply goes there, said by Rodz', async () => {
     const n = await twoNodes({ kgState: automatic(seed()), doState: automatic(doSeed()) });
-    await both(n, ORIGIN, 'e eso es cierto?', { atEStart: true, atEAnywhere: true, msgKey: 'k-ask' });
+    // Addressed to E only: on do the bridge reads no mention of don (else don replies too and do makes its own group).
+    await Promise.all([
+      say(n.kg.byConnection.primary, ORIGIN, 'e eso es cierto?', { atEStart: true, atEAnywhere: true, msgKey: 'k-ask' }),
+      say(n.dolly.byConnection.primary, ORIGIN, 'e eso es cierto?', { atEStart: false, atEAnywhere: false, msgKey: 'k-ask' }),
+    ]);
     await waitFor(() => sideOn(n.dolly)?.mouth_chat);
     expect(sideOn(n.dolly)).toEqual({ aliasOf: ORIGIN, transcript: sideOn(n.kg).transcript, automatic: true, mouth_chat: R });
     await donSaysItInR(n, ORIGIN, 'don y ahora?');

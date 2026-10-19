@@ -3160,10 +3160,10 @@ export const CONFIG_SCHEMA = {
   node_role: `
     The role THIS node plays: 'primary' | 'secondary', set PER NODE (operator 2026-10-03). Both nodes
     ingest the same primary Beeper account. Since 2026-10-19 a command names its being ("/e join"),
-    so the being's node runs it and the role picks nothing there; /join and /split still create
-    their group only on the 'primary' node. The log_to_group audit merge reads it (the secondary
-    edits the primary's line). The other node links a side group from its opener: /join as an alias
-    of the chat, /split as its own conversation with its own beings' threads forked.
+    so the being's node runs it — and makes a /join or /split group — and the role picks nothing
+    there. The log_to_group audit merge reads it (the secondary edits the primary's line). The other
+    node links a side group from its opener: /join as an alias of the chat, /split as its own
+    conversation with its own beings' threads forked.
   `,
 
   group_title: `
@@ -3280,14 +3280,17 @@ export const CONFIG_SCHEMA = {
       any other text                   → on; that text (trimmed) is the group's title, as is.
 
     On: no being replies in this chat, in any mode; every reply (its limbs and voice too) goes to the
-    side group, unquoted. The primary account creates it, inviting Rodz (the secondary) and every
+    side group, unquoted. The node whose being is about to reply creates it when it holds none, on its
+    primary account, inviting Rodz (the secondary) and every
     member of the chat it can see; no secondary → the members alone. An addressed reply makes it
     before the turn; any other (on/auto) only once the reply has something to post, so a silence
     makes nothing. It is a /join-kind alias of the chat (same folder and thread, its own transcript),
     marked automatic: true. /send works in it; /end does nothing there. Once the group is gone the
-    next reply opens a new one. A title may repeat: the group is known by its id. Only the node_role
-    'primary' node creates it; the other node links it from the opener and, until then, withholds
-    its replies.
+    next reply opens a new one. A title may repeat: the group is known by its id. The other node links
+    it from the opener and, when its own entry for the chat says nothing, sets reply_in_side_group: on
+    there too — so only the creating node needs configuring (2026-10-19). Both nodes making one at
+    once is fine: two groups, each node links the other's, and each keeps replying in the first it
+    holds (its own); a line in either reaches both, as an alias of the chat.
   `,
 
   aliases: `

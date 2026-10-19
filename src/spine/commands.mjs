@@ -3137,10 +3137,10 @@ export function createCommands({
   //            recorded parent_chat for /split). Repeatable; honours config.send.post_back_from.
   //   /end   — archive the group (both kinds) and drop its mapping. Posts nothing.
   //
-  // WHICH NODE: the handle's (commandOf) — `/e join` runs on E's node, and only there. /join and /split
-  // still create only on the node_role 'primary' node. A being must still RESIDE here (residesHere),
-  // which is also the "is there a thread to carry/copy" check. /send+/end act only where this node holds
-  // the group (an alias or a parent); both nodes do once the other links it (linkSideGroup).
+  // WHICH NODE: the handle's (commandOf) — `/e join` runs on E's node, and only there; that node creates
+  // the group on its own primary account. A being must still RESIDE here (residesHere), which is also
+  // the "is there a thread to carry/copy" check. /send+/end act only where this node holds the group (an
+  // alias or a parent); both nodes do once the other links it (linkSideGroup).
   const residesHere = (state, surface, chatId) => {
     const agents = getContact(state, surface, chatId)?.entry?.agents ?? {};
     return Object.values(agents).some((b) => b && typeof b === 'object' && b.threadId != null);
@@ -3149,9 +3149,6 @@ export function createCommands({
   // `/join`/`/split`'s <name> (the rest of the line, it fills {name} in the group title); none → a
   // random one (randomName).
   const forkNameOf = (body) => /^\/(?:join|split)\b[ \t]*(.*)$/i.exec(String(body ?? '').trim())?.[1].trim() || randomName();
-
-  // The shared node gate for /join + /split: true to PROCEED on this node (the primary role).
-  const forkNodeSelected = () => String(cfg().node_role ?? '').trim().toLowerCase() === 'primary';
 
   // config.join.placeholder / config.split.placeholder, with the built-in fallback so a command never
   // edits to an empty string.
@@ -3406,7 +3403,6 @@ export function createCommands({
   async function joinGroup(ev) {
     const surface = surfaceOf(ev);
     if (!loadState || !writeState) return;                   // state not wired → silent
-    if (!forkNodeSelected()) return;                         // not the primary node → silent
     const refused = memberRefusal(ev, '/join');
     if (refused) return refused;
     const state0 = await loadState();
@@ -3498,7 +3494,6 @@ export function createCommands({
   async function splitGroup(ev) {
     const surface = surfaceOf(ev);
     if (!loadState || !writeState) return;                   // state not wired → silent
-    if (!forkNodeSelected()) return;                         // not the primary node → silent
     const refused = memberRefusal(ev, '/split');
     if (refused) return refused;
     let state = await loadState();
@@ -3659,8 +3654,10 @@ export function createCommands({
   // `reply_in_side_group` on a chat's OWN conversations.yaml entry: no being replies there, in any mode.
   // gating.decide asks this before a reply → the chat id of its side group (an alias of the chat marked
   // `automatic: true`); with `create` false and no group yet, a function that makes it, called once the
-  // reply has something to post (sender.open); false = withhold the reply (not the node_role primary
-  // node, or the create failed); null = in place.
+  // reply has something to post (sender.open); false = withhold the reply (the create failed); null =
+  // in place. The node whose being replies makes it when it holds none (operator 2026-10-19); both
+  // nodes making one at once is fine: two groups, each node links the other's, and each keeps replying
+  // in the first one it holds — its own.
   // The value: a truthy word → true ("SI+<group>"), a falsy word / empty / absent → false, any other
   // string → that title.
   const replyInSideGroupOf = (v) => {
@@ -3686,7 +3683,6 @@ export function createCommands({
       await mutateState(writeState, async () => writeState(dropContact(await loadState(), surface, room)));
       onLog(`automatic: ${room} (the SI+ group of ${ev.chatName || ev.chatId}) is gone — alias dropped`);
     }
-    if (!forkNodeSelected()) { onLog(`automatic: ${ev.chatName || ev.chatId} has no side group on this node and only the node_role primary node makes one — reply withheld`); return false; }
     if (!create) return () => autoSideGroup(ev);
     const key = `${surface}\u0000${ev.chatId}`;
     if (!autoCreating.has(key)) autoCreating.set(key, openAutoSideGroup(ev, surface, setting).finally(() => autoCreating.delete(key)));
@@ -3709,7 +3705,9 @@ export function createCommands({
   // own conversation, this node's residents' threads forked (registerSplit). A chat only seen here is
   // converted in place; one with a being thread of its own is left for the operator (logged).
   // As on the creator, Rodz's copy comes first (mouthCopyOf; it waits on this chat's lane only), so the
-  // group is never usable here before its mouth_chat: one write holds both.
+  // group is never usable here before its mouth_chat: one write holds both. An automatic group also
+  // switches reply_in_side_group on for this node's own entry of the origin when that entry says
+  // nothing (operator 2026-10-19: only the creating node is configured), in the same write.
   const SIDE_KINDS = new Set(['join', 'split', 'automatic']);
   async function linkSideGroup(ev) {
     const c = ev?.canary;
@@ -3733,7 +3731,7 @@ export function createCommands({
       let state = await loadState();
       if (refusal(state) != null) return;
       const own = state.contacts[surface]?.[chatId];
-      let as;
+      let as, switched = null;
       if (c.kind === 'split') {
         const split = await registerSplit(state, surface, chatId, c.origin, { title: ev.chatName || chatId, verb: 'split' });
         state = split.state;
@@ -3742,10 +3740,15 @@ export function createCommands({
         const { jid } = getContact(state, surface, c.origin);
         state = aliasContact(state, surface, chatId, jid, { transcript: c.transcript ?? sanitizeSlug(ev.chatName || chatId), ...(c.kind === 'automatic' ? { automatic: true } : {}) });
         as = `an alias of ${jid}`;
+        if (c.kind === 'automatic' && getContact(state, surface, jid)?.entry?.reply_in_side_group == null) {
+          state = patchContact(state, surface, jid, { reply_in_side_group: 'on' });
+          switched = jid;
+        }
       }
       await writeState(setAliasMouthChat(state, chatId, room));
       const mouth = room ? `; Rodz's room ${room} (its copy of the opener)` : copy ? `; Rodz's copy of the opener did not arrive within ${OPENER_COPY_MS}ms — replies there come from the primary until the mouth finds its room` : '';
       onLog(`${c.kind}: ${chatId} linked as ${as}${own ? ', converting the entry it had from being seen' : ''}${mouth} — from its opener (made by <${ev.fromNode}>)`);
+      if (switched) onLog(`automatic: reply_in_side_group set on for ${switched} here, as on <${ev.fromNode}> (its side group ${chatId})`);
     });
   }
 

@@ -2,13 +2,14 @@
 //
 // 1. No "SI chat …" trigger anywhere.
 // 2. /join and /split from anyone in the group; /send and /end from anyone in the side group. The
-//    PRIMARY creates every side group: /join and /split with Rodz + the requester (the operator's
-//    own: Rodz alone); no secondary → the requester alone.
+//    PRIMARY ACCOUNT creates every side group: /join and /split with Rodz + the requester (the
+//    operator's own: Rodz alone); no secondary → the requester alone. Since 2026-10-19 the node is
+//    the handle's, whatever its node_role (tests/side-groups-by-node.test.mjs).
 // 3. `reply_in_side_group` on the chat's own entry: a truthy word → "SI+<group>", any other string →
 //    that title, a falsy word / empty / absent → in place. Every reply (any mode) goes to the group,
 //    made on the primary with Rodz + every member of the chat. An addressed reply makes it at once; an
 //    unaddressed one only once it has something to post, so a silence makes nothing. /end is off
-//    there. One node creates (node_role primary); the other links it from the opener's canary frame.
+//    there. The node whose being replies creates it; the other links it from the opener's canary frame.
 // 4. Nothing finds a group by its title: the primary posts every opener, its canary names the group,
 //    and Rodz's copy of it gives Rodz's own room (mouth_chat). Titles may repeat.
 // Never a real Beeper call: forkBridge is a fake that records which account each op rode.
@@ -186,12 +187,11 @@ describe('who may run the side-group commands', () => {
     expect(h.calls.create).toEqual([]);
   });
 
-  it('a non-primary node stands down for a member too', async () => {
+  it('node_role picks nothing: a node_role secondary whose being the handle names creates for a member too (2026-10-19)', async () => {
     const h = harness({ config: cfg({ node_role: 'secondary' }) });
     await typed(h, inOrigin('/e join viaje'));
     await typed(h, inOrigin('/e split viaje'));
-    expect(h.calls.create).toEqual([]);
-    expect(h.sent).toEqual([]);
+    expect(h.calls.create.map((c) => [c.title, c.via])).toEqual([[`SI+${TITLE}-viaje`, 'primary'], [`SI+${TITLE}-viaje`, 'primary']]);
   });
 });
 
@@ -722,14 +722,13 @@ describe('every mode replies in the side group; a turn that stays silent makes n
 });
 
 describe('two nodes on the shared accounts: one creates, the other links', () => {
-  it('a non-primary node never creates and posts nothing while no group is linked', async () => {
+  it('a node_role secondary holding no group makes its own for its being\'s reply (2026-10-19)', async () => {
     for (const body of [ASK, 'hola a todos']) {
       const h = harness({ config: cfg({ node_role: 'secondary' }), state: seedState({ entry: AUTOMATIC }) });
       const b = buildSpine(h, { node: 'do' });
       await say(b.spine, body);
-      expect(h.calls.create).toEqual([]);
-      expect(b.opened()).toEqual([]);
-      expect(b.brain.calls).toEqual([]);
+      expect(h.calls.create.map((c) => c.via), body).toEqual(['primary']);
+      expect(chatsOf(b), body).toEqual([SIDE]);
     }
   });
 
