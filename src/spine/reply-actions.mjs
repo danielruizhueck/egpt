@@ -429,9 +429,15 @@ export function partialProse(partial, ev = {}, opts = {}) {
 // limbs / actionsOf / wake (2026-10-15, /book + /email): limbs = { book, email } — each
 // (action, ev, being) -> { outcome, detail }; actionsOf(being) -> that agent's `actions` list;
 // wake = spine.wakeOnBackground, which carries the outcome back to the being as a turn.
-export function createReplyActions({ bridge, bridgeOf = null, peerMouth = null, bodyEmojiOf = () => null, labelOf = () => null, resolveConvDir = async () => null, askAdvice = null, limbs = {}, actionsOf = () => null, wake = null, defaultKey = 'e', onLog = () => {} } = {}) {
+// onUndeliverable({ being, chatId, what, reason }) (2026-10-19): a limb that said nothing anywhere —
+// boot posts it to log_to_group, once (the sender's own hook, for the reply).
+export function createReplyActions({ bridge, bridgeOf = null, peerMouth = null, bodyEmojiOf = () => null, labelOf = () => null, resolveConvDir = async () => null, askAdvice = null, limbs = {}, actionsOf = () => null, wake = null, defaultKey = 'e', onUndeliverable = async () => {}, onLog = () => {} } = {}) {
   if (!bridge) throw new Error('createReplyActions: bridge is required');
   const outbound = makeOutbound({ bridge, bridgeOf, peerMouth, onLog });
+  const lost = async (out, ev, being, what) => {
+    try { await onUndeliverable({ being, chatId: ev.chatId, what, reason: out.bridge.sendFailure?.(ev.chatId) ?? 'the send returned nothing' }); }
+    catch (e) { onLog(`${what}: could not report the loss — ${e?.message ?? e}`); }
+  };
   // …AND THE CHAT IS PART OF THE QUESTION (operator 2026-09-11, sharpened 2026-09-12). This site
   // asked the resolver about the BEING alone, which answers with the being's MOUTH — and since the
   // mouth became the SECOND account, ev.chatId named a room only the EAR has. resolveChatId missed,
@@ -466,8 +472,9 @@ export function createReplyActions({ bridge, bridgeOf = null, peerMouth = null, 
     // ...and so must its REAL path: a boxed being can plant a junction in its Room, and the spine reads as the operator.
     if (escapes(relPath(realpathSync.native(convDir), real))) { onLog(`media: "${a.path}" leaves the conversation dir through a link — rejected (fail-closed)`); return false; }
     // No target, so nothing to key: whoever says this being's lines in this chat posts it (sender.mjs makeOutbound `say`).
-    const ok = await outbound(being, ev.chatId).say((on, room) => on.sendMedia?.(room, abs, { caption: a.caption, bodyEmoji: bodyEmojiOf(being), label: labelOf(being), persona: being }), { what: 'media' });
-    if (!ok) onLog(`media: send failed "${a.path}"`);
+    const out = outbound(being, ev.chatId);
+    const ok = await out.say((on, room) => on.sendMedia?.(room, abs, { caption: a.caption, bodyEmoji: bodyEmojiOf(being), label: labelOf(being), persona: being }), { what: 'media' });
+    if (!ok) { onLog(`media: send failed "${a.path}"`); await lost(out, ev, being, `/media ${a.path}`); }
     return !!ok;
   }
 
@@ -505,7 +512,7 @@ export function createReplyActions({ bridge, bridgeOf = null, peerMouth = null, 
         if (!peerMouth) {
           const text = `${a.emoji} (${labelOf(being) ?? being})`;
           const ok = await out.say(async (on, room, replyTo) => { const r = await on.send?.(room, text, { replyTo }); return !(r?.blocked || r == null); }, { msgId: a.targetId, text, what: 'react' });
-          if (!ok) onLog(`react: ${text} → #${a.targetId} not delivered`);
+          if (!ok) { onLog(`react: ${text} → #${a.targetId} not delivered`); await lost(out, ev, being, `/react #${a.targetId}`); }
           return !!ok;
         }
         const ok = await out.react(a.targetId, a.emoji, out.keyOf(a.targetId, 'react'));
@@ -520,7 +527,7 @@ export function createReplyActions({ bridge, bridgeOf = null, peerMouth = null, 
         const tag = { bodyEmoji: bodyEmojiOf(being), label: labelOf(being), persona: being };
         const send = async (on, room, replyTo) => { const r = await on.send?.(room, a.text, { replyTo, ...tag }); return !(r?.blocked || r == null); };
         const ok = await out.say(send, { msgId: a.targetId, keyOf: out.keyOf(a.targetId, 'reply'), text: a.text, tag });
-        if (!ok) onLog(`reply: → #${a.targetId} not delivered`);
+        if (!ok) { onLog(`reply: → #${a.targetId} not delivered`); await lost(out, ev, being, `/reply #${a.targetId}`); }
         return ok;
       }
       case 'ask': {

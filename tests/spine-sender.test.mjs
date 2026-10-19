@@ -540,6 +540,29 @@ describe('sender — routed-target drop falls back to the origin chat (never a s
     expect(calls[0].reason).toMatch(/both refused the send/);
   });
 
+  // …and with NO origin at all (operator 2026-10-19: the SI+ group's reply was dropped without a word
+  // — "why is the error not bubbling up?"): any reply the bridge refuses is reported, once, with the
+  // bridge's own reason.
+  it('REPRODUCE: a reply the bridge refuses (no origin) → onUndeliverable ONCE, naming what was lost and the bridge\'s reason', async () => {
+    const SIDE = 'aheLwZ0u6CpjePxSdbG9';
+    const bridge = { ...bothUnreachableBridge(SIDE), sendFailure: (chat) => (chat === SIDE ? 'POST → 404 Chat not found' : null) };
+    const calls = [];
+    const out = createSender({ bridge, bodyEmojiOf: () => '🐶', onUndeliverable: async (o) => calls.push(o) }).open(SIDE, { being: 'e' });
+    await out.finish({ text: 'sí, es cierto' });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ being: 'e', chatId: SIDE, what: 'reply' });
+    expect(calls[0].reason).toMatch(/404 Chat not found/);
+  });
+
+  it('a reply that lands reports nothing (regression lock)', async () => {
+    const bridge = bothUnreachableBridge();
+    const calls = [];
+    const out = createSender({ bridge, onUndeliverable: async (o) => calls.push(o) }).open('!ok', { being: 'e' });
+    await out.finish({ text: 'hola' });
+    expect(bridge.sent.map((s) => s.chat)).toEqual(['!ok']);
+    expect(calls).toEqual([]);
+  });
+
   it('BOTH refuse but NO notify wired → no throw, behaviour is the pre-fix drop (byte-identical)', async () => {
     const SUPER = '!super', ORIGIN = '!origin';
     const bridge = bothUnreachableBridge(SUPER, ORIGIN);

@@ -36,9 +36,14 @@ import { _resetPromotions, ECHO_MARKER } from '../src/incoming-media.mjs';
 import { echoRank } from '../src/spine/echo-priority.mjs';
 import { addressed, createRouter } from '../src/spine/router.mjs';
 import { buildTranscriptionPipeline } from '../src/transcription-pipeline.mjs';
-import { makeOutbound } from '../src/spine/sender.mjs';
+import { makeOutbound, createSender } from '../src/spine/sender.mjs';
 import { boot, makePeerMouth } from '../src/spine/boot.mjs';
-import { emptyState } from '../src/conversations-state.mjs';
+import { emptyState, ensureContact, patchContact } from '../src/conversations-state.mjs';
+import { createBeeperBridgePort } from '../src/bridges/beeper-port.mjs';
+import { shortChatId } from '../src/bridges/chat-id.mjs';
+import { createCommands } from '../src/spine/commands.mjs';
+import { createReplyActions } from '../src/spine/reply-actions.mjs';
+import { superChannelAlive } from '../src/spine/gating.mjs';
 import { startTranscriptorServer } from '../src/tools/transcriptor.mjs';
 import { startSynthesizerServer } from '../src/tools/synthesizer.mjs';
 
@@ -70,7 +75,8 @@ async function startFakeBeeper() {
   const chatGets = [];        // GET /v1/chats/:id served (chat info + the roster it carries) — lets a test prove the membership cache never re-asks
   // stuckCursor models a BROKEN server that re-serves page 1 forever with hasMore:true
   // (the cursor never advances) — the page walk must not spin on it.
-  const chatsOpts = { stuckCursor: false };
+  // unlisted: chats the GET answers but the list leaves out — a group Beeper does not list until it has a message.
+  const chatsOpts = { stuckCursor: false, unlisted: new Set() };
   // accountsDelayMs models a SLOW /v1/accounts answer — what "under full parallel load"
   // does to the startup fetch. It is the deterministic stand-in for the load that used to
   // make this file race a sleep (see the startupReady test below).
@@ -185,7 +191,7 @@ async function startFakeBeeper() {
       const chatList = req.url.match(/^\/v1\/chats(?:\?(.*))?$/);
       if (req.method === 'GET' && chatList) {
         chatListGets += 1;
-        const all = [...chats.entries()].map(([id, c]) => ({ id, ...c }));
+        const all = [...chats.entries()].filter(([id]) => !chatsOpts.unlisted.has(id)).map(([id, c]) => ({ id, ...c }));
         const cursor = new URLSearchParams(chatList[1] ?? '').get('cursor');
         const start = (cursor && !chatsOpts.stuckCursor) ? all.findIndex((c) => c.id === cursor) + 1 : 0;
         const page = all.slice(start, start + CHATS_PER_PAGE);
@@ -4808,6 +4814,112 @@ describe('createGroup (Beeper async group-create)', () => {
     const r = await bridge.createGroup(OPTS);
     expect(r).toBeNull();
     expect(fake.chatGets.length).toBe(before);   // it never polled a chat GET
+  });
+});
+
+// ── A CHAT ID IS ADDRESSED AS IS (operator 2026-10-19, live on reve: "do NOT look by title, we had
+// already agreed to use stable chat-ids"). The automatic SI+ group was created, then its opener and
+// E's reply were DROPPED: the send searched the chat list for the id, and Beeper does not list a new
+// group until it has a message. An id we hold goes straight to the API; only a NAME is searched for.
+describe('beeper bridge — a chat id is addressed as is, never through the chat list', () => {
+  const NEW = 'aheLwZ0u6CpjePxSdbG9';   // the live id
+  const ORIGIN = 'origin';
+  // The live create: the POST 404s with the new id, the first GET 404s, the second 200s — and the
+  // chat list never shows the group.
+  const asyncCreate = (participants = [{ id: '@an:beeper.local', isSelf: true }, { id: '@whatsapp_lid-lulu:beeper.local', phoneNumber: '+34600000000' }]) => {
+    fake.createChatOpts.status = 404;
+    fake.createChatOpts.body = JSON.stringify({ message: `Chat not found: ${CHAT(NEW)}`, code: 'NOT_FOUND' });
+    let gets = 0;
+    fake.chats.set(CHAT(NEW), () => { gets += 1; if (gets < 2) throw Object.assign(new Error('Chat not found'), { status: 404 }); return { id: CHAT(NEW), title: 'SI+Origen', type: 'group', accountID: 'whatsapp', participants: { items: participants } }; });
+    fake.chatsOpts.unlisted.add(CHAT(NEW));
+  };
+
+  it('REPRODUCE: a send to an id the chat list does not hold goes out, with no list call', async () => {
+    fake.chats.set(CHAT('room-a'), { title: 'A', type: 'single', isMuted: false, accountID: 'whatsapp' });
+    const { bridge } = await startBridge();
+    const before = fake.chatListGets();
+    const r = await sendSettled(bridge, 'hola', { chatId: NEW });
+    expect(r?.ok).toBe(true);
+    expect(fake.posts.map((p) => p.chatID)).toEqual([CHAT(NEW)]);
+    expect(fake.chatListGets() - before).toBe(0);
+  });
+
+  it('every path that takes a chat uses the id as is: stream, quoted reply, reaction, media, sendAndGetId, message list', async () => {
+    const { bridge } = await startBridge();
+    const before = fake.chatListGets();
+    const h = bridge.startStreamMessage('⏳', { chatId: NEW });
+    await h.finish('la respuesta');
+    expect(h.delivered).toBe(true);
+    await sendSettled(bridge, 'citando', { chatId: NEW, replyToMessageID: '7' });
+    expect(await bridge.sendReaction(NEW, '7', '👍')).toBe(true);
+    const pic = join(stateDir, 'pic.png');
+    writeFileSync(pic, 'png-bytes');
+    const media = await bridge.sendMedia(NEW, pic, { caption: 'foto' });
+    await media?.confirmedId;
+    expect(media?.ok).toBe(true);
+    expect(await bridge.sendAndGetId('con id', { chatId: NEW })).toBeTruthy();
+    expect((await bridge.listMessagesRaw(NEW)).length).toBeGreaterThan(0);
+    expect(fake.posts.every((p) => p.chatID === CHAT(NEW))).toBe(true);
+    expect(fake.posts.find((p) => p.text === 'citando')?.replyToMessageID).toBe('7');
+    expect(fake.edits.at(-1)).toMatchObject({ chatID: CHAT(NEW), text: 'la respuesta' });
+    expect(fake.reactions.at(-1)).toMatchObject({ chatID: CHAT(NEW), reactionKey: '👍' });
+    expect(fake.chatListGets() - before).toBe(0);
+  });
+
+  it('REPRODUCE (the live SI+ drop): an automatic side group just created — the opener and E\'s reply and /reply land in it by id', async () => {
+    asyncCreate();
+    fake.chats.set(CHAT(ORIGIN), { title: 'Origen', type: 'group', isMuted: false, accountID: 'whatsapp', participants: { items: [{ id: '@an:beeper.local', isSelf: true }, { id: '@whatsapp_lid-lulu:beeper.local', phoneNumber: '+34600000000' }] } });
+    const { bridge } = await startBridge({ sleep: async () => {} });
+    const port = await createBeeperBridgePort({}, { start: async () => bridge });
+    let st = ensureContact(emptyState(), 'whatsapp', ORIGIN, { pushedName: 'Origen' }).state;
+    st = patchContact(st, 'whatsapp', ORIGIN, { reply_in_side_group: true });
+    const logs = [];
+    const commands = createCommands({
+      getConfig: () => ({ node_name: 'kg', node_role: 'primary', beeper: { primary: { phone: '+16468217865' } } }),
+      send: async () => {}, loadState: async () => st, writeState: async (s) => { st = s; }, defaultKey: 'e',
+      forkBridge: {
+        createGroup: (o) => port.createGroup(o),
+        postReply: (chatId, text, replyTo, { canary = null } = {}) => port.send(chatId, text, { replyTo, canary }),
+        chatAccountId: async () => 'whatsapp',
+        chatRaw: (id) => port.chatRaw(id),
+        chatTitle: async () => null,
+        awaitMouthMessage: async () => null,
+      },
+      onLog: (m) => logs.push(m),
+    });
+    const at = await commands.autoSideGroup({ chatId: ORIGIN, surface: 'whatsapp', chatName: 'Origen', senderId: '@whatsapp_lid-lulu:beeper.local', senderName: 'Lulu', msgId: '7', body: 'e eso es cierto?' });
+    expect(at).toBe(NEW);
+    expect(fake.posts.map((p) => p.chatID)).toEqual([CHAT(NEW)]);   // the opener
+    expect(logs.some((m) => m.includes('opener posted by the primary'))).toBe(true);
+
+    const out = createSender({ bridge: port }).open(at, { being: 'e' });
+    await out.finish({ text: 'sí, es cierto' });
+    expect(fake.edits.filter((e) => e.chatID === CHAT(NEW)).map((e) => e.text).join('\n')).toContain('sí, es cierto');
+
+    const actions = createReplyActions({ bridge: port });
+    const { ran } = await actions.execute(actions.parse('/reply #7 eso', { chatId: at }).run, [], { chatId: at, surface: 'whatsapp' }, { being: 'e' });
+    expect(ran).toHaveLength(1);
+    expect(fake.posts.at(-1)).toMatchObject({ chatID: CHAT(NEW), replyToMessageID: '7' });
+    expect(fake.posts.every((p) => p.chatID === CHAT(NEW))).toBe(true);
+  });
+
+  it('the 404 the create poll sees before the group syncs is never read as "the group is gone"', async () => {
+    asyncCreate();
+    const { bridge } = await startBridge({ sleep: async () => {} });
+    const r = await bridge.createGroup({ accountID: 'whatsapp', participantIDs: ['@whatsapp_lid-lulu:beeper.local'], type: 'group', title: 'SI+Origen' });
+    expect(shortChatId(r?.chatID)).toBe(NEW);
+    expect(await bridge.chatRaw(NEW)).toBeTruthy();
+    expect(await superChannelAlive(NEW, { chatRaw: bridge.chatRaw, config: {} })).not.toBe(false);
+  });
+
+  it('a NAME is still looked up in the chat list (regression lock)', async () => {
+    fake.chats.set(CHAT('room-named'), { title: 'Grupo Con Nombre', type: 'group', isMuted: false, accountID: 'whatsapp' });
+    const { bridge } = await startBridge();
+    const before = fake.chatListGets();
+    const r = await sendSettled(bridge, 'por nombre', { chatId: 'Grupo Con Nombre' });
+    expect(r?.chatId).toBe('room-named');
+    expect(fake.posts.at(-1).chatID).toBe(CHAT('room-named'));
+    expect(fake.chatListGets() - before).toBeGreaterThan(0);
   });
 });
 

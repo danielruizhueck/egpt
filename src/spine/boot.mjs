@@ -2901,9 +2901,9 @@ export async function boot({
       onLog: (m) => log.line?.(`[transcript] ${m}`) }),
     // peerMouth (operator 2026-09-05): THE reply path, so THE place the mouth decision is made —
     // null on a node with no peer_spine, and the sender is then byte-identical to before.
-    // onUndeliverable (operator 2026-10-12): a reply the mouth can place in NEITHER the routed room
-    // nor the origin is no longer dropped silently — it surfaces on log_to_group through the EXISTING
-    // audit poster (forward ref to logToGroup below, like currentRoomOf above: only fires at reply
+    // onUndeliverable (operator 2026-10-12; any lost reply since 2026-10-19): a reply that lands
+    // nowhere is no longer dropped silently — it surfaces on log_to_group through reportUndelivered,
+    // over the EXISTING audit poster (forward ref, like currentRoomOf above: only fires at reply
     // time). log_to_group unset ⇒ logToGroup is a no-op post and the daemon line (sender's onLog) is
     // all there is — no crash, no second channel.
     // publicOf / noticeAdmin (2026-10-15): a public being's lead sees only its reply; its errors go
@@ -2911,7 +2911,7 @@ export async function boot({
     sender: createSender({ bridge: shellAwareBridge, bridgeOf: shellAwareBridgeOf, bodyEmojiOf, labelOf, agentSignatureOpenOf, agentSignatureCloseOf, defaultKey, peerMouth,
       publicOf: isPublicAgent,
       noticeAdmin: ({ being, chatId, text }) => noticeToChannel({ configKey: 'admin_channel', text: `${being} in ${chatId}: ${text}`, what: 'public-error', tag: 'public' }),
-      onUndeliverable: async ({ being, chatId, origin, reason }) => { try { await logToGroup(`⚠ reply to ${chatId} (${being}) undeliverable: ${reason}`); } catch { /* best-effort: a failed notice never affects the reply */ } },
+      onUndeliverable: ({ being, chatId, what, reason }) => reportUndelivered({ what, chatId, being, why: reason }),
       onLog: mouthLog, now }),
     // The real cadence registry the spine's tick() drives. The heartbeat LOADER
     // (below) collects every declarative heartbeat and registers it here, so each
@@ -3061,6 +3061,17 @@ export async function boot({
     }
     return mergeAudit({ role, nodeLabel: getConfig()?.node_name ?? '?', text, key, post, readRecent, edit });
   };
+  // A LOST OPENER / REPLY / LIMB (operator 2026-10-19: "why is the error not bubbling up?"): ONE line
+  // to log_to_group naming the chat (title and id), what was lost and why. Title and reason come from
+  // the connection holding the chat.
+  const reportUndelivered = async ({ what, chatId, being = null, why = null }) => {
+    const id = shortChatId(chatId);
+    const on = rawBridgeOf(being, id);
+    const title = on?.getChatName?.(id);
+    const reason = why ?? on?.sendFailure?.(id) ?? 'the bridge gave no reason';
+    try { return await logToGroup(`${getConfig()?.node_name ?? '?'} · ⚠ ${what}${being ? ` (${being})` : ''} not delivered to ${title && title !== id ? `"${title}" ` : ''}${id} — ${reason}`); }
+    catch { return false; }
+  };
   const brain = createBrainPool({ pool, getConfig, contacts, loadState: _loadState, writeState: _writeState, brains, defaultKey, labelOf, afterTurn: afterEveryTurn, onAlert: alertOperator, noticeTo: noticeToAdmin, resolveConfig: configResolver.configFor, resolveScope: createIdentityScope({ resolveMembers: memberResolver, getConfig, onLog: (m) => log.line?.(`[scope] ${m}`) }), io, beingLink, onLog: (m) => log.line?.(`[brain] ${m}`) });
 
   // ── THE AUTO-LOGIN LIMB (plan plans/2610082200-EGPT-LOGIN-PLAN.md, approach (2)) ──────────────
@@ -3153,13 +3164,19 @@ export async function boot({
     }
     return earBridge;
   };
+  // A side group is a room on the account that made it or answers for it — recorded as an arrival is
+  // (rememberArrival), since an automatic group's reply goes there with nothing arrived in it
+  // (2026-10-19: it went out on Rodz's account, addressed by the primary's room id).
+  const holds = (b, chatId) => rememberArrival(shortChatId(chatId), connectionOfBridge.get(b));
   // A side group lives on the account that made it (commands.sideGroupPlan): read the ear first, then
   // the mouth. A room neither account has is gone only when both say so.
   const sideChatRaw = async (chatId) => {
     const r = await earBridge.chatRaw(chatId);
     const mouth = postBridgeFor('secondary');
+    if (r) holds(earBridge, chatId);
     if (r || mouth === earBridge) return r;
     const m = await mouth.chatRaw(chatId);
+    if (m) holds(mouth, chatId);
     return m || (r === false && m === false ? false : null);
   };
   // Every warm session's live background tasks, with the conversation each would wake in.
@@ -3231,7 +3248,13 @@ export async function boot({
     forkBridge: {
       editMessage:   (chatId, msgId, text)            => earBridge.editMessage(chatId, msgId, text),
       // `via`: the account that makes the group — the primary, which has every contact (2026-10-18).
-      createGroup:   (opts, { via = null } = {})      => postBridgeFor(via).createGroup(opts),
+      createGroup:   async (opts, { via = null } = {}) => {
+        const on = postBridgeFor(via);
+        const created = await on.createGroup(opts);
+        const id = created?.chatID ?? created?.chatId;
+        if (id) holds(on, id);
+        return created;
+      },
       // /send's post_back_from (operator 2026-10-03): 'primary' posts via the operator's OWN account,
       // 'secondary' via the mouth. Resolve the NAMED connection to its already-dialled bridge (the
       // SAME bridgeByEndpoint/endpointFor map every other outbound uses), falling back to the ear
@@ -3262,6 +3285,7 @@ export async function boot({
       awaitMouthMessage: (test, ms) => { const mouth = postBridgeFor('secondary'); return mouth === earBridge ? Promise.resolve(null) : (mouth.awaitMessage?.(null, test, ms) ?? Promise.resolve(null)); },
     },
     logToGroup,                                          // per-command audit → config.log_to_group (fail-closed, see above); the dispatch chokepoint emits ONE metadata-only line per command
+    reportUndelivered,                                   // a side group's lost opener → one log_to_group line (above)
     requestLogin,                                        // /login <site> → the auto-login limb (src/spine/login.mjs); returns an outcome token, never a credential
     onChromeLog: (m) => log.line?.(`[chrome] ${m}`),    // group Chrome launches / refusals ("no browser for …")
     onLog: (m) => log.line?.(`[command] ${m}`),
@@ -3320,7 +3344,7 @@ export async function boot({
   // outcome returns to the being through the background wake (spine.wakeOnBackground).
   const mail = createEmail({ getConfig, fetch: fetchFn, readTranscript: (ev) => readTranscript(ev.chatId, { chatName: ev.chatName, network: ev.surface }), now, log: (m) => log.line?.(`[email] ${m}`) });
   const bookLimb = createBookLimb({ getConfig, fetch: fetchFn, ses: mail.ses, missingMail: mail.missing, now, log: (m) => log.line?.(`[book] ${m}`) });
-  const actions = createReplyActions({ bridge, bridgeOf: rawBridgeOf, peerMouth, bodyEmojiOf, labelOf, resolveConvDir, askAdvice: (a) => advice.ask(a), limbs: { book: bookLimb.book, email: mail.email }, actionsOf: (being) => getConfig()?.agents?.[being]?.actions, wake: (r) => spineLate?.wakeOnBackground(r), defaultKey, onLog: (m) => log.line?.(`[actions] ${m}`) });
+  const actions = createReplyActions({ bridge, bridgeOf: rawBridgeOf, peerMouth, bodyEmojiOf, labelOf, resolveConvDir, askAdvice: (a) => advice.ask(a), limbs: { book: bookLimb.book, email: mail.email }, actionsOf: (being) => getConfig()?.agents?.[being]?.actions, wake: (r) => spineLate?.wakeOnBackground(r), defaultKey, onUndeliverable: ({ being, chatId, what, reason }) => reportUndelivered({ what, chatId, being, why: reason }), onLog: (m) => log.line?.(`[actions] ${m}`) });
 
   // Heartbeats are DECLARATIVE now (operator 2026-07-01): the loader collects
   // them from the node config.heartbeats block + every conversation/room entity's

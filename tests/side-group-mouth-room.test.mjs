@@ -16,10 +16,10 @@ import { promises as fs } from 'node:fs';
 import { dirname } from 'node:path';
 import { shortChatId } from '../src/bridges/chat-id.mjs';
 
-let boot, emptyState, ensureContact, recordThread;
+let boot, emptyState, ensureContact, recordThread, patchContact, aliasContact;
 beforeAll(async () => {
   ({ boot } = await import('../src/spine/boot.mjs'));
-  ({ emptyState, ensureContact, recordThread } = await import('../src/conversations-state.mjs'));
+  ({ emptyState, ensureContact, recordThread, patchContact, aliasContact } = await import('../src/conversations-state.mjs'));
 });
 afterAll(async () => {
   delete process.env.EGPT_HOME;
@@ -36,6 +36,8 @@ const ORIGIN = '!origin-as-primary-sees-it';
 const P_FULL = '!sidegroup:beeper.local';    // what the primary's create returns
 const P = shortChatId(P_FULL);
 const R = '!sidegroup-as-rodz-sees-it';      // Rodz's own room for the same group
+const LOGS_NAME = 'eGPT Logs';               // log_to_group
+const LOGS = 'logsroom';
 // The same title on another group Rodz is in: nothing may find a group by its title.
 const DECOY = '!decoy-same-title';
 
@@ -57,22 +59,27 @@ const digits = (v) => String(v ?? '').replace(/\D/g, '');
 const rawChat = (token, id) => (WORLD[token][id] ? { id, type: 'group', accountID: 'whatsapp', title: TITLE_OF[id] ?? id, participants: { items: WORLD[token][id] } } : null);
 
 // One spy per connection. What the primary sends into P reaches Rodz's account as its own copy in R.
-function fakeTransport() {
+// `refuse`: chat ids the PRIMARY's Beeper refuses (send → null, stream not delivered) — a forced drop.
+function fakeTransport({ refuse = [] } = {}) {
   const built = [];
   const waiters = [];
   const start = async (opts) => {
     const token = opts.beeperToken;
     const spy = { connection: NAME_OF[token], token, onIncoming: opts.onIncoming, sent: [], streams: [], created: [] };
     built.push(spy);
+    const refused = (chatId) => token === PRIMARY && refuse.includes(shortChatId(chatId));
     const copyToRodz = (chatId, text) => {
       if (token !== PRIMARY || shortChatId(chatId) !== P) return;
       const copy = { id: `copy-${waiters.length}`, chatID: R, text };
       for (const w of [...waiters]) if (w.test(copy)) { waiters.splice(waiters.indexOf(w), 1); w.done(copy); }
     };
     return {
-      async send(text, o) { spy.sent.push({ text, chatId: o?.chatId }); copyToRodz(o?.chatId, text); return { ok: true }; },
+      async send(text, o) {
+        if (refused(o?.chatId)) return null;
+        spy.sent.push({ text, chatId: o?.chatId }); copyToRodz(o?.chatId, text); return { ok: true, confirmedId: Promise.resolve(`m-${spy.sent.length}`) };
+      },
       startStreamMessage(init, o) {
-        const h = { delivered: false, finals: [], chatId: o?.chatId, update() {}, async finish(t) { this.finals.push(t); this.delivered = true; } };
+        const h = { delivered: false, finals: [], chatId: o?.chatId, update() {}, async finish(t) { this.finals.push(t); this.delivered = !refused(o?.chatId); } };
         spy.streams.push(h); return h;
       },
       async editMessage() { return true; },
@@ -91,6 +98,9 @@ function fakeTransport() {
         return new Promise((done) => { waiters.push({ chat, test, done }); setTimeout(() => done(null), ms).unref?.(); });
       },
       async resolveChatIdByTitle() { spy.byTitle = (spy.byTitle ?? 0) + 1; return DECOY; },
+      async resolveChatId(n) { return n === LOGS_NAME ? LOGS : n; },
+      getChatName: (id) => (shortChatId(id) === P ? 'SI+Origen' : null),
+      sendFailure: (id) => (refused(id) ? 'POST /v1/chats/…/messages → 404 Chat not found' : null),
       isAlive: () => true, stop() {},
     };
   };
@@ -123,8 +133,8 @@ const KG = () => ({
   agents: { egpt: { configuration: 'egpt', default: true, handles: ['e'], name: 'E' } },
 });
 
-async function bootWith(config, state) {
-  const { start, built } = fakeTransport();
+async function bootWith(config, state, transport = {}) {
+  const { start, built } = fakeTransport(transport);
   let convState = state;
   const lines = [];
   const app = await boot({
@@ -163,4 +173,52 @@ describe('a side group\'s mouth room is learned from Rodz\'s copy of the opener,
     expect(byConnection.secondary.byTitle ?? 0).toBe(0);
     app.stop();
   });
+});
+
+// THE AUTOMATIC GROUP (reply_in_side_group, operator 2026-10-18): the message arrives in the ORIGIN and
+// the reply goes to P, where nothing has arrived — so the node must know P is a room on the primary,
+// the account that made it (live 2026-10-19: the reply went out on Rodz's account addressed by P, a
+// room only the primary has). And whatever is lost there says so on log_to_group, once.
+describe('the automatic group: its reply goes out on the account that holds it, and a lost one is reported', () => {
+  const automatic = () => patchContact(seed(), 'whatsapp', ORIGIN, { reply_in_side_group: true });
+  const ask = (spy) => say(spy, ORIGIN, 'e eso es cierto?', { atEStart: true, atEAnywhere: true, msgKey: 'k-ask' });
+  const outOf = (spy) => [...spy.streams, ...spy.sent].map((m) => m.chatId);
+
+  it('REPRODUCE: the first reply, right after the group is made, is said by Rodz in R — never on Rodz\'s account addressed by P', async () => {
+    const { app, byConnection, state } = await bootWith(KG(), automatic());
+    await ask(byConnection.primary);
+    await waitFor(() => byConnection.secondary.streams.length || byConnection.secondary.sent.length || byConnection.primary.streams.length);
+    expect(state().contacts.whatsapp[P]).toMatchObject({ aliasOf: ORIGIN, automatic: true, mouth_chat: R });
+    expect(outOf(byConnection.secondary)).toEqual([R]);
+    expect(byConnection.primary.streams).toEqual([]);
+    app.stop();
+  });
+
+  it('REPRODUCE: after a restart (the group already stored, nothing arrived in it since), the reply is still said in R', async () => {
+    const st = aliasContact(automatic(), 'whatsapp', P, ORIGIN, { transcript: 'si-origen', automatic: true, mouth_chat: R });
+    const { app, byConnection } = await bootWith(KG(), st);
+    await ask(byConnection.primary);
+    await waitFor(() => byConnection.secondary.streams.length || byConnection.secondary.sent.length || byConnection.primary.streams.length);
+    expect(byConnection.primary.created).toEqual([]);
+    expect(outOf(byConnection.secondary)).toEqual([R]);
+    app.stop();
+  });
+
+  it('REPRODUCE: the primary refuses every send into P → ONE log_to_group line for the opener and ONE for the reply, naming the group, its id and why', async () => {
+    const { app, byConnection } = await bootWith({ ...KG(), log_to_group: LOGS_NAME }, automatic(), { refuse: [P] });
+    await ask(byConnection.primary);
+    const logged = () => [...byConnection.primary.sent, ...byConnection.secondary.sent].filter((m) => m.chatId === LOGS).map((m) => m.text);
+    await waitFor(() => logged().length >= 2, { timeoutMs: 15000 });
+    await new Promise((r) => setTimeout(r, 200));
+    const lines = logged();
+    expect(lines.filter((t) => /opener/.test(t))).toHaveLength(1);
+    expect(lines.filter((t) => /reply/.test(t))).toHaveLength(1);
+    expect(lines).toHaveLength(2);
+    for (const t of lines) {
+      expect(t).toContain(P);
+      expect(t).toContain('SI+Origen');
+      expect(t).toContain('404 Chat not found');
+    }
+    app.stop();
+  }, 30000);
 });

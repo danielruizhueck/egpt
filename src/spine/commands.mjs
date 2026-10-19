@@ -722,6 +722,8 @@ export function createCommands({
   // default so a standalone/test createCommands audits nowhere; a failed/absent post never affects a
   // command (the chokepoint swallows it).
   logToGroup = async () => false,
+  // ({ what, chatId, why? }) => Promise — boot's one log_to_group line for a lost opener/reply/limb.
+  reportUndelivered = async () => false,
   onLog = () => {},
 } = {}) {
   const cfg = () => getConfig() ?? {};
@@ -3414,12 +3416,20 @@ export function createCommands({
   // hides a chat with no messages). Rodz's copy of it arrives in Rodz's OWN room for the group, named by
   // the canary, and that room is stored as the group's mouth_chat — by id, never by title (operator
   // 2026-10-18). Not seen in time → replies there come from the primary until the mouth finds its room.
-  // A failed opener never fails the command.
+  // A failed opener never fails the command, but it is never called posted: only a confirmed id is.
+  // Refused → logged + reported once; unconfirmed → the same, and Rodz's copy is still awaited.
   const postOpener = async ({ verb, newChatId, openerText, origin = null }) => {
     try {
       const copy = hasMouth() ? forkBridge.awaitMouthMessage?.((m) => canaryIds(decodeChatCanary(m?.text))[0] === newChatId, OPENER_COPY_MS) : null;
-      await forkBridge.postReply(newChatId, openerText, null, { via: 'primary', canary: origin ? `${newChatId} ${origin}` : newChatId });
-      onLog(`${verb}: opener posted by the primary into ${newChatId}`);
+      const sent = await forkBridge.postReply(newChatId, openerText, null, { via: 'primary', canary: origin ? `${newChatId} ${origin}` : newChatId });
+      const id = sent ? await sent.confirmedId : null;
+      if (id) onLog(`${verb}: opener posted by the primary into ${newChatId} (#${id})`);
+      else {
+        const why = sent ? 'the send went out but its id was never confirmed' : null;
+        onLog(sent ? `${verb}: opener sent into ${newChatId} but its id was never confirmed — not counted as posted` : `${verb}: opener NOT posted into ${newChatId} — the send was refused`);
+        await reportUndelivered({ what: 'opener', chatId: newChatId, why });
+        if (!sent) return;
+      }
       if (!copy) return;
       const room = (await copy)?.chatID ?? null;
       if (!room) { onLog(`${verb}: Rodz's copy of the opener did not arrive within ${OPENER_COPY_MS}ms — replies in ${newChatId} come from the primary until the mouth finds its room`); return; }

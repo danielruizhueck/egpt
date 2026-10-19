@@ -72,7 +72,7 @@ import { fileURLToPath } from 'node:url';
 import { join, basename } from 'node:path';
 import { EGPT_HOME } from '../egpt-home.mjs';
 import { cleanForSpeech } from '../speech-clean.mjs';
-import { shortChatId, fullChatId } from './chat-id.mjs';
+import { shortChatId, fullChatId, isChatId } from './chat-id.mjs';
 import { createEarProbe, injectViaTelegram } from '../ear-probe.mjs';
 
 // Profile-aware (NOT hardcoded ~/.egpt): EGPT_HOME selects the node, so two
@@ -869,6 +869,7 @@ export async function startBeeperBridge(opts = {}) {
   // chatHasParticipant below re-asks on its own TTL rather than trusting a hit forever. Same ONE
   // GET, same ONE cache entry: no second HTTP path was opened for membership.
   async function chatInfo(chatID, { refresh = false } = {}) {
+    chatID = shortChatId(chatID);   // createGroup polls the full id; the cache is keyed short like every reader
     if (!refresh && _chatCache.has(chatID)) return _chatCache.get(chatID);
     // `participants: null` is UNKNOWN, never "empty" — the catch below leaves it null, and the
     // membership answer must never read a failed fetch as "nobody is in this chat".
@@ -1181,10 +1182,9 @@ export async function startBeeperBridge(opts = {}) {
   async function resolveChatId(nameOrId, { network = null } = {}) {
     const s = String(nameOrId ?? '');
     if (!s) return null;
-    // Legacy/defensive: a full-form Matrix room id is recognized without a
-    // listChats round-trip (same short-circuit the '!' prefix always gave), just
-    // normalized down to the short form egpt uses past this point.
-    if (s.startsWith('!')) { const id = shortChatId(s); _knownChatIds.add(id); return id; }
+    // A chat ID (full or short, isChatId) is used as is — never looked up in the chat list, which does
+    // not show a new group until it has a message (operator 2026-10-19). Only a NAME is searched for.
+    if (isChatId(s)) { const id = shortChatId(s); _knownChatIds.add(id); return id; }
     // Already-known real id (see _knownChatIds above) — resolves with NO lookup,
     // same free short-circuit the '!' prefix used to give every raw id.
     if (_knownChatIds.has(s)) return s;
@@ -1464,11 +1464,19 @@ export async function startBeeperBridge(opts = {}) {
       return { r, confirmedId };
     } catch (e) { settle(null); throw e; }
   }
+  // Why the last send to a chat failed, until one there lands — what a lost opener/reply/limb reports
+  // (operator 2026-10-19: "why is the error not bubbling up?"). Read through sendFailure().
+  const _sendFailures = new Map();
+  const noteSendFailure = (chat, why) => { _sendFailures.set(shortChatId(chat), why); _capMap(_sendFailures, 500); };
   // chatID may be a room id, an exact chat title, or a deterministic slug —
   // one resolution chokepoint so config/outbox entries never need raw ids.
   async function sendMessage(chatIdOrName, text, { replyToMessageID } = {}) {
     const chatID = await resolveChatId(chatIdOrName);
-    if (!chatID || !text) { onLog(`beeper: send DROPPED — chat=${JSON.stringify(chatIdOrName)} resolved=${chatID} textLen=${(text || '').length}`); return null; }
+    if (!chatID || !text) {
+      onLog(`beeper: send DROPPED — chat=${JSON.stringify(chatIdOrName)} resolved=${chatID} textLen=${(text || '').length}`);
+      noteSendFailure(chatIdOrName, !chatID ? `no chat named ${JSON.stringify(String(chatIdOrName ?? ''))}` : 'empty text');
+      return null;
+    }
     try {
       // `@Nombre` -> a real mention, resolved against THIS chat's roster (rosterNamesAsMentions,
       // above). Here rather than in any caller, so /reply, a media caption's sibling text, a node
@@ -1479,8 +1487,9 @@ export async function startBeeperBridge(opts = {}) {
       const body = { text: await rosterNamesAsMentions(text, chatID) };
       if (replyToMessageID) body.replyToMessageID = String(replyToMessageID);
       const { r, confirmedId } = await postAndConfirm(chatID, body, body.text);
+      _sendFailures.delete(chatID);
       return { ok: true, chatId: chatID, pendingMessageID: r?.pendingMessageID, confirmedId };
-    } catch (e) { onLog(`beeper: send failed [${chatID}] — ${e?.message ?? e}`); return null; }
+    } catch (e) { onLog(`beeper: send failed [${chatID}] — ${e?.message ?? e}`); noteSendFailure(chatID, e?.message ?? String(e)); return null; }
   }
 
   // --- edit / delete (Beeper Desktop API: PUT/DELETE a message by its CONFIRMED
@@ -1626,10 +1635,14 @@ export async function startBeeperBridge(opts = {}) {
   }
   async function sendMedia(chatIDOrName, filePath, { caption = null, replyTo = null } = {}) {
     const chatID = await resolveChatId(chatIDOrName);
-    if (!chatID || !filePath) { onLog(`beeper: media DROPPED — chat=${JSON.stringify(chatIDOrName)} resolved=${chatID} file=${JSON.stringify(filePath)}`); return false; }
+    if (!chatID || !filePath) {
+      onLog(`beeper: media DROPPED — chat=${JSON.stringify(chatIDOrName)} resolved=${chatID} file=${JSON.stringify(filePath)}`);
+      noteSendFailure(chatIDOrName, !chatID ? `no chat named ${JSON.stringify(String(chatIDOrName ?? ''))}` : 'no file');
+      return false;
+    }
     try {
       const up = await uploadAsset(filePath);
-      if (!up?.uploadID) { onLog(`beeper: media upload returned no uploadID [${filePath}]`); return false; }
+      if (!up?.uploadID) { onLog(`beeper: media upload returned no uploadID [${filePath}]`); noteSendFailure(chatID, 'the upload returned no uploadID'); return false; }
       // A CAPTION IS A LINE A BEING WROTE, so it carries `@Nombre` like any other — the same
       // conversion through the same rosterNamesAsMentions above, resolved once here and used for
       // BOTH the body and the match text below (the _matchKey reason sendMessage states: matching
@@ -1656,8 +1669,9 @@ export async function startBeeperBridge(opts = {}) {
         try { rememberSent(sha256Hex(await readFile(filePath)), chatID); }
         catch (e) { onLog(`beeper: could not key own voice send for echo suppression [${chatID}/${filePath}] — ${e?.message ?? e}`); }
       }
+      _sendFailures.delete(chatID);
       return { ok: true, chatId: chatID, pendingMessageID: r?.pendingMessageID, confirmedId };
-    } catch (e) { onLog(`beeper: media send failed [${chatID}/${filePath}] — ${e?.message ?? e}`); return false; }
+    } catch (e) { onLog(`beeper: media send failed [${chatID}/${filePath}] — ${e?.message ?? e}`); noteSendFailure(chatID, e?.message ?? String(e)); return false; }
   }
   // Resolve the CONFIRMED id of a message we just sent: poll the recent list and
   // match our own text; pick the newest match (largest numeric id). TRANSFORM-TOLERANT:
@@ -2719,6 +2733,7 @@ export async function startBeeperBridge(opts = {}) {
     sendReaction:  (chatId, messageId, key)  => sendReaction(chatId, messageId, key),
     removeReaction: (chatId, messageId, key) => removeReaction(chatId, messageId, key),   // the 🎧 mark's removal (port `unreact`)
     sendMedia:     (chatId, filePath, opts)  => sendMedia(chatId, filePath, opts),
+    sendFailure:   (chatId)                  => _sendFailures.get(shortChatId(chatId)) ?? null,   // why the last send there failed (null once one lands)
     wasSentByUs:   (chatId, messageId)       => wasSentByUs(chatId, messageId),
     // Deterministic-name surface (operator 2026-06-10): callers and slash
     // files work with names/slugs; room ids stay an internal detail.

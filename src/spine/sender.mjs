@@ -427,14 +427,21 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
       // the sender it may be in NEITHER (not the base chat either) → both sends null: NOT a silent
       // return — notify (onUndeliverable, default no-op → byte-identical when unset), so the drop is
       // at least surfaced to the logging group instead of vanishing.
+      // Any reply that lands nowhere is reported ONCE, with the bridge's reason (operator 2026-10-19).
+      const why = (chat) => bridgeForThisBeing.sendFailure?.(chat) ?? 'the send returned nothing';
       const deliverHere = async (payload, sendOpts) => {
         const r = await bridgeForThisBeing.send(chatId, payload, sendOpts);
-        if (r || !origin || origin === chatId) return r;
+        if (r) return r;
+        if (!origin || origin === chatId) {
+          onLog(`sender: ${being} reply undeliverable to ${chatId} — notifying`);
+          await onUndeliverable({ being, chatId, origin, what: 'reply', reason: why(chatId) });
+          return r;
+        }
         onLog(`sender: ${being} reply undeliverable to routed ${chatId} — delivering to origin ${origin}`);
         const r2 = await bridgeForThisBeing.send(origin, payload, sendOpts);
         if (!r2) {
           onLog(`sender: ${being} reply ALSO undeliverable to origin ${origin} — neither room accepted it, notifying`);
-          await onUndeliverable({ being, chatId, origin, reason: `routed room ${chatId} and origin ${origin} both refused the send` });
+          await onUndeliverable({ being, chatId, origin, what: 'reply', reason: `routed room ${chatId} and origin ${origin} both refused the send — ${why(origin)}` });
         }
         return r2;
       };

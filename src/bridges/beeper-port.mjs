@@ -263,6 +263,8 @@ export async function createBeeperBridgePort(opts = {}, { start = startBeeperBri
     },
     editOwn(chat, msgId, text, opts = {}) { return real.editMessage?.(chat, msgId, wrapPersona(opts, text)); },
     wasSentByUs(chat, msgId) { return real.wasSentByUs?.(chat, msgId); },
+    // Why the last send to `chat` failed (beeper.mjs sendFailure) — the reason a lost reply reports. null without one.
+    sendFailure(chat) { return real.sendFailure ? real.sendFailure(chat) : null; },
     // MEMBERSHIP (operator 2026-08-31) — "is <identity> a participant of this chat?", the ONE
     // question a `fallback_handle:` asks before waking (src/spine/router.mjs fallbackWake). Not an
     // outbound: a READ of this account's own copy of the roster, cached and TTL'd in the bridge.

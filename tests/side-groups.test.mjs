@@ -68,11 +68,12 @@ const LIVE = { participants: { items: [{ id: AN_ID, phoneNumber: AN, isSelf: tru
 
 // secIds: digits → the secondary's own id for that phone (its rosters); absent → no match there.
 // copyArrives: Rodz's account receives its copy of what the primary posts, in its own room SEC(<id>).
-function harness({ config = cfg(), state, chatRaw = async () => LIVE, created = [SIDE_FULL, SIDE2_FULL], secIds = {}, copyArrives = true } = {}) {
+// postResult: what the primary's send of the opener answers (the port's shape: a confirmed id, or null = refused).
+function harness({ config = cfg(), state, chatRaw = async () => LIVE, created = [SIDE_FULL, SIDE2_FULL], secIds = {}, copyArrives = true, postResult = () => ({ ok: true, confirmedId: Promise.resolve('op-1') }) } = {}) {
   let st = state ?? seedState();
   const sent = [];
   const logs = [];
-  const calls = { create: [], post: [], archive: [], edit: [], resolve: [], byTitle: [], awaitMouth: [] };
+  const calls = { create: [], post: [], archive: [], edit: [], resolve: [], byTitle: [], awaitMouth: [], lost: [] };
   const mouthWaiters = [];
   const forkBridge = {
     editMessage: async (chatId, msgId, text) => { calls.edit.push({ chatId, msgId, text }); return true; },
@@ -83,7 +84,7 @@ function harness({ config = cfg(), state, chatRaw = async () => LIVE, created = 
         const copy = { chatID: SEC(chatId), text: `${text}${encodeChatCanary(opts.canary ?? '')}` };
         for (const w of [...mouthWaiters]) if (w.test(copy)) { mouthWaiters.splice(mouthWaiters.indexOf(w), 1); w.done(copy); }
       }
-      return { ok: true };
+      return postResult(chatId, opts);
     },
     archiveChat: async (chatId, o = {}) => { calls.archive.push({ chatId, via: o.via ?? null }); return true; },
     chatAccountId: async () => 'whatsapp',
@@ -106,6 +107,7 @@ function harness({ config = cfg(), state, chatRaw = async () => LIVE, created = 
     writeState: async (s) => { st = s; },
     defaultKey: 'e',
     forkBridge,
+    reportUndelivered: async (o) => { calls.lost.push(o); return true; },
     onLog: (m) => logs.push(m),
   });
   return { cmds, sent, logs, calls, config, getState: () => st, setState: (s) => { st = s; } };
@@ -527,6 +529,33 @@ describe('the automatic group: made on the primary with Rodz + every member of t
     expect(h.calls.post[0].text).toContain('/send');
     expect(h.calls.post[0].text).not.toContain('/end');
     expect(h.calls.post[0].text).toContain(TITLE);
+  });
+
+  // Live 2026-10-19 09:10: the opener's send was DROPPED and the log still said "opener posted".
+  it('REPRODUCE: an opener the primary\'s send refuses is logged as NOT posted and reported once — never "posted"', async () => {
+    const h = harness({ state: seedState({ entry: AUTOMATIC }), postResult: () => null, copyArrives: false });
+    const b = buildSpine(h);
+    await say(b.spine, ASK);
+    expect(h.logs.some((m) => /opener posted/.test(m))).toBe(false);
+    expect(h.logs.some((m) => /opener NOT posted into/.test(m) && m.includes(SIDE))).toBe(true);
+    expect(h.calls.lost).toEqual([expect.objectContaining({ what: 'opener', chatId: SIDE })]);
+  });
+
+  it('an opener whose id never confirms is not "posted" either: reported once, and Rodz\'s copy is still awaited', async () => {
+    const h = harness({ state: seedState({ entry: AUTOMATIC }), postResult: () => ({ ok: true, confirmedId: Promise.resolve(null) }) });
+    const b = buildSpine(h);
+    await say(b.spine, ASK);
+    expect(h.logs.some((m) => /opener posted/.test(m))).toBe(false);
+    expect(h.calls.lost).toEqual([expect.objectContaining({ what: 'opener', chatId: SIDE, why: expect.stringMatching(/never confirmed/) })]);
+    expect(h.getState().contacts.whatsapp[SIDE].mouth_chat).toBe(SEC(SIDE));
+  });
+
+  it('a confirmed opener is "posted" and reports nothing (regression lock)', async () => {
+    const h = harness({ state: seedState({ entry: AUTOMATIC }) });
+    const b = buildSpine(h);
+    await say(b.spine, ASK);
+    expect(h.logs.some((m) => m.includes(`opener posted by the primary into ${SIDE}`))).toBe(true);
+    expect(h.calls.lost).toEqual([]);
   });
 
   it('nothing is posted in the origin', async () => {
