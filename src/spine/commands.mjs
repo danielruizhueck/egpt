@@ -28,7 +28,7 @@ import { superChannelAlive, resolveMode } from './gating.mjs';
 import { stat as fsStat, readFile as fsReadFile, writeFile as fsWriteFile, mkdir as fsMkdir, readdir as fsReaddir, rm as fsRm, rename as fsRename } from 'node:fs/promises';
 import { readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, randomInt } from 'node:crypto';
 import { join, basename, dirname } from 'node:path';
 import * as YAML from 'yaml';
 import { EGPT_HOME } from '../egpt-home.mjs';
@@ -56,7 +56,7 @@ import { resolveBrainProfile, chromePipeArgs, stampGroupProfile, profileHolder a
 import { connectChromeHost } from '../chrome-host.mjs';
 import { admitLaunch, estimateChromeBytes, BRAIN_GROUP, SHARED_GROUP, isSafeGroupName, chromeConversationOf } from './chrome-pool.mjs';
 import { freemem } from 'node:os';
-import { helpText, COMMAND_SET } from '../interpreter.mjs';
+import { helpText, COMMAND_SET, parseBeingCommand } from '../interpreter.mjs';
 import { uploadNote, radioNoteFilename, pickSpeaker } from '../radio-relay.mjs';
 import { stripNodeSignature, stripRenderedNodeSignature, decodeChatCanary } from '../node-signature.mjs';
 import { bodyForMessageId } from '../transcript-log.mjs';
@@ -287,45 +287,6 @@ function recapText(messages, timeZone) {
   return lines.join('\n');
 }
 
-// ── NODE-ADDRESSED COMMANDS ─────────────────────────────────────────────────────────────────
-// (operator 2026-07-26: "i open a local shell, type '/chrome mo' and a chrome in mo's spine, a
-// friend in germany, opens. i can drive it by typing commands on the egpt shell.")
-//
-// A command may name the NODE it is for. THE SET IS AN ALLOWLIST — the browser family that IS
-// the remote control, plus /status and /members:
-//
-//   /chrome  /tabs  /open  /tab  /close  /status  /members  /config
-//
-// and nothing outside it is node-addressable, which is the lock: LIFECYCLE (/restart, /upgrade,
-// /rewind) and the STOP safe word are deliberately absent, so no envelope arriving from another
-// machine can restart, upgrade, rewind or kill this node. The responder reads the SAME allowlist
-// before it executes anything, so the lock holds at both ends.
-//
-// `/members` joined the set 2026-07-26 (HANDOFF C3). It was the one operator command left
-// outside, so on a shared Beeper account BOTH co-account nodes answered it — the same
-// double-answer the gate exists to end.
-//
-// `/config` joined the set 2026-07-27 — a config dump/set is node-scoped exactly like /status,
-// so the same allowlist keeps it from being answered by every co-account peer instead of just
-// the one addressed.
-//
-// NAMING THE NODE (operator ruling 2026-07-27, revised same day after a live miss): `=<name>`
-// binds directly to the COMMAND TOKEN ITSELF — `/tabs=do`, `/status=do`, `/members=do add tab
-// 3 cgpt3`, `/open=do https://x.com` — and is the ONE way to name a node for every member of
-// the set except /chrome, whose whole argument IS the node (never ambiguous), so `/chrome do`
-// keeps its bare positional form AND `/chrome=do` works too. The FIRST cut of this ruling let
-// `node=<name>` float anywhere in a command's arguments; typing `/tabs=do` live fell through
-// to the catch-all (a `\b` word boundary matched right before the `=`, so the command token
-// parsed as plain "tabs" and nothing downstream ever saw a node), which is why it was replaced
-// same-day with binding to the token: there is now nowhere for a node marker to float, so
-// there is nothing for a URL's own `=` (a query string, `?a=b`) to collide with either. The
-// bound `=<name>` is stripped (or, for /chrome, normalized to the bare positional form) before
-// the sub-grammar parses. dispatch.default_node (config/config-schema.mjs), UNSET by default,
-// is the one exception: a BARE command (no `=<name>`, and for /chrome no positional node
-// either) operates on that node instead of "wherever it was heard" when the operator has set
-// one; UNSET, every bare form is a strict no-op — today's behaviour, byte for byte.
-const NODE_ADDRESSABLE = /^\/(chrome|status|tabs|tab|open|close|members?|config|radio)\b(?:=(\S+))?(?:[ \t]*(.*))?$/i;
-
 // § COMMAND GRAMMAR — one shape for the whole surface (operator 2026-08-28 / 2026-08-29).
 //
 //     /<commands> <verb> [<value>] <target> [<scope>]
@@ -379,7 +340,7 @@ const LIVE_AGENT_SUBS = Object.keys(AGENT_SUB_ARITY).filter((v) => !Object.hasOw
 // Every level name in the operator-facing text comes from ACCESS_LEVELS (permission-levels.mjs),
 // never a literal: the tier list is spelled out in ONE place, and a new tier updates this line,
 // the refusals below and /help together or not at all. Same rule now holds for the verb list.
-export const AGENTS_USAGE = `usage: /agents [<verb>] [<value>] <handle>|force all [<conversation>] — verbs: refresh | rethread | reset | compact | stop | mode <${AUTO_MODES.join('|')}> | access_level <${ACCESS_LEVELS.join('|')}>. Bare \`/agents <handle>|force all\` shows status; bare \`all\` is refused. <conversation> is the rest of the line, spaces and all: \`/agents refresh e eGPT Rodz Lulu An\`.`;
+export const AGENTS_USAGE = `usage: /<handle> agents [<verb>] [<value>] [<handle>|force all [<conversation>]] — verbs: refresh | rethread | reset | compact | stop | mode <${AUTO_MODES.join('|')}> | access_level <${ACCESS_LEVELS.join('|')}>. A verb with no target acts on the being the command was typed to. \`/<handle> agents <handle>|force all\` shows status; bare \`all\` is refused. <conversation> is the rest of the line, spaces and all: \`/e agents refresh e eGPT Rodz Lulu An\`.`;
 
 // args (already whitespace-split) -> what agentsCmd wants: { args: [handle, verb, value],
 // slug }, or { retired } for the old order. Pure; exported for tests.
@@ -421,44 +382,6 @@ export function normalizeAgentsArgs(args) {
 export const PLURAL_OF = { agent: 'agents', room: 'rooms', member: 'members' };
 export const SINGULAR_CMD = /^\/(agent|room|member)(?:=\S+)?(?:\s+[\s\S]*)?$/i;
 
-// /radio say's PAYLOAD ALONE may contain embedded newlines (operator ruling 2026-08-08: the
-// text to read aloud is genuinely free-form prose, unlike every other argument this whole
-// command surface takes). NODE_ADDRESSABLE above stays exactly as it was — `[ \t]*(.*)` still
-// matches ONE line only, so the 4004d6f smuggling guard (`\s*` would have let a second line
-// read as an addressed command's arguments) is untouched for chrome/tabs/tab/open/close/
-// members/config/status, AND for /radio's own join/leave/disable. This is a SEPARATE, narrower
-// pattern that nodeAddressed only tries once NODE_ADDRESSABLE has already failed to match (i.e.
-// only when there IS an embedded newline) — it reads the command token, `=<node>` and the "say"
-// verb from the first line exactly like NODE_ADDRESSABLE does, and never touches what follows.
-const RADIO_SAY_MULTILINE = /^\/radio(?:=(\S+))?[ \t]+say\b[ \t]*([\s\S]*)$/i;
-
-// The ONE parse both nodeAddressed and makeNodeExplicit build on. `token` is the exact matched
-// command word (case preserved, for makeNodeExplicit's wire reconstruction); `cmd` is its
-// lowercased form; `rest` is the trailing text — used only by /chrome's positional node form and
-// by makeNodeExplicit's rebuild. Returns null when neither pattern matches at all.
-function parseNodeAddressable(text) {
-  const raw = String(text ?? '').trim();
-  const m = NODE_ADDRESSABLE.exec(raw);
-  if (m) return { token: m[1], cmd: m[1].toLowerCase(), node: m[2] ?? null, rest: (m[3] ?? '').trim() };
-  const rm = RADIO_SAY_MULTILINE.exec(raw);
-  if (!rm) return null;
-  return { token: 'radio', cmd: 'radio', node: rm[1] ?? null, rest: rm[2] ?? '' };
-}
-
-// The SHELL is node-local: the spine SERVES 127.0.0.1:23375 and the operator's editor dials in
-// (direction inverted 2026-08-26 — src/bridges/shell-port.mjs header), so no other node ever
-// sees a shell message. NOTE what that does and does not buy (corrected 2026-08-21):
-// node-locality is a ROUTING fact, not a security one — loopback is dialable by any local
-// account, so the limb AUTHENTICATES the editor (a nonce/HMAC handshake under the node's
-// shell.token, src/shell/auth.mjs) before treating its frames as the operator's. What matters
-// here is only the routing half. Everywhere else this node speaks is a chat on the shared Beeper
-// account, where a co-account peer heard the very same message and answers through its own gate —
-// which is exactly why a peer addressed THERE must not also be sent an envelope.
-// SHELL_SURFACE (identity.mjs) is that surface — `room`, the console's own home and the
-// operator-named rooms beside it. Every one of them is node-local for the same reason: a room
-// has no transport at all, so no co-account peer can have heard it either.
-const NODE_LOCAL_SURFACES = new Set([SHELL_SURFACE]);
-
 // ── /join + /split + /send + /end (operator 2026-10-03) ─────────────────────────────────────────
 // A "fork" was always TWO things; they are split into two commands.
 //   /join  — SUPERPOSITION. Spin a private side-group (operator + Rodz) whose chatId is ALIASED to
@@ -478,7 +401,7 @@ const NODE_LOCAL_SURFACES = new Set([SHELL_SURFACE]);
 // re-hardcoding the strings.
 // config.join.placeholder is a template ({name} {title} {group} {by}); config.join.exists answers a
 // /join whose name is already a live side-room the sender is not in (operator 2026-10-16).
-export const JOIN_PLACEHOLDER_DEFAULT = '🔗 joined group {name}. You can join too: send /join {name}';
+export const JOIN_PLACEHOLDER_DEFAULT = '🔗 joined group {name}. You can join too: send /{handle} join {name}';
 export const JOIN_EXISTS_DEFAULT = '🔗 group {name} already exists. Ask {by} to add you.';
 // config.join.limit: the answer when config.join.member_cap (live side-rooms per non-operator per
 // chat; -1/unset = unlimited) is reached. {name} lists that member's rooms.
@@ -495,14 +418,14 @@ export const SEND_POST_BACK_FROM_DEFAULT = 'primary';
 // config.send.origin (auto | always | never) and config.send.origin_template ({group} = side group title).
 export const SEND_ORIGIN_DEFAULT = 'auto';
 export const SEND_ORIGIN_TEMPLATE_DEFAULT = '↪ from {group}:\n';
-// config.join.opener / config.split.opener (a {group}=parent-chat-title template) — the one message
+// config.join.opener / config.split.opener (a {group}=parent-chat-title, {handle} template) — the one message
 // posted into the freshly-created side-group by the primary so the otherwise-empty group SURFACES in Beeper
 // (Beeper hides a chat with no messages — verified live). These are the small built-in fallbacks when
 // the key is unset; the real text is set in config.yaml. Exported so tests assert the fallback.
-export const JOIN_OPENER_DEFAULT = '🔗 Side-room of {group} — same agents, same conversation. Reply /send to a message to copy it back to the original chat; /end to close.';
-export const SPLIT_OPENER_DEFAULT = '🍴 Fork of {group} — a diverging copy: same agents, its own thread from here. Reply /send to a message to copy it back to the original chat; /end to close.';
+export const JOIN_OPENER_DEFAULT = '🔗 Side-room of {group} — same agents, same conversation. Reply /{handle} send to a message to copy it back to the original chat; /{handle} end to close.';
+export const SPLIT_OPENER_DEFAULT = '🍴 Fork of {group} — a diverging copy: same agents, its own thread from here. Reply /{handle} send to a message to copy it back to the original chat; /{handle} end to close.';
 // The automatic group's opener: /end is off there (operator 2026-10-18 ~21:00).
-export const AUTO_OPENER = '🔗 Side-room of {group} — same agents, same conversation. Reply /send to a message to copy it back to the original chat.';
+export const AUTO_OPENER = '🔗 Side-room of {group} — same agents, same conversation. Reply /{handle} send to a message to copy it back to the original chat.';
 // How long Rodz's copy of the opener may take to arrive: the new group reaches its account asynchronously.
 const OPENER_COPY_MS = 5000;
 
@@ -732,17 +655,7 @@ export function createCommands({
   // THE reply chokepoint: every reply this module emits goes out through here, so the
   // no-self-parsing convention (quoteLeadingCommand, above) cannot be missed by a new
   // message — including one added later. Call sites stay `send?.(chatId, text)`.
-  // A CAPTURED run diverts this chat's replies into a sink instead of sending them (the mesh
-  // responder: the reply must ride home INSIDE the envelope, not be posted raw into the relay
-  // chat). Keyed by chatId, and runCaptured's caller supplies an id nothing else uses, so
-  // concurrent runs never cross. quoteLeadingCommand still applies — the captured text becomes
-  // the body the ORIGIN posts into its own chat, so it must not parse as a command there either.
-  const sinks = new Map();   // chatId -> (text) => void
-  const send = (chatId, text) => {
-    const t = quoteLeadingCommand(text);
-    const sink = sinks.get(chatId);
-    return sink ? sink(t) : rawSend?.(chatId, t);
-  };
+  const send = (chatId, text) => rawSend?.(chatId, quoteLeadingCommand(text));
   const stat = io.stat ?? fsStat;
   const readFile = io.readFile ?? fsReadFile;
   const writeFile = io.writeFile ?? fsWriteFile;
@@ -765,14 +678,7 @@ export function createCommands({
   const currentRoomOf = (surface) => currentRoom.get(surface) ?? null;
 
   // A room-scoped command (/members, /activate, /radio join|leave|say, the r-quickreply) resolves
-  // its Room here — the ONE place that reads the mesh mark (bug #23 half A, 2026-07-27,
-  // mesh.mjs commandReply). A mesh-delivered command's ev.chatId is a private per-command id
-  // (`<chat>#cmd<n>`) that is DIFFERENT on every call — resolving through it mints a fresh
-  // contact-<ts> room each time, so an add and a list land in two different rooms and disagree.
-  // ev.mesh routes it to THIS node's own lobby instead (SHELL_SURFACE + LOBBY_SLUG — the
-  // console's home room, whose chatId IS its name, fixedSlugFor's fixed mapping), through the
-  // SAME resolveConvRoom seam every other room resolution uses. Mesh is unconditional and
-  // unaffected by anything below.
+  // its Room here.
   //
   // The JOINED-ROOM default (operator 2026-08-17, generalizing the 2026-08-16 /agents-only fix):
   // "this conversation" means the room currently /rooms join'd on this surface, when one is
@@ -788,7 +694,6 @@ export function createCommands({
   // and the per-surface transcript FILE (radioQuickReply) resolve from ONE selector and can never
   // disagree about which conversation a command targets.
   const convScopeOf = (ev) => {
-    if (ev?.mesh) return { surface: SHELL_SURFACE, chatId: LOBBY_SLUG };
     const joined = currentRoomOf(surfaceOf(ev));
     return { surface: joined ? 'room' : surfaceOf(ev), chatId: joined ?? ev.chatId };
   };
@@ -843,75 +748,40 @@ export function createCommands({
     return inSelfDm || !!ev?.authorized || !!ev?.isSender;
   }
 
-  // Which NODE does this line address? The ONE parse behind every node reading below — the
-  // origin's "must this travel?", the responder's "is this for me?", and the dispatch gate.
-  // Returns { node, cmd, raw } or null. `raw` is the exact substring (immediately trailing the
-  // command token) that named the node — run() strips it (or, for /chrome, normalizes it to
-  // the bare form) once the gate has passed, so each handler parses exactly what it always did.
-  //
-  //   /<cmd>=<node>             — bound to the COMMAND TOKEN ITSELF (ruling 2026-07-27): the
-  //                               ONE way to name a node, for every member of the set. A `=` in
-  //                               an ARGUMENT (a URL's query string, `?a=b`) can never be read
-  //                               as a node — it isn't adjacent to the command token, so
-  //                               NODE_ADDRESSABLE's own `(?:=(\S+))?` never sees it.
-  //   /chrome <node>            — its whole argument IS a node too (never ambiguous), known or
-  //                               not: an unknown one is a routing error, never silence.
-  //                               `/chrome=<node>` names the same thing.
-  //   no node named on the      — no `=<node>`, and (for /chrome) no positional node either —
-  //   command token itself        resolves through dispatch.default_node when the operator has
-  //                               set one (`raw: ''`, nothing to strip), REGARDLESS of whether the
-  //                               command carries arguments (ruling 2026-07-27: default_node
-  //                               applies to `/open <url>`, `/members <args>`, etc. just as much
-  //                               as to a bare command); UNSET, this is null, byte-identical to
-  //                               before.
-  function nodeAddressed(text) {
-    const hit = parseNodeAddressable(text);
-    if (!hit) return null;
-    const { cmd, node, rest } = hit;
-    if (node) return { node: node.toLowerCase(), cmd, raw: `=${node}` };
-    if (cmd === 'chrome' && rest) return { node: rest.toLowerCase(), cmd, raw: rest };
-    const dn = String(cfg().dispatch?.default_node ?? '').trim().toLowerCase();
-    return dn ? { node: dn, cmd, raw: '' } : null;
+  // ── A COMMAND NAMES ITS BEING (operator 2026-10-19: "make the handle of an agent act itself a
+  // command … now we can know who executes the command") ──
+  // `/<handle> <command> [args]` runs on the node of the being that handle wakes. commandOf reads a
+  // line (or an alias's expansion) into that: a being here → the command line without the handle, the
+  // being attached (commandBeing = its key, commandHandle = as typed); a handle no being here answers
+  // to → commandElsewhere, recorded and prompting nobody, as for a peer being. A bare `/<command>` is
+  // no command, except on the console (SHELL_SURFACE: node-local, nobody else hears it). The handle
+  // resolves as /agents' argument does (the router's own lookup), local beings only.
+  const isRelayAgent = (a) => !!a?.relay_channel || Array.isArray(a?.paths) || String(a?.configuration ?? '').toLowerCase() === 'relay';
+  function beingOfHandle(handle) {
+    const agents = cfg().agents ?? {};
+    const hit = addressed(handle, agents, { addressWithoutAt: true })[0];
+    if (hit) return hit.token === handle && !isRelayAgent(hit.agent) ? hit.name : null;
+    const personaListed = Object.keys(agents).some((k) => k.toLowerCase() === String(defaultKey).toLowerCase());
+    return !personaListed && handle === String(defaultKey).toLowerCase() ? defaultKey : null;   // the persona is real even with no agents: map
   }
-
-  // ORIGIN reading: the node this command must TRAVEL to in order to be answered — null when it
-  // stays here. Null for a command outside the allowlist, a command with no node, a node that is
-  // one of OURS, and a node that shares this Beeper account and heard the message anyway (that
-  // one is the unchanged broadcast + gate: the sibling answers, we say nothing).
-  function remoteNode(ev) {
-    const hit = nodeAddressed(ev?.body);
-    if (!hit) return null;
-    if (ownNodeNamesOf(cfg()).has(hit.node)) return null;
-    const peers = cfg().peer_nodes;
-    const isPeer = Array.isArray(peers) && peers.some((p) => String(p ?? '').trim().toLowerCase() === hit.node);
-    if (isPeer && !NODE_LOCAL_SURFACES.has(String(ev?.surface ?? '').toLowerCase())) return null;
-    return hit.node;
+  function commandOf(ev) {
+    let body = String(ev?.body ?? '').trim();
+    let alias = null;
+    if (!body.startsWith('/')) {
+      const hit = aliasOf(ev, body);
+      if (!hit) return null;
+      ({ body, alias } = hit);
+    }
+    const p = parseBeingCommand(body);
+    if (!p) return null;
+    const tag = alias ? { alias } : {};
+    const being = beingOfHandle(p.handle);
+    if (!being) return { ...ev, commandElsewhere: p.handle, ...tag };
+    return { ...ev, body: p.rest ? `${p.cmd} ${p.rest}` : p.cmd, commandBeing: being, commandHandle: p.handle, ...tag };
   }
-
-  // RESPONDER reading of the SAME parse: an envelope-delivered line is a node-addressable
-  // command for THIS node. Same allowlist, so lifecycle can never arrive over the mesh.
-  function nodeCommandForMe(text) {
-    const hit = nodeAddressed(text);
-    return !!hit && ownNodeNamesOf(cfg()).has(hit.node);
-  }
-
-  // ORIGIN rewrite, used by the mesh forwarder ONLY (operator 2026-07-27, live miss): a command
-  // resolved through THIS node's dispatch.default_node (nodeAddressed's `raw: ''` — nothing was
-  // typed to name the node) must travel with the node bound EXPLICITLY to the command token,
-  // because the RESPONDER re-parses the SAME wire body through its OWN nodeCommandForMe — and its
-  // own default_node may be unset or point elsewhere. Without this, a bare `/tabs` forwarded
-  // verbatim resolved to no node at the responder and fell through to the being (CLAUDE Code's
-  // own `/stats` answered instead of egpt). An ALREADY-explicit command (`/tabs=do`, `/chrome do`)
-  // is returned byte-identical — remoteNode resolved it without consulting default_node, so
-  // nothing about the wire form needs to change. Only the command TOKEN is rewritten; arguments
-  // (a URL's own `=`, `?a=b`) are never touched.
-  function makeNodeExplicit(text, node) {
-    const hit = nodeAddressed(text);
-    if (!hit || hit.raw) return text;                 // not addressable here, or already explicit
-    const parsed = parseNodeAddressable(text);
-    if (!parsed) return text;
-    return `/${parsed.token}=${node}${parsed.rest ? ` ${parsed.rest}` : ''}`;
-  }
+  // The handle a reply tells a person to type: the one they typed, else the persona's first.
+  const handleOf = (ev) => ev?.commandHandle ?? wakeTokens(defaultKey, cfg().agents?.[defaultKey])[0] ?? defaultKey;
+  const hintOf = (cmd, ev = null) => `/${handleOf(ev)} ${cmd}`;
 
   // rs — the RADIO quick reply (operator 2026-08-08): a single top-level string of its own,
   // radio_quick_reply_string, DEFAULT "rs", "" disables. It reads a QUOTED message aloud through
@@ -939,21 +809,15 @@ export function createCommands({
   // verbs, which their handlers gate (SIDE_CMD, operator 2026-10-18), and bare /agents, which a
   // non-operator gets as the public list (AGENTS_BARE_CMD). Every other command, lifecycle and every
   // /agents verb included, still needs the operator.
+  // The ev is commandOf's: a command names its being (commandBeing), except a registered command on
+  // the console.
   function isCommand(ev) {
     const body = String(ev?.body ?? '').trim();
     if (isOperator(ev) && isRadioQuickReply(ev)) return true;
     if (!body.startsWith('/')) return false;
+    const onConsole = surfaceOf(ev) === SHELL_SURFACE && COMMAND_SET.has(body.split(/\s/)[0].toLowerCase());
+    if (ev?.commandBeing == null && !onConsole) return false;
     return isOperator(ev) || RECAP_CMD.test(body) || (ev?.fromNode == null && SIDE_CMD.test(body)) || AGENTS_BARE_CMD.test(body);
-  }
-
-  // Run a command and CAPTURE its reply instead of sending it. Routes through the ONE run()
-  // below — same dispatch, same gates, same no-self-parsing chokepoint — so the mesh responder
-  // executes exactly what a typed command executes. Returns the joined reply text.
-  async function runCaptured(ev) {
-    const lines = [];
-    sinks.set(ev.chatId, (t) => lines.push(t));
-    try { await run(ev); } finally { sinks.delete(ev.chatId); }
-    return lines.join('\n\n');
   }
 
   // ── PER-COMMAND AUDIT → log_to_group (operator 2026-10-08) ─────────────────────────────────────
@@ -979,8 +843,7 @@ export function createCommands({
   };
   // THE WRAPPER around the dispatch: run the command, then emit the ONE audit line. A '/'-command the
   // dispatch handled on THIS node is audited (outcome inline when the handler returned one); NO_AUDIT
-  // (a command addressed to ANOTHER node — it audits there) and a non-'/'-message (the rs radio quick
-  // reply) are not. The token is read from ev.body so an `=<node>` binding (/tab=do) still audits as /tab.
+  // (an ignored public /agents list) and a non-'/'-message (the rs radio quick reply) are not.
   async function run(ev) {
     const outcome = await runDispatch(ev);
     if (outcome === NO_AUDIT) return;
@@ -990,7 +853,7 @@ export function createCommands({
   }
 
   async function runDispatch(ev) {
-    let line = String(ev.body ?? '').trim();
+    const line = String(ev.body ?? '').trim();
 
     // rs — THE RADIO QUICK REPLY: the one non-slash message isCommand ever routes here for
     // (see isCommand above) — every other non-slash line never reaches run() at all.
@@ -1001,28 +864,6 @@ export function createCommands({
       onLog(`${line} -> exit ${code}`);
       await exit(code, { force: lifecycleForce(line) });   // process leaves (after the bridge's "restarting…" announce); the daemon respawns
       return;
-    }
-
-    // THE NODE GATE, once, for the whole node-addressable set — the SAME ownNodeNamesOf
-    // /chrome's and /status's own gates already matched, now shared by all six instead of
-    // reimplemented per command. A line naming a node that is NOT ours only reaches here
-    // because that node shares this Beeper account and heard the message too (the spine
-    // forwards every other case, see remoteNode): it answers, we say NOTHING AT ALL — the
-    // same deliberate silence, so exactly one node answers on a shared account. Bare forms
-    // and everything outside the set fall through untouched.
-    const addressed = nodeAddressed(line);
-    if (addressed && !ownNodeNamesOf(cfg()).has(addressed.node)) return NO_AUDIT;   // another node owns it — it audits there, not here
-    // `=<name>` bound to the command token (or the bare dispatch.default_node stand-in, raw:
-    // '') has done its job — drop it so each command's own grammar is unchanged (`/tab=do 3`
-    // parses as `/tab 3`). Bound to the token, stripping is just cutting the `=<name>` back out
-    // of the command word — the arguments after it are never touched. /chrome is the one
-    // exception (ruling 2026-07-27): its whole argument IS the node, so an explicit `=<name>`
-    // normalizes to the bare positional form instead of vanishing, and its own positional form
-    // (raw === the whole argument, no leading "=") needs no stripping at all.
-    if (addressed?.raw) {
-      const named = addressed.raw.startsWith('=');
-      if (addressed.cmd === 'chrome' && named) line = line.replace(addressed.raw, ` ${addressed.node}`);
-      else if (named) line = line.replace(addressed.raw, '');
     }
 
     // The singular of a plural command ASKS (operator 2026-08-29: "the singular asking you
@@ -1058,12 +899,8 @@ export function createCommands({
     // See § COMMAND GRAMMAR at module scope for the shape and why the target trails.
     // `[<conv>]` and `=<slug>` are the same thing said two ways.
     //
-    // `=<slug>` is a PRIVATE convention parsed by THIS regex alone — it is bound directly to
-    // the command token exactly like NODE_ADDRESSABLE's `=<name>` (`/chrome=kg`, `/tab=do 3`,
-    // see the § NODE-ADDRESSED COMMANDS block above), which is what it's modeled on, but it is
-    // NOT that system: NODE_ADDRESSABLE's allowlist (chrome|status|tabs|tab|open|close|
-    // members?|config|radio) deliberately excludes /agents, so nodeAddressed(line) returns
-    // null for any `/agents...` line and never touches it — no interference either way.
+    // `=<slug>` is a PRIVATE convention parsed by THIS regex alone, bound directly to the
+    // command token (`/e agents=palma refresh e`).
     // Omitted = the CURRENT conversation (ev.surface/ev.chatId), exactly like today's bare
     // /e reset/auto/access. Given = resolved through resolveTarget — the SAME fuzzy/jid
     // resolver /e auto <mode> <target> and /e reset <target> already used, reused verbatim
@@ -1077,6 +914,8 @@ export function createCommands({
       if (handling) { await send?.(ev.chatId, `${handling}\n\n${AGENTS_USAGE}`); return; }
       const raw = (agentsMatch[2] ?? '').trim().split(/\s+/).filter(Boolean);
       const { args, slug, retired } = normalizeAgentsArgs(raw);
+      // A verb with no target names the being the command was typed to (`/e agents compact`).
+      if (args?.[1] && args[0] == null && ev.commandHandle) args[0] = ev.commandHandle;
       // The retired object-first order gets its own line back, rebuilt into the new one —
       // naming the exact replacement, not just the rule.
       if (retired) {
@@ -1086,8 +925,8 @@ export function createCommands({
         const vraw = retired.verb.toLowerCase();
         const verb = RETIRED_AGENT_SUBS[vraw] ?? canonicalAgentSub(vraw);
         const fixed = AGENT_SUB_ARITY[canonicalAgentSub(vraw)] === 1
-          ? `/agents ${verb} ${retired.rest[0] ?? '<value>'} ${retired.handle}`
-          : `/agents ${verb} ${retired.handle}`;
+          ? `${hintOf('agents', ev)} ${verb} ${retired.rest[0] ?? '<value>'} ${retired.handle}`
+          : `${hintOf('agents', ev)} ${verb} ${retired.handle}`;
         await send?.(ev.chatId, `/agents: the verb comes first now — \`${fixed}\``);
         return;
       }
@@ -1096,38 +935,23 @@ export function createCommands({
     }
 
     // /status [<target>] — bare: one compact ops line with live node health (unchanged
-    // byte-for-byte; BOTH co-account nodes answer, on purpose). `/status <fragment>`
+    // byte-for-byte). `/status <fragment>`
     // targets a SPECIFIC conversation instead — resolved through the same resolveTarget
     // /agents' `=<slug>` binding uses — and reports that conversation's operator-facing
     // facts (§ statusTarget). Every probe in both forms is wrapped: any failure degrades
     // to '?' so /status NEVER throws.
-    //
-    // NODE-FIRST (operator ruling 2026-07-25): a <target> naming a NODE is a node
-    // question, resolved through the SAME wake-word gate /chrome <node> uses — this
-    // node's own names win, a sibling's name is silent. See § statusNodeGate.
     const statusMatch = /^\/status(?:\s+(.+))?\s*$/i.exec(line);
     if (statusMatch) {
       const target = statusMatch[1]?.trim() || null;
-      if (target) {
-        const gate = statusNodeGate(target);
-        if (gate === 'silent') return;                                     // a sibling node was addressed, not us
-        if (gate === 'mine') { await send?.(ev.chatId, await status(ev)); return; }
-      }
       await send?.(ev.chatId, target ? await statusTarget(ev, target) : await status(ev));
       return;
     }
 
-    // /chrome [<node>] — ATTACH-ONLY status of the local Chrome, answered ONLY by the
-    // addressed node. Must stay BEFORE the catch-all at the end of this dispatch (it
-    // answers ANY /token, so a fall-through would silently swallow /chrome) — that
-    // ordering IS test-enforced: the /chrome tests assert its real reply, and they fail
-    // the moment it reaches the catch-all instead. It does NOT interact with /agents' own
-    // dispatch above: /agents' match is ANCHORED at ^/agents, so it can never match /chrome.
-    const chromeMatch = /^\/chrome(?:\s+(.+?))?\s*$/i.exec(line);
-    // dispatch.default_node resolves a truly bare `/chrome` to a node (addressed.raw === '')
-    // without leaving anything in `line` to capture — fall back to the gate's own resolution
-    // (already verified OURS, above) so the report is sent instead of the discovery hint.
-    if (chromeMatch) { await chrome(ev, chromeMatch[1]?.trim() || addressed?.node || null); return; }
+    // /chrome — this chat's browser-group Chrome on this node. Must stay BEFORE the catch-all
+    // at the end of this dispatch (it answers ANY /token, so a fall-through would silently
+    // swallow /chrome) — that ordering IS test-enforced: the /chrome tests assert its real reply.
+    const chromeMatch = /^\/chrome\b/i.exec(line);
+    if (chromeMatch) { await chrome(ev); return; }
 
     // /tabs, /open <url>, /tab <n>, /close <n> — Phase 1 browser command wrappers, thin
     // dispatch over cdp.mjs's listTabs/openTab/activateTarget/closeTab (no CDP knowledge
@@ -1169,22 +993,21 @@ export function createCommands({
     if (membersMatch) { await members(ev, membersMatch[1]?.trim() || null); return; }
 
     // /radio [join|leave] — WHICH node relays the CURRENT CONVERSATION's room to the
-    // internet radio station (config + command only, see radio() below). Pre-catch-all,
-    // node-addressable like /status/members/config (see NODE_ADDRESSABLE above).
+    // internet radio station (config + command only, see radio() below). Pre-catch-all.
     //
     // "say" is matched FIRST, separately, with a payload group that spans lines ([\s\S]*) — the
     // text to read aloud is the one argument in this whole command surface that is genuinely
     // free-form prose (operator ruling 2026-08-08). join/leave/disable fall through to the
     // ORIGINAL single-line grammar below, unchanged — their arguments are always one token.
     const radioSayMatch = /^\/radio\s+say\b[ \t]*([\s\S]*)$/i.exec(line);
-    if (radioSayMatch) { await radio(ev, 'say', radioSayMatch[1]?.trim() || null, addressed); return; }
+    if (radioSayMatch) { await radio(ev, 'say', radioSayMatch[1]?.trim() || null, true); return; }
     const radioMatch = /^\/radio(?:\s+(\S+))?(?:\s+(.+?))?\s*$/i.exec(line);
-    if (radioMatch) { await radio(ev, radioMatch[1]?.toLowerCase() || null, radioMatch[2]?.trim() || null, addressed); return; }
+    if (radioMatch) { await radio(ev, radioMatch[1]?.toLowerCase() || null, radioMatch[2]?.trim() || null, true); return; }
 
     // /config [<key>[=<value>]] — bare: a redacted dump of the live config. `<key>` alone: a
     // GET. `<key>=<value>`: resolve <key> through config-schema.mjs (dotted path or bare leaf),
     // parse <value> like the extension prototype does, write it, and confirm the RESOLVED path.
-    // Pre-catch-all, node-addressable like /status/members (see NODE_ADDRESSABLE above).
+    // Pre-catch-all.
     const configMatch = /^\/config(?:\s+(.+?))?\s*$/i.exec(line);
     if (configMatch) { await send?.(ev.chatId, await configCmd(configMatch[1]?.trim() || null)); return; }
 
@@ -1223,20 +1046,15 @@ export function createCommands({
     const unbanMatch = /^\/unban\b[ \t]*(.*)$/i.exec(line);
     if (unbanMatch) { await send?.(ev.chatId, unbanHere(ev, unbanMatch[1]?.trim() || null)); return; }
 
-    // /join — type /join [<name>|<node>] to spin a private side-group that is a VIEW (alias) of this
-    // chat's conversation (one shared thread, two chats); /split — /split [<name>|<node>] spins a
+    // /join — type /<handle> join [<name>] to spin a private side-group that is a VIEW (alias) of this
+    // chat's conversation (one shared thread, two chats); /split — /<handle> split [<name>] spins a
     // side-group backed by a NEW, DIVERGING conversation (its beings' threads are copied); /send —
     // reply /send to a message in either group to relay it back to the original chat; /end — reply
     // /end in either group to archive it and drop its mapping (operator 2026-10-03). They sit
     // pre-catch-all like the rest. isCommand admits these four from any sender (SIDE_CMD); /join and
     // /split refuse a member outside a group, /send and /end act only in a side group (operator
-    // 2026-10-18). NOT in
-    // NODE_ADDRESSABLE: a /join/split node override is parsed by the handler itself (`/join do` or
-    // `/join=do`). Each handler STANDS DOWN SILENTLY on the node that is not the right one (not the
-    // node_role=primary / addressed node for /join+/split; no alias-or-parent for /send+/end, and a
-    // node_role secondary for /send), so a
-    // shared Beeper account never double-answers. Written as `<name>Match = /^\/word…` so the /help
-    // drift guard (tests/spine-commands.test.mjs) sees them.
+    // 2026-10-18); /send and /end stand down silently where this node holds no alias or parent.
+    // Written as `<name>Match = /^\/word…` so the /help drift guard (tests/spine-commands.test.mjs) sees them.
     const joinMatch = /^\/join\b[\s\S]*$/i.exec(line);
     if (joinMatch) { return await joinGroup(ev); }   // returns an outcome for the audit on its member paths
     const splitMatch = /^\/split\b[\s\S]*$/i.exec(line);
@@ -1246,31 +1064,18 @@ export function createCommands({
     const endMatch = /^\/end\b[\s\S]*$/i.exec(line);
     if (endMatch) { return await end(ev); }   // end() returns its outcome string (archived / no-op) for the audit line
 
-    // /e and /egpt carry NO special meaning any more (retired 2026-08-15 — see § /agents
-    // above, which replaces the whole family). A bare `/e` or `/e <anything>` no longer gets
-    // its own usage reply; it falls straight through to the generic catch-all below, exactly
-    // like any other unrecognized token.
+    // A registered command no branch above dispatches.
     const tok = line.split(/\s+/)[0];
-    await send?.(ev.chatId, `${tok}: recognized — lifecycle (/restart, /upgrade, /rewind) + /agents + /status are wired in v2 so far.`);
+    await send?.(ev.chatId, `${tok}: recognized, not wired yet — ${hintOf('help', ev)} lists what is.`);
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // /chrome [<node>] — the chat's browser-group Chrome: launched over the pipe when it is not up,
+  // /chrome — the chat's browser-group Chrome: launched over the pipe when it is not up,
   // then its tabs. The Session 1 daemon spawns and holds every Chrome (src/chrome-host.mjs), and a child
   // inherits its parent's session (measured 2026-07-15: spine SessionId 0, explorer.exe SessionId 1),
   // so the window lands on the operator's desktop; a spine with no such daemon has no browser.
-  //
-  // NODE GATE: `<node>` is matched against this node's own names (node_name ∪ node_alias,
-  // via the shared ownNodeNamesOf). A non-match replies NOTHING AT ALL — the same
-  // wake-word principle the mesh uses, so on the shared Beeper account exactly one node
-  // answers. An UNKNOWN node name is a non-match too, and therefore also silent: if every
-  // node answered "unknown node" the operator would get the double-answer the gate exists
-  // to prevent. Bare /chrome is the one exception — it's the discovery path, so each node
-  // answers with a short usage line naming itself (never the status payload).
-  async function chrome(ev, arg) {
-    const own = ownNodeNamesOf(cfg());
-    if (!arg) { await send?.(ev.chatId, `/chrome <node> — Chrome status from a node. This node answers to: ${[...own].join(', ') || '(no node_name set)'}`); return; }
-    if (!own.has(arg.toLowerCase())) return;   // not addressed → silent, on purpose (BEFORE any launch)
+  // The node is the handle's (`/e chrome`); nothing else names it.
+  async function chrome(ev) {
     await send?.(ev.chatId, await chromeReport(await browserConversationOf(surfaceOf(ev), ev.chatId)));
   }
 
@@ -1435,7 +1240,7 @@ export function createCommands({
   // one-line note, same "never throw" ethos as chromeReport.
   async function tabsReport(c) {
     let tabs;
-    try { tabs = await c.listTabs(); } catch { return 'no Chrome to list tabs from — try /chrome first'; }
+    try { tabs = await c.listTabs(); } catch { return 'no Chrome to list tabs from — try /<handle> chrome first'; }
     const lines = [`tabs: ${tabs.length}`];
     tabs.forEach((t, i) => {
       lines.push(`  ${i + 1} · ${trunc(t?.title ?? '(untitled)', 48)}`);
@@ -1457,7 +1262,7 @@ export function createCommands({
   // { error } — callers never throw on a bad index.
   async function nthTab(c, n) {
     let tabs;
-    try { tabs = await c.listTabs(); } catch { return { error: 'no Chrome to list tabs from — try /chrome first' }; }
+    try { tabs = await c.listTabs(); } catch { return { error: 'no Chrome to list tabs from — try /<handle> chrome first' }; }
     const tab = tabs[n - 1];
     if (!tab) return { error: `no tab ${n} — ${tabs.length} open` };
     return { tab };
@@ -1490,11 +1295,11 @@ export function createCommands({
     catch (e) { return `/login: failed — ${e?.message ?? e}`; }
   }
 
-  const ROOM_USAGE = 'usage: /rooms | /rooms create <name> | /rooms join|leave|members <room> | /rooms delete [force] <room>';
+  const ROOM_USAGE = 'usage: /<handle> rooms | /<handle> rooms create <name> | /<handle> rooms join|leave|members <room> | /<handle> rooms delete [force] <room>';
   // remove/mode take `<id|name>` for the same reason add group does (operator 2026-08-31):
   // all three now run the SAME argument through the SAME resolver, so the usage line stops
   // implying that only one of them knows what a chat name is.
-  const MEMBERS_USAGE = 'usage: /members | /members add tab <n> [alias=<name>|<name>] | /members add group <chat name|id> | /members remove <id|name> | /members mode <disable|mention|all> <id|name>';
+  const MEMBERS_USAGE = 'usage: /<handle> members | /<handle> members add tab <n> [alias=<name>|<name>] | /<handle> members add group <chat name|id> | /<handle> members remove <id|name> | /<handle> members mode <disable|mention|all> <id|name>';
   // A slug with no folder on disk — the members path and the delete path both need to say
   // this instead of acting as though it exists (bug fix 2026-08-07: "/rooms help" rendered
   // "help (0 members)", a roster fabricated for a room that was never created — 'help' just
@@ -1572,11 +1377,11 @@ export function createCommands({
     // operator typed it would be the exact class of "did something adjacent to what you meant"
     // this surface refuses elsewhere.
     if (sub && Object.hasOwn(RETIRED_AGENT_SUBS, sub)) {
-      await send?.(ev.chatId, `/agents: "${subRaw}" is not a verb here any more — did you mean \`/agents ${RETIRED_AGENT_SUBS[sub]} ${handleArg}\`? (/restart is the NODE's lifecycle; ${RETIRED_AGENT_SUBS[sub]} gives this conversation a new thread). Nothing was changed.`);
+      await send?.(ev.chatId, `/agents: "${subRaw}" is not a verb here any more — did you mean \`${hintOf('agents', ev)} ${RETIRED_AGENT_SUBS[sub]} ${handleArg}\`? (${hintOf('restart', ev)} is the NODE's lifecycle; ${RETIRED_AGENT_SUBS[sub]} gives this conversation a new thread). Nothing was changed.`);
       return;
     }
     if (sub && !LIVE_AGENT_SUBS.includes(sub)) {
-      await send?.(ev.chatId, `/agents: unknown subcommand "${subRaw}" — ${LIVE_AGENT_SUBS.join('|')} (mode <${AUTO_MODES.join('|')}>, access_level <${ACCESS_LEVELS.join('|')}>). Verb first: /agents <sub> <handle>.`);
+      await send?.(ev.chatId, `/agents: unknown subcommand "${subRaw}" — ${LIVE_AGENT_SUBS.join('|')} (mode <${AUTO_MODES.join('|')}>, access_level <${ACCESS_LEVELS.join('|')}>). Verb first: ${hintOf('agents', ev)} <sub> <handle>.`);
       return;
     }
     if (sub === 'mode') {
@@ -1589,14 +1394,13 @@ export function createCommands({
     // 'sandbox': it worked everywhere except here, leaving a hand edit of conversations.yaml
     // as the only way in.
     if (sub === 'access_level' && !isAccessLevel(valueRaw?.toLowerCase())) {
-      await send?.(ev.chatId, `usage: /agents access_level ${ACCESS_LEVELS.join('|')} <handle>|force all`);
+      await send?.(ev.chatId, `usage: ${hintOf('agents', ev)} access_level ${ACCESS_LEVELS.join('|')} [<handle>|force all]`);
       return;
     }
-    // `all` is REFUSED (operator 2026-10-11); ONE reply on a shared chat — the secondary stays silent.
+    // `all` is REFUSED (operator 2026-10-11).
     if (handleArg.toLowerCase() === 'all') {
-      const forced = ['/agents', subRaw, valueRaw, FORCE_ALL, slugArg].filter(Boolean).join(' ');
-      if (String(cfg().node_role ?? '').trim().toLowerCase() === 'secondary') onLog(`/agents: "all" refused — the primary replies`);
-      else await send?.(ev.chatId, `/agents: \`all\` changes every being at once — say \`${forced}\` to mean it. Nothing was changed.`);
+      const forced = [hintOf('agents', ev), subRaw, valueRaw, FORCE_ALL, slugArg].filter(Boolean).join(' ');
+      await send?.(ev.chatId, `/agents: \`all\` changes every being at once — say \`${forced}\` to mean it. Nothing was changed.`);
       return;
     }
 
@@ -2439,7 +2243,7 @@ export function createCommands({
   // in-memory and it never touches a real profile.
   async function roomCreate(ev, name) {
     // A room NAME is operator-chosen; reject an empty/punctuation-only one before touching fs.
-    if (!name || !/[a-z0-9]/i.test(name)) { await send?.(ev.chatId, 'usage: /rooms create <name>'); return; }
+    if (!name || !/[a-z0-9]/i.test(name)) { await send?.(ev.chatId, 'usage: /<handle> rooms create <name>'); return; }
     const r = await resolveConvRoom('room', name);
     if (!r) { await send?.(ev.chatId, `can't resolve room '${name}'`); return; }
     const slug = r.slug;
@@ -2515,7 +2319,7 @@ export function createCommands({
     if (!force) {
       const contents = await roomContents(room);
       if (contents.length) {
-        await send?.(ev.chatId, `room ${slug} has content — ${contents.join(', ')} — /rooms ${slug} delete force to remove anyway`);
+        await send?.(ev.chatId, `room ${slug} has content — ${contents.join(', ')} — ${hintOf('rooms', ev)} ${slug} delete force to remove anyway`);
         return;
       }
     }
@@ -2643,7 +2447,7 @@ export function createCommands({
   // kind:brain, state:muted (mode:disable — "no chatter reaches it yet").
   async function membersAddTab(ev, room, n, aliasArg) {
     let tabs;
-    try { tabs = await (await chatClientOf(ev)).listTabs(); } catch { await send?.(ev.chatId, 'no Chrome to list tabs from — try /chrome first'); return; }
+    try { tabs = await (await chatClientOf(ev)).listTabs(); } catch { await send?.(ev.chatId, `no Chrome to list tabs from — try ${hintOf('chrome', ev)} first`); return; }
     const tab = tabs[n - 1];
     if (!tab) { await send?.(ev.chatId, `no tab ${n} — ${tabs.length} open`); return; }
     const adapter = await adapterFor(tab.url);
@@ -2667,7 +2471,7 @@ export function createCommands({
       // "refreshed 'chatgpt'", giving zero indication the alias was ignored).
       if (alias && alias !== same.id) {
         const modeWord = STATE_TO_MODE[same.state] ?? same.state;
-        await send?.(ev.chatId, `can't add tab ${n} as '${alias}' — tab is already member '${same.id}' (mode:${modeWord}); /members remove ${same.id} first if you want to replace it`);
+        await send?.(ev.chatId, `can't add tab ${n} as '${alias}' — tab is already member '${same.id}' (mode:${modeWord}); ${hintOf('members', ev)} remove ${same.id} first if you want to replace it`);
         return;
       }
       await room.setMember({ ...same, targetId: tab.id, title: tab.title });
@@ -2889,18 +2693,15 @@ export function createCommands({
   // the 2026-08-08 join-only rule above): "'not relaying' as a response to a '/radio say'
   // command is not necessary if the spine has no radio configuration enabled. it only
   // replies if it has, and matches." For EVERY verb — join, leave, say, and bare status —
-  // a BARE `/radio <verb>` (not `=<node>`, and not a bare command resolved through this
-  // node's own dispatch.default_node, whose `raw` is `''`) replies ONLY if THIS node can
-  // act on it; a node with no configured/enabled radio, or that the command doesn't
-  // match, says NOTHING. `/radio=<node> <verb>` was SPECIFICALLY addressed, so it always
-  // replies, success or refusal. The ONE exception, for every verb: "can't resolve this
-  // conversation's room" always replies — that's a broken invocation, not a mismatch.
-  // The distinction reuses the node gate's own answer (`explicit`, below,
-  // `addressed.raw.startsWith('=')`) rather than a second "was I addressed" test.
+  // an unaddressed call (the rs quick reply) replies ONLY if THIS node can act on it; a node
+  // with no configured/enabled radio, or that the command doesn't match, says NOTHING. A
+  // command (`/<handle> radio …`, or the console's) is addressed to this node (`explicit`), so
+  // it always replies, success or refusal. The ONE exception, for every verb: "can't resolve
+  // this conversation's room" always replies — that's a broken invocation, not a mismatch.
   //
   // Verb-first (the /rooms 2026-08-07 lesson): an unrecognized verb NEVER touches a room,
   // it just gets the usage line.
-  const RADIO_USAGE = 'usage: /radio | /radio join [<radio>] | /radio leave [all|<slug>] | /radio say <text> | /radio disable [<radio>|<node>|<person>]';
+  const RADIO_USAGE = 'usage: /<handle> radio | /<handle> radio join [<radio>] | /<handle> radio leave [all|<slug>] | /<handle> radio say <text> | /<handle> radio disable [<radio>|<node>|<person>]';
 
   // Which radio each entity on THIS node is joined to, per listEntityDirs (THE walk,
   // owned by boot.mjs — never a second entity enumeration), computed ONCE per /radio
@@ -3067,9 +2868,8 @@ export function createCommands({
     return '```yaml\n' + lines.join('\n') + '\n```';
   }
 
-  async function radio(ev, first, rest, addressed) {
+  async function radio(ev, first, rest, explicit) {
     if (first && first !== 'join' && first !== 'leave' && first !== 'say' && first !== 'disable') { await send?.(ev.chatId, RADIO_USAGE); return; }
-    const explicit = !!addressed?.raw && addressed.raw.startsWith('=');
     const radios = (cfg().radio_service && typeof cfg().radio_service === 'object') ? cfg().radio_service : {};
     const configuredNames = Object.keys(radios);
     const thisNode = cfg().node_name;
@@ -3187,7 +2987,7 @@ export function createCommands({
     if (!rest) { await send?.(ev.chatId, RADIO_USAGE); return; }
     const doc = await room.loadConfig();
     const joinedRadio = doc.radio?.join || null;
-    if (!joinedRadio) { if (explicit) await send?.(ev.chatId, 'not relaying — /radio join <radio> first'); return; }
+    if (!joinedRadio) { if (explicit) await send?.(ev.chatId, `not relaying — ${hintOf('radio', ev)} join <radio> first`); return; }
     if (!radios[joinedRadio] || radios[joinedRadio].enabled !== true) {
       if (explicit) await send?.(ev.chatId, `radio '${joinedRadio}' not configured or disabled on ${thisNode}`);
       return;
@@ -3214,8 +3014,8 @@ export function createCommands({
   // ─────────────────────────────────────────────────────────────────────────────
   // rs — reply to any message with just this token and it airs, through the SAME /radio say
   // path above (room must be joined, radio enabled, sender not blocked, speaker resolved,
-  // uploaded through the SAME gate) — never a second uploader. `addressed` is always null here
-  // (rs carries no `=<node>` syntax), so `radio()`'s `explicit` is always false: rs behaves like
+  // uploaded through the SAME gate) — never a second uploader. rs names no node, so
+  // `radio()`'s `explicit` is false: rs behaves like
   // a BARE /radio say throughout — silent on an unjoined/disabled room, but a blocked sender and
   // "can't resolve this conversation's room" still always reply (radio()'s own unconditional
   // branches, unchanged).
@@ -3321,7 +3121,7 @@ export function createCommands({
     const body = text ? bodyForMessageId(text, ev.replyToId) : null;
     const cleaned = body ? cleanQuotedBody(body) : null;
     if (!cleaned) { await nothingToRead(); return; }
-    await radio(ev, 'say', cleaned, null);
+    await radio(ev, 'say', cleaned, false);
   }
 
   // ── /join + /split + /send + /end (operator 2026-10-03) ─────────────────────────────────────
@@ -3337,41 +3137,21 @@ export function createCommands({
   //            recorded parent_chat for /split). Repeatable; honours config.send.post_back_from.
   //   /end   — archive the group (both kinds) and drop its mapping. Posts nothing.
   //
-  // THE NODE GATE (replaces the old config.fork.lead_node). On a shared primary account BOTH nodes
-  // hear the command and the being resides on each, so neither the message nor the being can pick one.
-  // DEFAULT: act only on the node whose own name plays the `primary` role — i.e. cfg().node_role ===
-  // 'primary'. OVERRIDE: `/join <node>` / `/join=<node>` names a node directly; a trailing token that
-  // matches a KNOWN node name (knownNodeNames) is the override, otherwise it is the `<name>` title
-  // arg. On an addressed node, act only if ownNodeNamesOf has it. Every non-selected node stands down
-  // SILENTLY. A being must still RESIDE here (residesHere), which is also the "is there a thread to
-  // carry/copy" check. /send+/end act only where this node holds the group (an alias or a parent);
-  // both nodes do once the other links it (linkSideGroup), so /send stands down on a node_role
-  // secondary and /end archives (idempotent) on each.
+  // WHICH NODE: the handle's (commandOf) — `/e join` runs on E's node, and only there. /join and /split
+  // still create only on the node_role 'primary' node. A being must still RESIDE here (residesHere),
+  // which is also the "is there a thread to carry/copy" check. /send+/end act only where this node holds
+  // the group (an alias or a parent); both nodes do once the other links it (linkSideGroup).
   const residesHere = (state, surface, chatId) => {
     const agents = getContact(state, surface, chatId)?.entry?.agents ?? {};
     return Object.values(agents).some((b) => b && typeof b === 'object' && b.threadId != null);
   };
 
-  // Parse `/join`/`/split`'s optional trailing token into a { node, name }. A KNOWN node name is the
-  // `<node>` override (both the space form `/join do` and the `=do` form); anything else is the
-  // `<name>` arg that fills {name} in the group title. node lowercased or null; name the raw token (or
-  // null → the caller defaults it to the verb word).
-  const parseForkArgs = (body) => {
-    const m = /^\/(?:join|split)\b(?:=(\S+))?[ \t]*(.*)$/i.exec(String(body ?? '').trim());
-    if (!m) return { node: null, name: null };
-    const tok = (m[1] ?? m[2] ?? '').trim();
-    if (!tok) return { node: null, name: null };
-    const first = tok.split(/\s+/)[0].toLowerCase();
-    if (knownNodeNames(cfg()).has(first)) return { node: first, name: null };
-    return { node: null, name: tok };
-  };
+  // `/join`/`/split`'s <name> (the rest of the line, it fills {name} in the group title); none → a
+  // random one (randomName).
+  const forkNameOf = (body) => /^\/(?:join|split)\b[ \t]*(.*)$/i.exec(String(body ?? '').trim())?.[1].trim() || randomName();
 
-  // The shared node gate for /join + /split: true to PROCEED on this node, false to stand down
-  // silently. node == null → proceed only when this node plays the primary role; a named node →
-  // proceed only when it is one of ours.
-  const forkNodeSelected = (node) => node
-    ? ownNodeNamesOf(cfg()).has(node)
-    : String(cfg().node_role ?? '').trim().toLowerCase() === 'primary';
+  // The shared node gate for /join + /split: true to PROCEED on this node (the primary role).
+  const forkNodeSelected = () => String(cfg().node_role ?? '').trim().toLowerCase() === 'primary';
 
   // config.join.placeholder / config.split.placeholder, with the built-in fallback so a command never
   // edits to an empty string.
@@ -3389,15 +3169,19 @@ export function createCommands({
     const body = tpl.split('{name}').map((p) => p.split('{group}').map(esc).join('.*')).join('[0-9a-f]{5}');
     return new RegExp(`^(?:${esc(SIDE_GROUP_PREFIX)})?${body}( \\d{4}-\\d{8})?$`).test(String(title));
   };
-  // config.join.opener / config.split.opener ({group}=parent chat title), with the built-in fallback —
-  // the message posted into the new side-group so it surfaces in Beeper (see postOpener below).
-  const openerOf = (block, dflt, groupName) =>
+  // config.join.opener / config.split.opener ({group}=parent chat title, {handle}=the being's), with the
+  // built-in fallback — the message posted into the new side-group so it surfaces in Beeper (postOpener).
+  const openerOf = (block, dflt, groupName, ev = null) =>
     ((block && typeof block.opener === 'string' && block.opener.trim()) ? block.opener : dflt)
-      .replaceAll('{group}', String(groupName ?? ''));
-  // config.join.default_name / config.split.default_name — the {name} used when /join|/split carries NO
-  // <name> (was the hard-coded verb word "join"/"split", which made every nameless /join on one chat an
-  // IDENTICAL title), with the built-in fallback. Same shape as placeholderOf.
-  const defaultNameOf = (block, dflt) => (block && typeof block.default_name === 'string' && block.default_name.trim()) ? block.default_name : dflt;
+      .replaceAll('{group}', String(groupName ?? '')).replaceAll('{handle}', handleOf(ev));
+  // A nameless /join or /split's {name} (operator 2026-10-19): 5 random lowercase letters/digits. Never
+  // all hex: that is a retired discreet group's shape (titleLooksDiscreet).
+  const randomName = () => {
+    let s;
+    do s = Array.from({ length: 5 }, () => 'abcdefghijklmnopqrstuvwxyz0123456789'[randomInt(36)]).join('');
+    while (/^[0-9a-f]{5}$/.test(s));
+    return s;
+  };
   // RODZ's Beeper user id (@whatsapp_lid-…) — the one member the group must carry besides the creating
   // account. WhatsApp's create REFUSES a `+phone` member; the bridge resolves the id from
   // config.beeper.secondary.phone's digits. Null => STOP (log only, no chat reply). Shared by both verbs.
@@ -3616,14 +3400,13 @@ export function createCommands({
     return lines.length ? ['Agents in this chat:', ...lines].join('\n') : null;
   }
 
-  // /join (anyone types /join [<name>|<node>] in chat C): create the side-group and ALIAS it to C.
+  // /join (anyone types /<handle> join [<name>] in chat C): create the side-group and ALIAS it to C.
   // Every precondition resolves BEFORE any bridge/state mutation (an unresolvable Rodz STOPS, nothing
   // created).
   async function joinGroup(ev) {
     const surface = surfaceOf(ev);
     if (!loadState || !writeState) return;                   // state not wired → silent
-    const { node, name } = parseForkArgs(ev.body);
-    if (!forkNodeSelected(node)) return;                     // not the selected node → silent
+    if (!forkNodeSelected()) return;                         // not the primary node → silent
     const refused = memberRefusal(ev, '/join');
     if (refused) return refused;
     const state0 = await loadState();
@@ -3638,7 +3421,7 @@ export function createCommands({
     // always a known contact; this guard only trips on a genuinely-unknown chat.
     if (!contact) {
       onLog(`/join: ${ev.chatId} is not a known conversation — nothing to alias, refusing.`);
-      await send?.(ev.chatId, '/join: I don\'t know this conversation yet — send a message here first, then /join.');
+      await send?.(ev.chatId, `/join: I don't know this conversation yet — send a message here first, then ${hintOf('join', ev)}.`);
       return;
     }
     // A sender other than the account itself goes into the new group; only a bridged id can be invited.
@@ -3648,9 +3431,9 @@ export function createCommands({
       return 'refused — the sender id cannot be invited';
     }
     const cTitle = ev.chatName || (await forkBridge.chatTitle(ev.chatId)) || ev.chatId;
-    const joinName = name ?? defaultNameOf(cfg().join, 'egpt super');
+    const joinName = forkNameOf(ev.body);
     const baseTitle = groupTitleOf(cTitle, joinName);
-    const vars = (title) => ({ name: joinName, title, group: cTitle, by: ev.senderName ?? '' });
+    const vars = (title) => ({ name: joinName, title, group: cTitle, by: ev.senderName ?? '', handle: handleOf(ev) });
     const placeholder = (title) => fillVars(placeholderOf(cfg().join, JOIN_PLACEHOLDER_DEFAULT), vars(title));
     // Our own message is edited in place; anyone else's is not ours to edit, so it gets a reply.
     const announce = (text) => (ev.isSender ? forkBridge.editMessage(ev.chatId, ev.msgId, text) : send?.(ev.chatId, text));
@@ -3705,18 +3488,17 @@ export function createCommands({
     onLog(`/join: ${cTitle} -> group ${joinChatId} aliased to ${primaryJid} (invited ${plan.participantIDs.join(', ')})`);
     // (d) POST THE OPENER so the new (otherwise-empty) group surfaces in Beeper — added step AFTER the
     //     success path; a failure here never undoes the alias/placeholder above.
-    await postOpener({ verb: '/join', newChatId: joinChatId, openerText: openerOf(cfg().join, JOIN_OPENER_DEFAULT, cTitle), origin: primaryJid, kind: 'join', transcript });
+    await postOpener({ verb: '/join', newChatId: joinChatId, openerText: openerOf(cfg().join, JOIN_OPENER_DEFAULT, cTitle, ev), origin: primaryJid, kind: 'join', transcript });
   }
 
-  // /split (anyone types /split [<name>|<node>] in chat C): create a side-group backed by a NEW
+  // /split (anyone types /<handle> split [<name>] in chat C): create a side-group backed by a NEW
   // conversation that DIVERGES from C — each resident being's thread is COPIED under a new thread id.
   // Same preconditions/gate as /join; the difference is a NEW entry + per-being thread copy instead of
   // an alias.
   async function splitGroup(ev) {
     const surface = surfaceOf(ev);
     if (!loadState || !writeState) return;                   // state not wired → silent
-    const { node, name } = parseForkArgs(ev.body);
-    if (!forkNodeSelected(node)) return;                     // not the selected node → silent
+    if (!forkNodeSelected()) return;                         // not the primary node → silent
     const refused = memberRefusal(ev, '/split');
     if (refused) return refused;
     let state = await loadState();
@@ -3729,7 +3511,7 @@ export function createCommands({
     if (!plan) return;
     const cTitle = ev.chatName || (await forkBridge.chatTitle(ev.chatId)) || ev.chatId;
     const placeholder = placeholderOf(cfg().split, SPLIT_PLACEHOLDER_DEFAULT);
-    const title = groupTitleOf(cTitle, name ?? defaultNameOf(cfg().split, 'egpt split'));
+    const title = groupTitleOf(cTitle, forkNameOf(ev.body));
 
     // ── mutations begin ──
     // (a) CREATE the group (sideGroupPlan). SHORT id, same reason as /join above: the new entry +
@@ -3747,7 +3529,7 @@ export function createCommands({
     onLog(`/split: ${cTitle} -> NEW conv ${splitChatId} (${split.slug}, invited ${plan.participantIDs.join(', ')}); copied threads for ${split.copied.join(', ') || '(none)'} (parent ${ev.chatId})`);
     // (e) POST THE OPENER so the new group surfaces in Beeper — added step AFTER the copy + placeholder;
     //     a failure here never undoes the conversation/threads already written.
-    await postOpener({ verb: '/split', newChatId: splitChatId, openerText: openerOf(cfg().split, SPLIT_OPENER_DEFAULT, cTitle), origin: ev.chatId, kind: 'split' });
+    await postOpener({ verb: '/split', newChatId: splitChatId, openerText: openerOf(cfg().split, SPLIT_OPENER_DEFAULT, cTitle, ev), origin: ev.chatId, kind: 'split' });
   }
 
   // A /split group's own conversation, on the creator (/split) and on the other node (linkSideGroup):
@@ -3810,9 +3592,7 @@ export function createCommands({
       ?? getContact(state, surface, ev.chatId)?.entry?.parent_chat ?? null;
     if (!originalChatId) return;                           // not a join/split group → silent
     if (!residesHere(state, surface, ev.chatId)) return;   // gate (defensive — a group implies it)
-    // Both nodes hold the group once the other links it (linkSideGroup): the node_role secondary leaves /send to the primary.
-    if (String(cfg().node_role ?? '').trim().toLowerCase() === 'secondary') return;
-    if (ev.replyToId == null) { await send?.(ev.chatId, 'reply to a message with /send to send it to the original chat'); return; }
+    if (ev.replyToId == null) { await send?.(ev.chatId, `reply to a message with ${hintOf('send', ev)} to send it to the original chat`); return; }
     // The quoted message was logged on THIS surface, so read it from THIS surface's own transcript:
     // for a /join side-room that is transcript-<its id>.md beside the shared transcript.md (same
     // folder), for a /split its own conversation's transcript.md. transcriptTarget is the SAME
@@ -3906,7 +3686,7 @@ export function createCommands({
       await mutateState(writeState, async () => writeState(dropContact(await loadState(), surface, room)));
       onLog(`automatic: ${room} (the SI+ group of ${ev.chatName || ev.chatId}) is gone — alias dropped`);
     }
-    if (!forkNodeSelected(null)) { onLog(`automatic: ${ev.chatName || ev.chatId} has no side group on this node and only the node_role primary node makes one — reply withheld`); return false; }
+    if (!forkNodeSelected()) { onLog(`automatic: ${ev.chatName || ev.chatId} has no side group on this node and only the node_role primary node makes one — reply withheld`); return false; }
     if (!create) return () => autoSideGroup(ev);
     const key = `${surface}\u0000${ev.chatId}`;
     if (!autoCreating.has(key)) autoCreating.set(key, openAutoSideGroup(ev, surface, setting).finally(() => autoCreating.delete(key)));
@@ -3969,10 +3749,11 @@ export function createCommands({
     });
   }
 
-  // ── COMMAND ALIASES (operator 2026-10-19): config/commands_alias.yaml, `<alias>: /<command> [args]` ──
+  // ── COMMAND ALIASES (operator 2026-10-19): config/commands_alias.yaml, `<alias>: /<handle> <command> [args]` ──
   // A line that STARTS with an alias (any case, whole words, the longest alias first) is that command
-  // line plus the rest of the line. spine classify sends it down the typed command's path, so every gate
-  // is the command's own. Read through the stat cache: an edit applies on the next message.
+  // line plus the rest of the line, read by commandOf like a typed one, so every gate is the command's
+  // own. The handle may be any node's being: that node runs it. Read through the stat cache: an edit
+  // applies on the next message.
   const parseAliasFile = (text) => { try { return { map: text == null ? null : YAML.parse(text) }; } catch (e) { return { error: e?.message ?? String(e) }; } };
   let aliasMemo = { key: null, list: [] };
   function aliasList() {
@@ -3988,35 +3769,34 @@ export function createCommands({
     else for (const [k, v] of Object.entries(map ?? {})) {
       const alias = String(k).trim().toLowerCase().split(/\s+/).join(' ');
       const line = typeof v === 'string' ? v.trim() : '';
+      const bare = COMMAND_SET.has(line.split(/[\s=]/)[0].toLowerCase());
       const why = !alias ? 'is empty'
         : alias.startsWith('/') ? 'starts with "/"'
         : handles.has(alias.replace(/^@/, '').split(' ')[0]) ? 'starts with a being handle'
-        : !COMMAND_SET.has(line.split(/[\s=]/)[0].toLowerCase()) ? `maps to ${JSON.stringify(v)}, not a known command` : null;
+        : bare ? `maps to ${JSON.stringify(v)}, a command with no being — write /<handle> ${line.slice(1)}`
+        : !parseBeingCommand(line) ? `maps to ${JSON.stringify(v)}, not /<handle> <known command>` : null;
       if (why) { onLog(`commands_alias.yaml: "${k}" ${why} — refused`); continue; }
       list.push({ alias, line, re: new RegExp(`^${alias.split(' ').map(esc).join('\\s+')}(?![\\p{L}\\p{N}_])`, 'iu') });
     }
     aliasMemo = { key, list: list.sort((a, b) => b.alias.length - a.alias.length) };
     return aliasMemo.list;
   }
-  // The typed command a line stands for ({ ...ev, body: <command line>, alias }), or null. A leading
+  // The command line a line stands for ({ body, alias }), or null — commandOf reads it. A leading
   // , . : ; ! ? of the rest is dropped. A node-signed line never is one: being output is never input.
-  function aliased(ev) {
-    const body = String(ev?.body ?? '').trim();
-    if (ev?.fromNode != null || !body || body.startsWith('/')) return null;
+  function aliasOf(ev, body) {
+    if (ev?.fromNode != null || !body) return null;
     for (const { alias, line, re } of aliasList()) {
       const hit = re.exec(body);
       if (!hit) continue;
       const rest = body.slice(hit[0].length).replace(/^[\s,.:;!?]+/, '');
-      return { ...ev, body: rest ? `${line} ${rest}` : line, alias };
+      return { body: rest ? `${line} ${rest}` : line, alias };
     }
     return null;
   }
 
-  // /config [<key>[=<value>]] — the `=` idiom the node binding already uses (`/config=kg`),
-  // applied to the pair (operator ruling 2026-07-28, replacing the one-day-old `set`/`get`
-  // sub-verbs — no legacy alias kept). Bare: a redacted dump. `<key>` alone: a GET. `<key>=<value>`:
-  // a SET. Both may appear together (`/config=kg default_node=do`) — the node binding is stripped
-  // by the gate before configCmd ever sees `rest`, so this needs no special handling here.
+  // /config [<key>[=<value>]] — the `=` idiom applied to the pair (operator ruling 2026-07-28,
+  // replacing the one-day-old `set`/`get` sub-verbs — no legacy alias kept). Bare: a redacted dump.
+  // `<key>` alone: a GET. `<key>=<value>`: a SET.
   // <key> resolves through resolveConfigKey (config/config-schema.mjs — a dotted path used as-is,
   // or a bare leaf looked up in the KEYS: index); <value> is JSON.parse'd, falling back to the raw
   // string on a parse failure (same coercion the extension used), then written via writeConfigKey
@@ -4026,7 +3806,7 @@ export function createCommands({
   // Matched against KEY NAMES, recursively. Credentials AND personal identifiers: a dump goes
   // to whatever surface asked, which is usually a real Beeper chat, permanently. `account` and
   // `allowed_users` are the operator's email and phone numbers — not secrets, but a config dump
-  // exists to check values like default_node, not to post a contact list into a group.
+  // exists to check values like node_role, not to post a contact list into a group.
   // `account` is ANCHORED so `peer_nodes` ([kg, do] — not sensitive, and worth seeing) stays.
   const CONFIG_REDACT_RE = /token|key|secret|password|^account$|allowed_users|ics_url/i;   // ics_url: book's secret iCal address
   function redactConfigValue(value) {
@@ -4038,7 +3818,7 @@ export function createCommands({
     }
     return value;
   }
-  const CONFIG_USAGE = 'usage: /config | /config <key> | /config <key>=<value>';
+  const CONFIG_USAGE = 'usage: /<handle> config | /<handle> config <key> | /<handle> config <key>=<value>';
   async function configCmd(rest) {
     if (!rest) return '```json\n' + JSON.stringify(redactConfigValue(cfg()), null, 2) + '\n```';
     const eq = rest.indexOf('=');
@@ -4119,33 +3899,6 @@ export function createCommands({
     const n = floodBan.unban(surfaceOf(ev), ev.chatId, name);
     if (n) return `cleared ${n} flood ban${n === 1 ? '' : 's'}${name ? ` matching "${name}"` : ''} here`;
     return name ? `no flood ban matching "${name}" here` : 'no active flood ban here';
-  }
-
-  // `/status <target>` NODE GATE (operator ruling 2026-07-25) — classify <target> BEFORE
-  // the conversation-fragment search runs. Bare /status is untouched: both co-account
-  // nodes answer it, as designed. Named, exactly one node answers:
-  //
-  //   'mine'   — <target> is one of THIS node's own names (node_name ∪ node_alias, via
-  //              the SHARED ownNodeNamesOf — the same set /chrome's gate matches). This
-  //              node replies with the bare-/status node-health payload.
-  //   'silent' — <target> is a node on this Beeper account that is NOT us (cfg.peer_nodes,
-  //              the roster /status already surfaces as `peers:`). Reply NOTHING AT ALL —
-  //              the same deliberate silence /chrome uses. It must NOT fall through to the
-  //              fragment search: on 2026-07-25 `/status do` typed on kg did exactly that,
-  //              matched 9 conversations, and the "be more specific" reply seeded the
-  //              two-node message flood. A bare "unknown node" would be just as wrong —
-  //              every node answering that IS the double-answer the gate prevents.
-  //   null     — an ordinary fragment (or a node with no identity configured): fall through
-  //              to statusTarget, byte-identical to before.
-  //
-  // Precedence is node-first: a conversation slug colliding with a node name loses, and
-  // renaming the slug is the operator's call — no disambiguation, no warning machinery.
-  function statusNodeGate(target) {
-    const t = String(target).toLowerCase();
-    if (ownNodeNamesOf(cfg()).has(t)) return 'mine';
-    const peers = cfg().peer_nodes;
-    if (Array.isArray(peers) && peers.some((p) => String(p ?? '').trim().toLowerCase() === t)) return 'silent';
-    return null;
   }
 
   // Assemble the /status report as a fenced YAML block (operator 2026-07-02: the
@@ -4547,5 +4300,5 @@ export function createCommands({
   // above). `/e`/`/egpt` now carry no special meaning at all and fall through to the generic
   // catch-all like any other unrecognized token.
 
-  return { isCommand, aliased, run, runCaptured, remoteNode, nodeCommandForMe, makeNodeExplicit, currentRoomOf, startBrowser, chromeClientFor: ensureChrome, browserConversationOf, chatChromeOf, autoSideGroup, linkSideGroup };
+  return { isCommand, commandOf, hintOf, run, currentRoomOf, startBrowser, chromeClientFor: ensureChrome, browserConversationOf, chatChromeOf, autoSideGroup, linkSideGroup };
 }

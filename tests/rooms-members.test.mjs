@@ -943,30 +943,29 @@ describe('/members usage line', () => {
   });
 });
 
-// C3 (HANDOFF 2026-07-26): /members joined the node-addressable set, so a node token is
-// stripped by the ONE shared gate (commands.mjs) before /members' own sub-grammar parses.
-// `=<name>` bound to the COMMAND TOKEN (operator ruling 2026-07-27, revised same day: the
-// first cut let "node=<name>" float anywhere in the arguments, and that's what let `/tabs=do`
-// fall through to the catch-all live — see commands.mjs's NODE_ADDRESSABLE comment) replaced
-// the old floating parse. The three things that must hold together: a peer's name silences us,
-// OUR name runs here, and the existing sub-grammar (`add tab <n>`, `<id> mode <m>`, bare) is
-// untouched.
-describe('/members <node> — the shared node gate, with the sub-grammar intact', () => {
-  const NODES = { node_name: 'kg', peer_nodes: ['kg', 'do'] };
+// C3 (HANDOFF 2026-07-26) was the `/members=<node>` gate; since 2026-10-19 a command names its
+// being instead: `/e members` runs on E's node, `/d members` is D's node's. Three things hold
+// together: another node's handle silences us, OUR handle runs here, and the sub-grammar
+// (`add tab <n>`, `<id> mode <m>`, bare) is untouched.
+describe('/members by being — the handle picks the node, with the sub-grammar intact', () => {
+  const NODES = { node_name: 'kg', peer_nodes: ['kg', 'do'], agents: { egpt: { handles: ['e', 'egpt'], default: true } } };
+  // The spine's reading (classify): commandOf, then isCommand, then run.
+  const typed = async (cmds, ev) => { const c = cmds.commandOf(ev); if (c && cmds.isCommand(c)) await cmds.run(c); return c; };
 
-  it('REPRODUCE-FIRST: /members=do (a peer, not us) answers NOTHING AT ALL', async () => {
+  it('/d members (another node\'s being) is no command here: answers NOTHING AT ALL', async () => {
     const { cmds, sent } = harness({ config: NODES });
-    await cmds.run({ ...self, body: '/members=do' });
+    const c = await typed(cmds, { ...self, body: '/d members', authorized: true });
+    expect(c.commandElsewhere).toBe('d');
     expect(sent).toEqual([]);
   });
 
-  it('/members=kg (OUR node) strips the token and lists, exactly like bare /members', async () => {
+  it('/e members (OUR being) lists, exactly like the dispatcher\'s /members', async () => {
     const cdp = { listTabs: async () => threeTabs };
     const { cmds, sent } = harness({ cdp, config: NODES });
     await cmds.run({ ...self, body: '/members add tab 1' });
     await cmds.run({ ...self, body: '/members' });
     const bare = sent.at(-1).text;
-    await cmds.run({ ...self, body: '/members=kg' });
+    await typed(cmds, { ...self, body: '/e members', authorized: true });
     expect(sent.at(-1).text).toBe(bare);
     expect(sent.at(-1).text).not.toMatch(/usage:/);
   });

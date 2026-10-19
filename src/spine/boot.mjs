@@ -584,13 +584,7 @@ export function makePeerMouth({ peer, bridge, bridgeOf = null, owns = () => fals
 // THE MISSING PIECE IS `ev`: a handler only ever has `send?.(ev.chatId, text)` — the chatId, not
 // the InboundEvent transcript.log needs (ev.surface, ev.chatName for the slug resolve). `run`
 // below wraps createCommands's own `run(ev)` to remember ev BY CHAT ID for exactly the span of
-// that call — one in-flight command per chat, the same assumption commands.mjs's own capture-sink
-// Map already relies on (its comment: "concurrent runs never cross") — so `send` can read it back.
-//
-// A MESH-CAPTURED command (mesh.mjs's runCaptured) never reaches this `send` at all: commands.mjs
-// diverts it into a private sink instead (the whole point — that reply rides home INSIDE an
-// envelope). So a relayed command is correctly excluded: it was never posted into a room, and the
-// operator ruling ("everything that is typed or received in a ROOM") only covers what was.
+// that call — one in-flight command per chat — so `send` can read it back.
 //
 // LABEL: 'system' — a command reply is the NODE speaking, not a persona (src/shell/app.mjs
 // already uses author 'system' for this identical class of message: spine-generated, not a
@@ -781,22 +775,13 @@ function shellHeaderGroupOf(agent, nodeName) {
 //                 `lobby → X` arrow — the shell's fixed home conversation is LOBBY_SLUG itself,
 //                 so with nothing joined the segment reads `room: lobby` (honest, not "→ nothing"),
 //                 and with a room joined it reads `room: <that room>`).
-//   defaultNode = raw `dispatch.default_node` (string|undefined/null; normalized in here, trim+lowercase).
-//                 Renders ` → <default_node>` right after the room segment's value, UNLESS it's
-//                 unset/empty OR equals nodeName itself (bare commands run locally either way —
-//                 no arrow implying a route that isn't happening). Kept as the ONLY arrow in the
-//                 string now that room-join no longer uses one, so `room: acim → do` reads
-//                 unambiguously as "cross-node default routing", not room-to-room navigation.
 // Groups render in agents-map insertion order (JS object order already preserves it); handles
 // render within a group in agent-declaration order. SHORT HANDLE = the shortest string in the
 // agent's `handles:` array, else its map key.
-export function computeShellHeader({ nodeName, agents, defaultNode, currentRoom } = {}) {
-  const normDefaultNode = String(defaultNode ?? '').trim().toLowerCase();
-  const normNodeName = String(nodeName ?? '').trim().toLowerCase();
-  const arrow = (normDefaultNode && normDefaultNode !== normNodeName) ? ` → ${normDefaultNode}` : '';
+export function computeShellHeader({ nodeName, agents, currentRoom } = {}) {
   const room = String(currentRoom ?? '').trim();
   const roomLabel = (room && room !== LOBBY_SLUG) ? room : LOBBY_SLUG;
-  const base = `🟢 room: ${roomLabel}${arrow} — ? for help · ctrl-d = send`;
+  const base = `🟢 room: ${roomLabel} — ? for help · ctrl-d = send`;
   const map = (agents && typeof agents === 'object' && !Array.isArray(agents)) ? agents : {};
   const groups = new Map();   // groupKey → [ '@handle', ... ], insertion order = first agent encountered
   for (const [key, a] of Object.entries(map)) {
@@ -2586,7 +2571,7 @@ export async function boot({
   // 2026-07-26. The wrap is a Proxy precisely so this port's `isConnected` GETTER stays live.
   // THE PERMANENT SHELL HEADER (operator 2026-07-27, computeShellHeader above): computed HERE,
   // the ONE place config is read for this feature — the editor never touches config.yaml.
-  const shellHeaderAt = (currentRoom) => computeShellHeader({ nodeName: node_name, agents: cfg.agents, defaultNode: cfg.dispatch?.default_node, currentRoom });
+  const shellHeaderAt = (currentRoom) => computeShellHeader({ nodeName: node_name, agents: cfg.agents, currentRoom });
   const shellHeader = shellHeaderAt();
   // The watchers, built before the router that consults them. Ports come from the agents block
   // and nowhere else, so a node declaring no unless_peer_alive builds none and probes nothing.
@@ -3030,9 +3015,9 @@ export async function boot({
   // affected by whether its audit landed. Wired into createCommands below; exposed on the app for
   // assertability, exactly like noticeToAdmin.
   //
-  // TWO-NODE CONVERGENCE (operator 2026-10-08, the follow-up): a few commands (/join, /split,
-  // /status <sibling>, /end in a one-node side-room) are NOT deduped by the default_node gate, so
-  // BOTH co-account nodes audit the same command EVENT and post TWO lines here. audit-merge.mjs
+  // TWO-NODE CONVERGENCE (operator 2026-10-08, the follow-up): when BOTH co-account nodes audit the
+  // same command EVENT they post TWO lines here (since 2026-10-19 a command runs on its being's
+  // node only, so this is rare). audit-merge.mjs
   // converges them onto ONE message keyed by ev.msgHash (the `key`, carried identically on both
   // nodes): the PRIMARY posts read-free with a marker; the SECONDARY staggers, reads THIS chat's
   // recent messages for that marker and EDITS the primary's line (appending its own segment) — or
@@ -3120,9 +3105,7 @@ export async function boot({
   const turns = createTurns({ brain, bridge, bridgeOf: rawBridgeOf, peerMouth, log });
 
   // operator slash commands (Self DM / authorized) — lifecycle wired now; reuses
-  // the same exit codes the daemon respawns on. Constructed BEFORE the mesh: a
-  // node-addressed command can arrive as an envelope and is executed through THIS
-  // service on the far side (operator 2026-07-26 — egpt as a remote control).
+  // the same exit codes the daemon respawns on.
   // COMMAND REPLIES → transcript.md too (see wrapCommandsForTranscript above): the send below
   // is wrapped so every command reply is recorded under the 'system' label, node-qualified like
   // any other line, and `commands.run` is wrapped right after construction so `send` can find the
@@ -3323,7 +3306,7 @@ export async function boot({
   // on this node's EAR, and neither of which exists on the mouth's account when the two are
   // different Beeper accounts. shellAwareBridgeOf, not rawBridgeOf, to match the `bridge` above:
   // a mesh reply into a shell-owned chat must still reach the console.
-  const mesh = createMeshService({ bridge: shellAwareBridge, bridgeOf: shellAwareBridgeOf, brain, commands, getConfig, bodyEmojiOf, labelOf, getSelfChatId: selfChatId, loadState: _loadState, turns, onLog: (m) => log.line?.(`[mesh] ${m}`) });
+  const mesh = createMeshService({ bridge: shellAwareBridge, bridgeOf: shellAwareBridgeOf, brain, getConfig, bodyEmojiOf, labelOf, getSelfChatId: selfChatId, loadState: _loadState, turns, onLog: (m) => log.line?.(`[mesh] ${m}`) });
   bridge.onEdit((e) => mesh.onEdit({ msgId: e.msgId, newText: e.newText }));
 
   // Conversation-E LIMBS (ROADMAP §3): a reply may carry own-line action commands

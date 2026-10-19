@@ -89,12 +89,14 @@ default `~/.egpt`).
 
 You drive eGPT from your **Self-DM** on any authorized surface (or as an
 authorized sender). Slash commands typed there are intercepted by the node, not
-answered by the persona:
+answered by the persona. A command names a being — `/<handle> <command>`, e.g.
+`/e restart` — and only that being's node runs it; a bare `/restart` in a chat is
+ordinary text (the editor shell console still takes it):
 
 ```text
-/status                       compact node health (git sha, pid, uptime, liveness,
+/<handle> status              compact node health (git sha, pid, uptime, liveness,
                               heartbeats, conversation + this chat's mode)
-/agents[=<slug>] <handle>|all
+/<handle> agents[=<slug>] <handle>|all
                               manage ANY resident being (the persona, or a sibling
                               like wren) on any conversation. Bare: live status
                               (fenced yaml — engine/model/effort/allowed_tools,
@@ -102,13 +104,13 @@ answered by the persona:
                               `all` applies to every resident being on the entry.
                               omit `=<slug>` for this chat; from Self-DM name the
                               target (slug/name fragment or @jid)
-/agents[=<slug>] refresh <handle>|all
+/<handle> agents[=<slug>] refresh <handle>|all
                               SMALLEST: keep the running thread and re-feed it.
                               <chat>/directives/ is re-copied from the current
                               template immediately; the identity goes back into
                               the LIVE thread on its next turn. Nothing moved, no
                               new thread, the model keeps its context
-/agents[=<slug>] rethread <handle>|all
+/<handle> agents[=<slug>] rethread <handle>|all
                               MIDDLE: clear ONLY this being's threadId (mode,
                               access_level, and every other field survive
                               untouched) and roll transcript.md into
@@ -118,7 +120,7 @@ answered by the persona:
                               as part of this command. Was `restart` until
                               2026-09-10 — that word is /restart, the NODE's
                               lifecycle, and is refused here
-/agents[=<slug>] reset <handle>|all
+/<handle> agents[=<slug>] reset <handle>|all
                               BIG: archive this being's whole conversation folder
                               aside (transcript.md, media/, files/, directives/ —
                               everything), wipe ITS registry block (mode,
@@ -127,19 +129,19 @@ answered by the persona:
                               allowed_users, which are durable operator grants and
                               survive the reset, reseed a pristine tree at the
                               same path
-/agents[=<slug>] auto <mode> <handle>|all
+/<handle> agents[=<slug>] auto <mode> <handle>|all
                               set a chat's reply mode. modes: on · mute (log only,
                               never a turn) ·
                               mention-direct · mention · accum (mention + the turn
                               is prompted with what was said since the being's
                               last turn) · off
-/agents[=<slug>] access_level <regular|all|sandbox> <handle>|all
+/<handle> agents[=<slug>] access_level <regular|all|sandbox> <handle>|all
                               point a being at a confinement tier: regular (the
                               node's confined default), all (unconfined), or
                               sandbox (all's capability, only inside the OS box)
-/restart                      bounce the node (daemon respawns the current checkout)
-/upgrade                      git pull + npm install + rebuild, then respawn
-/rewind <ref>                 check out <ref>, reinstall, respawn
+/<handle> restart             bounce the node (daemon respawns the current checkout)
+/<handle> upgrade             git pull + npm install + rebuild, then respawn
+/<handle> rewind <ref>        check out <ref>, reinstall, respawn
 ```
 
 Restarts also work headlessly via the **ingest box**: drop a file whose content

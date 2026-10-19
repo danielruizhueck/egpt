@@ -27,10 +27,10 @@ function harness({ config = {}, configPath }) {
 }
 
 describe('/config <key>=<value> — bare leaf + dotted path resolution, write, redaction', () => {
-  it("REPRODUCE-FIRST: /config=kg default_node=do resolves the bare leaf to dispatch.default_node, writes it, and confirms the resolved path", async () => {
+  it("REPRODUCE-FIRST: /config default_node=do resolves the bare leaf to dispatch.default_node, writes it, and confirms the resolved path", async () => {
     const configPath = await tmpConfigPath();
     const { cmds, sent } = harness({ config: { node_name: 'kg' }, configPath });
-    await cmds.run({ body: '/config=kg default_node=do', chatId: '!self', authorized: true });
+    await cmds.run({ body: '/config default_node=do', chatId: '!self', authorized: true });
     expect(sent).toHaveLength(1);
     expect(sent[0].text).toMatch(/dispatch\.default_node/);
     // A hot key (step B): the spine swaps the re-read file in on its next tick.
@@ -158,7 +158,7 @@ describe('/config <key>=<value> — bare leaf + dotted path resolution, write, r
     const configPath = await tmpConfigPath();
     const { cmds, sent } = harness({ config: {}, configPath });
     await cmds.run({ body: '/config default_node = do', chatId: '!self', authorized: true });
-    expect(sent[0].text).toMatch(/usage: \/config/);
+    expect(sent[0].text).toMatch(/usage: \/<handle> config/);
     expect(sent[0].text).toMatch(/no spaces around/);
     await expect(readFile(configPath, 'utf8')).rejects.toThrow();
   });
@@ -166,10 +166,6 @@ describe('/config <key>=<value> — bare leaf + dotted path resolution, write, r
 
 describe('/config <key> — bare-key GET, mirrors the write path\'s resolution + redaction', () => {
   it('REPRODUCE-FIRST: /config default_node resolves the bare leaf and names dispatch.default_node = "do"', async () => {
-    // node_name matches default_node so the NODE GATE (run() line ~583) resolves this LOCALLY —
-    // an isolated cmds.run() has no mesh to forward through, so a default_node naming ANOTHER
-    // node would silently drop the command here (that forwarding path is covered separately in
-    // tests/remote-command.test.mjs, which runs the full spine+mesh stack).
     const configPath = await tmpConfigPath();
     const { cmds, sent } = harness({ config: { node_name: 'do', dispatch: { default_node: 'do' } }, configPath });
     await cmds.run({ body: '/config default_node', chatId: '!self', authorized: true });
@@ -230,33 +226,49 @@ describe('/config <key> — bare-key GET, mirrors the write path\'s resolution +
   });
 });
 
-describe('/config participates in node addressing (NODE_ADDRESSABLE gate)', () => {
-  it('/config=do default_node=do applies LOCALLY on the node named "do", replying with the resolved path', async () => {
+// A command names its being (2026-10-19): the being's node runs it, the other node does not.
+// `typed` is the spine's own reading (classify): commandOf, then isCommand, then run.
+const KG = { node_name: 'kg', peer_nodes: ['kg', 'do'], agents: { egpt: { handles: ['e', 'egpt'], default: true } } };
+const DO = { node_name: 'do', peer_nodes: ['kg', 'do'], agents: { egpt: { handles: ['d', 'don'], default: true } } };
+async function typed(cmds, ev) {
+  const c = cmds.commandOf(ev);
+  if (!c || c.commandElsewhere || !cmds.isCommand(c)) return c;
+  await cmds.run(c);
+  return c;
+}
+
+describe('/config runs on the node of the being it is typed to', () => {
+  it('/d config default_node=do applies on do (D\'s node), replying with the resolved path', async () => {
     const configPath = await tmpConfigPath();
-    const { cmds, sent } = harness({ config: { node_name: 'do', peer_nodes: ['kg', 'do'] }, configPath });
-    await cmds.run({ body: '/config=do default_node=do', chatId: '!fam', surface: 'whatsapp', authorized: true });
+    const { cmds, sent } = harness({ config: DO, configPath });
+    await typed(cmds, { body: '/d config default_node=do', chatId: '!fam', surface: 'whatsapp', authorized: true });
     expect(sent).toHaveLength(1);
     expect(sent[0].text).toMatch(/dispatch\.default_node/);
     const written = await readFile(configPath, 'utf8');
     expect(written).toMatch(/default_node: do/);
   });
 
-  it('/config=do default_node=do stays SILENT on a co-account peer node that is NOT named (kg)', async () => {
+  it('/d config default_node=do is not a command on kg: nothing said, nothing written', async () => {
     const configPath = await tmpConfigPath();
-    const { cmds, sent } = harness({ config: { node_name: 'kg', peer_nodes: ['kg', 'do'] }, configPath });
-    await cmds.run({ body: '/config=do default_node=do', chatId: '!fam', surface: 'whatsapp', authorized: true });
+    const { cmds, sent } = harness({ config: KG, configPath });
+    const c = await typed(cmds, { body: '/d config default_node=do', chatId: '!fam', surface: 'whatsapp', authorized: true });
+    expect(c.commandElsewhere).toBe('d');
     expect(sent).toHaveLength(0);
     await expect(readFile(configPath, 'utf8')).rejects.toThrow();   // never touched
   });
 });
 
-describe('LOCK: lifecycle + STOP still not node-addressable after /config joined NODE_ADDRESSABLE', () => {
-  it('/restart do, /upgrade do, /rewind do, and the STOP safe word never resolve to a remote node — even with default_node set', async () => {
+describe('LOCK: lifecycle typed to another node\'s being never runs here; STOP is no command', () => {
+  it('/d restart, /d upgrade, /d rewind x on kg are not commands there; "stop" is no command at all', async () => {
     const configPath = await tmpConfigPath();
-    const { cmds } = harness({ config: { node_name: 'kg', peer_nodes: ['kg', 'do'], dispatch: { default_node: 'do' } }, configPath });
-    for (const body of ['/restart do', '/upgrade do', '/rewind do', 'stop']) {
-      expect(cmds.remoteNode({ body, surface: 'shell', chatId: 'main' })).toBe(null);
+    const exits = [];
+    const cmds = createCommands({ getConfig: () => KG, send: async () => {}, exit: (code) => exits.push(code), configPath });
+    for (const body of ['/d restart', '/d upgrade', '/d rewind abc123']) {
+      const c = await typed(cmds, { body, surface: 'whatsapp', chatId: '!self', authorized: true });
+      expect(c?.commandElsewhere, body).toBe('d');
     }
+    expect(cmds.commandOf({ body: 'stop', surface: 'whatsapp', chatId: '!self', authorized: true })).toBe(null);
+    expect(exits).toEqual([]);
   });
 });
 

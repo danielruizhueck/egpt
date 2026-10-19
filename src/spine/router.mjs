@@ -392,8 +392,7 @@ export function createRouter({ getAgents = () => ({}), getConfig = () => ({}), d
     // relayDispatch's `prompt` straight to brain.turn, so `@don.mo hola` reached `don` with the
     // handle on. Nor COULD the far node strip it — the token is the ORIGIN's relay-agent handle,
     // in the origin's vocabulary, resolved by the one matcher here. So the origin takes it off
-    // the body it puts on the wire (spine.dispatchChat → addressedBody), the same field
-    // mesh.forwardCommand already rewrites before forwarding.
+    // the body it puts on the wire (spine.dispatchChat → addressedBody).
     const address = atStart ? (token ?? null) : null;
     // MULTIPATH (operator 2026-07-06: multipath is configuration — an agent declares a list of
     // paths, every message through every path). An agent carrying `paths:` is a relay whose every

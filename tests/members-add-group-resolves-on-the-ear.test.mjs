@@ -186,7 +186,7 @@ describe('/members add group <name> resolves the name on the EAR, not on the def
     // The precondition: this really is the split shape — both connections held, only one ear.
     expect(Object.keys(byConnection).sort()).toEqual(['primary', 'secondary']);
 
-    await deliver(byConnection.primary, SELF_DM, `/members add group ${GROUP_NAME}`);
+    await deliver(byConnection.primary, SELF_DM, `/e members add group ${GROUP_NAME}`);
     await waitFor(() => posted().length > 0);
 
     expect(posted()[0].text).toContain(`added group '${GROUP_NAME}' → '${ON_PRIMARY}'`);
@@ -204,7 +204,7 @@ describe('/members add group <name> resolves the name on the EAR, not on the def
       [SECONDARY]: [],
     });
 
-    await deliver(byConnection.primary, SELF_DM, `/members add group ${GROUP_NAME}`);
+    await deliver(byConnection.primary, SELF_DM, `/e members add group ${GROUP_NAME}`);
     await waitFor(() => posted().length > 0);
 
     expect(posted()[0].text).toContain(`added group '${GROUP_NAME}' → '${ON_PRIMARY}'`);
@@ -222,7 +222,7 @@ describe('/members add group <name> resolves the name on the EAR, not on the def
       [SECONDARY]: [{ id: ON_SECONDARY, name: 'dolly only chat' }],
     });
 
-    await deliver(byConnection.primary, SELF_DM, '/members add group perrito traduciones');   // the live typo
+    await deliver(byConnection.primary, SELF_DM, '/e members add group perrito traduciones');   // the live typo
     await waitFor(() => posted().length > 0);
 
     const reply = posted()[0].text;
@@ -241,7 +241,7 @@ describe('/members add group <name> resolves the name on the EAR, not on the def
     });
     expect(built.map((s) => s.connection)).toEqual(['primary']);
 
-    await deliver(byConnection.primary, SELF_DM, `/members add group ${GROUP_NAME}`);
+    await deliver(byConnection.primary, SELF_DM, `/e members add group ${GROUP_NAME}`);
     await waitFor(() => posted().length > 0);
 
     expect(posted()[0].text).toContain(`added group '${GROUP_NAME}' → '${ON_PRIMARY}'`);

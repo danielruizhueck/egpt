@@ -153,10 +153,12 @@ describe('what is NOT audited', () => {
     expect(sent).toHaveLength(1);                            // (the catch-all still replied, unchanged)
   });
 
-  it('a command addressed to ANOTHER co-account node (/status=do) is NOT audited here — it audits there', async () => {
+  it('a command naming ANOTHER node\'s being (/don status) is no command here — nothing runs, nothing is audited', async () => {
     const { cmds, audit, sent } = harness({ state: seedC() });
-    await cmds.run(ev(C_CHAT, '/status=do', 'conversas con favel'));
-    expect(audit).toHaveLength(0);                           // the node gate stands this node down silently, with no audit
+    const cmd = cmds.commandOf({ ...ev(C_CHAT, '/don status', 'conversas con favel'), authorized: true });
+    expect(cmd.commandElsewhere).toBe('don');                // the spine records it and runs nothing
+    expect(cmds.isCommand(cmd)).toBe(false);
+    expect(audit).toHaveLength(0);
     expect(sent).toHaveLength(0);
   });
 });

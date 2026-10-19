@@ -4733,13 +4733,13 @@ describe('a node that SLEPT is not a node that just started — the backlog cuto
       fake.emit(said(ID('n2'), 'bueno, mañana te cuento', h(2)));
       fake.emit(said(ID('c1'), 'buenas noches a todos', h(3), CHATTER));   // mention mode, nobody addressed
       const plain = (p) => stripNodeSignature(p.text ?? '');
-      const notices = () => fake.posts.filter((p) => plain(p).endsWith('type /recap to list them'));
+      const notices = () => fake.posts.filter((p) => plain(p).endsWith('type /e recap to list them'));
       await waitFor(() => notices().length > 0, 15_000);
       await new Promise((r) => setTimeout(r, 1_500));        // the chatter chat settled at the same moment
-      expect(notices().map((p) => ({ chatID: p.chatID, text: plain(p) }))).toEqual([{ chatID: GROUP, text: '2 messages in the backlog. type /recap to list them' }]);
+      expect(notices().map((p) => ({ chatID: p.chatID, text: plain(p) }))).toEqual([{ chatID: GROUP, text: '2 messages in the backlog. type /e recap to list them' }]);
       expect(node.turns).toEqual([]);                        // told, not answered
 
-      fake.emit(said(ID('recap'), '/recap', node.now() + 1_000));
+      fake.emit(said(ID('recap'), '/e recap', node.now() + 1_000));
       await waitFor(() => fake.posts.some((p) => plain(p).startsWith('2 messages in the backlog:')));
       const listing = plain(fake.posts.find((p) => plain(p).startsWith('2 messages in the backlog:'))).split('\n');
       expect(listing).toContain(`An (${hhmm(h(1))}): @e ¿me escuchas?`);

@@ -894,7 +894,7 @@ describe('spine — alias dispatch (the command line runs, the record keeps the 
     const ran = [];
     const commands = {
       isCommand: (ev) => String(ev.body).startsWith('/'),
-      aliased: (ev) => (ev.body.startsWith('aparte') ? { ...ev, body: `/join${ev.body.slice('aparte'.length)}`, alias: 'aparte' } : null),
+      commandOf: (ev) => (ev.body.startsWith('aparte') ? { ...ev, body: `/join${ev.body.slice('aparte'.length)}`, alias: 'aparte', commandBeing: 'e', commandHandle: 'e' } : null),
       run: async (ev) => { ran.push(ev.body); },
     };
     const spine = createSpine({

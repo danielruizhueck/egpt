@@ -490,7 +490,7 @@ describe('boot — a typed /upgrade with a turn in flight (the kg 16:10 incident
     const turn = say('e busca esto', { atE: true });            // not awaited: it is held open
     expect(await waitFor(() => sessions.started.length === 1)).toBe(true);
 
-    await say('/upgrade');
+    await say('/e upgrade');
     await flush();
     expect(exits).toEqual([]);                                    // ← before this change: [42], the turn still open
 
@@ -510,7 +510,7 @@ describe('boot — a typed /upgrade with a turn in flight (the kg 16:10 incident
 
   it('nothing in flight: /upgrade exits 42 as fast as before, and publishes no drain', async () => {
     const { exits, say } = await bootHeld();
-    await say('/upgrade');
+    await say('/e upgrade');
     expect(await waitFor(() => exits.length > 0)).toBe(true);
     expect(exits).toEqual([42]);
     expect(existsSync(DRAINING)).toBe(false);
@@ -520,8 +520,8 @@ describe('boot — a typed /upgrade with a turn in flight (the kg 16:10 incident
     const { sessions, timers, exits, say, lines } = await bootHeld();
     const turn = say('e busca esto', { atE: true });
     await waitFor(() => sessions.started.length === 1);
-    await say('/restart');
-    await say('/upgrade');
+    await say('/e restart');
+    await say('/e upgrade');
     await flush();
     expect(exits).toEqual([]);
     expect(lines.filter((l) => l.includes('drain: waiting for'))).toHaveLength(1);
@@ -537,7 +537,7 @@ describe('boot — a typed /upgrade with a turn in flight (the kg 16:10 incident
     const { sessions, exits, say } = await bootHeld();
     const turn = say('e busca esto', { atE: true });
     await waitFor(() => sessions.started.length === 1);
-    await say('/rewind abc1234');
+    await say('/e rewind abc1234');
     expect(await waitFor(() => exits.length > 0)).toBe(true);
     expect(exits).toEqual([44]);
     sessions.release();
@@ -577,7 +577,7 @@ describe('boot — a /restart with background work live on a warm session (step 
 
   it('(a)(e) waits, names the task in state/draining.json — and /restart force proceeds', async () => {
     const { timers, exits, say } = await bootWithBackground();
-    await say('/restart');
+    await say('/e restart');
     await flush();
     expect(exits).toEqual([]);
     expect(await waitFor(() => existsSync(DRAINING))).toBe(true);
@@ -588,14 +588,14 @@ describe('boot — a /restart with background work live on a warm session (step 
     timers.fire();
     await flush();
     expect(exits).toEqual([]);
-    await say('/restart force');
+    await say('/e restart force');
     expect(await waitFor(() => exits.length > 0)).toBe(true);
     expect(exits).toEqual([43]);
   });
 
   it('(f) /rewind stays immediate with background work live', async () => {
     const { exits, say } = await bootWithBackground();
-    await say('/rewind abc1234');
+    await say('/e rewind abc1234');
     expect(await waitFor(() => exits.length > 0)).toBe(true);
     expect(exits).toEqual([44]);
   });

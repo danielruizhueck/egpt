@@ -345,8 +345,8 @@ export function createMeshRelay({
   // chain); no `to` = the open-channel path (the owner of `being` on the other end answers,
   // everyone else stays silent) and the label drops the `.node`.
   // structural (operator 2026-07-27): true when this relay carries a `/command`, not a
-  // being-prompt — the origin already knows this at the call site (forwardCommand gates on
-  // the allowlist), so it rides straight through as a flag rather than being re-derived here.
+  // being-prompt; it rides straight through as a flag. Nothing sets it since commands name their
+  // being (2026-10-19).
   // quiet (operator 2026-08-31, "the mesh is only transport"): the ORIGIN already has a turn in
   // flight for this conversation and has decided — LOCALLY, on its own allow_new_input verdict —
   // not to open a second placeholder for this line. So: no ack, no "🤔", no notify. The

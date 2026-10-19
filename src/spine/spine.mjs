@@ -801,8 +801,9 @@ export function createSpine({
   // in an auto chat. A context turn (send_to_egpt: always) runs a being but answers nobody, so it
   // does not count: a chat of chatter under a mention gate hears nothing about its backlog.
   async function wouldReachABeing(ev) {
-    // A line starting with an alias is its command line here too (commands.aliased, as classify reads it).
-    if (commands?.isCommand?.(commands.aliased?.(ev) ?? ev) || isEnvelope(ev) || isTransit(ev) || advice?.isAnswer?.(ev)) return false;
+    // A command (commands.commandOf, as classify reads it) — this node's or another's — reaches no being.
+    const cmd = commands?.commandOf?.(ev) ?? ev;
+    if (cmd.commandElsewhere || commands?.isCommand?.(cmd) || isEnvelope(ev) || isTransit(ev) || advice?.isAnswer?.(ev)) return false;
     const { d } = await gateOf((await targetsOf(ev))[0], ev);
     return d.receives && d.mayReply && !(d.mode === 'auto' && ev.isSender);
   }
@@ -903,10 +904,13 @@ export function createSpine({
     // process; the daemon respawns). Runs before gating: a /restart works even in
     // a muted/mention chat.
     //
-    // ALIAS (config/commands_alias.yaml, operator 2026-10-19): a line starting with an alias is its
-    // command line from here on, so the typed command's own gates decide. Not admitted → the line flows
-    // on as said. The record keeps the words as said (handleFast logs `ev`, never `cmd`).
-    const cmd = commands?.aliased?.(ev) ?? ev;
+    // A COMMAND NAMES ITS BEING (operator 2026-10-19): commands.commandOf reads `/<handle> <command>`
+    // (typed, or an alias's expansion) into the command line its gates decide, the being attached. A
+    // handle of another node's being: that node runs it; here it is recorded and prompts nobody. Not a
+    // command (a bare `/join` included) or not admitted → the line flows on as said. The record keeps
+    // the words as said (handleFast logs `ev`, never `cmd`).
+    const cmd = commands?.commandOf?.(ev) ?? ev;
+    if (cmd.commandElsewhere) return () => { note(`command: ${guardChannel(ev)} '/${cmd.commandElsewhere} …' names no being on this node — recorded, prompts nobody`); };
     if (commands?.isCommand?.(cmd)) {
       if (cmd.alias) note(`alias: ${guardChannel(ev)} '${cmd.alias}' → ${cmd.body}`);
       // ALWAYS-AVAILABLE (never blocked, never counted): the lifecycle commands. They are
@@ -933,16 +937,6 @@ export function createSpine({
         if (humanTurn(ev)) guard.noteHuman(channel);
         else await guardCountNonHuman(ev, channel);
       }
-      // NODE-ADDRESSED AT ANOTHER NODE (operator 2026-07-26 — egpt as a remote control for the
-      // network): `/chrome do` typed on the SHELL can never be heard by do (the shell is
-      // node-local — the spine dials the editor on 127.0.0.1), so the command has to TRAVEL. It
-      // rides the SAME mesh envelope a `@don` being-prompt rides, the target executes it locally,
-      // and the reply mirrors home through the same living mirror. `commands.remoteNode` is the
-      // ONE decision — an allowlisted command naming a node that is neither ours nor a
-      // co-account peer that already heard this — so a null (every case today) leaves the local
-      // command path byte-identical.
-      const remote = commands.remoteNode?.(cmd);
-      if (remote && mesh?.forwardCommand) return async () => { await mesh.forwardCommand(cmd, remote); };
       return async () => { await commands.run(cmd); };
     }
 
@@ -1184,7 +1178,7 @@ export function createSpine({
       // THE ORIGIN IS ALSO THE ONLY NODE THAT CAN DO IT: the token is THIS node's relay-agent
       // handle, resolved by THE matcher here, and the far node has no vocabulary for it.
       // addressedBody, not triggerFor — a dispatch line never crosses — and the rewritten event
-      // is the same `{ ...ev, body }` shape forwardCommand already forwards under (mesh.mjs).
+      // is the same `{ ...ev, body }` shape.
       //
       // meshBody, not addressedBody (operator 2026-09-11): the OPEN CHANNEL keeps its handle,
       // because there the handle IS the routing. See meshBody's header.
@@ -1864,7 +1858,7 @@ export function createSpine({
     if (!b.reaches || b.told) return;
     b.told = true;
     const n = b.messages.length;
-    try { await say({ chatId: b.chatId, text: `${n} message${n === 1 ? '' : 's'} in the backlog. type /recap to list them`, what: 'backlog' }); }
+    try { await say({ chatId: b.chatId, text: `${n} message${n === 1 ? '' : 's'} in the backlog. type ${commands?.hintOf?.('recap') ?? '/recap'} to list them`, what: 'backlog' }); }
     catch (e) { note(`backlog: could not tell ${b.chatId} — ${e?.message ?? e}`); }
   }
   function clearBacklog() {

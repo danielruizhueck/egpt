@@ -928,29 +928,16 @@ describe('computeShellHeader — the permanent shell status line', () => {
     expect(() => computeShellHeader({})).not.toThrow();
   });
 
-  it('`defaultNode` set to a DIFFERENT node than `nodeName` inserts a " → <default_node>" segment right after the room segment\'s value', () => {
-    const s = computeShellHeader({ nodeName: 'kg', defaultNode: 'do' });
-    expect(s).toBe('🟢 room: lobby → do — ? for help · ctrl-d = send');
-  });
-
-  it('`defaultNode` naming THIS node itself (case-insensitive) renders with NO arrow — identical to the unset case', () => {
-    expect(computeShellHeader({ nodeName: 'kg', defaultNode: 'kg' }))
-      .toBe('🟢 room: lobby — ? for help · ctrl-d = send');
-    expect(computeShellHeader({ nodeName: 'kg', defaultNode: 'KG' }))
-      .toBe('🟢 room: lobby — ? for help · ctrl-d = send');
-  });
-
-  it('`defaultNode` absent or empty string renders with NO arrow', () => {
-    expect(computeShellHeader({ nodeName: 'kg' }))
-      .toBe('🟢 room: lobby — ? for help · ctrl-d = send');
-    expect(computeShellHeader({ nodeName: 'kg', defaultNode: '' }))
-      .toBe('🟢 room: lobby — ? for help · ctrl-d = send');
+  // dispatch.default_node is retired (2026-10-19: a command names its being): no arrow, ever.
+  it('a stray `defaultNode` renders NO arrow — the header ignores it', () => {
+    for (const defaultNode of ['do', 'kg', '', undefined]) {
+      expect(computeShellHeader({ nodeName: 'kg', defaultNode })).toBe('🟢 room: lobby — ? for help · ctrl-d = send');
+    }
   });
 
   // Live status-line room reflection (operator 2026-08-16, reworded 2026-08-17): /rooms join
   // <slug> should show up in the SAME header string boot pushes to the shell — currentRoom is
-  // the seam. Rendered as `room: <slug>`, never a `lobby → X` arrow (that read like cross-node
-  // routing, a different concept — see the defaultNode arrow below).
+  // the seam. Rendered as `room: <slug>`, never a `lobby → X` arrow.
   describe('`currentRoom` — the /rooms join reflection', () => {
     it('a joined room renders as "room: <currentRoom>"', () => {
       expect(computeShellHeader({ nodeName: 'kg', currentRoom: 'acim' }))
@@ -971,9 +958,9 @@ describe('computeShellHeader — the permanent shell status line', () => {
         .toBe('🟢 room: lobby — ? for help · ctrl-d = send');
     });
 
-    it('a joined room AND a routed defaultNode: the defaultNode arrow chains after the room value ("room: acim → do")', () => {
+    it('a joined room with a stray defaultNode: still no arrow after the room value', () => {
       expect(computeShellHeader({ nodeName: 'kg', currentRoom: 'acim', defaultNode: 'do' }))
-        .toBe('🟢 room: acim → do — ? for help · ctrl-d = send');
+        .toBe('🟢 room: acim — ? for help · ctrl-d = send');
     });
 
     it('a joined room still combines with the agents/groups trailing segment', () => {

@@ -42,7 +42,7 @@ function build() {
     logTranscript: async () => true, defaultKey: 'e',
   });
   const ran = [];
-  const commands = { isCommand: real.isCommand, run: async (e) => { ran.push(e.body); return real.run(e); } };
+  const commands = { commandOf: real.commandOf, isCommand: real.isCommand, run: async (e) => { ran.push(e.body); return real.run(e); } };
   const brain = { calls: [], async turn(being) { this.calls.push(being); return { text: 'ok', sessionId: 'thread-1', being }; }, async accessLevel() { return 'regular'; } };
   const spine = createSpine({
     bridge: { onMessage() {}, send() {}, stop() {}, wasSentByUs: () => false },
@@ -60,7 +60,7 @@ function build() {
 }
 
 describe('/agents stays operator-only while /join is open to members', () => {
-  for (const body of ['/agents rethread e', '/agents reset e', '/agents mode on e', '/agents compact e', '/agents stop e', '/agents refresh e', '/agents access_level all e', '/agents e']) {
+  for (const body of ['/e agents rethread e', '/e agents reset e', '/e agents mode on e', '/e agents compact e', '/e agents stop e', '/e agents refresh e', '/e agents access_level all e', '/e agents e', '/e agents compact']) {
     it(`a member (not on networks allowed_users, not isSender) sending "${body}" runs nothing and changes nothing`, async () => {
       const { spine, ran, replies, state } = build();
       const before = state.st;
@@ -74,11 +74,11 @@ describe('/agents stays operator-only while /join is open to members', () => {
 
   it('per-agent allowed_users (conversation_defaults AND the conversation block) do NOT grant /agents', () => {
     const { real } = build();
-    expect(real.isCommand(member('/agents rethread e'))).toBe(false);
+    expect(real.isCommand(real.commandOf(member('/e agents rethread e')))).toBe(false);
   });
 
   it('the same member IS admitted for /join (the widening is /join alone)', async () => {
     const { real } = build();
-    expect(real.isCommand(member('/join emely'))).toBe(true);
+    expect(real.isCommand(real.commandOf(member('/e join emely')))).toBe(true);
   });
 });

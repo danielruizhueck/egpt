@@ -237,7 +237,7 @@ describe('a node-level send rides the connection that can REACH the chat, not th
   // announceAndExit), which posts "↻ /restart…" before the process goes.
   it('the going-down "↻ /restart…" line goes out on primary', async () => {
     const { app, byConnection, posted, exits } = await bootWith(KG());
-    await deliver(byConnection.primary, SELF_DM, '/restart');
+    await deliver(byConnection.primary, SELF_DM, '/e restart');
     await waitFor(() => posted().some((p) => p.text.includes('↻')));
 
     const going = posted().filter((p) => p.text.includes('↻'));
@@ -270,7 +270,7 @@ describe('a node-level send rides the connection that can REACH the chat, not th
   // dolly.egpt does not have — the operator's very next keystroke after the deploy.
   it('a COMMAND reply typed in Self is answered on primary', async () => {
     const { app, byConnection, posted } = await bootWith(KG());
-    await deliver(byConnection.primary, SELF_DM, '/status');
+    await deliver(byConnection.primary, SELF_DM, '/e status');
     await waitFor(() => posted().length > 0);
 
     expect(posted().map((p) => p.connection)).toEqual(['primary']);

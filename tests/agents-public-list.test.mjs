@@ -67,11 +67,13 @@ const LIST_C = [
 describe('bare /agents from a non-operator: the public list', () => {
   it('is admitted at the command gate; every verb, a handle, a slug and force all are still refused', () => {
     const { cmds } = harness();
-    expect(cmds.isCommand(msg('/agents'))).toBe(true);
-    expect(cmds.isCommand(msg('  /AGENTS  '))).toBe(true);
-    for (const body of ['/agents e', '/agents rethread e', '/agents reset e', '/agents compact e', '/agents stop e', '/agents refresh e',
-      '/agents mode on e', '/agents access_level all e', '/agents force all', '/agents=c', '/agents=c e', '/agent']) {
-      expect(cmds.isCommand(msg(body)), body).toBe(false);
+    const cmd = (ev) => cmds.commandOf(ev) ?? ev;   // as the spine reads a line
+    expect(cmds.isCommand(cmd(msg('/e agents')))).toBe(true);
+    expect(cmds.isCommand(cmd(msg('  /E AGENTS  ')))).toBe(true);
+    for (const body of ['/e agents e', '/e agents rethread e', '/e agents reset e', '/e agents compact e', '/e agents stop e', '/e agents refresh e',
+      '/e agents mode on e', '/e agents access_level all e', '/e agents force all', '/e agents=c', '/e agents=c e', '/e agent',
+      '/e agents compact', '/agents']) {
+      expect(cmds.isCommand(cmd(msg(body))), body).toBe(false);
     }
   });
 
@@ -167,7 +169,7 @@ describe('bare /agents from a non-operator: the public list', () => {
       clock: { now: () => 1 },
     });
     const before = state.st;
-    await spine.handleInbound(msg('/agents'));
+    await spine.handleInbound(msg('/e agents'));
     expect(replies).toEqual([LIST_C]);
     expect(brain.calls).toEqual([]);
     expect(state.st).toBe(before);

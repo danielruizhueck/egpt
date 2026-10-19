@@ -17,13 +17,21 @@ A slash command typed in an authorized chat is intercepted by the node itself,
 not answered by the persona. Authorization = the surface's own `chat_id`
 (Self-DM), an entry in that surface's `allowed_users`, or the account owner.
 
+A command names the being that runs it (since 2026-10-19): `/<handle> <command>`,
+e.g. `/e restart`, `/don agents`, `/e join viaje`. The node that hosts that being
+runs it; every other node records the line and does nothing. A bare `/restart`
+in a chat is ordinary text. `/<handle> <anything else>` (`/e hola`) is a message
+to that being. The editor shell (the node's own console) and the ingest box
+still take the bare command. An `/<handle> agents` verb with no target acts on
+that being (`/e agents compact`).
+
 ```text
-/status                                        compact node health (fenced yaml):
+/<handle> status                               compact node health (fenced yaml):
                                                git sha + subject, pid, uptime,
                                                last alive-beat age, heartbeat
                                                count, conversation count, this
                                                chat's E mode
-/agents[=<slug>] <handle>|all                  live status of a resident being
+/<handle> agents[=<slug>] <handle>|all         live status of a resident being
                                                (fenced yaml, resolved fresh from
                                                config — never a stale snapshot).
                                                `all` covers every resident being.
@@ -31,14 +39,14 @@ not answered by the persona. Authorization = the surface's own `chat_id`
                                                the Self-DM name a target
                                                (slug/name fragment, or a verbatim
                                                @jid / room-id)
-/agents[=<slug>] refresh <handle>|all          SMALLEST: keep the thread, re-feed it.
+/<handle> agents[=<slug>] refresh <handle>|all  SMALLEST: keep the thread, re-feed it.
                                                <chat>/directives/ is re-copied from
                                                the current template right away, and
                                                the being's identity goes back into
                                                its RUNNING thread on that thread's
                                                next turn. Nothing is moved, no new
                                                thread, the context is kept
-/agents[=<slug>] rethread <handle>|all         MIDDLE: clear only this being's
+/<handle> agents[=<slug>] rethread <handle>|all  MIDDLE: clear only this being's
                                                threadId (mode, access_level, every
                                                other field survive) and roll
                                                transcript.md into transcripts/ under
@@ -48,7 +56,7 @@ not answered by the persona. Authorization = the surface's own `chat_id`
                                                `restart` until 2026-09-10 — that
                                                word is /restart, the NODE's
                                                lifecycle, and is now refused here
-/agents[=<slug>] reset <handle>|all            BIG: reset THIS being on THIS chat:
+/<handle> agents[=<slug>] reset <handle>|all   BIG: reset THIS being on THIS chat:
                                                archive the chat's WHOLE folder aside,
                                                wipe this being's registry block
                                                (mode, threadId, all of it — a
@@ -57,17 +65,17 @@ not answered by the persona. Authorization = the surface's own `chat_id`
                                                grants that survive the reset,
                                                reseed pristine — next message
                                                starts fresh
-/agents[=<slug>] auto <mode> <handle>|all      set a being's reply mode
-/agents[=<slug>] access_level <regular|all|sandbox> <handle>|all
+/<handle> agents[=<slug>] auto <mode> <handle>|all  set a being's reply mode
+/<handle> agents[=<slug>] access_level <regular|all|sandbox> <handle>|all
                                                point a being at a confinement
                                                tier: this node's regular
                                                default, the unconfined one, or
                                                the OS-sandboxed one (see below)
-/restart                                       bounce the node (daemon respawns
+/<handle> restart                              bounce the node (daemon respawns
                                                the current checkout)
-/upgrade                                       git pull + npm install + rebuild,
+/<handle> upgrade                              git pull + npm install + rebuild,
                                                then respawn
-/rewind <ref>                                  git checkout <ref>, reinstall,
+/<handle> rewind <ref>                         git checkout <ref>, reinstall,
                                                respawn
 ```
 

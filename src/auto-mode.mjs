@@ -187,7 +187,10 @@ export function mentionHits(text, tokens, { addressWithoutAt = true } = {}) {
   const alt = list.map(_escapeWake).join('|');
   // THE BARE FORM (see the '@ is optional at the start' note above): the SAME rule with the
   // '@' dropped, anchored to ^ and reusing _NOT_GLUED — the one boundary, not a second one.
-  const bare = addressWithoutAt ? t.match(new RegExp(`^(${alt})${_NOT_GLUED}`, 'iu')) : null;
+  // `/<handle>` OPENING the message (then a space or the end) addresses in either state, as a
+  // leading '@' does (operator 2026-10-19: "/e hola" talks to E; "/e join" is a command, read first).
+  const bare = t.match(new RegExp(`^/(${alt})(?=\\s|$)`, 'iu'))
+    ?? (addressWithoutAt ? t.match(new RegExp(`^(${alt})${_NOT_GLUED}`, 'iu')) : null);
   const hits = bare ? [{ token: bare[1].toLowerCase(), atStart: true }] : [];
   if (!t.includes('@')) return hits;
   const re = new RegExp(`(?:^|\\s)@(${alt})${_NOT_GLUED}`, 'giu');
@@ -251,7 +254,7 @@ export function withoutAddress(text, token) {
   if (!w) return t;
   const mark = t.match(VOICE_MARK)?.[0] ?? '';
   const rest = t.slice(mark.length);
-  const m = rest.match(new RegExp(`^\\s*@?${_escapeWake(w)}${_NOT_GLUED}\\s*`, 'iu'));
+  const m = rest.match(new RegExp(`^\\s*[@/]?${_escapeWake(w)}${_NOT_GLUED}\\s*`, 'iu'));
   return m ? mark + rest.slice(m[0].length) : t;
 }
 // A fenced or inline CODE region must never contribute a live wake match — e.g.

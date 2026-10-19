@@ -1083,7 +1083,7 @@ describe('a node-level line in a chat the mouth is in is said by the MOUTH, in i
 
   it('a COMMAND reply typed in a chat both accounts are in goes out on secondary, in secondary\'s room', async () => {
     const { app, byConnection } = await bootWith(KG());
-    await deliver(byConnection.primary, BOTH_AS_PRIMARY, '/status');
+    await deliver(byConnection.primary, BOTH_AS_PRIMARY, '/e status');
     await waitFor(() => byConnection.secondary.sent.length > 0);
 
     expect(byConnection.secondary.sent.length).toBeGreaterThan(0);
@@ -1095,7 +1095,7 @@ describe('a node-level line in a chat the mouth is in is said by the MOUTH, in i
   it('the going-down "↻ /restart…" line, in a Self chat the mouth is in, goes out on secondary', async () => {
     const exits = [];
     const { app, byConnection } = await bootWith(ADMIN_SELF(), { exit: (code) => exits.push(code) });
-    await deliver(byConnection.primary, BOTH_AS_PRIMARY, '/restart');
+    await deliver(byConnection.primary, BOTH_AS_PRIMARY, '/e restart');
     await waitFor(() => exits.length > 0);
 
     const going = byConnection.secondary.sent.filter((m) => m.text.includes('↻'));
@@ -1110,9 +1110,9 @@ describe('a node-level line in a chat the mouth is in is said by the MOUTH, in i
   it('in the Self-DM (the mouth is not in it) the command reply and the going-down line stay on primary', async () => {
     const exits = [];
     const { app, byConnection } = await bootWith(SELF_IS_DM(), { exit: (code) => exits.push(code) });
-    await deliver(byConnection.primary, SELF_DM, '/status');
+    await deliver(byConnection.primary, SELF_DM, '/e status');
     await waitFor(() => byConnection.primary.sent.length > 0);
-    await deliver(byConnection.primary, SELF_DM, '/restart');
+    await deliver(byConnection.primary, SELF_DM, '/e restart');
     await waitFor(() => exits.length > 0);
 
     expect(new Set(byConnection.primary.sent.map((m) => m.chatId))).toEqual(new Set([SELF_DM]));
@@ -1232,7 +1232,7 @@ describe('/send through the mouth: Rodz\'s own room for the original, found by i
     cfg.send = { post_back_from: 'secondary', origin: 'never' };
     const { app, byConnection } = await bootWith(cfg, { state: seed() });
     await deliver(byConnection.primary, BOTH_AS_PRIMARY, 'hola', { atE: false });   // the original: a chat the ear holds
-    await byConnection.primary.onIncoming('/send', { chatId: SIDE_ROOM, chatName: 'SI+both-x', network: 'whatsapp', userId: DANDO, senderName: 'Dando', authorized: true, isSender: true, msgKey: 'snd-1', replyToId: 'q-1' });
+    await byConnection.primary.onIncoming('/e send', { chatId: SIDE_ROOM, chatName: 'SI+both-x', network: 'whatsapp', userId: DANDO, senderName: 'Dando', authorized: true, isSender: true, msgKey: 'snd-1', replyToId: 'q-1' });
     await waitFor(() => byConnection.secondary.sent.length > 0);
     expect(byConnection.secondary.sent.map((m) => [m.chatId, m.text])).toEqual([[BOTH_AS_SECONDARY, 'la respuesta']]);
     expect(byConnection.primary.sent.filter((m) => m.chatId === BOTH_AS_PRIMARY)).toEqual([]);

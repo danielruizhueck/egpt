@@ -38,10 +38,11 @@ function commandsHarness({ state = null } = {}) {
     brains: { resolve: (name) => ({ name, type: 'ccode' }) },
   });
   // ONE hop of the live loop: a message lands in the operator's Self DM; if the node treats
-  // it as a command it answers, and THAT answer is what the peer node sees next.
+  // it as a command it answers, and THAT answer is what the peer node sees next. A command names
+  // its being (`/e status do`); commandOf reads it as the spine does.
   const hop = async (body) => {
-    const ev = { body, chatId: '!self', surface: 'whatsapp' };
-    if (!cmds.isCommand(ev)) return null;      // not a command → no command reply → loop dies
+    const ev = cmds.commandOf({ body, chatId: '!self', surface: 'whatsapp' });
+    if (!ev || !cmds.isCommand(ev)) return null;      // not a command → no command reply → loop dies
     const before = sent.length;
     await cmds.run(ev);
     return sent.length > before ? sent.at(-1).text : null;
@@ -56,7 +57,7 @@ describe('(A) a command reply never parses as a command', () => {
   // and then ran forever, one colon per hop.
   it('the /status ambiguity reply (the live seed) does not feed itself', async () => {
     const { hop } = commandsHarness({ state: ambiguousState() });
-    const seed = await hop('/status do');
+    const seed = await hop('/e status do');
     expect(seed).toMatch(/matches 9/);              // the ambiguity reply, unchanged in substance
     expect(seed.startsWith('/')).toBe(false);       // …but it can no longer BE a command
     expect(await hop(seed)).toBeNull();             // the peer node has nothing to answer
@@ -64,7 +65,7 @@ describe('(A) a command reply never parses as a command', () => {
 
   it('the catch-all reply to an unrecognized /foo does not feed itself', async () => {
     const { hop } = commandsHarness();
-    const first = await hop('/foo');
+    const first = await hop('/e channels');          // registered, not wired: the catch-all
     expect(first).toMatch(/recognized/);
     expect(first.startsWith('/')).toBe(false);
     expect(await hop(first)).toBeNull();
@@ -73,7 +74,7 @@ describe('(A) a command reply never parses as a command', () => {
   // The loop as it actually ran: feed every reply straight back in. It must die on hop 2.
   it('the two-node echo terminates instead of escalating', async () => {
     const { hop } = commandsHarness({ state: ambiguousState() });
-    let body = '/status do', hops = 0;
+    let body = '/e status do', hops = 0;
     while (body && hops < 50) { body = await hop(body); hops++; }
     expect(hops).toBe(2);                            // seed answered, its reply answered nothing
   });

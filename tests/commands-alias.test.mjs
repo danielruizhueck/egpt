@@ -32,10 +32,10 @@ const CONFIG = {
 const ALIASES = join(HOME, 'config', 'commands_alias.yaml');
 const writeAliases = (text) => { mkdirSync(join(HOME, 'config'), { recursive: true }); writeFileSync(ALIASES, text, 'utf8'); };
 const DEFAULT_ALIASES = [
-  'aparte: /join',
-  'nos vamos aparte: /join',
-  'nos vamos: /end',
-  'reinicia: /restart force',
+  'aparte: /e join',
+  'nos vamos aparte: /e join',
+  'nos vamos: /e end',
+  'reinicia: /e restart force',
   '',
 ].join('\n');
 
@@ -141,13 +141,13 @@ describe('an alias runs its command line, with the rest of the message as argume
 });
 
 describe('who may use an alias: whoever may type its command', () => {
-  it('"reinicia" from a member is refused exactly as a typed /restart is; from the operator it runs', async () => {
+  it('"reinicia" from a member is refused exactly as a typed /e restart is; from the operator it runs', async () => {
     const { say, calls } = build();
-    await say(member('/restart'));
+    await say(member('/e restart'));
     await say(member('reinicia'));
     expect(calls.exit).toEqual([]);
     expect(calls.audit).toEqual([]);
-    expect(calls.brain).toEqual(['/restart', 'reinicia']);   // both are ordinary text for the being
+    expect(calls.brain).toEqual(['/e restart', 'reinicia']);   // both are ordinary text for the being
     await say(operator('reinicia'));
     expect(calls.exit).toEqual([{ code: 43, force: true }]);
   });
@@ -178,7 +178,7 @@ describe('the file: live, validated, optional', () => {
     const { say, calls } = build();
     await say(member('fuera viaje'));
     expect(calls.create).toEqual([]);
-    writeAliases('fuera: /join\n');
+    writeAliases('fuera: /e join\n');
     await say(member('fuera viaje'));
     expect(calls.create.map((c) => c.title)).toEqual(['SI+C-viaje']);
     await say(member('aparte playa'));                 // gone with the edit
@@ -187,22 +187,23 @@ describe('the file: live, validated, optional', () => {
     expect(calls.create).toHaveLength(1);
   });
 
-  it('refuses, one log line each, an alias that starts with "/", starts with a being handle, or maps to no command; keeps the rest', async () => {
+  it('refuses, one log line each, an alias that starts with "/", starts with a being handle, maps to a bare command, or maps to no command; keeps the rest', async () => {
     writeAliases([
       '/join: /split',
       'e: /end',
       'don ya: /end',
       'hola: /nonexistent',
       'bueno: hola',
-      'aparte: /join',
+      'fuera: /join',
+      'aparte: /e join',
       '',
     ].join('\n'));
     const { say, calls } = build();
     await say(member('aparte viaje'));
     await say(member('hola mundo'));
     const logs = aliasLogs(calls);
-    expect(logs).toHaveLength(5);
-    for (const [alias, why] of [['/join', /starts with "\/"/], ['e', /being handle/], ['don ya', /being handle/], ['hola', /not a known command/], ['bueno', /not a known command/]]) {
+    expect(logs).toHaveLength(6);
+    for (const [alias, why] of [['/join', /starts with "\/"/], ['e', /being handle/], ['don ya', /being handle/], ['fuera', /no being/], ['hola', /not \/<handle> <known command>/], ['bueno', /not \/<handle> <known command>/]]) {
       const about = logs.filter((l) => l.startsWith(`commands_alias.yaml: "${alias}" `));
       expect(about, alias).toHaveLength(1);
       expect(about[0]).toMatch(why);
@@ -225,7 +226,7 @@ describe('the file: live, validated, optional', () => {
   it('the shipped skeleton is all comments; its examples, uncommented, load with no refusal', async () => {
     const skel = readFileSync(new URL('../config/skeletons/commands_alias.yaml', import.meta.url), 'utf8');
     expect(YAML.parse(skel)).toBe(null);
-    writeAliases(skel.replace(/^# (\S[^:]*: \/.*)$/gm, '$1'));
+    writeAliases(skel.replace(/^# ([a-z][a-z ]*: \/.*)$/gm, '$1'));
     const { say, calls } = build();
     await say(member('nos vamos aparte viaje'));
     expect(calls.create.map((c) => c.title)).toEqual(['SI+C-viaje']);
@@ -248,7 +249,7 @@ describe('/tab /close /activate /bans /unban are registry commands', () => {
 
   it('each is a wired registry entry, and an alias to each is accepted and runs it', async () => {
     for (const [, cmd] of ALIASED) expect(COMMANDS.find((e) => e.cmd === cmd), cmd).toMatchObject({ wired: true });
-    writeAliases(ALIASED.map(([alias, cmd]) => `${alias}: ${cmd}`).join('\n') + '\n');
+    writeAliases(ALIASED.map(([alias, cmd]) => `${alias}: /e ${cmd.slice(1)}`).join('\n') + '\n');
     const { say, calls } = build();
     for (const [alias, , rest] of ALIASED) await say(operator(`${alias} ${rest}`.trim()));
     expect(aliasLogs(calls)).toEqual([]);
@@ -259,14 +260,14 @@ describe('/tab /close /activate /bans /unban are registry commands', () => {
 });
 
 describe('regression locks', () => {
-  it('typed /commands are unchanged', async () => {
+  it('typed /<handle> commands are unchanged', async () => {
     const { say, calls } = build();
-    await say(member('/join viaje'));
-    await say(operator('/restart'));
+    await say(member('/e join viaje'));
+    await say(operator('/e restart'));
     expect(calls.create.map((c) => c.title)).toEqual(['SI+C-viaje']);
     expect(calls.exit).toEqual([{ code: 43, force: false }]);
     expect(calls.audit).toEqual(['/join in C by Lulu', '/restart in C by An']);
-    expect(calls.transcript).toEqual(['/join viaje', '/restart']);
+    expect(calls.transcript).toEqual(['/e join viaje', '/e restart']);
   });
 
   it('"e aparte" addresses the being, not the alias', async () => {
