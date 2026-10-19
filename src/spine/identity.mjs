@@ -160,7 +160,7 @@ export function createIdentity({ formatLine = formatDispatchLine, now = () => Da
         // gate reads it to suppress a wake of the AUTHOR only (spine.mjs). null = a node-only frame
         // or an unsigned message. A synthetic may hand it over as f.fromBeing (none today → null).
         fromBeing: signed ? decodeBeingSignature(rawBody) : (f.fromBeing ?? null),
-        // The automatic side group's intro: the origin chat id its creator stamped (commands.linkSideGroup). null otherwise.
+        // A side group's opener: the ids its creator stamped (commands.postOpener, linkSideGroup). null otherwise.
         canary: typeof rawBody === 'string' ? decodeChatCanary(rawBody) : null,
         // WHERE THIS MESSAGE ACTUALLY ARRIVED, when that is not where it is being dispatched:
         // { surface, chatId, chatName } of the ORIGIN conversation. Carried exactly as fromMember

@@ -50,7 +50,6 @@ function harness({ config = CFG, state, logToGroup, backlogOf, exit = async () =
     chatAccountId: async () => 'whatsapp',
     chatTitle: async () => null,
     resolveUserIdByPhone: async () => null,
-    resolveSecondaryChatIdByTitle: async () => null,
   };
   const cmds = createCommands({
     getConfig: () => config,

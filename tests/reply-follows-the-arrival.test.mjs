@@ -46,10 +46,10 @@ import { createSender } from '../src/spine/sender.mjs';
 import { crossAccountChatKey, crossAccountMsgKey } from '../src/bridges/beeper.mjs';
 import { encodeNodeSignature } from '../src/node-signature.mjs';
 
-let boot, emptyState, ensureContact, aliasContact, getContact;
+let boot, emptyState, ensureContact, aliasContact, getContact, recordThread;
 beforeAll(async () => {
   ({ boot } = await import('../src/spine/boot.mjs'));
-  ({ emptyState, ensureContact, aliasContact, getContact } = await import('../src/conversations-state.mjs'));
+  ({ emptyState, ensureContact, aliasContact, getContact, recordThread } = await import('../src/conversations-state.mjs'));
 });
 afterAll(async () => {
   delete process.env.EGPT_HOME;
@@ -1211,5 +1211,31 @@ describe('the retired super_chats block reroutes nothing and places no SI-state 
       expect(replies()).toEqual([{ connection: 'primary', chatId: AN_GROUP }]);
       app.stop();
     }
+  });
+});
+
+// ── /send FROM A SIDE GROUP, SAID BY THE MOUTH (operator 2026-10-18: by id, never by title) ─────
+// A member's /send (or post_back_from: secondary) is said by Rodz in ITS OWN room for the original,
+// found through the one placement — the stored mouth_chat, else routeLocally — never by its title.
+describe('/send through the mouth: Rodz\'s own room for the original, found by id', () => {
+  const SIDE_ROOM = '!side-group-as-primary-sees-it';
+  const seed = () => {
+    let st = ensureContact(emptyState(), 'whatsapp', BOTH_AS_PRIMARY, { pushedName: 'both' }).state;
+    st = recordThread(st, 'whatsapp', BOTH_AS_PRIMARY, 'th-1', '2026-10-18T00:00:00Z', 'egpt');
+    return aliasContact(st, 'whatsapp', SIDE_ROOM, getContact(st, 'whatsapp', BOTH_AS_PRIMARY).jid, { transcript: 'side', join_name: 'x' });
+  };
+
+  it('post_back_from secondary: said on secondary, into ITS room for the original — nothing on the ear', async () => {
+    LISTED[SIDE_ROOM] = [{ id: 'q-1', text: 'la respuesta', timestamp: '2026-09-11T14:04:40.000Z' }];
+    const cfg = KG();
+    cfg.send = { post_back_from: 'secondary', origin: 'never' };
+    const { app, byConnection } = await bootWith(cfg, { state: seed() });
+    await deliver(byConnection.primary, BOTH_AS_PRIMARY, 'hola', { atE: false });   // the original: a chat the ear holds
+    await byConnection.primary.onIncoming('/send', { chatId: SIDE_ROOM, chatName: 'SI+both-x', network: 'whatsapp', userId: DANDO, senderName: 'Dando', authorized: true, isSender: true, msgKey: 'snd-1', replyToId: 'q-1' });
+    await waitFor(() => byConnection.secondary.sent.length > 0);
+    expect(byConnection.secondary.sent.map((m) => [m.chatId, m.text])).toEqual([[BOTH_AS_SECONDARY, 'la respuesta']]);
+    expect(byConnection.primary.sent.filter((m) => m.chatId === BOTH_AS_PRIMARY)).toEqual([]);
+    delete LISTED[SIDE_ROOM];
+    app.stop();
   });
 });

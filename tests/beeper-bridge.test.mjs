@@ -1705,21 +1705,6 @@ describe('beeper bridge', () => {
     expect(bridge.getChatSlug(CHAT('room9'))).toBe('dando-ruiz');
   });
 
-  it('resolveChatIdByTitle — the /join+/split opener finder: exact title, accountID-scoped, SHORT id, null when absent', async () => {
-    // A group has a DIFFERENT room per account; the secondary surfaces the new group under the SAME
-    // title but its own id. The opener resolves that id by title (scoped to the group's network).
-    fake.chats.set(CHAT('room9'), { title: 'egpt join de Proyecto X', type: 'group', isMuted: false, accountID: 'whatsapp' });
-    fake.chats.set(CHAT('room-tg'), { title: 'egpt join de Proyecto X', type: 'group', isMuted: false, accountID: 'telegram' });
-    const { bridge } = await startBridge();
-    // exact title, scoped to the account the group lives on → that account's SHORT room id
-    expect(await bridge.resolveChatIdByTitle('egpt join de Proyecto X', { accountID: 'whatsapp' })).toBe('room9');
-    // the SAME title on another account is not matched when the scan is scoped
-    expect(await bridge.resolveChatIdByTitle('egpt join de Proyecto X', { accountID: 'telegram' })).toBe('room-tg');
-    // no chat by that title yet → null (the handler polls, then falls back to the primary)
-    expect(await bridge.resolveChatIdByTitle('nope not here', { accountID: 'whatsapp' })).toBe(null);
-    expect(await bridge.resolveChatIdByTitle('', { accountID: 'whatsapp' })).toBe(null);
-  });
-
   it('default verdict never surfaces: no resolver wired → transcribes but no 👂', async () => {
     const { incoming } = await startBridge();
     fake.emit({ type: 'message.upserted', entries: [liveMsg({ text: null, type: 'VOICE', attachments: [voiceAtt()] })] });
@@ -4992,5 +4977,12 @@ describe('beeper bridge — recentMessages / awaitMessage', () => {
     fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: 'w-1', text: 'not it' }), liveMsg({ id: 'w-2', text: 'the one' })] });
     expect((await waiting)?.id).toBe('w-2');
     expect(await bridge.awaitMessage(CHAT('chat-1'), () => true, 20)).toBe(null);
+  });
+
+  it('awaitMessage with no chat resolves on a matching arrival in ANY chat (a side group\'s opener copy names its room)', async () => {
+    const { bridge } = await startBridge();
+    const waiting = bridge.awaitMessage(null, (m) => m.text === 'the one', 5000);
+    fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: 'a-1', text: 'not it' }), { ...liveMsg({ id: 'a-2', text: 'the one' }), chatID: CHAT('room-r') }] });
+    expect(await waiting).toMatchObject({ id: 'a-2', chatID: 'room-r' });
   });
 });

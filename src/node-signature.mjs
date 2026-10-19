@@ -112,9 +112,10 @@ export function renderNodeSignature(text) {
   });
 }
 
-// ── THE CANARY (the automatic side group's intro, 2026-10-18) ──
-// A second frame beside the node frame carrying the origin chat's id on the shared account, so the
-// other node links the same group (commands.linkSideGroup). Same TAGS codec; its interior leads with
+// ── THE CANARY (a side group's opener, 2026-10-18) ──
+// A second frame beside the node frame carrying the group's own id (and the automatic group's origin),
+// so Rodz's copy names its room and the other node links the same group (commands.postOpener,
+// commands.linkSideGroup). Same TAGS codec; its interior leads with
 // '/', which a node name never does, so decodeNodeSignature reads the node frame alone and
 // renderNodeSignature erases this one.
 const CANARY_LEAD = '/';

@@ -63,8 +63,9 @@ export async function superChannelAlive(chatId, { chatRaw, config = {} }) {
   return items.some((p) => !mouths.has(digits(p?.phoneNumber)));
 }
 
-// sideGroupFor(ev, { create }) → the chat a reply here goes to instead (a chat id), false = withhold it,
-// null = in place (commands.autoSideGroup: side_group.automatic, operator 2026-10-18). Absent → always in place.
+// sideGroupFor(ev, { create }) → the chat a reply here goes to instead (a chat id, or a function that
+// makes it, for sender.open to call), false = withhold it, null = in place (commands.autoSideGroup:
+// reply_in_side_group, operator 2026-10-18). Absent → always in place.
 export function createGating({ getConfig = () => ({}), loadState = null, defaultKey = 'e', sideGroupFor = null } = {}) {
   const cfg = () => getConfig() ?? {};
 
@@ -88,7 +89,7 @@ export function createGating({ getConfig = () => ({}), loadState = null, default
     let replyChatId = null;
     if (mayReply && sideGroupFor && !ev.backlog && !(mode === 'auto' && ev.isSender)) {
       let at = null;
-      // Only a reply someone asked for opens the group: an unaddressed 'on' turn may stay silent.
+      // An addressed reply makes the group now; an unaddressed one (on/auto) once it has something to post.
       try { at = await sideGroupFor(ev, { create: replyAllowed('mention', mention ?? {}) }); } catch { at = false; }
       if (at === false) mayReply = false;
       else if (at) replyChatId = at;

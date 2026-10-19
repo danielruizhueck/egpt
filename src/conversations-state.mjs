@@ -1738,14 +1738,15 @@ export function aliasTranscriptKeyOf(state, surface, jid) {
 // super — a plain scalar that rides aliasContact's `extra` and that every registry reader skips
 // (entry.aliasOf short-circuits them), so it never leaks into config/resident resolution and
 // survives serialize (alias entries pass through untouched). Read RAW, like aliasTranscriptKeyOf.
-// The mouth route has no ev.surface, so BOTH helpers key by chatId across surfaces.
+// The mouth route has no ev.surface, so BOTH helpers key by chatId across surfaces. A /split group's own
+// entry (parent_chat) is a side group too and carries it the same way (2026-10-18).
 
 // { isAlias, mouthChat } for `chatId`: whether it is an alias at all (so the mouth knows whether a
 // freshly-derived id is worth persisting) and its stored second-account room, if any.
 export function aliasMouthInfo(state, chatId) {
   for (const bucket of Object.values(state?.contacts ?? {})) {
     const entry = bucket?.[chatId];
-    if (entry?.aliasOf) return { isAlias: true, mouthChat: entry.mouth_chat ?? null };
+    if (entry?.aliasOf || entry?.parent_chat) return { isAlias: true, mouthChat: entry.mouth_chat ?? null };
   }
   return { isAlias: false, mouthChat: null };
 }
@@ -1757,7 +1758,7 @@ export function setAliasMouthChat(state, chatId, mouthChatId) {
   if (!chatId || !mouthChatId) return state;
   for (const [surface, bucket] of Object.entries(state?.contacts ?? {})) {
     const entry = bucket?.[chatId];
-    if (!entry?.aliasOf) continue;
+    if (!entry?.aliasOf && !entry?.parent_chat) continue;
     if (entry.mouth_chat === mouthChatId) return state;        // unchanged → no write
     const nextBucket = { ...bucket, [chatId]: { ...entry, mouth_chat: mouthChatId } };
     return { ...state, contacts: { ...(state.contacts ?? {}), [surface]: nextBucket } };

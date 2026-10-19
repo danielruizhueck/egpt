@@ -381,13 +381,43 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
   const textOf = (v) => (typeof v === 'string' ? v : v?.text ?? '');
   const outbound = makeOutbound({ bridge, bridgeOf, peerMouth, onLog });
   const copies = new Map();   // one lookup per message and mouth room, shared by concurrent opens; misses are dropped
-  return {
+  // `chatId` a function → a room made only once the reply has something to post (a side group not made
+  // yet, gating.decide): asked at the first real text or a finish with a reply, at once for a status. A
+  // silence asks nothing. The reply then opens there like any other.
+  const later = (room, opts) => {
+    let asked = null, out = null;
+    const ask = () => (asked ??= Promise.resolve().then(room)
+      .catch((e) => { onLog(`sender: ${opts.being ?? defaultKey} — making its room threw: ${e?.message ?? e}`); return null; })
+      .then((id) => {
+        if (id) out = sender.open(id, opts);
+        else onLog(`sender: ${opts.being ?? defaultKey} — its room could not be made, nothing posted`);
+        return out;
+      }));
+    const onOpen = (f) => ask().then((o) => (o ? f(o) : undefined));
+    if (opts.status) ask();
+    return {
+      activate() { if (asked) onOpen((o) => o.activate()); },
+      update(partial) { const t = textOf(partial); if (asked || (t && !SILENCE_SO_FAR.test(t))) onOpen((o) => o.update(partial)); },
+      pulse(ms, label) { return out ? out.pulse(ms, label) : true; },
+      async end(text) { if (asked) await onOpen((o) => o.end(text)); },
+      async finish(reply, o = {}) {
+        if (asked || (o.surface !== false && textOf(reply).trim())) return onOpen((x) => x.finish(reply, o));
+        onLog(`sender: ${opts.being ?? defaultKey} turn withheld before its room was made — nothing posted`);
+      },
+      async fail(e) { if (asked) await onOpen((o) => o.fail(e)); },
+      get confirmedId() { return out?.confirmedId ?? null; },
+      get confirmedIn() { return out?.confirmedIn ?? null; },
+    };
+  };
+  const sender = {
     // `status`: a liveness status message (src/spine/liveness.mjs) — opens on that line instead of THINKING.
     // `replyIn`: the room `replyTo` (an id, or a promise of one) lives in — a local mouth's route answer, or
     // null for this chat's own connection. Given, the quote is resolved for the room the stream opens in.
     // `replyKey`: replyTo's cross-account key ({ msgKey, timestamp }) when the caller holds it (the
     // inbound event's own) — the mouth is told it as is, with no list read to compute it.
-    open(chatId, { being = defaultKey, replyTo = null, replyIn = undefined, replyKey = null, queued = false, queuedAhead = 0, auto = false, ambient = false, origin = null, status = null } = {}) {
+    open(chatId, opts = {}) {
+      if (typeof chatId === 'function') return later(chatId, opts);
+      let { being = defaultKey, replyTo = null, replyIn = undefined, replyKey = null, queued = false, queuedAhead = 0, auto = false, ambient = false, origin = null, status = null } = opts;
       const { bridge: bridgeForThisBeing, route: peerRoute, keyOf } = outbound(being, chatId);
       // ROUTED-TARGET FALLBACK (never a silent drop): a send the sending account can't place on the
       // routed room (a super/alias room it isn't a member of → resolveChatId null → DROPPED) re-sends
@@ -753,4 +783,5 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
       };
     },
   };
+  return sender;
 }

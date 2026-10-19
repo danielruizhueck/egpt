@@ -104,7 +104,7 @@ export function makeWrapPersona({ bridgeSignatureOpen = '', bridgeSignatureClose
     // quote-reply to this message names its author structurally (bridges/beeper.mjs
     // replyToBeing). `o.persona` is the being key the reply train already hands the stream
     // (src/spine/sender.mjs `tag`); a send with none keeps the node-only frame.
-    // `o.canary` (the automatic side group's intro): the origin chat id, a second frame after the node one.
+    // `o.canary` (a side group's opener): the group's ids (commands.postOpener), a second frame after the node one.
     return stripNodeSignature(wrapped) + encodeNodeSignature(nodeName, o.persona) + (o.canary ? encodeChatCanary(o.canary) : '');
   };
 }

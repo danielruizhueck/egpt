@@ -1367,6 +1367,10 @@ export function createSpine({
     return openChannel(target?.mesh) ? null : addressedBody(ev, target);
   }
 
+  // A turn's later outputs (voice, limbs) go where its reply went: the side group, made now if the reply
+  // did not make it, else ev's chat. null = the side group could not be made.
+  const replyChatOf = async (d, ev) => (typeof d.replyChatId === 'function' ? (await d.replyChatId()) || null : (d.replyChatId ?? ev.chatId));
+
   // Open THIS mention's placeholder + enqueue its reply turn on the per-conversation FIFO.
   // Returns the turn's completion promise.
   //
@@ -1378,8 +1382,9 @@ export function createSpine({
   // case: E's /reply at the message it is answering is now GENUINELY redundant, so it strips
   // instead of tearing the placeholder down and posting a fresh quote in its place.
   function openAndRunReply({ to, ev, d, mention, turnKey, pinned = false, trigger = null }) {
-    // d.replyChatId: the chat's automatic SI+ group (gating.decide) — the reply goes there, unquoted,
-    // and never falls back to ev's chat. The transcript stays keyed to ev.
+    // d.replyChatId: the chat's side group (gating.decide; a function when it is made only once the reply
+    // has something to post) — the reply goes there, unquoted, and never falls back to ev's chat. The
+    // transcript stays keyed to ev.
     const at = d.replyChatId ?? null;
     const replyTo = at ? null : (ev.msgId ?? null);
     const ahead = bumpTrain(turnKey);
@@ -1693,7 +1698,7 @@ export function createSpine({
               // Said like /media (makeOutbound `say`), replying to the text. That text's id lives
               // where the sender put it (`confirmedIn`: a local mouth's room, else this chat's own
               // connection), so its key is read off that copy and the id itself is handed on only there.
-              const o = outbound(to, d.replyChatId ?? ev.chatId);   // the chat the text went to
+              const o = outbound(to, await replyChatOf(d, ev));   // the chat the text went to
               const heldBy = out.confirmedIn ?? null;
               try { await o.say((on, room, replyTo) => on.sendMedia(room, tmpPath, { replyTo }), { msgId: heldBy ? null : textId, keyOf: o.keyOf(textId, 'voice', heldBy), what: 'voice' }); }
               catch (e) { note(`voice-send ${to}/${ev.chatId}: ${e?.message ?? e}`); }
@@ -1711,8 +1716,10 @@ export function createSpine({
       // Optional-chained: a transcript service without the method (older fakes) just records less.
       if (parsed && hadActions) {
         try {
-          // A reply routed to the automatic SI+ group takes its limbs there too: none acts in the origin.
-          const limbEv = d.replyChatId ? { ...ev, chatId: d.replyChatId } : ev;
+          // A reply routed to the side group takes its limbs there too: none acts in the origin.
+          const at = await replyChatOf(d, ev);
+          if (!at) throw new Error('its side group could not be made — no limb run');
+          const limbEv = at === ev.chatId ? ev : { ...ev, chatId: at };
           const { ran = [] } = (await actions.execute(parsed.run, parsed.stripped, limbEv, { being: to })) ?? {};
           for (const a of ran) await transcript.logAction?.(ev, a, { being: to });
         } catch (e) { note(`actions ${to}/${ev.chatId}: ${e?.message ?? e}`); }

@@ -3238,7 +3238,7 @@ export async function boot({
     // group create); chatTitle its display name.
     forkBridge: {
       editMessage:   (chatId, msgId, text)            => earBridge.editMessage(chatId, msgId, text),
-      // `via` (2026-10-18): the account that makes the group, 'secondary' (the mouth) or 'primary'.
+      // `via`: the account that makes the group — the primary, which has every contact (2026-10-18).
       createGroup:   (opts, { via = null } = {})      => postBridgeFor(via).createGroup(opts),
       // /send's post_back_from (operator 2026-10-03): 'primary' posts via the operator's OWN account,
       // 'secondary' via the mouth. Resolve the NAMED connection to its already-dialled bridge (the
@@ -3248,9 +3248,14 @@ export async function boot({
       // `unsigned` (operator 2026-10-04, /send) threads straight into the SAME send as skipSignature:
       // the relay posts back AS THE OPERATOR with no node signature (no visible 🏰, no invisible tag),
       // while still flowing through .send so its sent id is tracked for echo-dedup like any other post.
-      // `canary`: the automatic side group's intro carries its origin chat id (persona-wrap).
-      postReply:     (chatId, text, replyToMessageID, { via = null, unsigned = false, canary = null } = {}) =>
-        postBridgeFor(via).send(chatId, text, { replyTo: replyToMessageID, skipSignature: unsigned, canary }),
+      // 'secondary' is said through the one placement (sayOnce): the mouth in its OWN room for the chat
+      // (the stored mouth_chat, else routeLocally), else the connection holding it; not said → the
+      // primary. Never found by title. `canary`: a side group's opener names the group (persona-wrap).
+      postReply:     async (chatId, text, replyToMessageID, { via = null, unsigned = false, canary = null } = {}) => {
+        const opts = { replyTo: replyToMessageID, skipSignature: unsigned, canary };
+        if (via === 'secondary' && await sayOnce({ chatId, text, opts, what: '/send' })) return true;
+        return postBridgeFor(via === 'secondary' ? 'primary' : via).send(chatId, text, opts);
+      },
       archiveChat:   (chatId, { via = null } = {})    => postBridgeFor(via).archiveChat(chatId),   // via: the connection /end arrived on
       chatAccountId: async (chatId) => { try { return (await sideChatRaw(chatId))?.accountID ?? null; } catch { return null; } },
       chatRaw:       (chatId)                         => sideChatRaw(chatId),   // the side-group liveness check
@@ -3258,21 +3263,11 @@ export async function boot({
       listMessagesRaw: (chatId, opts = {})            => postBridgeFor(opts.via).listMessagesRaw(chatId, opts),   // /send reads the replied-to message's live text
       // RODZ'S BEEPER USER ID (operator 2026-10-03) — the create needs `@whatsapp_lid-…`, not a
       // +phone (the API rejects it). Resolved from config.beeper.secondary.phone by scanning this
-      // account's rosters (phoneNumber+id ride together on every participant). `via`: another account's
-      // rosters (a side group's requester, under the creating account's own id — commands.requesterIdOn).
-      resolveUserIdByPhone: (phoneDigits, opts = {}) => postBridgeFor(opts.via).resolveUserIdByPhone(phoneDigits, opts),
-      // THE SECONDARY'S OWN ROOM ID for the new side-group (operator 2026-10-03, the OPENER) — the
-      // group is created on the primary, but Beeper gives the SECONDARY (Rodz) its own room id for the
-      // same group, surfaced async, under the SAME title. Resolved on the SECONDARY bridge
-      // (postBridgeFor('secondary') — the SAME map /send's postReply routes through; single-account
-      // nodes collapse it to the ear bridge) by TITLE so the opener can be posted FROM RODZ.
-      resolveSecondaryChatIdByTitle: (title, opts) => postBridgeFor('secondary').resolveChatIdByTitle(title, opts),
-      // THE PRIMARY ACCOUNT'S OWN ROOM ID for a title (operator 2026-10-04, the TITLE-COLLISION check) —
-      // /join + /split probe it BEFORE creating the group: a group already titled this on the primary means
-      // a duplicate, and a duplicate title makes the opener's by-title lookup land in a STALE group, so the
-      // verb suffixes the title to keep it unique. Mirrors the secondary resolver, on postBridgeFor('primary')
-      // (the SAME map; single-account nodes collapse it to the ear bridge), scoped by accountID at the call.
-      resolvePrimaryChatIdByTitle: (title, opts) => postBridgeFor('primary').resolveChatIdByTitle(title, opts),
+      // account's rosters (phoneNumber+id ride together on every participant).
+      resolveUserIdByPhone: (phoneDigits, opts) => earBridge.resolveUserIdByPhone(phoneDigits, opts),
+      // Rodz's next raw arrival in ANY chat that passes `test` (bridge awaitMessage): its copy of a side
+      // group's opener names Rodz's own room for the group (commands.postOpener). null with no mouth of its own.
+      awaitMouthMessage: (test, ms) => { const mouth = postBridgeFor('secondary'); return mouth === earBridge ? Promise.resolve(null) : (mouth.awaitMessage?.(null, test, ms) ?? Promise.resolve(null)); },
     },
     logToGroup,                                          // per-command audit → config.log_to_group (fail-closed, see above); the dispatch chokepoint emits ONE metadata-only line per command
     requestLogin,                                        // /login <site> → the auto-login limb (src/spine/login.mjs); returns an outcome token, never a credential

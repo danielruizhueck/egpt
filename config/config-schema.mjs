@@ -3202,8 +3202,8 @@ export const CONFIG_SCHEMA = {
     /join — the SUPERPOSITION side-group (operator 2026-10-03). /join [<name>|<node>] creates a
     private group whose chatId is ALIASED to this chat's conversation — one shared on-disk thread, two
     chat surfaces, nothing copied. It is a VIEW, not a branch. Anyone in a group chat may run it
-    (2026-10-18): the secondary account creates it and invites only that person; the operator's own
-    /join is made on the primary with the secondary; no secondary → the primary invites them. Reply
+    (2026-10-18): the primary account creates it, inviting the secondary (Rodz) and that person; the
+    operator's own /join invites Rodz alone; no secondary → just that person. Reply
     /send to relay a chosen message back to the original chat; reply /end to archive the group and
     drop the alias. The two accounts' phones come from beeper.primary.phone / beeper.secondary.phone;
     the group title is config.group_title; and the texts that live here are:
@@ -3222,8 +3222,9 @@ export const CONFIG_SCHEMA = {
                    never capped. (operator 2026-10-16)
       limit:       the reply when member_cap is reached; {name} lists that member's rooms. Unset → a
                    built-in default.
-      opener:      the one message posted from Rodz into the new group right after it is created, so
+      opener:      the one message posted by the primary into the new group right after it is created, so
                    the otherwise-empty group surfaces in Beeper (Beeper hides chats with no messages).
+                   Rodz's copy of it tells the node Rodz's own room for the group, by id.
                    A {group} template ({group} = the parent chat's title). Unset → a small built-in
                    default.
       triggers:    OPTIONAL list of extra phrases that invoke /join; the '/'-word is always a trigger.
@@ -3244,8 +3245,9 @@ export const CONFIG_SCHEMA = {
       default_name: the {name} used in the group title when /split carries NO <name> arg. Unset → the
                    built-in "egpt split".
       placeholder: what the operator's /split message is edited into. Unset → a small built-in default.
-      opener:      the one message posted from Rodz into the new group right after it is created, so
+      opener:      the one message posted by the primary into the new group right after it is created, so
                    the otherwise-empty group surfaces in Beeper (Beeper hides chats with no messages).
+                   Rodz's copy of it tells the node Rodz's own room for the group, by id.
                    A {group} template ({group} = the parent chat's title). Unset → a small built-in
                    default.
       triggers:    OPTIONAL list of extra phrases that invoke /split; the '/'-word is always a trigger.
@@ -3258,8 +3260,8 @@ export const CONFIG_SCHEMA = {
   send: `
     /send — relay a replied-to message from a /join or /split group back to the ORIGINAL chat
     (operator 2026-10-03). Repeatable; posts nothing to the group and never closes it. Anyone in the
-    side group may run it (2026-10-18); a non-operator's relay is posted by the secondary, signed
-    (no secondary → the primary, signed), never as the operator.
+    side group may run it (2026-10-18); a non-operator's relay is posted by the secondary, signed, in
+    its own room for the original (found by id, never by title; else the primary), never as the operator.
       post_back_from: which account posts the operator's relayed message to the original chat —
                       'primary' (the operator's OWN account; the DEFAULT) posts so it appears from the
                       operator; 'secondary' (the mouth) makes it appear from the bot's secondary
@@ -3282,33 +3284,33 @@ export const CONFIG_SCHEMA = {
   end: `
     /end — archive a /join or /split group (both kinds) and drop its mapping, closing it (operator
     2026-10-03). Anyone in the side group may run it (2026-10-18); the group is archived on the
-    account it was heard on. Posts nothing; silent outside a join/split group.
+    account it was heard on. Posts nothing; silent outside a join/split group. Off in the
+    reply_in_side_group group: there it does nothing.
       triggers:       OPTIONAL list of extra phrases that invoke /end; the '/'-word is always a
                       trigger. A message that EQUALS one of these (trimmed, case-insensitive) runs
                       /end. Operator-only, EXACT whole-message match only (never prefix/contains).
                       Pick phrases you won't say by accident. Unset → only the '/'-word triggers.
   `,
 
-  side_group: `
-    The automatic side group (operator 2026-10-18). Set it on ONE conversation's
-    OWN entry in config/conversations.yaml: side_group: { automatic: true }.
-    Read nowhere else: in config/config.yaml, on a side group's entry or in a
-    folder config.yaml it does nothing. There is no trigger phrase.
+  reply_in_side_group: `
+    The automatic side group (operator 2026-10-18). Set it on ONE conversation's OWN entry in
+    config/conversations.yaml. Read nowhere else: in config/config.yaml, on a side group's entry or in
+    a folder config.yaml it does nothing. There is no trigger phrase.
 
-    KEYS:
-      automatic
-        true → no being replies in this chat. The first reply someone asked
-        for (the being addressed, or a reply to it) opens the group
-        "SI+<chat title>" (the secondary creates it, inviting the sender of the
-        message being answered; no secondary → the primary does), and that
-        reply and every later one goes there, unquoted. Until the group exists
-        an unaddressed 'on' turn is not run. A message from one of
-        our own accounts makes it on the primary with Rodz. It is a /join-kind
-        alias of the chat (same folder and thread, its own transcript), marked
-        automatic: true; /send and /end work in it, and after /end or once the
-        group is gone the next reply opens a new one. Only the node_role
-        'primary' node creates it; the other node links it from the intro and,
-        until then, withholds its replies. DEFAULT false (replies in place).
+    VALUE:
+      true / yes / on / 1 (any case)   → on; the group is titled "SI+<chat title>".
+      false / no / off / 0 / "" / unset → off: replies in place (the DEFAULT).
+      any other text                   → on; that text (trimmed) is the group's title, as is.
+
+    On: no being replies in this chat, in any mode; every reply (its limbs and voice too) goes to the
+    side group, unquoted. The primary account creates it, inviting Rodz (the secondary) and every
+    member of the chat it can see; no secondary → the members alone. An addressed reply makes it
+    before the turn; any other (on/auto) only once the reply has something to post, so a silence
+    makes nothing. It is a /join-kind alias of the chat (same folder and thread, its own transcript),
+    marked automatic: true. /send works in it; /end does nothing there. Once the group is gone the
+    next reply opens a new one. A title may repeat: the group is known by its id. Only the node_role
+    'primary' node creates it; the other node links it from the opener and, until then, withholds
+    its replies.
   `,
 
   aliases: `

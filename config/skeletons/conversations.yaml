@@ -44,8 +44,9 @@ contacts:
       # browser group: browsers.yaml uploads:
       #privileged_browser: true
 
-      # no reply here: every reply goes to the group "SI+<title>", made on the first one (see config-schema side_group)
-      #side_group: { automatic: true }
+      # no reply here: every reply goes to a side group the primary makes (config-schema reply_in_side_group);
+      # true/yes/on → "SI+<title>", any other text → that title
+      #reply_in_side_group: on
 
       # one block per resident agent, keyed by its config.yaml agents: name.
       # EVERY field a being has lives HERE, flat (operator 2026-08-14: one block
