@@ -231,6 +231,7 @@ function fakeTransport() {
       // THE 🎧 LISTENING MARK's reads and writes (2026-09-16): this account's own copies of a chat's
       // recent messages, and a reaction placed on / taken off one of them.
       async listMessagesRaw(chat) { return LISTED[chat] ?? []; },
+      recentMessages(chat) { return LISTED[chat] ?? []; },   // …as it noted them arriving: where the mouth finds its own copy
       async sendReaction(chat, id, key) { if (spy.reactThrows) throw new Error('reaction bridge boom'); spy.reactions.push({ chatId: chat, id, key }); return true; },   // `reactThrows` (off by default) lets a test prove a react fault never breaks the reply
       async removeReaction(chat, id, key) { spy.unreactions.push({ chatId: chat, id, key }); return true; },
       async chatRaw(chat) { return world[chat] ? rawChat(chat, world[chat]) : null; },

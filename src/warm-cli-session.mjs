@@ -425,12 +425,14 @@ export function createWarmCliSession(options = {}) {
       // "👍" — not exotic in a chat) would be acknowledged by an event that predates it.
       // A tool_result also arrives as a `user` event, and carries no `isReplay`, so it is not
       // seen here — same as before.
+      // TRIMMED on both sides: the CLI echoes the line as it REWROTE it (measured 2.1.303, a mid-turn
+      // absorption: "…#34353: " written, "…#34353:" replayed, `promptRewritten` in its transcript).
       if (ev.type === 'user' && ev.isReplay === true && pending) {
         const echoed = (Array.isArray(ev.message?.content) ? ev.message.content : [])
-          .filter((c) => c?.type === 'text').map((c) => c.text).join('');
-        if (!pending.openerReplayed && echoed === pending.openerText) pending.openerReplayed = true;
+          .filter((c) => c?.type === 'text').map((c) => c.text).join('').trim();
+        if (!pending.openerReplayed && echoed === pending.openerText.trim()) pending.openerReplayed = true;
         else {
-          const rec = pending.injections.find((r) => !r.done && r.text === echoed);
+          const rec = pending.injections.find((r) => !r.done && r.text.trim() === echoed);
           if (rec) { rec.done = true; rec.settle({ ok: true }); }
         }
       }

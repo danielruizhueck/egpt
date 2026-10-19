@@ -4119,12 +4119,13 @@ describe('beeper bridge — 🎧 listening mark: placed where the decode runs, t
     profile, ownTranscriptor: own, transcribeViaEndpoint: remote, reachable: async () => true, cli, residentServing: () => null,
   });
 
-  // The MOUTH: a connection on the other account, holding ITS OWN copy of the note (its own id 2404).
+  // The MOUTH: a connection on the other account, holding ITS OWN copy of the note (its own id 2404),
+  // as it noted it arriving.
   function mouthBridge({ holdsNote = true } = {}) {
     const reactions = [], unreactions = [];
     return {
       reactions, unreactions,
-      async listMessagesRaw() { return holdsNote ? [{ id: '2404', timestamp: NOTE_TS, type: 'VOICE', text: null, attachments: [listedAtt('dolly-egpt_2404')] }] : []; },
+      recentMessages() { return holdsNote ? [{ id: '2404', timestamp: NOTE_TS, type: 'VOICE', text: null, attachments: [listedAtt('dolly-egpt_2404')] }] : []; },
       async react(chatId, msgId, emoji) { reactions.push({ chatId, msgId, emoji }); return true; },
       async unreact(chatId, msgId, emoji) { unreactions.push({ chatId, msgId, emoji }); return true; },
     };

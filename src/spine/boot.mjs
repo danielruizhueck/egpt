@@ -25,7 +25,7 @@ import { peerSpineFrom, createMouthReceiver, speakThroughPeer, startPeerStream, 
 // The cross-account chat key itself — minted in the bridge, beside the payloads it reads. The
 // LOCAL mouth below keys with the same primitive the peer link keys with; there is one definition
 // of "which of MY chats is that ONE real chat" and both transports ask it.
-import { crossAccountChatKey, crossAccountMsgKey, _msgTimestampMs, LISTENING_REACTION } from '../bridges/beeper.mjs';
+import { crossAccountChatKey, LISTENING_REACTION } from '../bridges/beeper.mjs';
 import { htmlToMarkdown } from '../html-to-markdown.mjs';
 import { mergeAudit } from './audit-merge.mjs';
 import { createWarmPool } from '../warm-sessions.mjs';
@@ -459,24 +459,16 @@ export function makePeerMouth({ peer, bridge, bridgeOf = null, owns = () => fals
   //
   // THE LOOKUP ITSELF is shared with the /reply limb's quote (2026-09-16, `quote` below): which of
   // the mouth's OWN messages a cross-account key names. One lookup, two things done with the id.
-  // ITS OWN ARRIVAL names the copy with no GET (the bridge's recentMessages). Not seen yet → the list,
-  // and meanwhile the copy itself if it lands: it can trail the ear's arrival by most of a second.
-  const ownCopy = async ({ bridge: on, chatId, connection }, { msgKey, timestamp = 0 } = {}) => {
+  // ITS OWN ARRIVAL names the copy, and nothing else does — no search (operator 2026-10-18): the
+  // bridge's in-memory record (noted before any gate), else the copy itself if it lands within
+  // COPY_WAIT_MS. Both through findMessageByKey, so one rule decides.
+  const ownCopy = async ({ bridge: on, chatId }, { msgKey, timestamp = 0 } = {}) => {
     const want = String(msgKey ?? '').trim();
     if (!want) return { ok: false, reason: 'no-key', detail: 'the message carries no cross-account key' };
     const seen = findMessageByKey(on?.recentMessages?.(chatId) ?? [], want, timestamp);
-    if (seen.ok) return seen;
-    if (!on?.listMessagesRaw) return { ok: false, reason: 'no-list', detail: `'${connection}' cannot list its messages` };
-    const arrived = Promise.resolve(on.awaitMessage?.(chatId, (m) => crossAccountMsgKey(m) === want && (!timestamp || _msgTimestampMs(m) === timestamp), COPY_WAIT_MS))
-      .then((m) => (m?.id != null ? { ok: true, msgId: String(m.id) } : null), () => null);
-    const listed = (async () => {
-      let messages = [];
-      try { messages = await on.listMessagesRaw(chatId); }
-      catch (e) { return { ok: false, reason: 'unavailable', detail: e?.message ?? String(e) }; }
-      const hit = findMessageByKey(messages, want, timestamp);
-      return hit.ok ? hit : ((await arrived) ?? hit);
-    })();
-    return Promise.race([listed, arrived.then((a) => a ?? listed)]);
+    if (seen.reason !== 'no-match' || !on?.awaitMessage) return seen;   // found, or twins no wait can tell apart
+    const m = await Promise.resolve(on.awaitMessage(chatId, (x) => findMessageByKey([x], want, timestamp).ok, COPY_WAIT_MS)).catch(() => null);
+    return m?.id != null ? { ok: true, msgId: String(m.id) } : { ...seen, detail: `${seen.detail}, nor did it arrive within ${COPY_WAIT_MS}ms` };
   };
   // `remove` takes a reaction back OFF the mouth's own copy, found the same way (the 🎧 listening
   // mark, 2026-09-16 — sender.mjs makeOutbound `react`).

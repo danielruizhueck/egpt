@@ -846,13 +846,12 @@ describe('a REACTION crosses the link and is placed on the OTHER account\'s own 
     port.stop();
   });
 
-  it('ONE match is answered whatever the timestamp says — the content already identified it', async () => {
-    // The timestamp is a TIE-BREAK, not a filter. A single match must not be thrown away because
-    // one account rendered the clock differently; that would turn a working ack into silence.
+  it('ONE match at a DIFFERENT second is refused — it may be an older message with the same body', async () => {
+    // The timestamp is a filter at whole-second granularity (2026-10-18): the right copy may not be listed yet.
     const { reacted, poke, port } = rig({ messages: [{ ...STEERED_ON_SECONDARY, timestamp: '2026-09-07T11:07:19.000Z' }] });
     const r = await poke();
-    expect(r.ok).toBe(true);
-    expect(reacted).toEqual([{ chatId: SECONDARY_CHAT_ID, msgId: '1118', emoji: '👀' }]);
+    expect(r).toMatchObject({ ok: false, reason: 'no-match' });
+    expect(reacted).toEqual([]);
     port.stop();
   });
 
@@ -1325,16 +1324,19 @@ describe('findMessageByKey — which of MY messages is that one, on its own', ()
     expect(findMessageByKey([EARLIER_ON_SECONDARY], STEERED_KEY, STEERED_TS).reason).toBe('no-match');
   });
 
-  it('the TIMESTAMP is a tie-break and not a filter: one match stands, several need it', () => {
-    // One match, wrong timestamp → still the answer (the content already identified it).
-    expect(findMessageByKey([STEERED_ON_SECONDARY], STEERED_KEY, 1)).toEqual({ ok: true, msgId: '1118' });
-    // Two matches, one at that instant → that one.
+  it('the TIMESTAMP is a filter at whole-second granularity: only a copy in that second is ever chosen', () => {
+    // One match, another second → refused: it may be an older same-body message.
+    expect(findMessageByKey([STEERED_ON_SECONDARY], STEERED_KEY, Date.parse('2026-09-07T11:07:19.000Z')).reason).toBe('no-match');
+    // The sender's copy keeps ms, the other account's is truncated: the same second, the same message.
+    expect(findMessageByKey([STEERED_ON_SECONDARY], STEERED_KEY, STEERED_TS + 13)).toEqual({ ok: true, msgId: '1118' });
+    // Two matches, one in that second → that one.
     const older = { id: '1100', text: STEERED_TEXT, timestamp: '2026-09-07T10:00:00.000Z' };
     expect(findMessageByKey([older, STEERED_ON_SECONDARY], STEERED_KEY, STEERED_TS)).toEqual({ ok: true, msgId: '1118' });
-    // Two matches, NEITHER at that instant → refuse. Never "the closest", never "the newest".
-    expect(findMessageByKey([older, STEERED_ON_SECONDARY], STEERED_KEY, Date.parse('2026-09-07T12:00:00.000Z')).reason).toBe('ambiguous');
-    // Two matches at the SAME instant → refuse.
+    // Two matches, NEITHER in that second → refuse. Never "the closest", never "the newest".
+    expect(findMessageByKey([older, STEERED_ON_SECONDARY], STEERED_KEY, Date.parse('2026-09-07T12:00:00.000Z')).reason).toBe('no-match');
+    // Two matches in the SAME second → refuse.
     expect(findMessageByKey([{ ...STEERED_ON_SECONDARY, id: '1200' }, STEERED_ON_SECONDARY], STEERED_KEY, STEERED_TS).reason).toBe('ambiguous');
+    expect(findMessageByKey([{ ...STEERED_ON_SECONDARY, id: '1200', timestamp: STEERED_TS + 400 }, STEERED_ON_SECONDARY], STEERED_KEY, STEERED_TS + 13).reason).toBe('ambiguous');
     // Two matches and no timestamp to break with → refuse.
     expect(findMessageByKey([older, STEERED_ON_SECONDARY], STEERED_KEY, 0).reason).toBe('ambiguous');
   });

@@ -203,16 +203,13 @@ export function findChatByKey(chats, chatKey, exclude = []) {
  * same question about a smaller thing — and because a REACTION on the wrong message is the
  * message-sized version of a reply in the wrong chat: public, and unnoticed until it is.
  *
- * THE TIMESTAMP IS A TIE-BREAK, NOT A FILTER, and the distinction is the whole design. One match
- * is answered whatever its timestamp says, because the two accounts' clocks are not the question —
- * the CONTENT already identified the message. The timestamp is consulted only when the content did
- * NOT identify it, i.e. when a chat holds two messages with the same body. That is not exotic
- * ("ok", "👍", "jaja"), which is exactly why the frame carries it.
+ * THE TIMESTAMP IS A FILTER, AT WHOLE-SECOND GRANULARITY (2026-10-18). A copy whose second differs
+ * from the frame's is never chosen, not even alone: the list may not hold the right one yet, and an
+ * older same-body message ("ok", "e") would be. Whole seconds because a sender's own copy keeps
+ * milliseconds and the other account's is truncated (…16.013Z / …16.000Z, live).
  *
- * AND IT STILL FAILS CLOSED. Zero matches: nothing. Several matches and none of them at that
- * timestamp: nothing. Several matches AT that timestamp: nothing. Never a guess, never "the newest
- * one" — the caller's fallback is to place no reaction at all, which is a strictly better outcome
- * than one on the wrong message.
+ * AND IT FAILS CLOSED. No match in that second: nothing. Several in it: nothing. No timestamp and
+ * several matches: nothing. Never a guess — no reaction beats one on the wrong message.
  *
  * @param {object[]} messages   RAW Beeper message payloads — the /v1/chats/{c}/messages shape
  *   (bridge.listMessagesRaw). Not normalized: crossAccountMsgKey reads `text` itself, exactly as
@@ -230,21 +227,15 @@ export function findMessageByKey(messages, msgKey, timestamp = 0) {
     if (crossAccountMsgKey(m) !== want) continue;
     hits.set(String(m.id), m);                       // the same id listed twice is ONE message
   }
-  let ids = [...hits.keys()];
+  const ids = [...hits.keys()];
   if (ids.length === 0) return { ok: false, reason: 'no-match', detail: 'no message on this account keys to that body' };
-  if (ids.length > 1) {
-    const ts = Number(timestamp) || 0;
-    const same = ts ? ids.filter((id) => _msgTimestampMs(hits.get(id)) === ts) : [];
-    if (same.length !== 1) {
-      return {
-        ok: false,
-        reason: 'ambiguous',
-        detail: `${ids.length} messages key alike (${ids.join(', ')})${ts ? ` and ${same.length} of them at ${new Date(ts).toISOString()}` : ' and the frame carried no timestamp'} — refusing to pick`,
-      };
-    }
-    ids = same;
-  }
-  return { ok: true, msgId: ids[0] };
+  const ts = Number(timestamp) || 0;
+  if (!ts) return ids.length === 1 ? { ok: true, msgId: ids[0] } : { ok: false, reason: 'ambiguous', detail: `${ids.length} messages key alike (${ids.join(', ')}) and the frame carried no timestamp — refusing to pick` };
+  const second = (ms) => (ms == null ? null : Math.floor(ms / 1000));
+  const same = ids.filter((id) => second(_msgTimestampMs(hits.get(id))) === second(ts));
+  if (same.length === 0) return { ok: false, reason: 'no-match', detail: `no message on this account keys to that body at ${new Date(ts).toISOString()} (${ids.length} at other seconds: ${ids.join(', ')})` };
+  if (same.length > 1) return { ok: false, reason: 'ambiguous', detail: `${ids.length} messages key alike (${ids.join(', ')}) and ${same.length} of them at ${new Date(ts).toISOString()} — refusing to pick` };
+  return { ok: true, msgId: same[0] };
 }
 
 /**
@@ -273,8 +264,7 @@ export function findMessageByKey(messages, msgKey, timestamp = 0) {
  * two differ from each other at the third character. Comparing a message list against a preview
  * is comparing two renderings, so it is not done: both sides of this hand in the same field.
  *
- * THE TIMESTAMP IS A GUARD HERE, NOT A TIE-BREAK — the opposite of findMessageByKey above, and
- * for a reason. There the CONTENT had already identified the message within one chat; here the
+ * THE TIMESTAMP IS A GUARD HERE, as in findMessageByKey above, and more so: here the
  * content is being asked to identify a CHAT out of a whole account, where short bodies are not
  * rare: of 154 chats on the operator's primary, 11 had a `preview` byte-identical to another
  * chat's ("ok", ":)", "Hello", "Started a call"). So a body match only counts at the same WHOLE
