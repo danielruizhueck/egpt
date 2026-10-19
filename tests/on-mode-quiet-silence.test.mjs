@@ -1,7 +1,7 @@
 // On-mode ambient turns post nothing up front (operator 2026-10-18): "if mode is 'on' then '...'
-// should not be posted in channel, only logged." A turn the being was NOT addressed in (no handle,
-// not a reply to it) runs with no ⏳ placeholder; a silence posts nothing, a real reply posts once.
-// Addressed turns and every other mode keep the immediate ⏳.
+// should not be posted in channel, only logged." Ruled at 22:10: a HUMAN line opens its ⏳ at
+// arrival, addressed or not; only a NON-HUMAN one (another being, a node-signed line) runs with no
+// ⏳ — its silence posts nothing, a real reply posts once. Every other mode keeps the immediate ⏳.
 import { describe, it, expect } from 'vitest';
 import { createRouter } from '../src/spine/router.mjs';
 import { createGating } from '../src/spine/gating.mjs';
@@ -13,6 +13,8 @@ import { mentionStatus } from '../src/auto-mode.mjs';
 const MOUTH_HOLDS = { route: async () => null, mouthIsElsewhere: () => false };
 const CHAT = { surface: 'whatsapp', node: 'wa', chatId: '!g', chatName: 'grupo', kind: 'text', raw: { chatType: 'group' }, senderId: 'u-1', senderName: 'An' };
 let seq = 0;
+const BEING = { fromMember: { id: 'claude', kind: 'brain' } };   // another being's line (room relay)
+const SIGNED = { fromNode: 'do' };                                // a node-signed line
 const msg = (body, extra = {}) => ({
   ...CHAT, body, msgId: `m${++seq}`, ts: 1,
   mention: { ...mentionStatus(body, ['e', 'egpt']), replyToBot: extra.replyToBeing != null },
@@ -41,7 +43,7 @@ function build({ mode = 'on', reply = 'ok', partials = [], tasks = [] } = {}) {
   const bridge = streamingBridge();
   const brain = {
     calls: [], tasks,
-    async turn(being, ev, onPartial) { this.calls.push({ being, ev }); for (const p of partials) onPartial?.(p); return { text: reply, sessionId: 's' }; },
+    async turn(being, ev, onPartial) { this.calls.push({ being, ev, open: bridge.streams.map((s) => s.init) }); for (const p of partials) onPartial?.(p); return { text: reply, sessionId: 's' }; },
     background() { return brain.tasks; },
   };
   const transcript = { entries: [], async log(ev, r) { this.entries.push({ ev, reply: r }); } };
@@ -63,10 +65,10 @@ function build({ mode = 'on', reply = 'ok', partials = [], tasks = [] } = {}) {
   return { bridge, brain, replies, quiet };
 }
 
-describe('on mode, not addressed — no placeholder up front', () => {
+describe('on mode, a non-human line — no placeholder up front', () => {
   it("REPRODUCE: a '…' silence posts NOTHING (no ⏳, no ✓, no edit) and logs one line", async () => {
     const b = build({ reply: '…' });
-    await b.bridge.emit(msg('qué calor hace hoy'));
+    await b.bridge.emit(msg('qué calor hace hoy', BEING));
     expect(b.brain.calls).toHaveLength(1);
     expect(b.bridge.streams).toEqual([]);
     expect(b.bridge.sent).toEqual([]);
@@ -76,7 +78,7 @@ describe('on mode, not addressed — no placeholder up front', () => {
 
   it("REPRODUCE (live 'E: ⏳ Thinking… → E: …'): a streamed '…' partial opens nothing either", async () => {
     const b = build({ reply: '...', partials: ['.', '..', '...'] });
-    await b.bridge.emit(msg('jaja'));
+    await b.bridge.emit(msg('jaja', BEING));
     expect(b.bridge.streams).toEqual([]);
     expect(b.bridge.sent).toEqual([]);
     expect(b.quiet()).toHaveLength(1);
@@ -84,7 +86,7 @@ describe('on mode, not addressed — no placeholder up front', () => {
 
   it('an empty turn posts nothing as well (no "<received silence>")', async () => {
     const b = build({ reply: '' });
-    await b.bridge.emit(msg('ok'));
+    await b.bridge.emit(msg('ok', BEING));
     expect(b.bridge.streams).toEqual([]);
     expect(b.bridge.sent).toEqual([]);
     expect(b.quiet()).toHaveLength(1);
@@ -92,7 +94,7 @@ describe('on mode, not addressed — no placeholder up front', () => {
 
   it('a real reply is posted ONCE, opening on its first text — never on ⏳ Thinking…', async () => {
     const b = build({ reply: 'Hola a todos', partials: ['Hola', 'Hola a todos'] });
-    await b.bridge.emit(msg('buenas'));
+    await b.bridge.emit(msg('buenas', BEING));
     expect(b.bridge.streams).toHaveLength(1);
     const [s] = b.bridge.streams;
     expect(s.init).toBe('Hola ⏳');
@@ -105,7 +107,7 @@ describe('on mode, not addressed — no placeholder up front', () => {
 
   it('a real reply with no stream at all opens on the reply itself', async () => {
     const b = build({ reply: 'Hola' });
-    await b.bridge.emit(msg('buenas'));
+    await b.bridge.emit(msg('buenas', BEING));
     expect(b.bridge.streams.map((s) => [s.init, s.finals])).toEqual([['Hola', ['Hola']]]);
     expect(b.bridge.sent).toEqual([]);
   });
@@ -113,7 +115,7 @@ describe('on mode, not addressed — no placeholder up front', () => {
   it('a /react-only turn: the reaction lands, no message is posted', async () => {
     seq = 40;
     const b = build({ reply: '/react #m41 👍' });
-    await b.bridge.emit(msg('lo logré!'));
+    await b.bridge.emit(msg('lo logré!', BEING));
     expect(b.bridge.reactions).toEqual([{ chat: '!g', msgId: 'm41', emoji: '👍' }]);
     expect(b.bridge.streams).toEqual([]);
     expect(b.bridge.sent).toEqual([]);
@@ -121,13 +123,45 @@ describe('on mode, not addressed — no placeholder up front', () => {
 
   it('a silent turn that leaves background work still opens the ⚙️ status', async () => {
     const b = build({ reply: '…', tasks: [{ description: 'Crawl the site', since: 1 }] });
-    await b.bridge.emit(msg('alguien sabe?'));
+    await b.bridge.emit(msg('alguien sabe?', BEING));
     expect(b.bridge.streams.map((s) => s.init)).toEqual(['⚙️ working in background: Crawl the site ⏳']);
     expect(b.bridge.sent).toEqual([]);
   });
+
+  it("REPRODUCE: addressed makes no difference — a node-signed '@e …' silence posts nothing", async () => {
+    const b = build({ reply: '…' });
+    await b.bridge.emit(msg('@e hola', SIGNED));
+    expect(b.brain.calls).toHaveLength(1);
+    expect(b.bridge.streams).toEqual([]);
+    expect(b.bridge.sent).toEqual([]);
+    expect(b.quiet()).toHaveLength(1);
+  });
+
+  it("REPRODUCE: another being's '@e …' reply opens on its own text, never on ⏳", async () => {
+    const b = build({ reply: 'Hola' });
+    await b.bridge.emit(msg('@e hola', BEING));
+    expect(b.bridge.streams.map((s) => [s.init, s.finals])).toEqual([['Hola', ['Hola']]]);
+  });
 });
 
-describe('addressed, or any other mode — unchanged: immediate ⏳', () => {
+describe('on mode, a human line — ⏳ at arrival, addressed or not', () => {
+  it('REPRODUCE: an unaddressed line opens its ⏳ before the turn runs; the reply edits it', async () => {
+    const b = build({ reply: 'Hola' });
+    await b.bridge.emit(msg('qué calor hace hoy'));
+    expect(b.brain.calls[0].open).toEqual([THINKING]);
+    expect(b.bridge.streams.map((s) => [s.init, s.finals])).toEqual([[THINKING, ['Hola']]]);
+  });
+
+  it("REPRODUCE: an unaddressed '…' resolves the ⏳ to ✓, nothing withheld", async () => {
+    const b = build({ reply: '…' });
+    await b.bridge.emit(msg('jaja'));
+    expect(b.bridge.streams.map((s) => [s.init, s.finals])).toEqual([[THINKING, ['✓']]]);
+    expect(b.bridge.sent).toEqual([]);
+    expect(b.quiet()).toEqual([]);
+  });
+});
+
+describe('a human, addressed, or any other mode — unchanged: immediate ⏳', () => {
   for (const [what, m] of [
     ['@handle', () => msg('@e hola')],
     ['handle at the start', () => msg('e hola')],
@@ -151,12 +185,14 @@ describe('addressed, or any other mode — unchanged: immediate ⏳', () => {
   });
 
   for (const mode of ['mention', 'accum']) {
-    it(`${mode} mode, @handle: ⏳ placeholder first, a '…' is posted`, async () => {
-      const b = build({ mode, reply: '…' });
-      await b.bridge.emit(msg('@e hola'));
-      expect(b.bridge.streams[0].init).toBe(THINKING);
-      expect(b.bridge.streams[0].finals).toEqual(['…']);
-    });
+    for (const [who, extra] of [['a human', {}], ['another being', BEING]]) {
+      it(`${mode} mode, @handle from ${who}: ⏳ placeholder first, a '…' is posted`, async () => {
+        const b = build({ mode, reply: '…' });
+        await b.bridge.emit(msg('@e hola', extra));
+        expect(b.bridge.streams[0].init).toBe(THINKING);
+        expect(b.bridge.streams[0].finals).toEqual(['…']);
+      });
+    }
   }
 });
 

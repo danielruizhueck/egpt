@@ -990,8 +990,7 @@ describe('spine — /reply handled BEFORE posting (no visible token, no delete+r
     const actions = createReplyActions({ bridge, peerMouth: MOUTH_HOLDS, bodyEmojiOf: () => '🐶', labelOf: () => 'egpt', resolveConvDir: async () => null, onLog: () => {} });
     const spine = createSpine({
       bridge, brain, store: fakeStore(),
-      // addressed: an unaddressed 'on' turn opens no placeholder (on-mode-quiet-silence.test.mjs)
-      identity: fakeIdentity, router: { resolve: () => ({ being: 'e', mention: { atEStart: true, atEAnywhere: true } }) }, gating: fakeGating({}),
+      identity: fakeIdentity, router: fakeRouter, gating: fakeGating({}),
       sender: createSender({ bridge, bodyEmojiOf: () => '🐶', labelOf: () => 'egpt' }),
       transcript, heartbeats: fakeHeartbeats(), actions,
       clock: { now: () => 1000 },

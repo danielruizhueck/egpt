@@ -118,10 +118,10 @@ describe('boot — a public being', () => {
     app.stop();
   });
 
-  it('LOCK: without the flag the same being streams its reply, stamped and signed as before', async () => {
+  it('LOCK: without the flag the same being streams its placeholder, stamped and signed as before', async () => {
     const { app, spy } = await run({ isPublic: false, turn: reply });
     expect(spy.streams).toHaveLength(1);
-    expect(spy.streams[0].init).toMatch(/^🐶 EduWeb: Hola ⏳ 🏰/);   // unaddressed 'on' turn: opens on its first text (2026-10-18)
+    expect(spy.streams[0].init).toMatch(/^🐶 EduWeb: ⏳ Thinking… 🏰/);
     expect(spy.streams[0].finals[0]).toMatch(/^🐶 EduWeb: Hola, ¿de qué colegio me escribes\? 🏰/);
     app.stop();
   });

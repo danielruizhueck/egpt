@@ -1,7 +1,8 @@
 // An ambient 'on' turn opens its ⏳ train when the being starts working (operator 2026-10-18,
 // after "help me pay paypal…" ran ~37 s with nothing visible and a steered "e" opened nothing
-// either): on its first tool use, after AMBIENT_OPEN_MS of running, or when a line addressed to
-// it is steered in. A quick tool-free silence still posts nothing.
+// either): on its first tool use, after AMBIENT_OPEN_MS of running, or when a human line is
+// steered in. A quick tool-free silence still posts nothing. Ambient = a NON-HUMAN line (22:10):
+// a human's opens its ⏳ on arrival.
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { createRouter } from '../src/spine/router.mjs';
@@ -15,7 +16,8 @@ import { mentionStatus } from '../src/auto-mode.mjs';
 const MOUTH_HOLDS = { route: async () => null, mouthIsElsewhere: () => false };
 const CHAT = { surface: 'whatsapp', node: 'wa', chatId: '!g', chatName: 'grupo', kind: 'text', raw: { chatType: 'group' }, senderId: 'u-1', senderName: 'An' };
 let seq = 0;
-const msg = (body) => ({ ...CHAT, body, msgId: `m${++seq}`, ts: 1, mention: { ...mentionStatus(body, ['e', 'egpt']), replyToBot: false } });
+const msg = (body, extra = {}) => ({ ...CHAT, body, msgId: `m${++seq}`, ts: 1, mention: { ...mentionStatus(body, ['e', 'egpt']), replyToBot: false }, ...extra });
+const BEING = { fromMember: { id: 'claude', kind: 'brain' } };   // another being's line (room relay)
 const flush = () => new Promise((r) => setImmediate(r));
 async function until(cond) { for (let i = 0; i < 50 && !cond(); i++) await flush(); }
 const gate = () => { let open; const p = new Promise((r) => { open = r; }); return { p, open }; };
@@ -67,11 +69,11 @@ function build({ mode = 'on', work, steers = false } = {}) {
 
 afterEach(() => { vi.useRealTimers(); });
 
-describe('on mode, not addressed — the train opens when the being starts working', () => {
+describe('on mode, a non-human line — the train opens when the being starts working', () => {
   it('REPRODUCE: the first tool use opens the ⏳ train at that moment, before any text', async () => {
     const g = gate();
     const b = build({ work: async (onPartial) => { onPartial('', { tool: true }); await g.p; return { text: 'Listo, pagado.' }; } });
-    const done = b.bridge.emit(msg('help me pay paypal'));
+    const done = b.bridge.emit(msg('help me pay paypal', BEING));
     await until(() => b.bridge.streams.length);
     expect(b.bridge.streams.map((s) => s.init)).toEqual([THINKING]);
     expect(b.bridge.streams[0].opts).toMatchObject({ replyTo: expect.stringMatching(/^m\d+$/) });
@@ -86,7 +88,7 @@ describe('on mode, not addressed — the train opens when the being starts worki
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const g = gate();
     const b = build({ work: async () => { await g.p; return { text: 'Hecho' }; } });
-    const done = b.bridge.emit(msg('alguien revisa esto?'));
+    const done = b.bridge.emit(msg('alguien revisa esto?', BEING));
     await until(() => b.brain.calls.length);
     await vi.advanceTimersByTimeAsync(9_999);
     expect(b.bridge.streams).toEqual([]);
@@ -97,46 +99,50 @@ describe('on mode, not addressed — the train opens when the being starts worki
     expect(b.bridge.streams[0].finals).toEqual(['Hecho']);
   });
 
-  it('REPRODUCE (live 21:33): an addressed line steered into the ambient turn opens its train at once', async () => {
-    const g = gate();
-    const b = build({ steers: true, work: async () => { await g.p; return { text: 'Abrí PayPal.' }; } });
-    const done = b.bridge.emit(msg('help me pay paypal'));
-    await until(() => b.brain.calls.length);
-    expect(b.bridge.streams).toEqual([]);
-    await b.bridge.emit(msg('e'));
-    expect(b.brain.steered).toEqual(['e']);
-    expect(b.bridge.streams.map((s) => s.init)).toEqual([THINKING]);
-    g.open();
-    await done;
-    expect(b.bridge.streams).toHaveLength(1);
-    expect(b.bridge.streams[0].finals).toEqual(['Abrí PayPal.']);
-  });
+  for (const line of ['e', 'mirá esto']) {
+    it(`REPRODUCE (live 21:33): a human line ("${line}") steered into the ambient turn opens its train at once`, async () => {
+      const g = gate();
+      const b = build({ steers: true, work: async () => { await g.p; return { text: 'Abrí PayPal.' }; } });
+      const done = b.bridge.emit(msg('help me pay paypal', BEING));
+      await until(() => b.brain.calls.length);
+      expect(b.bridge.streams).toEqual([]);
+      await b.bridge.emit(msg(line));
+      expect(b.brain.steered).toEqual([line]);
+      expect(b.bridge.streams.map((s) => s.init)).toEqual([THINKING]);
+      g.open();
+      await done;
+      expect(b.bridge.streams).toHaveLength(1);
+      expect(b.bridge.streams[0].finals).toEqual(['Abrí PayPal.']);
+    });
+  }
 
   it('REPRODUCE: worked then stayed silent — the train resolves to ✓, as a non-ambient silence does', async () => {
     const b = build({ work: async (onPartial) => { onPartial('', { tool: true }); return { text: '…' }; } });
-    await b.bridge.emit(msg('qué hora es allá?'));
+    await b.bridge.emit(msg('qué hora es allá?', BEING));
     expect(b.bridge.streams.map((s) => [s.init, s.finals])).toEqual([[THINKING, ['✓']]]);
     expect(b.bridge.sent).toEqual([]);
     expect(b.quiet()).toEqual([]);
   });
 
-  it('an unaddressed line steered in opens nothing', async () => {
-    const g = gate();
-    const b = build({ steers: true, work: async () => { await g.p; return { text: '…' }; } });
-    const done = b.bridge.emit(msg('jaja'));
-    await until(() => b.brain.calls.length);
-    await b.bridge.emit(msg('jajaja'));
-    expect(b.brain.steered).toEqual(['jajaja']);
-    g.open();
-    await done;
-    expect(b.bridge.streams).toEqual([]);
-    expect(b.quiet()).toHaveLength(1);
-  });
+  for (const line of ['jajaja', 'e']) {
+    it(`a non-human line ("${line}") steered in opens nothing, addressed or not`, async () => {
+      const g = gate();
+      const b = build({ steers: true, work: async () => { await g.p; return { text: '…' }; } });
+      const done = b.bridge.emit(msg('jaja', BEING));
+      await until(() => b.brain.calls.length);
+      await b.bridge.emit(msg(line, BEING));
+      expect(b.brain.steered).toEqual([line]);
+      g.open();
+      await done;
+      expect(b.bridge.streams).toEqual([]);
+      expect(b.quiet()).toHaveLength(1);
+    });
+  }
 
   it('a quick tool-free silence posts nothing, logs one line, and leaves no timer to open it later', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const b = build({ work: async () => ({ text: '…' }) });
-    await b.bridge.emit(msg('qué calor'));
+    await b.bridge.emit(msg('qué calor', BEING));
     await vi.advanceTimersByTimeAsync(60_000);
     expect(b.bridge.streams).toEqual([]);
     expect(b.bridge.sent).toEqual([]);
@@ -144,21 +150,25 @@ describe('on mode, not addressed — the train opens when the being starts worki
   });
 });
 
-describe('addressed turns — unchanged', () => {
-  it('@handle: one ⏳ up front; a tool use and ten seconds open nothing more', async () => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    const g = gate();
-    const b = build({ work: async (onPartial) => { onPartial('Hola', undefined); onPartial('Hola', { tool: true }); await g.p; return { text: 'Hola' }; } });
-    const done = b.bridge.emit(msg('@e hola'));
-    await until(() => b.brain.calls.length);
-    await vi.advanceTimersByTimeAsync(10_000);
-    g.open();
-    await done;
-    expect(b.bridge.streams).toHaveLength(1);
-    expect(b.bridge.streams[0].init).toBe(THINKING);
-    expect(b.bridge.streams[0].frames).toEqual(['Hola ⏳']);   // the tool signal is not text: no extra frame
-    expect(b.bridge.streams[0].finals).toEqual(['Hola']);
-  });
+describe('on mode, a human line — its ⏳ is up on arrival, addressed or not', () => {
+  for (const body of ['help me pay paypal', '@e hola']) {
+    it(`"${body}": one ⏳ before any text, tool or timer; a tool use and ten seconds open nothing more`, async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const g = gate();
+      let atTurn = null;
+      const b = build({ work: async (onPartial) => { atTurn = b.bridge.streams.map((s) => s.init); onPartial('Hola', undefined); onPartial('Hola', { tool: true }); await g.p; return { text: 'Hola' }; } });
+      const done = b.bridge.emit(msg(body));
+      await until(() => b.brain.calls.length);
+      expect(atTurn).toEqual([THINKING]);
+      await vi.advanceTimersByTimeAsync(10_000);
+      g.open();
+      await done;
+      expect(b.bridge.streams).toHaveLength(1);
+      expect(b.bridge.streams[0].init).toBe(THINKING);
+      expect(b.bridge.streams[0].frames).toEqual(['Hola ⏳']);   // the tool signal is not text: no extra frame
+      expect(b.bridge.streams[0].finals).toEqual(['Hola']);
+    });
+  }
 });
 
 describe('sender — begin()', () => {

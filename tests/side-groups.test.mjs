@@ -590,7 +590,7 @@ describe('the automatic group: made on the primary with Rodz + every member of t
 });
 
 describe('every mode replies in the side group; a turn that stays silent makes nothing', () => {
-  it('on, not addressed, silent: the turn runs, no group is made, nothing is posted anywhere', async () => {
+  it('on, a human, not addressed, silent: the turn runs, no group is made, nothing is posted anywhere', async () => {
     for (const partials of [[], ['.', '..', '…']]) {
       const h = harness({ state: seedState({ entry: AUTOMATIC }) });
       const b = buildSpine(h, { reply: '…', partials });
@@ -603,49 +603,54 @@ describe('every mode replies in the side group; a turn that stays silent makes n
     }
   });
 
-  it('on, not addressed, it speaks: the group is made then, the reply lands there on its first text, nothing in the origin', async () => {
+  it('on, a human, not addressed, it speaks: the group is made then, its ⏳ opens there with the first text, nothing in the origin', async () => {
     const h = harness({ state: seedState({ entry: AUTOMATIC }) });
     const b = buildSpine(h, { reply: 'Hola a todos', partials: ['…', 'Hola', 'Hola a todos'] });
     await say(b.spine, 'hola a todos');
     expect(h.calls.create.map((c) => [c.via, c.participantIDs])).toEqual([['primary', [RODZ_USER_ID, LULU, PEPE]]]);
-    expect(b.bridge.streams.map((s) => [s.chat, s.init, s.finals])).toEqual([[SIDE, 'Hola ⏳', ['Hola a todos']]]);
+    expect(b.bridge.streams.map((s) => [s.chat, s.init, s.frames, s.finals])).toEqual([[SIDE, THINKING, ['Hola ⏳', 'Hola a todos ⏳'], ['Hola a todos']]]);
     expect(b.bridge.sent).toEqual([]);
   });
 
-  it('on, not addressed, it works first (a tool use, its 10 s): nothing is made or posted until its first text', async () => {
-    const h = harness({ state: seedState({ entry: AUTOMATIC }) });
-    const timers = fakeTimers();
-    const before = {};
-    const b = buildSpine(h, { timers, partials: [['', { tool: true }]], reply: () => {
-      before.armed = timers.size();
-      timers.flush();
-      Object.assign(before, { made: h.calls.create.length, opened: b.opened().length });
-      return 'Listo';
-    } });
-    await say(b.spine, 'hola a todos');
-    expect(before).toEqual({ armed: 1, made: 0, opened: 0 });
-    expect(h.calls.create).toHaveLength(1);
-    expect(b.bridge.streams.map((s) => [s.chat, s.init, s.finals])).toEqual([[SIDE, 'Listo', ['Listo']]]);
-    expect(b.bridge.sent).toEqual([]);
-  });
+  // A human's turn arms no 10 s timer (its ⏳ is not deferred); a non-human's does. Neither makes the group.
+  for (const [who, over, armed, init] of [['a human', {}, 0, THINKING], ['another being', { fromMember: { id: 'claude', kind: 'brain' } }, 1, 'Listo']]) {
+    it(`on, ${who}, not addressed, it works first (a tool use, the 10 s): nothing is made or posted until its first text`, async () => {
+      const h = harness({ state: seedState({ entry: AUTOMATIC }) });
+      const timers = fakeTimers();
+      const before = {};
+      const b = buildSpine(h, { timers, partials: [['', { tool: true }]], reply: () => {
+        before.armed = timers.size();
+        timers.flush();
+        Object.assign(before, { made: h.calls.create.length, opened: b.opened().length });
+        return 'Listo';
+      } });
+      await say(b.spine, 'hola a todos', over);
+      expect(before).toEqual({ armed, made: 0, opened: 0 });
+      expect(h.calls.create).toHaveLength(1);
+      expect(b.bridge.streams.map((s) => [s.chat, s.init, s.finals])).toEqual([[SIDE, init, ['Listo']]]);
+      expect(b.bridge.sent).toEqual([]);
+    });
+  }
 
-  it('on, not addressed, a reply with no stream: the group is made at its finish and the reply opens there', async () => {
+  it('on, a human, not addressed, a reply with no stream: the group is made at its finish and its ⏳ opens there', async () => {
     const h = harness({ state: seedState({ entry: AUTOMATIC }) });
     const b = buildSpine(h, { reply: 'Buenas' });
     await say(b.spine, 'hola a todos');
     expect(h.calls.create).toHaveLength(1);
-    expect(b.bridge.streams.map((s) => [s.chat, s.init, s.finals])).toEqual([[SIDE, 'Buenas', ['Buenas']]]);
+    expect(b.bridge.streams.map((s) => [s.chat, s.init, s.finals])).toEqual([[SIDE, THINKING, ['Buenas']]]);
   });
 
-  it('on: once the group exists, later unaddressed and addressed replies go there', async () => {
+  it('on: once the group exists, a human line opens its ⏳ there on arrival, addressed or not', async () => {
     const h = harness({ state: seedState({ entry: AUTOMATIC }) });
-    const b = buildSpine(h);
+    const atTurn = [];
+    const b = buildSpine(h, { reply: () => { atTurn.push(b.bridge.streams.length); return 'ok'; } });
     await say(b.spine, 'hola a todos');
     await say(b.spine, 'que bien', { userId: PEPE, senderName: 'Pepe' });
     await say(b.spine, ASK);
     expect(h.calls.create).toHaveLength(1);
     expect(chatsOf(b)).toEqual([SIDE, SIDE, SIDE]);
-    expect(b.bridge.streams[2].init).toBe(THINKING);   // addressed: the ⏳ opens up front, in the group
+    expect(atTurn).toEqual([0, 2, 3]);   // the first made the group at its reply; after that the ⏳ was up before the turn ran
+    expect(b.bridge.streams.map((s) => s.init)).toEqual([THINKING, THINKING, THINKING]);
   });
 
   it('on, addressed: the ⏳ opens in the group up front', async () => {

@@ -5,7 +5,7 @@
 // arrive it edits in place into the answer. A send failure ends it with
 // "… ❌ Sending failed."; an 'on'/'auto'-mode '...' silence resolves it to the quiet limb mark
 // '✓' (posts nothing new, never deleted) — in mention/mention-direct/accum the '...' surfaces.
-// An 'on' turn nobody addressed (`ambient`, operator 2026-10-18) opens nothing until it has text
+// An 'on' turn on a non-human line (`ambient`, operator 2026-10-18) opens nothing until it has text
 // or begin() is called (the being started working): its quick silence posts nothing, only a log line.
 //
 // No SEPARATE knee-jerk message: a per-turn "📨 Sending to E..." piled up and
@@ -636,7 +636,7 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
         // its turn starts (before the first token), so the user sees it move. No-op
         // for a placeholder that was never queued.
         activate() { activated = true; if (queued) push(THINKING); },
-        // ambient: open the train now (the being started working, or was addressed). No-op otherwise.
+        // ambient: open the train now (the being started working, or a human steered in). No-op otherwise.
         begin() { if (!ended) start(); },
         // absorb() runs UNCONDITIONALLY, before the push. `stream?.update?.(`${absorb(t)} …`)`
         // reads as if it did, but optional chaining short-circuits the WHOLE call expression —

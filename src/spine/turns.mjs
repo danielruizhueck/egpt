@@ -238,8 +238,8 @@ export function createTurns({ brain, bridge = null, bridgeOf = null, peerMouth =
   // RELAYED turn's synthetic event has `msgId: null` — the real message lives on the ORIGIN
   // node's account, on the other side of the wire — so the responder passes ack:false and the
   // reaction is simply not attempted. Every local caller omits it and is unchanged.
-  // `addressed`: the line was addressed to the being — handed in, it opens an ambient live turn's train.
-  async function steerLiveTurn({ to, ev, turnKey, ack = true, addressed = false }) {
+  // `human`: the line is a human's — handed in, it opens an ambient live turn's train.
+  async function steerLiveTurn({ to, ev, turnKey, ack = true, human = false }) {
     const live = liveTurnBy.get(turnKey);
     if (!live) return false;                          // nothing streaming on this key to steer
     if (typeof brain.steer !== 'function' || typeof brain.allowNewInput !== 'function') return false;
@@ -272,7 +272,7 @@ export function createTurns({ brain, bridge = null, bridgeOf = null, peerMouth =
     // HANDED OVER IS NOT INGESTED, AND THIS LINE NO LONGER PRETENDS OTHERWISE. It used to read
     // "wove … into the live turn", said on the strength of a successful stdin write.
     note(`steer ${to}/${ev.chatId}: handed ${who}'s message to the live turn (allow_new_input=${allow})`);
-    if (addressed) live.out?.begin?.();
+    if (human) live.out?.begin?.();
 
     // 👀 — THE MODEL'S OWN ACKNOWLEDGEMENT, AND ONLY THAT (operator 2026-09-09). `handed.ack`
     // settles from CLI events alone (warm-cli-session.mjs: the `--replay-user-messages` echo of
