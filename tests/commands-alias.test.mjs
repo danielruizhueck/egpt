@@ -49,8 +49,8 @@ const operator = (body, over = {}) => member(body, { senderId: '@an:beeper.com',
 function build() {
   let st = ensureContact({ contacts: {} }, 'whatsapp', GROUP, { pushedName: 'C' }).state;
   st = recordThread(st, 'whatsapp', GROUP, 'thread-1', '2026-10-19T00:00:00Z', 'e');
-  const calls = { create: [], edit: [], exit: [], audit: [], logs: [], transcript: [], brain: [] };
-  const commands = createCommands({
+  const calls = { create: [], edit: [], exit: [], audit: [], logs: [], transcript: [], brain: [], ran: [] };
+  const real = createCommands({
     getConfig: () => CONFIG, send: async () => {},
     exit: async (code, o = {}) => { calls.exit.push({ code, force: !!o.force }); },
     loadState: async () => st, writeState: async (s) => { st = s; },
@@ -69,6 +69,8 @@ function build() {
     logToGroup: async (text) => { calls.audit.push(text); return true; },
     onLog: (m) => calls.logs.push(m),
   });
+  // ran: the command line each run() receives (the audit carries no arguments).
+  const commands = { ...real, run: (e) => { calls.ran.push(e.body); return real.run(e); } };
   const spine = createSpine({
     bridge: { onMessage() {}, send() {}, stop() {}, wasSentByUs: () => false },
     brain: { async turn(being, ev) { calls.brain.push(ev.body); return { text: 'ok', sessionId: 'thread-1', being }; }, async accessLevel() { return 'regular'; } },
@@ -114,9 +116,10 @@ describe('an alias runs its command line, with the rest of the message as argume
     await say(member('nos vamos aparte playa'));
     expect(calls.create.map((c) => c.title)).toEqual(['SI+C-playa']);
     await say(member('Nos  vamos   ya'));
+    expect(calls.ran).toEqual(['/join playa', '/end ya']);
     expect(calls.audit).toEqual([
-      "alias 'nos vamos aparte' → /join playa in C by Lulu",
-      "alias 'nos vamos' → /end ya in C by Lulu → no-op — not a /join or /split side channel",
+      "alias 'nos vamos aparte' → /join in C by Lulu",
+      "alias 'nos vamos' → /end in C by Lulu → no-op — not a /join or /split side channel",
     ]);
   });
 
@@ -151,8 +154,9 @@ describe('who may use an alias: whoever may type its command', () => {
   it('"reinicia" from the operator is /restart force, audited as the alias', async () => {
     const { say, calls } = build();
     await say(operator('reinicia'));
+    expect(calls.ran).toEqual(['/restart force']);
     expect(calls.exit).toEqual([{ code: 43, force: true }]);
-    expect(calls.audit).toEqual(["alias 'reinicia' → /restart force in C by An"]);
+    expect(calls.audit).toEqual(["alias 'reinicia' → /restart in C by An"]);
   });
 
   it('a node-signed line starting with an alias runs nothing (being output is never input)', async () => {
@@ -227,11 +231,13 @@ describe('the file: live, validated, optional', () => {
     expect(aliasLogs(calls)).toEqual([]);
   });
 
-  it('the transcript keeps the words as said; the audit names the alias and the command line', async () => {
+  it('the transcript keeps the words as said; the audit names the alias and the command, never its arguments', async () => {
     const { say, calls } = build();
     await say(member('aparte viaje'));
     expect(calls.transcript).toEqual(['aparte viaje']);
-    expect(calls.audit).toEqual(["alias 'aparte' → /join viaje in C by Lulu"]);
+    expect(calls.ran).toEqual(['/join viaje']);
+    expect(calls.create.map((c) => c.title)).toEqual(['SI+C-viaje']);
+    expect(calls.audit).toEqual(["alias 'aparte' → /join in C by Lulu"]);
   });
 });
 

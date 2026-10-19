@@ -973,7 +973,7 @@ export function createCommands({
     // message (boot's logToGroup → audit-merge.mjs). It is a content hash, never any reply body, so
     // the audit stays metadata-only. A sink that ignores the 2nd arg (the standalone default) is
     // unaffected.
-    const what = ev?.alias ? `alias '${ev.alias}' → ${String(ev.body).trim()}` : `/${cmd}`;
+    const what = ev?.alias ? `alias '${ev.alias}' → /${cmd}` : `/${cmd}`;   // never the arguments
     try { await logToGroup(`${what} in ${chat} by ${who}${outcome ? ` → ${outcome}` : ''}`, { key: ev?.msgHash ?? null }); }
     catch { /* fail-closed: a broken audit never breaks the command */ }
   };
