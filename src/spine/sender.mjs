@@ -41,7 +41,7 @@ const noReplyMark = () => `⚠️ no reply (turn failed/empty)`;
 // a silence the bridge invented is indistinguishable from one the being chose.
 // When the bridge has nothing from the model, it says so in its OWN voice.
 const BRIDGE_SILENCE = '<received silence (error?)>';
-// A partial that may still become the '…' silence: an ambient turn posts nothing while it is this.
+// A partial that may still become the '…' silence: an 'on' turn shows nothing while it is this.
 const SILENCE_SO_FAR = /^[\s.…]*$/;
 // A LIMB-ONLY turn is not silence (operator 2026-09-01, reading his own SPOILER transcript:
 // "the bridge acted on it but forgot that the reply was non empty" ... "then bridge can say
@@ -416,9 +416,10 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
     // null for this chat's own connection. Given, the quote is resolved for the room the stream opens in.
     // `replyKey`: replyTo's cross-account key ({ msgKey, timestamp }) when the caller holds it (the
     // inbound event's own) — the mouth is told it as is, with no list read to compute it.
+    // `hideSilence`: an 'on' turn — a partial that may still be its '…' silence is never shown (operator 2026-10-18).
     open(chatId, opts = {}) {
       if (typeof chatId === 'function') return later(chatId, opts);
-      let { being = defaultKey, replyTo = null, replyIn = undefined, replyKey = null, queued = false, queuedAhead = 0, auto = false, ambient = false, origin = null, status = null } = opts;
+      let { being = defaultKey, replyTo = null, replyIn = undefined, replyKey = null, queued = false, queuedAhead = 0, auto = false, ambient = false, hideSilence = false, origin = null, status = null } = opts;
       const { bridge: bridgeForThisBeing, route: peerRoute, keyOf } = outbound(being, chatId);
       // ROUTED-TARGET FALLBACK (never a silent drop): a send the sending account can't place on the
       // routed room (a super/alias room it isn't a member of → resolveChatId null → DROPPED) re-sends
@@ -645,8 +646,9 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
         // would have carried only the settled value with the narration above it lost.
         update(partial) {
           const t = textOf(partial); if (!t) return;
-          // ambient: nothing is posted while the text may still be the '…' silence; the first other text opens it
-          if (ambient && !started) { if (!SILENCE_SO_FAR.test(t)) { absorb(t); start(); } return; }
+          // on: nothing is shown while the text may still be the hidden '…' silence; ambient opens on the first other text
+          if ((ambient || hideSilence) && SILENCE_SO_FAR.test(t)) return;
+          if (ambient && !started) { absorb(t); start(); return; }
           const frame = `${absorb(t)} ${LIVE_FRAME_MARK}`; push(frame);
         },
         // LIVENESS: the live frame again with the time since `ms` ago, never absorbed into what was

@@ -37,19 +37,31 @@ function streamingBridge() {
   };
 }
 
+// Fired on demand: the auto dwell is a timer.
+function fakeTimers() {
+  const pending = [];
+  return {
+    setTimeout: (fn) => { pending.push(fn); return { unref() {} }; },
+    clearTimeout: () => {},
+    async settle() { for (let i = 0; i < 10; i++) { await new Promise((r) => setTimeout(r, 0)); pending.splice(0).forEach((fn) => fn()); } },
+  };
+}
+
 function build({ mode = 'on', reply = 'ok', partials = [], tasks = [] } = {}) {
   const agents = { egpt: { configuration: 'egpt', handles: ['e', 'egpt'], default: true, mode } };
   const config = { agents };
   const bridge = streamingBridge();
   const brain = {
     calls: [], tasks,
-    async turn(being, ev, onPartial) { this.calls.push({ being, ev, open: bridge.streams.map((s) => s.init) }); for (const p of partials) onPartial?.(p); return { text: reply, sessionId: 's' }; },
+    async turn(being, ev, onPartial) { this.calls.push({ being, ev, open: bridge.streams.map((s) => s.init) }); for (const p of partials) (Array.isArray(p) ? onPartial?.(...p) : onPartial?.(p)); return { text: reply, sessionId: 's' }; },
     background() { return brain.tasks; },
   };
   const transcript = { entries: [], async log(ev, r) { this.entries.push({ ev, reply: r }); } };
   const notes = [];
   const onLog = (s) => notes.push(s);
+  const timers = mode === 'auto' ? fakeTimers() : null;
   const spine = createSpine({
+    ...(timers ? { setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout, turnTimeoutMs: 0 } : {}),
     bridge, brain, transcript, defaultBeing: 'egpt',
     sender: createSender({ bridge, bodyEmojiOf: () => '🐶', labelOf: () => 'E', onLog }),
     actions: createReplyActions({ bridge, peerMouth: MOUTH_HOLDS, bodyEmojiOf: () => '🐶', labelOf: () => 'E', onLog }),
@@ -62,7 +74,7 @@ function build({ mode = 'on', reply = 'ok', partials = [], tasks = [] } = {}) {
   spine.start();
   const replies = () => transcript.entries.filter((e) => e.reply != null).map((e) => e.reply);
   const quiet = () => notes.filter((s) => s.includes('nothing posted'));
-  return { bridge, brain, replies, quiet };
+  return { bridge, brain, replies, quiet, timers };
 }
 
 describe('on mode, a non-human line — no placeholder up front', () => {
@@ -196,6 +208,61 @@ describe('a human, addressed, or any other mode — unchanged: immediate ⏳', (
   }
 });
 
+describe("on mode, a streamed '…' silence — the train keeps showing, then ✓", () => {
+  const DOTS = ['.', '..', '...'];
+
+  it("REPRODUCE: a human line streaming '.', '..', '...' ends ✓; no frame ever shows dots", async () => {
+    const b = build({ reply: '...', partials: DOTS });
+    await b.bridge.emit(msg('jaja'));
+    expect(b.bridge.streams.map((s) => [s.init, s.frames, s.finals])).toEqual([[THINKING, [], ['✓']]]);
+    expect(b.bridge.sent).toEqual([]);
+  });
+
+  it("REPRODUCE: an addressed human '@e' line streaming '…' ends ✓ as well", async () => {
+    const b = build({ reply: '…', partials: ['…'] });
+    await b.bridge.emit(msg('@e hola'));
+    expect(b.bridge.streams.map((s) => [s.init, s.frames, s.finals])).toEqual([[THINKING, [], ['✓']]]);
+  });
+
+  it("REPRODUCE: a non-human line whose train opened on a tool use, then streamed dots, ends ✓", async () => {
+    const b = build({ reply: '...', partials: [['', { tool: true }], ...DOTS] });
+    await b.bridge.emit(msg('jaja', BEING));
+    expect(b.bridge.streams.map((s) => [s.init, s.frames, s.finals])).toEqual([[THINKING, [], ['✓']]]);
+  });
+
+  it("REPRODUCE: a reply that starts with dots streams once other text arrives", async () => {
+    const b = build({ reply: '...bueno, sí', partials: ['...', '...bueno', '...bueno, sí'] });
+    await b.bridge.emit(msg('vienes?'));
+    const [s] = b.bridge.streams;
+    expect(s.frames).toEqual(['...bueno ⏳', '...bueno, sí ⏳']);
+    expect(s.finals).toEqual(['...bueno, sí']);
+  });
+
+  it('a non-human streamed silence still posts nothing', async () => {
+    const b = build({ reply: '...', partials: DOTS });
+    await b.bridge.emit(msg('jaja', BEING));
+    expect(b.bridge.streams).toEqual([]);
+    expect(b.bridge.sent).toEqual([]);
+  });
+
+  it('auto mode: a streamed silence posts nothing', async () => {
+    const b = build({ mode: 'auto', reply: '...', partials: DOTS });
+    await b.bridge.emit(msg('jaja'));
+    await b.timers.settle();
+    expect(b.brain.calls).toHaveLength(1);
+    expect(b.bridge.streams).toEqual([]);
+    expect(b.bridge.sent).toEqual([]);
+  });
+
+  for (const mode of ['mention', 'accum']) {
+    it(`${mode} mode: a streamed '...' still surfaces, frames and all`, async () => {
+      const b = build({ mode, reply: '...', partials: DOTS });
+      await b.bridge.emit(msg('@e hola'));
+      expect(b.bridge.streams.map((s) => [s.init, s.frames, s.finals])).toEqual([[THINKING, ['. ⏳', '.. ⏳', '... ⏳'], ['...']]]);
+    });
+  }
+});
+
 describe('sender — ambient open', () => {
   function fakeBridge() {
     const streams = [], sent = [];
@@ -249,6 +316,14 @@ describe('sender — ambient open', () => {
     expect(ear.streams).toEqual([]);
     expect(ear.sent).toEqual([]);
     expect(mouth.streams.map((s) => [s.chat, s.init, s.finals])).toEqual([['mouth-room', 'Hola ⏳', ['Hola']]]);
+  });
+
+  it("hideSilence: dots-only partials leave the ⏳ alone; a withheld '...' settles on ✓", async () => {
+    const bridge = fakeBridge();
+    const out = createSender({ bridge }).open('!c', { being: 'e', hideSilence: true });
+    out.update('.'); out.update('...');
+    await out.finish({ text: '...' }, { surface: false });
+    expect(bridge.streams.map((s) => [s.init, s.frames, s.finals])).toEqual([[THINKING, [], ['✓']]]);
   });
 
   it('a failed ambient turn still says so, once', async () => {

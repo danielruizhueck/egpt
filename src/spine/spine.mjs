@@ -1395,7 +1395,7 @@ export function createSpine({
     // ambient: an 'on' turn on a non-human line opens no ⏳ — a silence then posts nothing. A human's
     // opens at arrival, addressed or not (operator 2026-10-18).
     const ambient = d.mode === 'on' && !humanTurn(ev);
-    const out = sender.open(at ?? ev.chatId, { being: to, replyTo, replyIn: null, replyKey: { msgKey: ev.msgHash, timestamp: ev.msgTs }, queued: ahead > 0, queuedAhead: ahead, auto: d.mode === 'auto', ambient, origin: at ? null : ev.chatId });
+    const out = sender.open(at ?? ev.chatId, { being: to, replyTo, replyIn: null, replyKey: { msgKey: ev.msgHash, timestamp: ev.msgTs }, queued: ahead > 0, queuedAhead: ahead, auto: d.mode === 'auto', ambient, hideSilence: d.mode === 'on', origin: at ? null : ev.chatId });
     return turnBy(turnKey, () => runReplyTurn({ to, ev, d, out, replyTo, turnKey, queued: ahead > 0, pinned, trigger, ambient }));
   }
 
