@@ -4089,6 +4089,42 @@ describe('the install moved: the redial asks WHERE before it dials', () => {
   });
 });
 
+// BEEPER RESTARTING FOR UPDATE (operator 2026-10-19, /update beeper): one state on the bridge, set
+// while the update tool restarts Beeper. Calls wait instead of failing, the socket is not redialled,
+// and clearing it redials at once with the backoff reset.
+describe('Beeper restarting for update: the bridge waits, then redials at once', () => {
+  it('a send made while it is set waits and then lands — nothing fails, nothing is reported lost', async () => {
+    const { bridge } = await startBridge();
+    await bridge.setBeeperRestart(true);
+    let done = false;
+    const sending = sendSettled(bridge, 'held for the restart', { chatId: CHAT('chat-1') }).then(() => { done = true; });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(fake.posts).toHaveLength(0);
+    expect(done).toBe(false);
+    await bridge.setBeeperRestart(false);
+    await sending;
+    expect(fake.posts.map((p) => p.text)).toEqual(['held for the restart']);
+    expect(bridge.sendFailure(CHAT('chat-1'))).toBe(null);
+  });
+
+  // Budget note: waits out the REAL 3s RECONNECT_MIN_MS to show no redial happened while set.
+  it('a socket closed while it is set is not redialled; clearing it redials at once and asks WHERE first', { timeout: 20_000 }, async () => {
+    let asked = 0;
+    const { bridge } = await startBridge({ rediscover: async () => { asked += 1; return null; } });
+    await bridge.setBeeperRestart(true);
+    const subsBefore = fake.subscribed();
+    fake.dropSockets();                                  // Beeper stops for the install
+    await new Promise((r) => setTimeout(r, 3_500));
+    expect(fake.subscribed()).toBe(subsBefore);
+    expect(asked).toBe(0);
+    const t0 = Date.now();
+    await bridge.setBeeperRestart(false);                // Beeper is back
+    await waitFor(() => fake.subscribed() > subsBefore, 2_500);
+    expect(Date.now() - t0).toBeLessThan(2_500);         // not a backoff step later
+    expect(asked).toBe(1);
+  });
+});
+
 // 🎧 LISTENING MARK (operator 2026-09-15: "put a reaction on voice message when listening, then
 // remove reaction when done" / "bridge can react to ack, not model. model can't delete").
 //

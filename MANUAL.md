@@ -77,6 +77,11 @@ that being (`/e agents compact`).
                                                then respawn
 /<handle> rewind <ref>                         git checkout <ref>, reinstall,
                                                respawn
+/<handle> update beeper                        install the Beeper update this
+                                               node downloaded: waits for turns,
+                                               restarts Beeper (eGPT stays up),
+                                               one result line in log_to_group;
+                                               else the one-line Beeper state
 ```
 
 **Reply modes** (`/agents … auto <mode>`): `on` (receive every burst, reply per

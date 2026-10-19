@@ -485,6 +485,7 @@ export function createCommands({
   getConfig = () => ({}),
   floodBan = null,                       // the media-flood auto-ban (src/flood-ban.mjs) — /unban clears, /bans lists; the SAME instance the bridges observe into. Null (standalone) → both commands say it isn't wired.
   background = null,                     // the node's background-work registry (src/spine/background.mjs) — the operator's bare /agents lists it
+  beeperUpdate = null,                   // /update beeper (src/tools/beeper-update.mjs createBeeperUpdate); null → not wired here
   send: rawSend,                         // (chatId, text) -> deliver a plain system reply
   exit = (code) => process.exit(code),
   writeRewindTarget,
@@ -720,7 +721,7 @@ export function createCommands({
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
     const out = {};
     for (const [name, entry] of Object.entries(raw)) {
-      if (name === 'use') continue;   // selector naming the active account, not an entry — never warn
+      if (name === 'use' || name === 'auto_update') continue;   // a selector / Beeper's own update setting, not an entry — never warn
       if (!entry || typeof entry !== 'object' || !entry.account) { onLog(`beeper registry: "${name}" missing account — skipped`); continue; }
       out[name] = entry.account;
     }
@@ -1045,6 +1046,16 @@ export function createCommands({
     if (bansMatch) { await send?.(ev.chatId, bansReport()); return; }
     const unbanMatch = /^\/unban\b[ \t]*(.*)$/i.exec(line);
     if (unbanMatch) { await send?.(ev.chatId, unbanHere(ev, unbanMatch[1]?.trim() || null)); return; }
+
+    // /update beeper — install the Beeper update this node downloaded (a controlled Beeper restart;
+    // the spine stays up), or the one-line Beeper state when there is nothing to do. Not /upgrade.
+    const updateMatch = /^\/update\b[ \t]*(.*)$/i.exec(line);
+    if (updateMatch) {
+      const target = updateMatch[1].trim().toLowerCase();
+      const usage = `usage: ${hintOf('update beeper', ev)} — install the Beeper update this node downloaded (eGPT itself: ${hintOf('upgrade', ev)})`;
+      await send?.(ev.chatId, target !== 'beeper' ? usage : beeperUpdate ? await beeperUpdate.update() : 'Beeper updates are not wired on this node');
+      return;
+    }
 
     // /join — type /<handle> join [<name>] to spin a private side-group that is a VIEW (alias) of this
     // chat's conversation (one shared thread, two chats); /split — /<handle> split [<name>] spins a

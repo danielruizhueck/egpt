@@ -166,6 +166,7 @@ export function createSpine({
   logToGroup = null,                   // optional (text) => Promise — boot's log_to_group poster (node-prefixed there). Liveness reports a being that did not answer whether its long background work is still needed. Null ⇒ the note is all there is.
   backgroundWork = null,               // optional () => [{ being, chatId, description, since }] — every warm session's live background tasks (boot: the pool's); the restart drain waits for them
   background = null,                   // optional registry (src/spine/background.mjs): pending voice notes at the ingestion point, agents mirrored on the tick
+  beeperUpdate = null,                 // optional (src/tools/beeper-update.mjs): its 6-hourly Beeper check rides the tick
   say = null,                          // optional ({ chatId, text, what }) => Promise<boolean> — boot's sayOnce, i.e. THE outbound placement (sender.mjs makeOutbound `say`), the same one the STOP confirmation and the lifecycle lines go through. The ONE thing the spine says on its own account: the loop guard's pause notice (operator 2026-09-20: "if the bridge pauses, it must emit warning in the channel with instructions on how to recover, instead of leaving everybody hanging"). Null (tests, a bare pipe) ⇒ a pause is logged and nothing is posted.
   // RECENT CONTEXT read seam (operator 2026-07-26) — `(chatId, {chatName, network}) =>
   // Promise<string|null>`, the conversation's transcript.md. THE SAME function boot
@@ -593,7 +594,8 @@ export function createSpine({
     const rec = { since: new Date(d.since).toISOString(), busy: t.busy.map(([k]) => k), turns: t.n, cap: RESTART_DRAIN_CAP_MS, background };
     Promise.resolve().then(() => d.onWait?.(rec)).catch((e) => note(`drain: could not publish the drain state — ${e?.message ?? e}`));
   }
-  function drainForRestart(done, { onWait = null, force = false } = {}) {
+  // `purpose` names what waits in the log lines: /update beeper drains the same way and does not exit.
+  function drainForRestart(done, { onWait = null, force = false, purpose = 'restarting' } = {}) {
     if (restartDrain) {
       if (!force || restartDrain.force) { note('drain: already waiting for turns in flight — no second drain'); return; }
       restartDrain.force = true;   // the operator's override reaches the drain already waiting
@@ -608,10 +610,10 @@ export function createSpine({
     const bg = force ? [] : liveBackground(since);
     if (!t.n && !bg.length) { done(); return; }
     // NOT unref'd: while it waits, this timer is what keeps the process here to leave with 42/43.
-    restartDrain = { since, lastLog: since, done, onWait, force, turnsSince: since, noticeAt: since + RESTART_DRAIN_CAP_MS, bgSeenAt: bg.length ? since : null, timer: setIntervalFn(pollRestartDrain, RESTART_DRAIN_POLL_MS) };
+    restartDrain = { since, lastLog: since, done, onWait, force, purpose, turnsSince: since, noticeAt: since + RESTART_DRAIN_CAP_MS, bgSeenAt: bg.length ? since : null, timer: setIntervalFn(pollRestartDrain, RESTART_DRAIN_POLL_MS) };
     const what = [t.n && `${t.n} turn(s)`, bg.length && `${bg.length} background task(s)`].filter(Boolean).join(' and ');
     const who = [t.n && t.list, ...bg.map(bgLabel)].filter(Boolean).join('; ');
-    note(`drain: waiting for ${what} before restarting — ${who} (cap ${RESTART_DRAIN_CAP_MS / 60_000} min${bg.length ? ' for turns; background work has none — /restart force skips it' : ''}; new messages are still answered)`);
+    note(`drain: waiting for ${what} before ${purpose} — ${who} (cap ${RESTART_DRAIN_CAP_MS / 60_000} min${bg.length ? ' for turns; background work has none — /restart force skips it' : ''}; new messages are still answered)`);
     publishDrain(restartDrain, t, bg);
   }
   function pollRestartDrain() {
@@ -623,7 +625,7 @@ export function createSpine({
     const waited = now - d.since;
     if (!t.n && !bg.length) {
       if (d.bgSeenAt != null && now - d.bgSeenAt < RESTART_DRAIN_BG_SETTLE_MS) return;   // a finished task's wake may be on its way
-      endRestartDrain(`drain: nothing in flight after ${Math.round(waited / 1000)}s — restarting`); return;
+      endRestartDrain(`drain: nothing in flight after ${Math.round(waited / 1000)}s — ${d.purpose}`); return;
     }
     if (bg.length) {
       d.turnsSince = d.bgSeenAt = now;   // the turns' cap counts only while no background work holds the drain
@@ -633,7 +635,7 @@ export function createSpine({
         note(`drain: ${line}`);
         if (logToGroup) Promise.resolve(logToGroup(line)).catch((e) => note(`drain: logging group refused the line — ${e?.message ?? e}`));
       }
-    } else if (now - d.turnsSince >= RESTART_DRAIN_CAP_MS) { endRestartDrain(`drain: CAP — ${t.n} turn(s) STILL in flight after ${RESTART_DRAIN_CAP_MS / 60_000} min: ${t.list} — restarting ANYWAY; they die with this process`); return; }
+    } else if (now - d.turnsSince >= RESTART_DRAIN_CAP_MS) { endRestartDrain(`drain: CAP — ${t.n} turn(s) STILL in flight after ${RESTART_DRAIN_CAP_MS / 60_000} min: ${t.list} — ${d.purpose} ANYWAY${d.purpose === 'restarting' ? '; they die with this process' : ''}`); return; }
     if (now - d.lastLog < RESTART_DRAIN_LOG_MS) return;
     d.lastLog = now;
     note(`drain: still waiting after ${Math.round(waited / 1000)}s — ${[t.n && `${t.n} turn(s): ${t.list}`, bg.length && `${bg.length} background task(s): ${bg.map(bgLabel).join('; ')}`].filter(Boolean).join('; ')}`);
@@ -1755,6 +1757,7 @@ export function createSpine({
     resumedAt();
     liveness.tick();
     background?.sync();
+    beeperUpdate?.tick(clock.now());
     heartbeats.runDue(clock.now());
   }
 

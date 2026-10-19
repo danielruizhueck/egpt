@@ -64,6 +64,8 @@ beeper:
   #   account: "other@example.com"
   #   token: "PASTE_YOUR_TOKEN_HERE"
   # use: main                     # OPTIONAL override of the default mouth - see above
+  # auto_update:                  # keeping Beeper itself current: auto | manual | none
+  #   windows: { method: manual } # the default: a log_to_group notice, install on /<handle> update beeper
 
 # --- This node's identity ----------------------------------------------------
 node_name: kg                     # REQUIRED - this node's name on the network, and the

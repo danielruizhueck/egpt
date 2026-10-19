@@ -752,8 +752,17 @@ export async function startBeeperBridge(opts = {}) {
   // below). One cutoff.
   let backlogCutoffMs = Date.now();
 
+  // BEEPER RESTARTING FOR UPDATE (operator 2026-10-19; /update beeper, src/tools/beeper-update.mjs):
+  // the one state this bridge holds while the update tool restarts Beeper. Set: every REST call
+  // waits here (nothing fails, so nothing is reported lost), the socket is not redialled and the
+  // ear probe gives no verdict. Cleared: the install is looked up again, the socket redials at
+  // once with the backoff reset, and the waiting calls go.
+  let _beeperRestart = null;   // { over: Promise, end } while set
+  const beeperRestartOver = () => _beeperRestart?.over;
+
   // --- REST ---
   async function api(method, path, body) {
+    await beeperRestartOver();
     const res = await fetch(baseUrl + path, {
       method,
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -1535,6 +1544,7 @@ export async function startBeeperBridge(opts = {}) {
   // onLog, unchanged.
   async function createGroup({ accountID, participantIDs, type = 'group', title, messageText } = {}) {
     if (!accountID || !Array.isArray(participantIDs) || !participantIDs.length) return null;
+    await beeperRestartOver();
     try {
       const res = await fetch(baseUrl + '/v1/chats', {
         method: 'POST',
@@ -1628,6 +1638,7 @@ export async function startBeeperBridge(opts = {}) {
     const buf = await readFile(filePath);
     const form = new FormData();
     form.append('file', new Blob([buf], { type: mimeTypeFor(filePath) }), basename(filePath));
+    await beeperRestartOver();
     const res = await fetch(baseUrl + '/v1/assets/upload', { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: form });
     if (!res.ok) throw new Error(`POST /v1/assets/upload → ${res.status} ${(await res.text()).slice(0, 200)}`);
     const t = await res.text();
@@ -2605,6 +2616,7 @@ export async function startBeeperBridge(opts = {}) {
       ? (text) => injectViaTelegram({ ...earProbeTelegram, text })
       : null,
     restart: () => { try { if (ws?.terminate) ws.terminate(); else ws?.close?.(); } catch { /* already gone */ } },
+    paused: () => !!_beeperRestart,
     onLog: (m) => onLog(`beeper: ${m}`),
   });
 
@@ -2669,6 +2681,7 @@ export async function startBeeperBridge(opts = {}) {
     ws.on('close', () => {
       _wsReady = false;
       if (_stopped) return;
+      if (_beeperRestart) { onLog('beeper: WS closed — Beeper is restarting for an update; redialling when it is back'); return; }
       onLog(`beeper: WS closed — reconnecting in ${Math.round(_reconnectMs / 1000)}s`);
       _reconnectTimer = setTimeout(redial, _reconnectMs);
       _reconnectMs = Math.min(_reconnectMs * 2, RECONNECT_MAX_MS);
@@ -2685,8 +2698,7 @@ export async function startBeeperBridge(opts = {}) {
   // BOTH catches are load-bearing. A failed lookup must never stop the reconnect loop — the whole
   // point is to keep redialling — and connect() throwing inside an async function would be an
   // unhandled rejection where the old setTimeout(connect) would merely have thrown.
-  async function redial() {
-    if (_stopped) return;
+  async function rediscoverInstall() {
     try {
       const found = await rediscover?.();
       if (found?.baseUrl && found.baseUrl !== baseUrl) {
@@ -2695,7 +2707,30 @@ export async function startBeeperBridge(opts = {}) {
         wsUrl = found.wsUrl ?? wsUrl;
       }
     } catch (e) { onLog(`beeper: rediscovery failed (${e?.message ?? e}) — redialling the address we have`); }
+  }
+  async function redial() {
+    if (_stopped) return;
+    await rediscoverInstall();
     try { connect(); } catch (e) { onLog(`beeper: redial failed — ${e?.message ?? e}`); }
+  }
+  // Set before the update tool restarts Beeper, cleared after (see _beeperRestart above).
+  async function setBeeperRestart(on) {
+    if (on) {
+      if (_beeperRestart) return;
+      let end;
+      _beeperRestart = { over: new Promise((r) => { end = r; }), end };
+      onLog('beeper: Beeper restarting for update — calls wait, no redial, no ear verdict');
+      return;
+    }
+    const r = _beeperRestart;
+    if (!r) return;
+    if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
+    _reconnectMs = RECONNECT_MIN_MS;
+    await rediscoverInstall();   // before the waiting calls go: the install may answer on another port now
+    _beeperRestart = null;
+    r.end();
+    onLog('beeper: Beeper restart for update over — redialling now');
+    if (!_wsReady && !_stopped) { try { connect(); } catch (e) { onLog(`beeper: redial failed — ${e?.message ?? e}`); } }
   }
   connect();
 
@@ -2866,6 +2901,7 @@ export async function startBeeperBridge(opts = {}) {
       return handle;
     },
     isAlive: () => _wsReady,
+    setBeeperRestart,
     stop: () => {
       _stopped = true;
       if (_reconnectTimer) clearTimeout(_reconnectTimer);

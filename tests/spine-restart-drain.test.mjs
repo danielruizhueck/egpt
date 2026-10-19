@@ -128,6 +128,20 @@ describe('spine.drainForRestart — /restart and /upgrade wait for the turns in 
     expect(drainLines().at(-1)).toBe('drain: nothing in flight after 0s — restarting');
   });
 
+  it('/update beeper drains the same way under its own name, and nothing exits', async () => {
+    const { spine, bridge, brain, timers, drainLines } = build();
+    const p1 = bridge.emit(msg('one', A, 'm1'));
+    await flush();
+    const ran = [];
+    spine.drainForRestart(() => ran.push('update'), { purpose: 'restarting Beeper for the update' });
+    expect(drainLines()).toEqual([`drain: waiting for 1 turn(s) before restarting Beeper for the update — ${KEY_A} (cap 30 min; new messages are still answered)`]);
+    brain.release('one');
+    await p1;
+    timers.fire();
+    expect(ran).toEqual(['update']);
+    expect(drainLines().at(-1)).toBe('drain: nothing in flight after 0s — restarting Beeper for the update');
+  });
+
   it('nothing in flight: it leaves synchronously — no timer, no line, no added delay', () => {
     const { spine, timers, drainLines } = build();
     const exits = [];

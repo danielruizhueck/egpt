@@ -25,7 +25,8 @@ import { peerSpineFrom, createMouthReceiver, speakThroughPeer, startPeerStream, 
 // The cross-account chat key itself — minted in the bridge, beside the payloads it reads. The
 // LOCAL mouth below keys with the same primitive the peer link keys with; there is one definition
 // of "which of MY chats is that ONE real chat" and both transports ask it.
-import { crossAccountChatKey, LISTENING_REACTION } from '../bridges/beeper.mjs';
+import { crossAccountChatKey, LISTENING_REACTION, _msgTimestampMs } from '../bridges/beeper.mjs';
+import { createBeeperUpdate } from '../tools/beeper-update.mjs';
 import { htmlToMarkdown } from '../html-to-markdown.mjs';
 import { mergeAudit } from './audit-merge.mjs';
 import { createWarmPool } from '../warm-sessions.mjs';
@@ -1276,7 +1277,7 @@ export async function boot({
   const declaredConnections = (() => {
     const b = cfg.beeper;
     if (!b || typeof b !== 'object' || Array.isArray(b)) return [];
-    return Object.keys(b).filter((k) => b[k] && typeof b[k] === 'object');
+    return Object.keys(b).filter((k) => k !== 'auto_update' && b[k] && typeof b[k] === 'object');   // auto_update: Beeper's own updates, not a connection
   })();
   // THE NODE'S DEFAULT OUTBOUND CONNECTION — which connection an agent that names none of its own
   // SPEAKS on. THE CONNECTION NAMES CARRY THE MEANING NOW (operator 2026-09-10): *"we dropped the
@@ -2770,7 +2771,14 @@ export async function boot({
   // the spot: /rewind is the way back FROM bad code, and waiting on a turn that code is writing
   // would defeat it.
   let restartCode = null;   // the code a pending restart drain leaves with
+  let beeperUpdate = null;  // /update beeper (created below, real node only)
   async function announceAndExit(code, { force = false } = {}) {
+    // A Beeper update in progress finishes first: its tool runs as this spine's child.
+    if ((code === 42 || code === 43) && beeperUpdate?.busy()) {
+      log.line?.(`[drain] ${KIND_OF[code]} waits for the Beeper update in progress`);
+      beeperUpdate.idle().then(() => announceAndExit(code, { force })).catch((e) => log.line?.(`[drain] ${e?.message ?? e}`));
+      return;
+    }
     if (code === 42 || code === 43) {
       restartCode = restartCode === 42 ? 42 : code;
       spine.drainForRestart(() => { goDown(restartCode).catch((e) => log.line?.(`[drain] ${e?.message ?? e}`)); }, {
@@ -3025,24 +3033,30 @@ export async function boot({
   // (listMessagesRaw, the one ownCopy/reactLocally read through) and editor (editMessage, the one the
   // streaming relay edits co-account copies with) are the SAME bridge the post lands on, routed in —
   // no second channel. Everything is best-effort: a resolve/read/edit miss degrades to a plain post.
+  // log_to_group's recent messages ({ id, text, ts }) and an editor, on the bridge the post lands on
+  // (outbound's bridge, resolveConfiguredChat), the read-back HTML mapped to markdown so a marker
+  // matches and an edit re-sends plain text. null when unset or unreadable. The audit merge and
+  // /update beeper read through it.
+  const logGroupIo = async () => {
+    const name = declaredChannel('log_to_group');
+    if (!name) return null;
+    const r = await resolveConfiguredChat(name);
+    const on = outbound(null, name).bridge;
+    if (!r.chatId || typeof on?.listMessagesRaw !== 'function' || typeof on?.editMessage !== 'function') return null;
+    return {
+      readRecent: async () => (await on.listMessagesRaw(r.chatId)).map((m) => ({ id: m?.id ?? null, text: htmlToMarkdown(m?.text) || '', ts: _msgTimestampMs(m) })),
+      edit: (id, full) => on.editMessage(r.chatId, id, full),
+    };
+  };
   const logToGroup = async (text, { key = null } = {}) => {
     if (!declaredChannel('log_to_group')) return false;   // OFF, silently — unchanged
     const post = (full) => noticeToChannel({ configKey: 'log_to_group', text: full, what: 'audit', tag: 'audit' });
     const role = getConfig()?.node_role;
-    // Only the SECONDARY reads + edits; the PRIMARY (and a single-node deployment) never touch the
-    // chat. Resolve the chat + its bridge the SAME way the post does (outbound's bridge, resolveConfiguredChat),
-    // mapping the read-back HTML to markdown so the marker matches and the edit re-sends plain text.
+    // Only the SECONDARY reads + edits; the PRIMARY (and a single-node deployment) never touch the chat.
     let readRecent = null, edit = null;
     if (String(role ?? '').trim().toLowerCase() === 'secondary') {
-      try {
-        const name = declaredChannel('log_to_group');
-        const r = await resolveConfiguredChat(name);
-        const on = outbound(null, name).bridge;
-        if (r.chatId && typeof on?.listMessagesRaw === 'function' && typeof on?.editMessage === 'function') {
-          readRecent = async () => (await on.listMessagesRaw(r.chatId)).map((m) => ({ id: m?.id ?? null, text: htmlToMarkdown(m?.text) || '' }));
-          edit = (id, full) => on.editMessage(r.chatId, id, full);
-        }
-      } catch { /* leave readRecent/edit null → mergeAudit degrades to a plain post */ }
+      try { ({ readRecent = null, edit = null } = (await logGroupIo()) ?? {}); }
+      catch { /* leave readRecent/edit null → mergeAudit degrades to a plain post */ }
     }
     return mergeAudit({ role, nodeLabel: getConfig()?.node_name ?? '?', text, key, post, readRecent, edit });
   };
@@ -3167,8 +3181,28 @@ export async function boot({
   // What this node is handling, in state/background.json (src/spine/background.mjs). Real-node only (tests: backgroundFile).
   const background = (ingest || backgroundFile) ? createBackgroundRegistry({ path: backgroundFile ?? join(EGPT_HOME, 'state', 'background.json'), node: node_name, liveAgents: liveBackground, now, onLog: (m) => log.line?.(`[background] ${m}`) }) : null;
   await background?.load();
+  // /update beeper + the 6-hourly Beeper check (src/tools/beeper-update.mjs). Real node only: it reads
+  // the local Beeper installs and the update feed. Drains like /restart; the spine stays up.
+  beeperUpdate = ingest ? createBeeperUpdate({
+    getConfig,
+    home: EGPT_HOME,
+    drain: (fn) => spine.drainForRestart(fn, { purpose: 'restarting Beeper for the update' }),
+    restartPending: () => restartCode != null,
+    beeperRestart: async (on) => {
+      for (const b of new Set(bridgeByEndpoint.values())) {
+        try { await b.setBeeperRestart?.(on); } catch (e) { log.line?.(`[beeper-update] a bridge refused the restart state (${on}): ${e?.message ?? e}`); }
+      }
+    },
+    logToGroup: (text) => logToGroup(text),
+    readLog: async () => (await logGroupIo())?.readRecent() ?? [],
+    editLog: async (id, text) => (await logGroupIo())?.edit(id, text) ?? false,
+    hint: () => commands.hintOf('update beeper'),   // this node's own handle: /e update beeper, /don update beeper
+    ownNames: () => ownNodeNamesOf(getConfig()),
+    onLog: (m) => log.line?.(`[beeper-update] ${m}`),
+  }) : null;
   const commands = createCommands({
     getConfig,
+    beeperUpdate,                                     // /update beeper
     floodBan,                                         // /unban + /bans — the SAME in-memory instance the bridges observe into
     background,                                       // the operator's bare /agents lists it
     send: commandTranscript.send,
@@ -3621,7 +3655,7 @@ export async function boot({
   });
   // backgroundWork: what a restart drain waits for. Held by the daemon, it survives a spine restart, so
   // there is nothing to wait for; spawned by this spine (no daemon host), it dies with it.
-  const spine = createSpine({ bridge, bridgeOf: rawBridgeOf, peerMouth, brain, turns, ...services, commands, mesh, actions, backgroundWork: () => (cliHost ? [] : liveBackground()), background, advice, guard, guardOverride, fromThisNode, say: sayOnce, logToGroup: (text) => logToGroup(`${getConfig()?.node_name ?? '?'} · ${text}`), stopSwitch, isSelfChat, isTransit: (ev) => isRelayChannelChat(getConfig(), ev), roomRelay, readTranscript, refreshConfig: heartbeatLoader.reload, applyConfig, configBootHash, readConfigHash, requestRestart: () => announceAndExit(43), radioRelay: radioRelay.relay, synthesize: vx.synthesize, voice: vx.voice, defaultBeing: defaultKey, labelOf, timeZone: transcriptTimeZone, clock: { now }, log, turnTimeoutMs, livenessEveryMs, tickMs: effectiveTickMs, setInterval: setIntervalFn, clearInterval: clearIntervalFn, probe: lagProbe, intakeCap: () => intakeCap(lagProbe.load?.()), stopPhrase: () => getConfig()?.stop_phrase });
+  const spine = createSpine({ bridge, bridgeOf: rawBridgeOf, peerMouth, brain, turns, ...services, commands, mesh, actions, backgroundWork: () => (cliHost ? [] : liveBackground()), background, beeperUpdate, advice, guard, guardOverride, fromThisNode, say: sayOnce, logToGroup: (text) => logToGroup(`${getConfig()?.node_name ?? '?'} · ${text}`), stopSwitch, isSelfChat, isTransit: (ev) => isRelayChannelChat(getConfig(), ev), roomRelay, readTranscript, refreshConfig: heartbeatLoader.reload, applyConfig, configBootHash, readConfigHash, requestRestart: () => announceAndExit(43), radioRelay: radioRelay.relay, synthesize: vx.synthesize, voice: vx.voice, defaultBeing: defaultKey, labelOf, timeZone: transcriptTimeZone, clock: { now }, log, turnTimeoutMs, livenessEveryMs, tickMs: effectiveTickMs, setInterval: setIntervalFn, clearInterval: clearIntervalFn, probe: lagProbe, intakeCap: () => intakeCap(lagProbe.load?.()), stopPhrase: () => getConfig()?.stop_phrase });
   // Bind the advice service's answer-routing dispatch now that the spine exists: an
   // operator answer in the advice channel re-enters the pipe as a turn in the origin chat.
   advice.useDispatch(spine.handleInbound);

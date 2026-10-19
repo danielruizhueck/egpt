@@ -365,6 +365,8 @@ export async function createBeeperBridgePort(opts = {}, { start = startBeeperBri
     awaitMessage(chat, test, ms) { return real.awaitMessage ? real.awaitMessage(chat, test, ms) : Promise.resolve(null); },
 
     isAlive: () => real.isAlive(),
+    // /update beeper's "Beeper restarting for update" state (beeper.mjs _beeperRestart); a fake without it: no-op.
+    setBeeperRestart: (on) => real.setBeeperRestart?.(on),
     stop: () => real.stop(),
   };
 }

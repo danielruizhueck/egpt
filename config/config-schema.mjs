@@ -750,6 +750,19 @@ export const CONFIG_SCHEMA = {
       <name>:
         account   label — the Beeper address this token belongs to
         token     that account's Desktop API token
+      auto_update:
+        <os>: { method: auto | manual | none }      os = windows | linux | mac
+        Keeping Beeper Desktop itself current (src/tools/beeper-update.mjs).
+          none    no checks, no notices.
+          manual  checks at boot, every 6 h and on /<handle> update beeper; ONE
+                  line per newly downloaded version to log_to_group; installs
+                  only on /<handle> update beeper (operator only).
+          auto    as manual, then installs by itself at the next quiet moment.
+        Installing is a controlled Beeper restart: it waits for turns like
+        /restart, eGPT stays up, the result is one line in log_to_group.
+        DEFAULT: windows manual. linux / mac: accepted, not implemented yet —
+        treated as none (one log line at boot). Not a connection. beeper: is a
+        restart-only key, so a change applies at the next restart.
 
     THE PORT IS DISCOVERED — there is none to configure (operator 2026-09-07).
     Beeper Desktop's local API binds the FIRST FREE PORT starting at 23373, so
