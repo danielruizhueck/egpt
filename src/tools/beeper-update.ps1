@@ -1,178 +1,229 @@
-# beeper-update.ps1 - install Beeper's pending update on a node that runs TWO Beeper Desktops.
+# beeper-update.ps1 - install Beeper's downloaded update for every Beeper on this machine.
 #
-# THE PROBLEM THIS SOLVES (operator 2026-09-03: "when updating beeper i need to close both s0
-# and s1, but i am having problems"). Beeper is a PER-USER electron-builder install: one binary
-# tree under %LOCALAPPDATA%\Programs\BeeperTexts, shared by the SESSION 0 service Desktop and
-# the SESSION 1 GUI. electron-updater downloads the new installer into its pending cache and
-# then waits for a quit that never comes: the service Desktop is restarted by NSSM within
-# seconds, and the installer cannot overwrite a tree either process still holds. So the update
-# sits there, downloaded, forever. Closing them by hand is the part that keeps failing, because
-# NSSM RESTARTS the S0 Desktop the moment it is killed - the service has to be STOPPED, not the
-# process killed.
+# Beeper is a PER-USER install (%LOCALAPPDATA%\Programs\BeeperTexts) shared by the Beeper app
+# and any eGPT Beeper service. electron-updater installs only on "Relaunch to update"; a plain
+# quit does not, and any running Beeper.exe blocks it. NSSM restarts a killed service Desktop,
+# so a service is STOPPED, never killed.
 #
-# ORDER IS LOAD-BEARING AT THE END. Beeper takes the NEXT FREE port from 23373, so whichever
-# Desktop starts first gets 23373 - and config.yaml pins the spine to a port. Start the SERVICE
-# first, wait for it to bind, and only then bring the GUI back; do it the other way round and
-# the two Desktops swap ports, at which point the spine talks to the operator's GUI with no
-# error at all. This script enforces that order and verifies the mapping afterwards.
+# Two flows, by what is running:
+#   app       no Beeper service running (the baseline): close the app, install, relaunch it,
+#             check each token. No administrator needed.
+#   services  stop each running service, close the app, install, start the services ONE AT A
+#             TIME - each token must answer before the next starts (started together they race
+#             for ports and one got none, 2026-10-15) - one restart of a service with no port,
+#             then the app LAST. Stopping a service needs the right to: grant it once with
+#             setup\grant-beeper-service-control.cmd, or let this script ask for administrator.
+# Refused before anything is touched: a sha512 mismatch, nothing newer, an installer that needs
+# admin rights, a missing permission. The installer runs as THIS user, never as SYSTEM.
+# The last stdout line is ONE JSON object (eGPT reads it).
 #
-#   .\beeper-update.cmd              install the pending update, if it is newer
-#   .\beeper-update.cmd -WhatIf      say what it would do and stop
-#   .\beeper-update.cmd -Force       reinstall even if the version is not newer
-#   .\beeper-update.cmd -NoRelaunchGui   leave the Session 1 GUI closed
-#   .\beeper-update.cmd -Pause          keep the ELEVATED window open at the end
+#   beeper-update.cmd                 install the downloaded update
+#   beeper-update.cmd -DryRun         print the plan and stop; touches nothing (-WhatIf works too)
+#   beeper-update.cmd -RestartOnly    no install: restart everything in order (a Beeper older
+#                                     than the installed one is still running)
+#   beeper-update.cmd -Force          reinstall even if the version is not newer
+#   beeper-update.cmd -NoRelaunchGui  leave the Beeper app closed
+#   -NoElevate                        never ask for UAC (eGPT runs it this way)
+#   -StateFile <json>                 plan from a recorded state, not this machine (tests); implies -DryRun
 #
 # ASCII ONLY, deliberately: PowerShell 5.1 decodes a BOM-less UTF-8 script as ANSI, so a single
 # em-dash in a comment is a parse error.
 [CmdletBinding()]
 param(
-  [string] $Installer,
+  [Alias('WhatIf')][switch] $DryRun,
+  [switch] $RestartOnly,
   [switch] $Force,
-  [switch] $WhatIf,
   [switch] $NoRelaunchGui,
+  [switch] $NoElevate,
   [switch] $Pause,
+  [string] $StateFile,
+  # Carried through a UAC prompt, which may log in as another account.
+  [string] $LocalAppData = $env:LOCALAPPDATA,
+  [string] $EgptHome = $(if ($env:EGPT_HOME) { $env:EGPT_HOME } else { Join-Path $env:USERPROFILE '.egpt' }),
   [int]    $ServicePortTimeoutSec = 90
 )
 
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$repo = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+. (Join-Path $repo 'setup\beeper-desktop.ps1')
 
-# --- self-elevate: stopping a service needs an admin token, the installer itself does not ----
-$id = [Security.Principal.WindowsIdentity]::GetCurrent()
-if (-not (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-  $argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$PSCommandPath`"")
-  foreach ($kv in $PSBoundParameters.GetEnumerator()) {
-    if ($kv.Value -is [switch]) { if ($kv.Value.IsPresent) { $argList += "-$($kv.Key)" } }
-    else { $argList += @("-$($kv.Key)", "`"$($kv.Value)`"") }
-  }
-  Write-Host "elevating..."
-  Start-Process powershell -Verb RunAs -ArgumentList $argList
-  return
-}
+$exe        = Join-Path $LocalAppData 'Programs\BeeperTexts\Beeper.exe'
+$pendingDir = Join-Path $LocalAppData 'beepertexts-updater\pending'
+$grantCmd   = Join-Path $repo 'setup\grant-beeper-service-control.cmd'
+$selfCmd    = Join-Path $PSScriptRoot 'beeper-update.cmd'
 
 function Say($m) { Write-Host "[beeper-update] $m" }
-
-# --- where things are -------------------------------------------------------------------------
-$installDir = Join-Path $env:LOCALAPPDATA 'Programs\BeeperTexts'
-$exe        = Join-Path $installDir 'Beeper.exe'
-if (-not (Test-Path $exe)) { throw "no Beeper install at $installDir" }
-$installed  = [version]((Get-Item $exe).VersionInfo.ProductVersion)
-Say "installed: $installed"
-
-$pendingDir = Join-Path $env:LOCALAPPDATA 'beepertexts-updater\pending'
-if (-not $Installer) {
-  $cand = Get-ChildItem $pendingDir -Filter '*.exe' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-  if (-not $cand) { Say "nothing pending in $pendingDir - open Beeper and let it download an update first"; return }
-  $Installer = $cand.FullName
+function Done($o, [int] $code = 0) {
+  Write-Output ($o | ConvertTo-Json -Compress -Depth 6)
+  if ($Pause) { Write-Host ''; Write-Host 'Press Enter to close...' -ForegroundColor Cyan; try { Read-Host | Out-Null } catch { } }
+  exit $code
 }
-if (-not (Test-Path $Installer)) { throw "installer not found: $Installer" }
-Say "pending:   $(Split-Path $Installer -Leaf)"
 
-# electron-updater writes the expected sha512 (base64) beside the download. Verify it: a torn
-# download is otherwise discovered only after both Desktops are already down.
-$infoPath = Join-Path (Split-Path $Installer -Parent) 'update-info.json'
-if (Test-Path $infoPath) {
-  $info = Get-Content $infoPath -Raw | ConvertFrom-Json
-  if ($info.sha512) {
-    # Get-FileHash gives hex, electron-updater records base64. Converted with an explicit
-    # byte[] and an index loop: the obvious `-split | ForEach-Object` pipeline yields Object[],
-    # which ToBase64String refuses.
-    $want  = $info.sha512
-    $hex   = (Get-FileHash -Path $Installer -Algorithm SHA512).Hash
-    $bytes = [byte[]]::new($hex.Length / 2)
-    for ($i = 0; $i -lt $bytes.Length; $i++) { $bytes[$i] = [Convert]::ToByte($hex.Substring($i * 2, 2), 16) }
-    $got = [Convert]::ToBase64String($bytes)
-    if ($got -ne $want) { throw "sha512 mismatch on $Installer - delete the pending folder and let Beeper download again" }
-    Say "sha512:    ok"
+# electron-updater records the sha512 as base64, Get-FileHash gives hex. Converted with an explicit
+# byte[] and an index loop: the obvious `-split | ForEach-Object` pipeline yields Object[], which
+# ToBase64String refuses.
+function Get-Sha512Base64([string] $Path) {
+  $hex   = (Get-FileHash -Path $Path -Algorithm SHA512).Hash
+  $bytes = [byte[]]::new($hex.Length / 2)
+  for ($i = 0; $i -lt $bytes.Length; $i++) { $bytes[$i] = [Convert]::ToByte($hex.Substring($i * 2, 2), 16) }
+  return [Convert]::ToBase64String($bytes)
+}
+
+# Everything the plan depends on, read without changing anything. -StateFile supplies the same shape.
+function Read-MachineState {
+  $me = [Security.Principal.WindowsIdentity]::GetCurrent()
+  $elevated = (New-Object Security.Principal.WindowsPrincipal($me)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+  $s = [ordered]@{
+    system     = ($me.User.Value -eq 'S-1-5-18')
+    elevated   = $elevated
+    installed  = $(if (Test-Path $exe) { (Get-Item $exe).VersionInfo.ProductVersion } else { $null })
+    pending    = $null
+    services   = @(Get-BeeperServices $exe | ForEach-Object { [ordered]@{ name = $_.Name; running = $_.Running; canControl = ($elevated -or (Test-BeeperServiceControl $_.Name)) } })
+    appRunning = [bool](Get-CimInstance Win32_Process -Filter "Name='Beeper.exe'" | Where-Object { $_.SessionId -ne 0 })
   }
+  $infoPath = Join-Path $pendingDir 'update-info.json'
+  if (Test-Path $infoPath) {
+    $info = Get-Content $infoPath -Raw | ConvertFrom-Json
+    $file = Join-Path $pendingDir $info.fileName
+    $s.pending = [ordered]@{
+      installer     = $file
+      version       = $(if ($info.fileName -match '(\d+\.\d+\.\d+(\.\d+)?)') { $matches[1] } else { $null })
+      adminRequired = [bool]$info.isAdminRightsRequired
+      sha512Ok      = ((Test-Path $file) -and $info.sha512 -and (Get-Sha512Base64 $file) -eq $info.sha512)
+    }
+  }
+  return $s
 }
 
-# The version in the file name is what electron-builder puts there; treat a parse failure as
-# "unknown" rather than guessing, and let -Force cover it.
-$newVer = $null
-if ((Split-Path $Installer -Leaf) -match '(\d+\.\d+\.\d+(\.\d+)?)') { $newVer = [version]$matches[1] }
-if ($newVer) { Say "pending version: $newVer" }
-if ($newVer -and $newVer -le $installed -and -not $Force) { Say "already at $installed - nothing to do (use -Force to reinstall)"; return }
-
-# --- who is holding the tree -------------------------------------------------------------------
-# The S0 Desktop is a service, found by its Application path rather than by a name, because the
-# name is whatever whoever installed it chose - these were hand-created and have been renamed
-# twice since (the shipped names are now egpt-beeper-primary / egpt-beeper-secondary).
-$svc = Get-CimInstance Win32_Service | Where-Object {
-  $_.PathName -match 'nssm' -and (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\$($_.Name)\Parameters" -ErrorAction SilentlyContinue).Application -like '*BeeperTexts\Beeper.exe'
-}
-if ($svc -and $svc.Count -gt 1) { throw "more than one Beeper service found: $($svc.Name -join ', ') - pass one explicitly" }
-$svcName  = if ($svc) { $svc.Name } else { $null }
-$svcWasUp = $false
-if ($svcName) {
-  $svcWasUp = (Get-Service $svcName).Status -eq 'Running'
-  Say "S0 service: $svcName ($(if($svcWasUp){'running'}else{'stopped'}))"
-} else { Say "S0 service: none found" }
-
-$gui = Get-CimInstance Win32_Process -Filter "Name='Beeper.exe'" | Where-Object { $_.SessionId -ne 0 }
-$guiWasUp = [bool]$gui
-Say "S1 GUI:     $(if($guiWasUp){"$($gui.Count) processes in session $($gui[0].SessionId)"}else{'not running'})"
-
-if ($WhatIf) { Say "-WhatIf: would stop $svcName, close the GUI, run the installer silently, then bring both back"; return }
-
-# --- bring both down ----------------------------------------------------------------------------
-# STOP the service, never kill the process: NSSM's AppRestartDelay brings a killed Desktop back
-# in 10s, right on top of the installer.
-if ($svcName -and $svcWasUp) {
-  Say "stopping $svcName"
-  Stop-Service $svcName -Force
-  (Get-Service $svcName).WaitForStatus('Stopped', '00:01:00')
+function Get-UpdatePlan($s) {
+  $running = @($s.services | Where-Object { $_.running } | ForEach-Object { $_.name })
+  $p = [ordered]@{
+    ok = $true; dryRun = [bool]$DryRun; flow = $(if ($running.Count) { 'services' } else { 'app' })
+    from = $s.installed; to = $s.installed; install = (-not $RestartOnly)
+    stop = $running; closeApp = [bool]$s.appRunning; start = $running; relaunchApp = ([bool]$s.appRunning -and -not $NoRelaunchGui)
+  }
+  $refuse = { param($step, $err, $remedy) $p.ok = $false; $p.step = $step; $p.error = $err; if ($remedy) { $p.remedy = $remedy }; $p }
+  if ($s.system) { return & $refuse 'identity' 'running as SYSTEM - Beeper is per-user; run this as the eGPT user' }
+  if (-not $s.installed) { return & $refuse 'install-dir' "no Beeper at $exe" }
+  if (-not $RestartOnly) {
+    $pd = $s.pending
+    if (-not $pd) { return & $refuse 'pending' "nothing downloaded in $pendingDir" }
+    if (-not $pd.sha512Ok) { return & $refuse 'sha512' "the download does not match its sha512" "delete $pendingDir and let Beeper download it again" }
+    if (-not $Force -and -not ($pd.version -and [version]$pd.version -gt [version]$s.installed)) { return & $refuse 'nothing-to-install' "Beeper $($s.installed) is installed; the download is $($pd.version)" }
+    if ($pd.adminRequired -and -not $s.elevated) { return & $refuse 'admin-rights' 'this download needs administrator rights' "run $selfCmd (it asks for administrator)" }
+    $p.to = $pd.version
+  }
+  $denied = @($s.services | Where-Object { $_.running -and -not $_.canControl } | ForEach-Object { $_.name })
+  if ($denied.Count) { return & $refuse 'permission' "this user may not stop/start $($denied -join ', ')" "run $grantCmd once as administrator" }
+  return $p
 }
 
-# The GUI gets a real close first. Beeper writes a local database; SIGKILL on a syncing client
-# is how a bridge comes back needing re-verification.
-if ($guiWasUp) {
-  Say "closing the Session 1 GUI"
-  Get-Process Beeper -ErrorAction SilentlyContinue | ForEach-Object { $null = $_.CloseMainWindow() }
-  $deadline = (Get-Date).AddSeconds(30)
-  while ((Get-Process Beeper -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+if ($StateFile) { $DryRun = $true; $state = Get-Content $StateFile -Raw | ConvertFrom-Json }
+else { $state = Read-MachineState }
+$plan = Get-UpdatePlan $state
+
+if (-not $plan.ok) {
+  if (-not $DryRun -and -not $NoElevate -and -not $state.elevated -and $plan.step -in @('permission', 'admin-rights')) {
+    $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"", '-LocalAppData', "`"$LocalAppData`"", '-EgptHome', "`"$EgptHome`"")
+    foreach ($k in 'RestartOnly', 'Force', 'NoRelaunchGui', 'Pause') { if (Get-Variable $k -ValueOnly) { $a += "-$k" } }
+    Say "$($plan.error) - elevating..."
+    Start-Process powershell -Verb RunAs -ArgumentList $a
+    return
+  }
+  Say "refused ($($plan.step)): $($plan.error)"
+  if ($plan.remedy) { Say "fix: $($plan.remedy)" }
+  Done $plan 1
 }
-# Whatever is left after that is a stray renderer or a Desktop with no window, and the installer
-# cannot proceed around it.
-$left = Get-Process Beeper -ErrorAction SilentlyContinue
-if ($left) { Say "$($left.Count) Beeper processes still up after the graceful close - terminating"; $left | Stop-Process -Force; Start-Sleep -Seconds 2 }
 
-# --- install ------------------------------------------------------------------------------------
-# /S is NSIS silent. --updated is electron-updater's own flag, telling the installer it is an
-# update rather than a first install. No --force-run: the relaunch below is ordered on purpose.
-Say "running the installer (silent)"
-$p = Start-Process -FilePath $Installer -ArgumentList '/S','--updated' -PassThru -Wait
-Say "installer exit code: $($p.ExitCode)"
-if ($p.ExitCode -ne 0) { Say "WARNING: non-zero exit - check the version below before trusting it" }
+Say "$($plan.flow) flow: Beeper $($plan.from) -> $($plan.to)$(if (-not $plan.install) { ' (restart only)' })"
+if ($DryRun) {
+  Say "-DryRun: stop [$($plan.stop -join ', ')], close the app: $($plan.closeApp), install: $($plan.install), start [$($plan.start -join ', ')] one at a time, relaunch the app: $($plan.relaunchApp)"
+  Done $plan
+}
 
-$now = [version]((Get-Item $exe).VersionInfo.ProductVersion)
-Say "installed now: $now"
-
-# --- bring both back, SERVICE FIRST --------------------------------------------------------------
-if ($svcName -and $svcWasUp) {
-  Say "starting $svcName"
-  Start-Service $svcName
-  # Wait for it to actually BIND before the GUI can race it for 23373. A Desktop takes a while
-  # to come up in Session 0, and this wait is the whole reason the port mapping survives.
+# Wait until $Token's Desktop answers (200 on /v1/accounts); its port and the version it serves.
+function Wait-Connection([string] $Token) {
+  if (-not $Token) { Start-Sleep -Seconds 25; return @{ port = $null; version = $null } }   # no token: give it the bind time measured (5-25 s)
   $deadline = (Get-Date).AddSeconds($ServicePortTimeoutSec)
-  $bound = $null
-  while (-not $bound -and (Get-Date) -lt $deadline) {
+  while ((Get-Date) -lt $deadline) {
     Start-Sleep -Seconds 2
-    $bound = Get-NetTCPConnection -State Listen -LocalPort 23373 -ErrorAction SilentlyContinue |
-             Where-Object { (Get-CimInstance Win32_Process -Filter "ProcessId=$($_.OwningProcess)").SessionId -eq 0 }
+    $port = Find-BeeperPort $Token
+    if ($port) { return @{ port = $port; version = (Get-BeeperVersionAt $port) } }
   }
-  if ($bound) { Say "S0 Desktop is listening on 23373" }
-  else { Say "WARNING: S0 Desktop did not bind 23373 within ${ServicePortTimeoutSec}s - do NOT start the GUI until it does, or they will swap ports" }
+  return @{ port = $null; version = $null }
+}
+function New-ConnectionRow($name, $service, $r, [bool] $hasToken, $expect) {
+  $status = if (-not $hasToken) { 'no-token' } elseif (-not $r.port) { 'no-port' } elseif ($r.version -and $r.version -ne $expect) { "version $($r.version)" } else { 'ok' }
+  return [ordered]@{ name = $name; service = $service; port = $r.port; version = $r.version; status = $status }
 }
 
-if ($guiWasUp -and -not $NoRelaunchGui) {
-  # Launched through explorer.exe so it runs as the SHELL user at medium integrity. Starting it
-  # from this elevated process would hand the GUI an admin token it must not have.
-  Say "relaunching the Session 1 GUI"
+$t0 = Get-Date
+$tokens = Get-BeeperTokens -RepoRoot $repo -EgptHome $EgptHome
+$failStep = $null; $failErr = $null; $step = 'stop'
+
+try {
+  # STOP the service, never kill the process: NSSM brings a killed Desktop back in 10 s.
+  foreach ($svc in $plan.stop) {
+    Say "stopping $svc"
+    Stop-Service $svc -Force
+    (Get-Service $svc).WaitForStatus('Stopped', '00:01:00')
+  }
+  # The app gets a real close first: a killed syncing client can come back needing re-verification.
+  if ($plan.closeApp) {
+    Say 'closing the Beeper app'
+    Get-Process Beeper -ErrorAction SilentlyContinue | ForEach-Object { $null = $_.CloseMainWindow() }
+    $deadline = (Get-Date).AddSeconds(30)
+    while ((Get-Process Beeper -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+  }
+  $left = @(Get-Process Beeper -ErrorAction SilentlyContinue)
+  if ($left.Count) { Say "$($left.Count) Beeper processes still up - terminating"; $left | Stop-Process -Force; Start-Sleep -Seconds 2 }
+  if (Get-Process Beeper -ErrorAction SilentlyContinue) { throw 'a Beeper.exe is still running; nothing was installed' }
+
+  if ($plan.install) {
+    # /S is NSIS silent; --updated tells it this is an update. No --force-run: the relaunch below is ordered.
+    $step = 'install'
+    Say 'running the installer (silent)'
+    $proc = Start-Process -FilePath $state.pending.installer -ArgumentList '/S', '--updated' -PassThru -Wait
+    $now = (Get-Item $exe).VersionInfo.ProductVersion
+    Say "installer exit $($proc.ExitCode); Beeper.exe is now $now"
+    if ($now -ne $plan.to) { throw "installer exit $($proc.ExitCode); Beeper.exe is $now, expected $($plan.to)" }
+  }
+} catch { $failStep = $step; $failErr = $_.Exception.Message; Say "FAILED ($step): $failErr - bringing Beeper back as it was" }
+
+# Back up whatever happened above: services one at a time, the app last.
+$expect = (Get-Item $exe).VersionInfo.ProductVersion
+$conns = New-Object System.Collections.ArrayList
+$ofService = @{}
+foreach ($svc in $plan.start) {
+  $name = $svc -replace '^egpt-beeper-', ''
+  $ofService[$name] = $true
+  Say "starting $svc"
+  try { Start-Service $svc } catch { Say "${svc}: $($_.Exception.Message)" }
+  $r = Wait-Connection $tokens[$name]
+  if ($tokens[$name] -and -not $r.port) {
+    Say "$svc answers on no port after ${ServicePortTimeoutSec}s - restarting it once"
+    try { Restart-Service $svc -Force } catch { Say "${svc}: $($_.Exception.Message)" }
+    $r = Wait-Connection $tokens[$name]
+  }
+  [void]$conns.Add((New-ConnectionRow $name $svc $r ([bool]$tokens[$name]) $expect))
+}
+if ($plan.relaunchApp) {
+  # Through explorer.exe: the app runs as the desktop user, detached from this process, never elevated.
+  Say 'relaunching the Beeper app'
   Start-Process explorer.exe -ArgumentList "`"$exe`""
+  foreach ($name in @($tokens.Keys | Where-Object { -not $ofService.ContainsKey($_) } | Sort-Object)) {
+    [void]$conns.Add((New-ConnectionRow $name $null (Wait-Connection $tokens[$name]) $true $expect))
+  }
 }
 
-Say "done. verify with:  node src/tools/beeper-whoami.mjs"
-
-# The elevated child gets its OWN window, which vanishes on exit before any of the above
-# can be read - and the whole point of a double-clickable tool is seeing what it did.
-if ($Pause) { Write-Host ''; Write-Host 'Press Enter to close...' -ForegroundColor Cyan; try { Read-Host | Out-Null } catch { } }
+$restartSec = [int][Math]::Round(((Get-Date) - $t0).TotalSeconds)
+$bad = @($conns | Where-Object { $_.status -ne 'ok' })
+$result = [ordered]@{
+  ok = (-not $failStep -and -not $bad.Count); flow = $plan.flow; from = $plan.from; to = $plan.to; installed = $expect
+  install = $plan.install; connections = @($conns); app = [ordered]@{ ran = $plan.closeApp; relaunched = $plan.relaunchApp }; restartSec = $restartSec
+}
+if ($failStep) { $result.step = $failStep; $result.error = $failErr }
+elseif ($bad.Count) { $result.step = 'start'; $result.error = (($bad | ForEach-Object { "$($_.name) $($_.status)" }) -join ', ') }
+Say "$(if ($result.ok) { 'done' } else { "FAILED at $($result.step)" }): Beeper $expect, restarted in ${restartSec}s -$((@($conns) | ForEach-Object { "$($_.name) $($_.status)$(if ($_.port) { " :$($_.port)" })" }) -join ', ')"
+Done $result $(if ($result.ok) { 0 } else { 1 })
