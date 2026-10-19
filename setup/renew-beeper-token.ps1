@@ -1,6 +1,7 @@
 # renew-beeper-token.ps1 - renew one Beeper connection's Desktop API token.
-# Beeper's Desktop API tokens expire (30 days by default), and a node whose token expired hears
-# nothing. This stops that connection's Beeper service, opens the same install in a window, takes
+# A Desktop API token works until it is revoked, or until an expiry chosen when it was approved
+# (eGPT's tokens have none); a node whose token stopped working hears nothing. This stops that
+# connection's Beeper service, opens the same install in a window, takes
 # the new token you paste, writes it to config.yaml, starts the service again, checks the token,
 # and restarts the spine so it reconnects.
 # Run it via renew-beeper-token.cmd (it elevates: stopping a service needs admin).
@@ -12,15 +13,7 @@ $egptHome = if ($env:EGPT_HOME) { $env:EGPT_HOME } else { Join-Path $env:USERPRO
 
 function Say([string]$m) { Write-Host "  $m" }
 
-function Find-ApiPort([string]$Token) {
-  foreach ($port in 23373..23382) {
-    try {
-      $r = Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 -Uri "http://127.0.0.1:$port/v1/accounts" -Headers @{ Authorization = "Bearer $Token" }
-      if ($r.StatusCode -eq 200) { return $port }
-    } catch { }
-  }
-  return $null
-}
+. (Join-Path $PSScriptRoot 'beeper-desktop.ps1')   # Find-BeeperPort
 
 function Norm([string]$p) { $p.Replace('\', '/').TrimEnd('/').ToLower() }
 
@@ -97,7 +90,7 @@ while (-not $token) {
 }
 Set-Clipboard -Value ' '
 Say ("got a token: " + $token.Length + " characters")
-$port = Find-ApiPort $token
+$port = Find-BeeperPort $token
 if ($port) { Say "the open Beeper accepts it (port $port)" }
 else { Say 'the open Beeper does not answer to it yet; writing it anyway - the service is checked after it starts' }
 
@@ -110,7 +103,7 @@ Wait-ProfileClosed 20
 Start-Service -Name $service
 Say "$service started; waiting for its API ..."
 $port = $null
-for ($i = 0; $i -lt 45 -and -not $port; $i += 5) { Start-Sleep -Seconds 5; $port = Find-ApiPort $token }
+for ($i = 0; $i -lt 45 -and -not $port; $i += 5) { Start-Sleep -Seconds 5; $port = Find-BeeperPort $token }
 if ($port) { Say "the service accepts the new token (port $port)" } else { Say 'WARNING: the service did not accept the token within 45 s - check it in Beeper' }
 
 $pidFile = Join-Path $egptHome 'state\spine.pid'

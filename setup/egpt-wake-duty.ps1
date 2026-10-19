@@ -14,6 +14,7 @@
 # ASCII ONLY (PowerShell 5.1 reads a BOM-less UTF-8 script as ANSI).
 
 $ErrorActionPreference = 'SilentlyContinue'
+. (Join-Path $PSScriptRoot 'beeper-desktop.ps1')
 $prof   = $env:USERPROFILE
 $state  = Join-Path $prof '.egpt\state'
 # Per-node, identical on every node, and NOT the home root: a disposable log under the profile.
@@ -68,7 +69,9 @@ try {
   # 4) log the cycle outcome (+ flag an outbox the spine could not clear - a delivery problem, not a wake problem)
   $spid    = Get-Content (Join-Path $state 'spine.pid')
   $alive   = $null -ne (Get-Process -Id $spid)
-  $beeper  = $false; try { Invoke-WebRequest 'http://127.0.0.1:23373/v1/accounts' -TimeoutSec 3 -UseBasicParsing -ErrorAction Stop | Out-Null; $beeper=$true } catch { if($_.Exception.Response){ $beeper=$true } }
+  # Per connection: the port its own token answers on (anything on 23373 may be another Beeper).
+  $tokens  = Get-BeeperTokens -RepoRoot (Split-Path -Parent $PSScriptRoot) -EgptHome $egptHome
+  $beeper  = if ($tokens.Count) { ($tokens.Keys | Sort-Object | ForEach-Object { $p = Find-BeeperPort $tokens[$_]; '{0}:{1}' -f $_, $(if ($p) { $p } else { 'none' }) }) -join ',' } else { 'no-token' }
   $pending = OutboxCount
   $awake   = [Math]::Round(((Get-Date) - $start).TotalSeconds, 0)
   L ("duty: net(inet=$inet) daemon=$daemon spinePid=$spid alive=$alive beeperApi=$beeper outboxPending=$pending awakeSecs=$awake")
