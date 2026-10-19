@@ -252,14 +252,10 @@ function resolveTarget(state, term, surface) {
 // gets wrapped — the invariant "a reply never begins with '/'" holds for every input.
 const quoteLeadingCommand = (text) => String(text ?? '').replace(/^\/([a-z0-9_-]*)/i, '`/$1`');
 
-// /recap (operator 2026-09-27) — THE ONE COMMAND ANYBODY MAY TYPE ("anybody can type /recap"):
-// isCommand admits it from any sender, because all it does is read a chat's own backlog back to that
-// same chat. One pattern, read by that gate and by run()'s dispatch, so the two cannot disagree.
-const RECAP_CMD = /^\/recap\b/i;
-// /join /split /send /end (operator 2026-10-18) — admitted from any sender too, never from a node-signed
-// line; each handler decides (a member: /join + /split in a group, /send + /end in a side group).
-const SIDE_CMD = /^\/(?:join|split|send|end)\b/i;
-// Bare /agents (operator 2026-10-16) — admitted from any sender; a non-operator gets agentsPublic.
+// The commands anyone in a chat may run (operator 2026-10-19): config.yaml public_commands, or the
+// chat's own conversations.yaml list, which replaces it. Everything else is the node's allowed users'.
+const PUBLIC_COMMANDS_DEFAULT = ['join', 'split', 'send', 'end'];
+// Bare /agents: a non-operator gets agentsPublic where public_commands lists agents.
 const AGENTS_BARE_CMD = /^\/agents\s*$/i;
 // The public list's words for a reply mode; 'off' has none (that being is not listed).
 const PUBLIC_MODE_WORDS = {
@@ -806,19 +802,27 @@ export function createCommands({
   // against cfg.telegram.chat_id, not whatsapp's — ids are per-surface namespaces.
   // Fall back to the whatsapp block when ev.surface is absent (safety). Authorized
   // senders (per-surface allowed_users / isSender) can command from anywhere.
-  // …EXCEPT /recap, which anybody may type (RECAP_CMD, above — operator 2026-09-27), the side-group
-  // verbs, which their handlers gate (SIDE_CMD, operator 2026-10-18), and bare /agents, which a
-  // non-operator gets as the public list (AGENTS_BARE_CMD). Every other command, lifecycle and every
-  // /agents verb included, still needs the operator.
+  // Anyone else runs only the chat's public commands (publicCommandsOf), never from a node-signed line.
   // The ev is commandOf's: a command names its being (commandBeing), except a registered command on
   // the console.
-  function isCommand(ev) {
+  async function isCommand(ev) {
     const body = String(ev?.body ?? '').trim();
     if (isOperator(ev) && isRadioQuickReply(ev)) return true;
     if (!body.startsWith('/')) return false;
     const onConsole = surfaceOf(ev) === SHELL_SURFACE && COMMAND_SET.has(body.split(/\s/)[0].toLowerCase());
     if (ev?.commandBeing == null && !onConsole) return false;
-    return isOperator(ev) || RECAP_CMD.test(body) || (ev?.fromNode == null && SIDE_CMD.test(body)) || AGENTS_BARE_CMD.test(body);
+    if (isOperator(ev)) return true;
+    if (ev?.fromNode != null) return false;
+    const word = body.slice(1).split(/[\s=]/)[0].toLowerCase();
+    // A public agents is its bare list (agentsPublic); every /agents verb stays the allowed users'.
+    return (await publicCommandsOf(ev)).includes(word) && (word !== 'agents' || AGENTS_BARE_CMD.test(body));
+  }
+  // The chat's own conversations.yaml list, else config.yaml's, else the default; words without '/'.
+  async function publicCommandsOf(ev) {
+    const own = loadState ? (await loadState()).contacts?.[surfaceOf(ev)]?.[ev.chatId]?.public_commands : undefined;
+    const global = cfg().public_commands;
+    const list = Array.isArray(own) ? own : Array.isArray(global) ? global : PUBLIC_COMMANDS_DEFAULT;
+    return list.map((w) => String(w).trim().replace(/^\//, '').toLowerCase());
   }
 
   // ── PER-COMMAND AUDIT → log_to_group (operator 2026-10-08) ─────────────────────────────────────
@@ -1026,7 +1030,7 @@ export function createCommands({
     // typed in, and only that chat's own messages. Pre-catch-all, same slot as /help.
     // NOTHING TO LIST ⇒ SILENT (operator "ok", 2026-09-27): on a shared account every co-account
     // node hears the same /recap, and the one that never slept must not answer beside the one that did.
-    const recapMatch = RECAP_CMD.exec(line);
+    const recapMatch = /^\/recap\b/i.exec(line);
     if (recapMatch) {
       const backlog = backlogOf(ev);
       if (backlog.length) await send?.(ev.chatId, recapText(backlog, timeZone));
@@ -1062,7 +1066,7 @@ export function createCommands({
     // side-group backed by a NEW, DIVERGING conversation (its beings' threads are copied); /send —
     // reply /send to a message in either group to relay it back to the original chat; /end — reply
     // /end in either group to archive it and drop its mapping (operator 2026-10-03). They sit
-    // pre-catch-all like the rest. isCommand admits these four from any sender (SIDE_CMD); /join and
+    // pre-catch-all like the rest. Public by default (PUBLIC_COMMANDS_DEFAULT); /join and
     // /split refuse a member outside a group, /send and /end act only in a side group (operator
     // 2026-10-18); /send and /end stand down silently where this node holds no alias or parent.
     // Written as `<name>Match = /^\/word…` so the /help drift guard (tests/spine-commands.test.mjs) sees them.

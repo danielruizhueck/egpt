@@ -245,17 +245,17 @@ describe('/<handle> update beeper — the command', () => {
     const { cmds, sent, typed } = cmdHarness({ update: async () => { n += 1; return 'kg · Beeper 4.3.209 · up to date'; } });
     const ev = typed('/e update beeper');
     expect(ev).toMatchObject({ body: '/update beeper', commandBeing: 'e' });
-    expect(cmds.isCommand(ev)).toBe(true);
+    expect(await cmds.isCommand(ev)).toBe(true);
     await cmds.run(ev);
     expect(n).toBe(1);
     expect(sent).toEqual(['kg · Beeper 4.3.209 · up to date']);
   });
 
-  it('another node\'s handle runs nothing here', () => {
+  it('another node\'s handle runs nothing here', async () => {
     const { cmds, typed } = cmdHarness({ update: async () => 'x' });
     const ev = typed('/don update beeper');
     expect(ev.commandElsewhere).toBe('don');
-    expect(cmds.isCommand(ev)).toBe(false);
+    expect(await cmds.isCommand(ev)).toBe(false);
   });
 
   it('an unknown or missing target gets the usage line, in the handle typed', async () => {
@@ -268,10 +268,10 @@ describe('/<handle> update beeper — the command', () => {
     expect(n).toBe(0);
   });
 
-  it('operator only, and never bare in a chat', () => {
+  it('operator only, and never bare in a chat', async () => {
     const { cmds, typed } = cmdHarness({ update: async () => 'x' });
-    expect(cmds.isCommand(typed('/e update beeper', { chatId: '!some-group', senderId: '@someone:beeper.local' }))).toBe(false);
-    expect(cmds.isCommand(typed('/update beeper'))).toBe(false);
+    expect(await cmds.isCommand(typed('/e update beeper', { chatId: '!some-group', senderId: '@someone:beeper.local' }))).toBe(false);
+    expect(await cmds.isCommand(typed('/update beeper'))).toBe(false);
   });
 
   it('the notice names the node\'s own handle (boot passes commands.hintOf)', () => {

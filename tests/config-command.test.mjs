@@ -232,7 +232,7 @@ const KG = { node_name: 'kg', peer_nodes: ['kg', 'do'], agents: { egpt: { handle
 const DO = { node_name: 'do', peer_nodes: ['kg', 'do'], agents: { egpt: { handles: ['d', 'don'], default: true } } };
 async function typed(cmds, ev) {
   const c = cmds.commandOf(ev);
-  if (!c || c.commandElsewhere || !cmds.isCommand(c)) return c;
+  if (!c || c.commandElsewhere || !(await cmds.isCommand(c))) return c;
   await cmds.run(c);
   return c;
 }

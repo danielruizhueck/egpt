@@ -168,10 +168,10 @@ describe('/status', () => {
     expect(sent[0].text).toMatch(/mode: mute/);
   });
 
-  it('/e status is intercepted only from an authorized chat (isCommand gate); a bare /status is no command', () => {
+  it('/e status is intercepted only from an authorized chat (isCommand gate); a bare /status is no command', async () => {
     const { cmds } = harness({});
-    expect(cmds.isCommand(cmds.commandOf({ body: '/e status', chatId: '!self' }))).toBe(true);    // Self DM
-    expect(cmds.isCommand(cmds.commandOf({ body: '/e status', chatId: '!rando' }))).toBe(false);  // random chat
+    expect(await cmds.isCommand(cmds.commandOf({ body: '/e status', chatId: '!self' }))).toBe(true);    // Self DM
+    expect(await cmds.isCommand(cmds.commandOf({ body: '/e status', chatId: '!rando' }))).toBe(false);  // random chat
     expect(cmds.commandOf({ body: '/status', chatId: '!self' })).toBe(null);
   });
 
@@ -699,7 +699,7 @@ describe('/status runs on the node of the being it is typed to (was: the node-fi
   const DO = { whatsapp: { chat_id: '!self' }, node_name: 'do', peer_nodes: ['kg', 'do'], agents: { egpt: { handles: ['d', 'don'], default: true } } };
   const self = { chatId: '!self', surface: 'whatsapp' };
   // The spine's reading (classify): commandOf, then isCommand, then run.
-  const typed = async (cmds, ev) => { const c = cmds.commandOf(ev); if (c && cmds.isCommand(c)) await cmds.run(c); return c; };
+  const typed = async (cmds, ev) => { const c = cmds.commandOf(ev); if (c && await cmds.isCommand(c)) await cmds.run(c); return c; };
 
   // Contacts whose slugs all contain "do" — the live shape that made `/status do`
   // ambiguous on the peer node. Plus one unrelated chat for the fragment regression.

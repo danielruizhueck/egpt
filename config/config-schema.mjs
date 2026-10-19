@@ -2949,8 +2949,18 @@ export const CONFIG_SCHEMA = {
     does not switch that one off.
   `,
 
+  public_commands: `
+    The commands ANYONE in a chat may run (operator 2026-10-19); every other command is
+    the node's allowed users' only (Self DM, networks.<surface>.allowed_users, the owner).
+    Command words, with or without the '/'. A node-signed line is never admitted.
+      config.yaml, root key:           DEFAULT [join, split, send, end]
+      conversations.yaml, a chat's own entry: REPLACES the root list there; [] = none.
+    A listed agents opens only the bare /agents list (agents_list); its verbs stay
+    allowed-users only. Each command's own rules still apply (/end only in a side group).
+  `,
+
   agents_list: `
-    Bare /agents from a NON-operator (operator 2026-10-16): a short public list of this
+    Bare /agents from a NON-operator (operator 2026-10-16; only where public_commands lists agents): a short public list of this
     node's local agents (the persona first) that read the chat — emoji + name, handles, voice handles, the reply
     mode in plain words, and whether THAT sender can call it (its allowed_users). Relays,
     public agents and 'off' beings are not listed. The operator's /agents is unchanged

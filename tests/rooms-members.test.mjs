@@ -950,7 +950,7 @@ describe('/members usage line', () => {
 describe('/members by being — the handle picks the node, with the sub-grammar intact', () => {
   const NODES = { node_name: 'kg', peer_nodes: ['kg', 'do'], agents: { egpt: { handles: ['e', 'egpt'], default: true } } };
   // The spine's reading (classify): commandOf, then isCommand, then run.
-  const typed = async (cmds, ev) => { const c = cmds.commandOf(ev); if (c && cmds.isCommand(c)) await cmds.run(c); return c; };
+  const typed = async (cmds, ev) => { const c = cmds.commandOf(ev); if (c && await cmds.isCommand(c)) await cmds.run(c); return c; };
 
   it('/d members (another node\'s being) is no command here: answers NOTHING AT ALL', async () => {
     const { cmds, sent } = harness({ config: NODES });

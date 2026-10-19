@@ -247,6 +247,11 @@ describe('a BARE handle at the START addresses, exactly like @handle', () => {
     expect(mentionHits('/status', DOLLY)).toEqual([]);
     expect(mentionHits('/dolly restart', DOLLY)).toEqual([]);
   });
+  it('a leading /<handle> is no address (operator 2026-10-19: "/e hola" must not work)', () => {
+    expect(mentionHits('/d hola', DOLLY)).toEqual([]);
+    expect(mentionHits('/don', DOLLY)).toEqual([]);
+    expect(mentionHits('/d hola', DOLLY, { addressWithoutAt: false })).toEqual([]);
+  });
 
   // THE GATING CONTRACT (operator 2026-07-27: "it work like mention direct -- the message
   // has to start with keyword"). The bare form must be INDISTINGUISHABLE from the @ form at

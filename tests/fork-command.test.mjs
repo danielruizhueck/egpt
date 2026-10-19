@@ -622,12 +622,12 @@ describe('/join <name> — template placeholder, same-name reuse, member gate', 
   });
 
   // ── the gate ──
-  it('isCommand admits /join /split /send /end from any sender (each handler gates it); /agents verbs stay operator-only', () => {
+  it('isCommand admits /join /split /send /end from any sender (each handler gates it); /agents verbs stay operator-only', async () => {
     const { cmds } = harness({ config: cfg() });
     const admitted = (body) => cmds.isCommand(cmds.commandOf(memberJoin(body)) ?? memberJoin(body));
-    for (const body of ['/e join emely', '/e split x', '/e send', '/e end']) expect(admitted(body), body).toBe(true);
+    for (const body of ['/e join emely', '/e split x', '/e send', '/e end']) expect(await admitted(body), body).toBe(true);
     for (const body of ['/e agents rethread e', '/e agents reset e', '/e agents mode on e', '/e joinx', '/join emely']) {
-      expect(admitted(body), body).toBe(false);
+      expect(await admitted(body), body).toBe(false);
     }
   });
 
@@ -1073,7 +1073,7 @@ describe('no phrase triggers: /join is its "/"-form or an alias (commands-alias.
   it('a leftover config.join.triggers phrase is an ordinary message; the module has no phrase entry point', async () => {
     const { cmds, calls } = harness({ config: { ...cfg(), join: { triggers: ['dame un segundo'] } } });
     const ev = { chatId: C_CHAT, surface: 'whatsapp', msgId: 'cmd1', chatName: 'Proyecto X', authorized: true, isSender: true, body: 'dame un segundo' };
-    expect(cmds.isCommand(ev)).toBe(false);
+    expect(await cmds.isCommand(ev)).toBe(false);
     expect(cmds.phraseCommand).toBeUndefined();
     expect(cmds.runPhrase).toBeUndefined();
     expect(calls.create).toEqual([]);

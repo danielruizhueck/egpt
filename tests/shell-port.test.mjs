@@ -130,7 +130,7 @@ describe('shell-port limb', () => {
     port.onMessage(({ body, from }) => {
       pending = (async () => {
         const ev = identity.build({ body, from });
-        if (commands.isCommand(ev)) await commands.run(ev);
+        if (await commands.isCommand(ev)) await commands.run(ev);
       })();
       return pending;
     });

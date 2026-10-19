@@ -123,7 +123,7 @@ const inOrigin = (body, extra = {}) => ({ chatId: ORIGIN, surface: 'whatsapp', c
 const asOperator = { senderId: AN_ID, senderName: 'An', isSender: true, authorized: true };
 async function typed(h, ev) {
   const cmd = h.cmds.commandOf(ev) ?? ev;
-  if (!h.cmds.isCommand(cmd)) return 'not a command';
+  if (!(await h.cmds.isCommand(cmd))) return 'not a command';
   return h.cmds.run(cmd);
 }
 
@@ -137,7 +137,7 @@ describe('"SI chat …" opens nothing anywhere', () => {
       const h = harness({ state: seedState({ entry: STRAY }) });
       for (const ev of [inOrigin(body), inOrigin(body, asOperator)]) {
         expect(h.cmds.commandOf(ev)).toBe(null);
-        expect(h.cmds.isCommand(ev)).toBe(false);
+        expect(await h.cmds.isCommand(ev)).toBe(false);
       }
       expect(h.calls.create).toEqual([]);
     });
@@ -146,7 +146,7 @@ describe('"SI chat …" opens nothing anywhere', () => {
   it('a leftover global super_chats block summons nothing either', async () => {
     const h = harness({ config: cfg({ extra: { super_chats: { triggers: ['SI chat'], automatic: true } } }) });
     expect(h.cmds.commandOf(inOrigin('SI chat'))).toBe(null);
-    expect(h.cmds.isCommand(inOrigin('SI chat'))).toBe(false);
+    expect(await h.cmds.isCommand(inOrigin('SI chat'))).toBe(false);
     expect(h.calls.create).toEqual([]);
   });
 
@@ -157,18 +157,18 @@ describe('"SI chat …" opens nothing anywhere', () => {
 
 // ── 2. /join and /split from any member ──────────────────────────────────────────────────────────
 describe('who may run the side-group commands', () => {
-  it('a member (not the operator) is admitted for /join /split /send /end, and still for nothing else', () => {
+  it('a member (not the operator) is admitted for /join /split /send /end, and still for nothing else', async () => {
     const h = harness();
     const admitted = (body) => h.cmds.isCommand(h.cmds.commandOf(inOrigin(body)) ?? inOrigin(body));
-    for (const body of ['/e join viaje', '/e split viaje', '/e send', '/e end', '/e JOIN', '/e split']) expect(admitted(body), body).toBe(true);
-    for (const body of ['/e agents mode on e', '/e status', '/e config', '/e restart', '/e joinx']) expect(admitted(body), body).toBe(false);
+    for (const body of ['/e join viaje', '/e split viaje', '/e send', '/e end', '/e JOIN', '/e split']) expect(await admitted(body), body).toBe(true);
+    for (const body of ['/e agents mode on e', '/e status', '/e config', '/e restart', '/e joinx', '/e recap', '/e agents']) expect(await admitted(body), body).toBe(false);
   });
 
-  it('a node-signed line is never a command from a member (being output is never input)', () => {
+  it('a node-signed line is never a command from a member (being output is never input)', async () => {
     const h = harness();
     for (const body of ['/e join viaje', '/e split viaje', '/e send', '/e end']) {
       const ev = inOrigin(`${body}${encodeNodeSignature('do', 'don')}`, { fromNode: 'do' });
-      expect(h.cmds.isCommand(h.cmds.commandOf(ev) ?? ev), body).toBe(false);
+      expect(await h.cmds.isCommand(h.cmds.commandOf(ev) ?? ev), body).toBe(false);
     }
   });
 

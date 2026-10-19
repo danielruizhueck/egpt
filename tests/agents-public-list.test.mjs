@@ -1,4 +1,5 @@
-// agents-public-list.test.mjs — a non-operator's bare `/agents` (operator 2026-10-16): this node's
+// agents-public-list.test.mjs — a non-operator's bare `/agents` (operator 2026-10-16; admitted only
+// where public_commands lists agents since 2026-10-19 — run() is called directly below): this node's
 // local beings that read this chat, how to call them, their reply mode in plain words, and whether THIS sender can call
 // them. Safe fields only. The operator's bare /agents is unchanged; every verb stays operator-only.
 // Throttled per chat; hammering it inside the window bans through the media-flood ban.
@@ -65,15 +66,22 @@ const LIST_C = [
 ].join('\n');
 
 describe('bare /agents from a non-operator: the public list', () => {
-  it('is admitted at the command gate; every verb, a handle, a slug and force all are still refused', () => {
-    const { cmds } = harness();
+  it('is admitted at the command gate only where public_commands lists agents (operator 2026-10-19)', async () => {
+    const closed = harness();
+    expect(await closed.cmds.isCommand(closed.cmds.commandOf(msg('/e agents')))).toBe(false);
+    const { cmds } = harness({ cfg: config({ public_commands: ['agents'] }) });
     const cmd = (ev) => cmds.commandOf(ev) ?? ev;   // as the spine reads a line
-    expect(cmds.isCommand(cmd(msg('/e agents')))).toBe(true);
-    expect(cmds.isCommand(cmd(msg('  /E AGENTS  ')))).toBe(true);
+    expect(await cmds.isCommand(cmd(msg('/e agents')))).toBe(true);
+    expect(await cmds.isCommand(cmd(msg('  /E AGENTS  ')))).toBe(true);
+  });
+
+  it('even where agents is public, every verb, a handle, a slug and force all are still refused', async () => {
+    const { cmds } = harness({ cfg: config({ public_commands: ['agents'] }) });
+    const cmd = (ev) => cmds.commandOf(ev) ?? ev;
     for (const body of ['/e agents e', '/e agents rethread e', '/e agents reset e', '/e agents compact e', '/e agents stop e', '/e agents refresh e',
       '/e agents mode on e', '/e agents access_level all e', '/e agents force all', '/e agents=c', '/e agents=c e', '/e agent',
       '/e agents compact', '/agents']) {
-      expect(cmds.isCommand(cmd(msg(body))), body).toBe(false);
+      expect(await cmds.isCommand(cmd(msg(body))), body).toBe(false);
     }
   });
 
@@ -152,7 +160,7 @@ describe('bare /agents from a non-operator: the public list', () => {
     const state = { st: seed() };
     const replies = [];
     const real = createCommands({
-      getConfig: () => config(), send: async (c, t) => replies.push(t), exit: () => {},
+      getConfig: () => config({ public_commands: ['agents'] }), send: async (c, t) => replies.push(t), exit: () => {},
       loadState: async () => state.st, writeState: async (s) => { state.st = s; }, logTranscript: async () => true, defaultKey: 'e',
     });
     const brain = { calls: [], async turn(being) { this.calls.push(being); return { text: 'ok', sessionId: 'thread-e', being }; }, async accessLevel() { return 'regular'; } };

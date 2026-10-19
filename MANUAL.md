@@ -20,10 +20,15 @@ not answered by the persona. Authorization = the surface's own `chat_id`
 A command names the being that runs it (since 2026-10-19): `/<handle> <command>`,
 e.g. `/e restart`, `/don agents`, `/e join viaje`. The node that hosts that being
 runs it; every other node records the line and does nothing. A bare `/restart`
-in a chat is ordinary text. `/<handle> <anything else>` (`/e hola`) is a message
-to that being. The editor shell (the node's own console) and the ingest box
+in a chat is ordinary text. `/<handle> <anything else>` (`/e hola`) is ordinary
+text too, and addresses nobody. The editor shell (the node's own console) and the ingest box
 still take the bare command. An `/<handle> agents` verb with no target acts on
 that being (`/e agents compact`).
+
+Anyone else in a chat runs only the commands `public_commands` names: the root
+key in config.yaml (default `[join, split, send, end]`), or the chat's own
+conversations.yaml entry, which replaces it (`[]` = none). A listed `agents`
+opens only the bare list; its verbs stay authorized-only.
 
 ```text
 /<handle> status                               compact node health (fenced yaml):

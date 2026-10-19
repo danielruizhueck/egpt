@@ -137,13 +137,13 @@ describe('/<handle> <command>: the handle\'s node runs it, the other node ignore
     recordedOnly(dolly, '/e restart');
   });
 
-  it('/e restart from a member is refused as before: no exit; it is a line to E like any other', async () => {
+  it('/e restart from a member is refused as before: no exit; ordinary text that addresses nobody', async () => {
     const { kg, dolly, say } = pair();
     await say(member('/e restart'));
     expect(kg.calls.exit).toEqual([]);
     expect(dolly.calls.exit).toEqual([]);
     expect(kg.calls.ran).toEqual([]);
-    expect(kg.calls.brain.map((b) => b.being)).toEqual(['egpt']);
+    expect(kg.calls.brain).toEqual([]);
   });
 
   it('/don agents on dolly: dolly runs /agents; kg ignores it', async () => {
@@ -177,16 +177,21 @@ describe('a bare /<command> is no command anywhere', () => {
   }
 });
 
-describe('/<handle> <not a command> is a message to that being', () => {
-  it('/e hola: the router addresses E on kg; nothing runs as a command', async () => {
+// Operator 2026-10-19 ~14:20: "'/e hola' must not work since 'hola' is not recognized as a command".
+describe('/<handle> <not a command> is ordinary text that addresses nobody', () => {
+  it('/e hola: the router addresses no one; nothing runs; nobody is woken on either node', async () => {
     const { kg, dolly, say } = pair();
     const routed = await kg.router.resolve(member('/e hola'));
-    expect(routed.targets[0]).toMatchObject({ being: 'egpt' });
-    expect(routed.targets[0].fallthrough).toBeFalsy();
+    expect(routed.targets[0].fallthrough).toBe(true);
     await say(member('/e hola'));
-    expect(kg.calls.ran).toEqual([]);
+    for (const n of [kg, dolly]) recordedOnly(n, '/e hola');
+  });
+
+  it('lock: "e hola" still wakes E on kg', async () => {
+    const { kg, dolly, say } = pair();
+    await say(member('e hola'));
     expect(kg.calls.brain.map((b) => b.being)).toEqual(['egpt']);
-    expect(dolly.calls.brain).toEqual([]);   // not addressed to D
+    expect(dolly.calls.brain).toEqual([]);
   });
 });
 
@@ -221,12 +226,12 @@ describe('the console (the editor shell, surface room) keeps bare commands', () 
     expect(kg.calls.exit).toEqual([43, 43]);
   });
 
-  it('"/e hola" there is a message to E; an unregistered "/foo" is no command', async () => {
+  it('"/e hola" and an unregistered "/foo" are no command there and address nobody', async () => {
     const kg = node('kg');
     await kg.say(onConsole('/e hola'));
     await kg.say(onConsole('/foo bar'));
     expect(kg.calls.ran).toEqual([]);
-    expect(kg.calls.brain.map((b) => b.being)).toEqual(['egpt']);
+    expect(kg.calls.brain).toEqual([]);
   });
 });
 

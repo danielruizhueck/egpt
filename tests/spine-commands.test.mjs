@@ -68,39 +68,39 @@ function harness({ config = AGENTS, state = null, brains, io = {}, cdp = {}, pro
 const typed = (cmds, ev) => cmds.commandOf(ev) ?? ev;
 
 describe('commands.isCommand', () => {
-  it('recognizes a slash command in the Self DM', () => {
+  it('recognizes a slash command in the Self DM', async () => {
     const { cmds } = harness({ config: { ...AGENTS,  whatsapp: { chat_id: '!self' } } });
-    expect(cmds.isCommand(typed(cmds, { body: '/e restart', chatId: '!self' }))).toBe(true);
+    expect(await cmds.isCommand(typed(cmds, { body: '/e restart', chatId: '!self' }))).toBe(true);
   });
-  it('a bare slash command is no command, even in the Self DM (operator 2026-10-19: a command names its being)', () => {
+  it('a bare slash command is no command, even in the Self DM (operator 2026-10-19: a command names its being)', async () => {
     const { cmds } = harness({ config: { ...AGENTS,  whatsapp: { chat_id: '!self' } } });
-    expect(cmds.isCommand(typed(cmds, { body: '/restart', chatId: '!self' }))).toBe(false);
+    expect(await cmds.isCommand(typed(cmds, { body: '/restart', chatId: '!self' }))).toBe(false);
   });
-  it('recognizes a slash command from an authorized sender / own send anywhere', () => {
+  it('recognizes a slash command from an authorized sender / own send anywhere', async () => {
     const { cmds } = harness();
-    expect(cmds.isCommand(typed(cmds, { body: '/e restart', chatId: '!group', authorized: true }))).toBe(true);
-    expect(cmds.isCommand(typed(cmds, { body: '/e restart', chatId: '!group', isSender: true }))).toBe(true);
+    expect(await cmds.isCommand(typed(cmds, { body: '/e restart', chatId: '!group', authorized: true }))).toBe(true);
+    expect(await cmds.isCommand(typed(cmds, { body: '/e restart', chatId: '!group', isSender: true }))).toBe(true);
   });
-  it('does NOT recognize a slash command from a random chat/sender', () => {
+  it('does NOT recognize a slash command from a random chat/sender', async () => {
     const { cmds } = harness({ config: { ...AGENTS,  whatsapp: { chat_id: '!self' } } });
-    expect(cmds.isCommand(typed(cmds, { body: '/e restart', chatId: '!group' }))).toBe(false);
+    expect(await cmds.isCommand(typed(cmds, { body: '/e restart', chatId: '!group' }))).toBe(false);
   });
-  it('recognizes a slash command in the TELEGRAM surface Self DM (per-surface chat_id)', () => {
+  it('recognizes a slash command in the TELEGRAM surface Self DM (per-surface chat_id)', async () => {
     const { cmds } = harness({ config: { ...AGENTS,  whatsapp: { chat_id: '!self' }, telegram: { chat_id: '!tg-self' } } });
-    expect(cmds.isCommand(typed(cmds, { body: '/e restart', chatId: '!tg-self', surface: 'telegram' }))).toBe(true);
+    expect(await cmds.isCommand(typed(cmds, { body: '/e restart', chatId: '!tg-self', surface: 'telegram' }))).toBe(true);
   });
-  it('does NOT recognize a slash command from a random telegram chat', () => {
+  it('does NOT recognize a slash command from a random telegram chat', async () => {
     const { cmds } = harness({ config: { ...AGENTS,  telegram: { chat_id: '!tg-self' } } });
-    expect(cmds.isCommand(typed(cmds, { body: '/e restart', chatId: '!tg-group', surface: 'telegram' }))).toBe(false);
+    expect(await cmds.isCommand(typed(cmds, { body: '/e restart', chatId: '!tg-group', surface: 'telegram' }))).toBe(false);
   });
-  it('the whatsapp Self chat_id does NOT authorize the same id on the telegram surface (namespace)', () => {
+  it('the whatsapp Self chat_id does NOT authorize the same id on the telegram surface (namespace)', async () => {
     const { cmds } = harness({ config: { ...AGENTS,  whatsapp: { chat_id: '!self' } } });
-    expect(cmds.isCommand(typed(cmds, { body: '/e restart', chatId: '!self', surface: 'telegram' }))).toBe(false);
+    expect(await cmds.isCommand(typed(cmds, { body: '/e restart', chatId: '!self', surface: 'telegram' }))).toBe(false);
   });
-  it('does NOT treat plain text (or @e) as a command', () => {
+  it('does NOT treat plain text (or @e) as a command', async () => {
     const { cmds } = harness();
-    expect(cmds.isCommand({ body: 'hola', chatId: '!self', authorized: true })).toBe(false);
-    expect(cmds.isCommand({ body: '@e estas?', chatId: '!self', authorized: true })).toBe(false);
+    expect(await cmds.isCommand({ body: 'hola', chatId: '!self', authorized: true })).toBe(false);
+    expect(await cmds.isCommand({ body: '@e estas?', chatId: '!self', authorized: true })).toBe(false);
   });
 });
 
@@ -2012,7 +2012,7 @@ describe('/agents across two nodes — only the host answers; `all` refused, `fo
     // Both nodes hear the line; each runs it only when the handle names one of its beings (commandOf).
     for (const n of [kg, dn]) {
       const cmd = n.cmds.commandOf({ chatId: CHAT, surface: SURFACE, body, authorized: true });
-      if (cmd && n.cmds.isCommand(cmd)) await n.cmds.run(cmd);
+      if (cmd && await n.cmds.isCommand(cmd)) await n.cmds.run(cmd);
     }
     return { kg, dn };
   };
@@ -2140,7 +2140,7 @@ describe('/agents <handle>|all — bare status view, usage, and /e/egpt retireme
     expect(sent[0].text).toMatch(/^usage: \/<handle> agents \[<verb>\] \[<value>\] \[<handle>/);   // ...verb slot first, target after
     expect(writes).toHaveLength(0);
     // a plain follow-up message is NOT claimed as a command (nothing was armed)
-    expect(cmds.isCommand({ chatId: '!room', surface: 'whatsapp', body: '1', authorized: true })).toBe(false);
+    expect(await cmds.isCommand({ chatId: '!room', surface: 'whatsapp', body: '1', authorized: true })).toBe(false);
   });
 
   it('/agents <handle> <unknown-subcommand> gets a usage-shaped reply, not a fallthrough', async () => {
@@ -2350,7 +2350,7 @@ describe('/chrome', () => {
     const { cmds, sent, spawns } = harness({ config: { agents: { e: { handles: ['d'] } }, node_name: 'do', whatsapp: { chat_id: '!self' } }, cdp: reachable });
     const cmd = typed(cmds, { ...self, body: '/e chrome' });
     expect(cmd.commandElsewhere).toBe('e');
-    expect(cmds.isCommand(cmd)).toBe(false);
+    expect(await cmds.isCommand(cmd)).toBe(false);
     expect(sent).toHaveLength(0);
     expect(spawns).toHaveLength(0);
   });
@@ -2358,7 +2358,7 @@ describe('/chrome', () => {
   it('the handle is case-insensitive', async () => {
     const { cmds, sent } = harness({ config: { ...AGENTS, ...kg }, cdp: reachable });
     const cmd = typed(cmds, { ...self, body: '/E CHROME' });
-    expect(cmds.isCommand(cmd)).toBe(true);
+    expect(await cmds.isCommand(cmd)).toBe(true);
     await cmds.run(cmd);
     expect(sent).toHaveLength(1);
     expect(sent[0].text).toMatch(/attached/i);
@@ -2378,17 +2378,17 @@ describe('/chrome', () => {
     expect(sent[0].text).toMatch(/its tab list failed/);
   });
 
-  it('/chrome is gated on the operator exactly like the other commands', () => {
+  it('/chrome is gated on the operator exactly like the other commands', async () => {
     const { cmds } = harness({ config: { ...AGENTS, ...kg }, cdp: reachable });
-    expect(cmds.isCommand(typed(cmds, { body: '/e chrome', chatId: '!self', surface: 'whatsapp' }))).toBe(true);
-    expect(cmds.isCommand(typed(cmds, { body: '/e chrome', chatId: '!group', surface: 'whatsapp' }))).toBe(false);
-    expect(cmds.isCommand(typed(cmds, { body: '/e chrome', chatId: '!group', surface: 'whatsapp', authorized: true }))).toBe(true);
+    expect(await cmds.isCommand(typed(cmds, { body: '/e chrome', chatId: '!self', surface: 'whatsapp' }))).toBe(true);
+    expect(await cmds.isCommand(typed(cmds, { body: '/e chrome', chatId: '!group', surface: 'whatsapp' }))).toBe(false);
+    expect(await cmds.isCommand(typed(cmds, { body: '/e chrome', chatId: '!group', surface: 'whatsapp', authorized: true }))).toBe(true);
   });
 
   it('a non-operator /chrome is never run (no reply, no launch)', async () => {
     const { cmds, sent, spawns } = harness({ config: kg, cdp: reachable });
     const ev = typed(cmds, { body: '/e chrome', chatId: '!group', surface: 'whatsapp' });
-    expect(cmds.isCommand(ev)).toBe(false);   // the loop never reaches run()
+    expect(await cmds.isCommand(ev)).toBe(false);   // the loop never reaches run()
     expect(sent).toHaveLength(0);
     expect(spawns).toHaveLength(0);
   });
@@ -2598,11 +2598,11 @@ describe('/rooms /members /activate — dispatch recognition', () => {
   const self = { chatId: '!self', surface: 'whatsapp' };
   const cfg = { whatsapp: { chat_id: '!self' } };
 
-  it('are recognized from the Self DM, refused from a random chat', () => {
+  it('are recognized from the Self DM, refused from a random chat', async () => {
     const { cmds } = harness({ config: cfg });
     for (const body of ['/e rooms', '/e members', '/e activate chatgpt']) {
-      expect(cmds.isCommand(typed(cmds, { body, chatId: '!self', surface: 'whatsapp' }))).toBe(true);
-      expect(cmds.isCommand(typed(cmds, { body, chatId: '!group', surface: 'whatsapp' }))).toBe(false);
+      expect(await cmds.isCommand(typed(cmds, { body, chatId: '!self', surface: 'whatsapp' }))).toBe(true);
+      expect(await cmds.isCommand(typed(cmds, { body, chatId: '!group', surface: 'whatsapp' }))).toBe(false);
     }
   });
 
@@ -2740,10 +2740,10 @@ describe('/help', () => {
     }
   });
 
-  it('is recognized from the Self DM, refused from a random chat (same operator gate as every other command)', () => {
+  it('is recognized from the Self DM, refused from a random chat (same operator gate as every other command)', async () => {
     const { cmds } = harness({ config: cfg });
-    expect(cmds.isCommand(typed(cmds, { body: '/e help', chatId: '!self', surface: 'whatsapp' }))).toBe(true);
-    expect(cmds.isCommand(typed(cmds, { body: '/e help', chatId: '!group', surface: 'whatsapp' }))).toBe(false);
+    expect(await cmds.isCommand(typed(cmds, { body: '/e help', chatId: '!self', surface: 'whatsapp' }))).toBe(true);
+    expect(await cmds.isCommand(typed(cmds, { body: '/e help', chatId: '!group', surface: 'whatsapp' }))).toBe(false);
   });
 });
 
@@ -2781,23 +2781,24 @@ describe('/recap — the backlog of the last wake, read out where it was written
     expect(sent).toEqual([]);
   });
 
-  // "anybody can type /recap" (operator 2026-09-27): it only reads a chat's own backlog back to
-  // that chat, so isCommand admits it from ANY sender — and nothing else. Every other command,
-  // lifecycle included, still needs the operator (the Self chat, the owner, allowed_users).
-  it('REPRODUCE-FIRST: anybody may run it — and it is the ONLY command a non-operator reaches', async () => {
-    const { cmds, sent, exits } = harness({ config: { ...AGENTS, whatsapp: { chat_id: '!self' } }, backlogOf: () => BACKLOG });
+  // Public only where public_commands lists it (operator 2026-10-19; it was public to anybody from
+  // 2026-09-27). Every other command, lifecycle included, still needs the operator.
+  it('a non-operator runs it only where public_commands lists it', async () => {
     const stranger = { chatId: '!palma', surface: 'whatsapp' };   // not Self, not the owner, not on allowed_users
+    const closed = harness({ config: { ...AGENTS, whatsapp: { chat_id: '!self' } }, backlogOf: () => BACKLOG });
+    expect(await closed.cmds.isCommand(typed(closed.cmds, { ...stranger, body: '/e recap' }))).toBe(false);
+    const { cmds, sent, exits } = harness({ config: { ...AGENTS, whatsapp: { chat_id: '!self' }, public_commands: ['recap'] }, backlogOf: () => BACKLOG });
     const recap = typed(cmds, { ...stranger, body: '/e recap' });
-    expect(cmds.isCommand(recap)).toBe(true);
+    expect(await cmds.isCommand(recap)).toBe(true);
     await cmds.run(recap);
     expect(sent.map((s) => s.chatId)).toEqual(['!palma']);
     for (const body of ['/e restart', '/e status', '/e help', '/e agents e', '/e config', '/e recaps', 'recap', '/recap']) {
-      expect(cmds.isCommand(typed(cmds, { ...stranger, body })), body).toBe(false);
+      expect(await cmds.isCommand(typed(cmds, { ...stranger, body })), body).toBe(false);
     }
     expect(exits).toEqual([]);
     // …and the operator's own gate is unchanged
-    expect(cmds.isCommand(typed(cmds, { chatId: '!self', surface: 'whatsapp', body: '/e status' }))).toBe(true);
-    expect(cmds.isCommand(typed(cmds, { ...stranger, authorized: true, body: '/e status' }))).toBe(true);
+    expect(await cmds.isCommand(typed(cmds, { chatId: '!self', surface: 'whatsapp', body: '/e status' }))).toBe(true);
+    expect(await cmds.isCommand(typed(cmds, { ...stranger, authorized: true, body: '/e status' }))).toBe(true);
   });
 
   it('/help lists it among the WIRED commands', async () => {

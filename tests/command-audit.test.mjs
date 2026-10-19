@@ -157,7 +157,7 @@ describe('what is NOT audited', () => {
     const { cmds, audit, sent } = harness({ state: seedC() });
     const cmd = cmds.commandOf({ ...ev(C_CHAT, '/don status', 'conversas con favel'), authorized: true });
     expect(cmd.commandElsewhere).toBe('don');                // the spine records it and runs nothing
-    expect(cmds.isCommand(cmd)).toBe(false);
+    expect(await cmds.isCommand(cmd)).toBe(false);
     expect(audit).toHaveLength(0);
     expect(sent).toHaveLength(0);
   });

@@ -49,7 +49,7 @@ class TmpRoom extends Room {
 const self = { chatId: '!conv-1', surface: 'whatsapp' };
 // The spine's reading (classify): commandOf, then isCommand, then run. A command names its being
 // (2026-10-19): `/e radio …` runs on E's node; another node's handle is no command here.
-const typed = async (cmds, ev) => { const c = cmds.commandOf(ev); if (c && !c.commandElsewhere && cmds.isCommand(c)) await cmds.run(c); return c; };
+const typed = async (cmds, ev) => { const c = cmds.commandOf(ev); if (c && !c.commandElsewhere && await cmds.isCommand(c)) await cmds.run(c); return c; };
 const KG_AGENTS = { egpt: { handles: ['e', 'egpt'], default: true } };
 const DO_AGENTS = { egpt: { handles: ['d', 'don'], default: true } };
 
@@ -1063,16 +1063,16 @@ describe('rs — the radio quick reply', () => {
     expect(uploadCalls[0].bytes.toString('utf8')).toBe('read this out loud');
   });
 
-  it('is gated by isCommand exactly like /radio say — an authorized-only chat, self DM: yes; an ordinary chat: no', () => {
+  it('is gated by isCommand exactly like /radio say — an authorized-only chat, self DM: yes; an ordinary chat: no', async () => {
     const { cmds } = harness({ config: { node_name: 'kg' } });
-    expect(cmds.isCommand({ ...self, body: 'rs' })).toBe(true);
-    expect(cmds.isCommand({ chatId: '!other', surface: 'whatsapp', body: 'rs' })).toBe(false);
-    expect(cmds.isCommand({ chatId: '!other', surface: 'whatsapp', body: 'rs', authorized: true })).toBe(true);
+    expect(await cmds.isCommand({ ...self, body: 'rs' })).toBe(true);
+    expect(await cmds.isCommand({ chatId: '!other', surface: 'whatsapp', body: 'rs' })).toBe(false);
+    expect(await cmds.isCommand({ chatId: '!other', surface: 'whatsapp', body: 'rs', authorized: true })).toBe(true);
   });
 
-  it('"rs" must be the WHOLE message — "rs please" is ordinary text, not the quick reply', () => {
+  it('"rs" must be the WHOLE message — "rs please" is ordinary text, not the quick reply', async () => {
     const { cmds } = harness({ config: { node_name: 'kg' } });
-    expect(cmds.isCommand({ ...self, body: 'rs please' })).toBe(false);
+    expect(await cmds.isCommand({ ...self, body: 'rs please' })).toBe(false);
   });
 
   it('a multi-line quoted body uploads with its newline intact too — the same payload path as /radio say', async () => {
@@ -1201,13 +1201,13 @@ describe('rs — the radio quick reply', () => {
     });
     seed(room, 'radio:\n  join: wildnloyal\n');
     seedTranscript(room, 'Bob@[chat].wa (10:00) #msg1: read this\n\n');
-    expect(cmds.isCommand({ ...self, body: 'rs' })).toBe(false);   // the old default no longer fires
+    expect(await cmds.isCommand({ ...self, body: 'rs' })).toBe(false);   // the old default no longer fires
     await cmds.run({ ...self, senderId: '16468217865', body: 'leelo', replyToId: 'msg1' });
     expect(uploadCalls).toHaveLength(1);
   });
 
-  it('radio_quick_reply_string: "" disables the feature — "rs" becomes ordinary text', () => {
+  it('radio_quick_reply_string: "" disables the feature — "rs" becomes ordinary text', async () => {
     const { cmds } = harness({ config: { node_name: 'kg', radio_quick_reply_string: '' } });
-    expect(cmds.isCommand({ ...self, body: 'rs' })).toBe(false);
+    expect(await cmds.isCommand({ ...self, body: 'rs' })).toBe(false);
   });
 });

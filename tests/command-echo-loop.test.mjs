@@ -42,7 +42,7 @@ function commandsHarness({ state = null } = {}) {
   // its being (`/e status do`); commandOf reads it as the spine does.
   const hop = async (body) => {
     const ev = cmds.commandOf({ body, chatId: '!self', surface: 'whatsapp' });
-    if (!ev || !cmds.isCommand(ev)) return null;      // not a command → no command reply → loop dies
+    if (!ev || !(await cmds.isCommand(ev))) return null;      // not a command → no command reply → loop dies
     const before = sent.length;
     await cmds.run(ev);
     return sent.length > before ? sent.at(-1).text : null;
@@ -101,7 +101,7 @@ describe('(A) a command reply never parses as a command', () => {
     expect(sent.length).toBeGreaterThanOrEqual(lines.length);
     for (const s of sent) {
       expect(s.text.startsWith('/'), `reply must not start with '/': ${s.text}`).toBe(false);
-      expect(cmds.isCommand({ body: s.text, chatId: '!self', surface: 'whatsapp' })).toBe(false);
+      expect(await cmds.isCommand({ body: s.text, chatId: '!self', surface: 'whatsapp' })).toBe(false);
     }
   });
 });

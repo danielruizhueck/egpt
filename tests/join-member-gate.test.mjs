@@ -72,13 +72,13 @@ describe('/agents stays operator-only while /join is open to members', () => {
     });
   }
 
-  it('per-agent allowed_users (conversation_defaults AND the conversation block) do NOT grant /agents', () => {
+  it('per-agent allowed_users (conversation_defaults AND the conversation block) do NOT grant /agents', async () => {
     const { real } = build();
-    expect(real.isCommand(real.commandOf(member('/e agents rethread e')))).toBe(false);
+    expect(await real.isCommand(real.commandOf(member('/e agents rethread e')))).toBe(false);
   });
 
   it('the same member IS admitted for /join (the widening is /join alone)', async () => {
     const { real } = build();
-    expect(real.isCommand(real.commandOf(member('/e join emely')))).toBe(true);
+    expect(await real.isCommand(real.commandOf(member('/e join emely')))).toBe(true);
   });
 });

@@ -805,7 +805,7 @@ export function createSpine({
   async function wouldReachABeing(ev) {
     // A command (commands.commandOf, as classify reads it) — this node's or another's — reaches no being.
     const cmd = commands?.commandOf?.(ev) ?? ev;
-    if (cmd.commandElsewhere || commands?.isCommand?.(cmd) || isEnvelope(ev) || isTransit(ev) || advice?.isAnswer?.(ev)) return false;
+    if (cmd.commandElsewhere || await commands?.isCommand?.(cmd) || isEnvelope(ev) || isTransit(ev) || advice?.isAnswer?.(ev)) return false;
     const { d } = await gateOf((await targetsOf(ev))[0], ev);
     return d.receives && d.mayReply && !(d.mode === 'auto' && ev.isSender);
   }
@@ -913,7 +913,7 @@ export function createSpine({
     // the words as said (handleFast logs `ev`, never `cmd`).
     const cmd = commands?.commandOf?.(ev) ?? ev;
     if (cmd.commandElsewhere) return () => { note(`command: ${guardChannel(ev)} '/${cmd.commandElsewhere} …' names no being on this node — recorded, prompts nobody`); };
-    if (commands?.isCommand?.(cmd)) {
+    if (await commands?.isCommand?.(cmd)) {
       if (cmd.alias) note(`alias: ${guardChannel(ev)} '${cmd.alias}' → ${cmd.body}`);
       // ALWAYS-AVAILABLE (never blocked, never counted): the lifecycle commands. They are
       // the operator's way back out of a broken node, and a guard that can lock them out
