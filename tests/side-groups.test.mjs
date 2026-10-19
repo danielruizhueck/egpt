@@ -75,6 +75,7 @@ function harness({ config = cfg(), state, chatRaw = async () => LIVE, created = 
   const logs = [];
   const calls = { create: [], post: [], archive: [], edit: [], resolve: [], byTitle: [], awaitMouth: [], lost: [] };
   const mouthWaiters = [];
+  const rodzSaw = [];
   const forkBridge = {
     editMessage: async (chatId, msgId, text) => { calls.edit.push({ chatId, msgId, text }); return true; },
     createGroup: async (opts, o = {}) => { calls.create.push({ ...opts, via: o.via ?? null }); return { success: true, chatID: created[calls.create.length - 1] }; },
@@ -94,7 +95,9 @@ function harness({ config = cfg(), state, chatRaw = async () => LIVE, created = 
       calls.resolve.push({ digits, via: o.via ?? null });
       return o.via === 'secondary' ? (secIds[digits] ?? null) : (digits === RODZ_DIGITS ? RODZ_USER_ID : null);
     },
-    awaitMouthMessage: (test, ms) => new Promise((done) => { calls.awaitMouth.push(ms); if (copyArrives) mouthWaiters.push({ test, done }); else done(null); }),
+    // Rodz's copy that already arrived (rodzGot) answers at once, as the bridge's recent arrivals do.
+    // With none and copyArrives, the wait ends only with a primary post (no timer): a test that links must hand it one.
+    awaitMouthMessage: (test, ms) => new Promise((done) => { calls.awaitMouth.push(ms); const seen = rodzSaw.find(test); if (seen) done(seen); else if (copyArrives) mouthWaiters.push({ test, done }); else done(null); }),
     // Nothing may look a group up by its title (operator 2026-10-18): these only record a call.
     resolveSecondaryChatIdByTitle: async (...a) => { calls.byTitle.push(a); return '!byTitle'; },
     resolvePrimaryChatIdByTitle: async (...a) => { calls.byTitle.push(a); return '!byTitle'; },
@@ -110,7 +113,8 @@ function harness({ config = cfg(), state, chatRaw = async () => LIVE, created = 
     reportUndelivered: async (o) => { calls.lost.push(o); return true; },
     onLog: (m) => logs.push(m),
   });
-  return { cmds, sent, logs, calls, config, getState: () => st, setState: (s) => { st = s; } };
+  // rodzGot: Rodz's account received `text` in its own room for `chatId` (the other node's half).
+  return { cmds, sent, logs, calls, config, getState: () => st, setState: (s) => { st = s; }, rodzGot: (chatId, text) => rodzSaw.push({ chatID: SEC(chatId), text }) };
 }
 
 // Lulu: a member of the group, not the operator, not on any allowed_users list.
@@ -195,11 +199,11 @@ describe('/join and /split: the primary creates "SI+<group>-<name>" with Rodz + 
     expect(h.getState().contacts.whatsapp[SIDE]).toMatchObject({ aliasOf: ORIGIN, join_name: 'viaje', join_by_id: LULU });
   });
 
-  it('its opener comes from the primary, its canary naming the group; Rodz\'s copy of it gives the mouth room', async () => {
+  it('its opener comes from the primary, its canary naming the group, its origin, its kind and transcript key; Rodz\'s copy of it gives the mouth room', async () => {
     const h = harness();
     await typed(h, inOrigin('/join viaje'));
     expect(h.calls.post).toHaveLength(1);
-    expect(h.calls.post[0]).toMatchObject({ chatId: SIDE, via: 'primary', canary: SIDE });
+    expect(h.calls.post[0]).toMatchObject({ chatId: SIDE, via: 'primary', canary: { group: SIDE, origin: ORIGIN, kind: 'join', transcript: h.getState().contacts.whatsapp[SIDE].transcript } });
     expect(h.getState().contacts.whatsapp[SIDE].mouth_chat).toBe(SEC(SIDE));
   });
 
@@ -210,7 +214,7 @@ describe('/join and /split: the primary creates "SI+<group>-<name>" with Rodz + 
     const split = getContact(h.getState(), 'whatsapp', SIDE);
     expect(split.jid).toBe(SIDE);
     expect(split.entry.parent_chat).toBe(ORIGIN);
-    expect(h.calls.post[0]).toMatchObject({ chatId: SIDE, via: 'primary', canary: SIDE });
+    expect(h.calls.post[0]).toMatchObject({ chatId: SIDE, via: 'primary', canary: { group: SIDE, origin: ORIGIN, kind: 'split', transcript: null } });
     expect(split.entry.mouth_chat).toBe(SEC(SIDE));
   });
 
@@ -265,7 +269,7 @@ describe('/join and /split: the primary creates "SI+<group>-<name>" with Rodz + 
     await typed(h, inOrigin('/join viaje', asOperator));
     await typed(h, inOrigin('/split viaje', asOperator));
     expect(h.calls.create.map((c) => [c.via, c.participantIDs])).toEqual([['primary', [RODZ_USER_ID]], ['primary', [RODZ_USER_ID]]]);
-    expect(h.calls.post[0]).toMatchObject({ chatId: SIDE, via: 'primary', canary: SIDE });   // the opener comes from the creator
+    expect(h.calls.post[0]).toMatchObject({ chatId: SIDE, via: 'primary', canary: { group: SIDE, origin: ORIGIN, kind: 'join' } });   // the opener comes from the creator
   });
 
   it('the requester is invited as heard, whichever connection heard them: nothing is looked up on the secondary', async () => {
@@ -524,7 +528,7 @@ describe('the automatic group: made on the primary with Rodz + every member of t
     const b = buildSpine(h);
     await say(b.spine, ASK);
     expect(h.calls.post).toHaveLength(1);
-    expect(h.calls.post[0]).toMatchObject({ chatId: SIDE, via: 'primary', canary: `${SIDE} ${ORIGIN}` });
+    expect(h.calls.post[0]).toMatchObject({ chatId: SIDE, via: 'primary', canary: { group: SIDE, origin: ORIGIN, kind: 'automatic', transcript: h.getState().contacts.whatsapp[SIDE].transcript } });
     expect(h.getState().contacts.whatsapp[SIDE].mouth_chat).toBe(SEC(SIDE));
     expect(h.calls.post[0].text).toContain('/send');
     expect(h.calls.post[0].text).not.toContain('/end');
@@ -733,15 +737,16 @@ describe('two nodes on the shared accounts: one creates, the other links', () =>
   it('the opener (canary + kg\'s frame) arriving in an unknown chat links it to this node\'s conversation', async () => {
     const h = harness({ config: cfg({ node_role: 'secondary' }), state: seedState({ entry: AUTOMATIC }) });
     const b = buildSpine(h, { node: 'do' });
+    h.rodzGot(SIDE, OPENER()[0]);
     await say(b.spine, ...OPENER());
-    expect(h.getState().contacts.whatsapp[SIDE]).toMatchObject({ aliasOf: ORIGIN, automatic: true });
+    expect(h.getState().contacts.whatsapp[SIDE]).toMatchObject({ aliasOf: ORIGIN, automatic: true, mouth_chat: SEC(SIDE) });
     expect(b.brain.calls).toEqual([]);                          // the opener itself wakes nobody
     await say(b.spine, 'hola a todos');
     expect(h.calls.create).toEqual([]);
     expect(chatsOf(b)).toEqual([SIDE]);                         // the peer replies in the linked group
   });
 
-  it('a /join or /split opener (its canary names the group alone) links nothing on the other node', async () => {
+  it('a /join or /split opener posted before 2026-10-19 (its canary names the group alone) links nothing on the other node', async () => {
     const h = harness({ config: cfg({ node_role: 'secondary' }), state: seedState({ entry: AUTOMATIC }) });
     const b = buildSpine(h, { node: 'do' });
     await say(b.spine, ...OPENER(SIDE));
@@ -768,10 +773,12 @@ describe('two nodes on the shared accounts: one creates, the other links', () =>
 
   it('a chat this node has only seen (no alias, no parent, no thread) is linked by the opener', async () => {
     const st = ensureContact(seedState({ entry: AUTOMATIC }), 'whatsapp', SIDE, { pushedName: `SI+${TITLE}` }).state;
-    const h = harness({ config: cfg({ node_role: 'secondary' }), state: st });
+    const h = harness({ config: cfg({ node_role: 'secondary' }), state: st, copyArrives: false });
     const b = buildSpine(h, { node: 'do' });
     await say(b.spine, ...OPENER());
     expect(h.getState().contacts.whatsapp[SIDE]).toMatchObject({ aliasOf: ORIGIN, automatic: true });
+    expect(h.getState().contacts.whatsapp[SIDE].mouth_chat).toBeUndefined();   // Rodz's copy never came: linked all the same
+    expect(h.logs.filter((l) => l.includes('did not arrive'))).toHaveLength(1);
   });
 
   it('a canary for a conversation this node does not have links nothing', async () => {
@@ -785,14 +792,22 @@ describe('two nodes on the shared accounts: one creates, the other links', () =>
 describe('the canary frame', () => {
   it('round-trips beside the node frame and leaves the node and being readings alone', async () => {
     const { decodeNodeSignature, decodeBeingSignature, renderNodeSignature, stripNodeSignature } = await import('../src/node-signature.mjs');
-    const text = `hola${SIG}${encodeChatCanary(ORIGIN)}`;
-    expect(decodeChatCanary(text)).toBe(ORIGIN);
+    const canary = { group: SIDE, origin: ORIGIN, kind: 'join', transcript: `SI+${TITLE}-viaje` };
+    const text = `hola${SIG}${encodeChatCanary(canary)}`;
+    expect(decodeChatCanary(text)).toEqual(canary);   // the non-ASCII transcript key survives (URI-encoded on the wire)
     expect(decodeNodeSignature(text)).toBe('kg');
     expect(decodeBeingSignature(text)).toBe('e');
     expect(renderNodeSignature(text)).toBe('hola<kg>');
     expect(stripNodeSignature(text)).toBe('hola');
     expect(decodeChatCanary(`hola${SIG}`)).toBe(null);
     expect(encodeChatCanary('')).toBe('');
+    expect(encodeChatCanary({ group: '' })).toBe('');
+  });
+
+  it('reads the openers posted before 2026-10-19: group alone (a /join or /split), group + origin (automatic)', () => {
+    expect(decodeChatCanary(`x${SIG}${encodeChatCanary(SIDE)}`)).toEqual({ group: SIDE, origin: null, kind: null, transcript: null });
+    expect(decodeChatCanary(`x${SIG}${encodeChatCanary(`${SIDE} ${ORIGIN}`)}`)).toEqual({ group: SIDE, origin: ORIGIN, kind: 'automatic', transcript: null });
+    expect(encodeChatCanary({ group: SIDE, origin: ORIGIN })).toBe(encodeChatCanary(`${SIDE} ${ORIGIN} automatic`));
   });
 });
 

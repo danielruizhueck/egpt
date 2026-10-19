@@ -2753,8 +2753,8 @@ export async function startBeeperBridge(opts = {}) {
     // steer ack, and a cached page would hand back a list that predates the very message being
     // pointed at. Returns [] on any failure — the caller refuses rather than guessing.
     listMessagesRaw: (chatId, opts) => listMessagesRaw(chatId, opts),
-    // …and the ones this account has SEEN arrive, with no GET (noteArrival above).
-    recentMessages: (chatId) => [...(_arrivals.get(shortChatId(chatId)) ?? [])],
+    // …and the ones this account has SEEN arrive, with no GET (noteArrival above). null: in every chat.
+    recentMessages: (chatId) => (chatId == null ? [..._arrivals.values()].flat() : [...(_arrivals.get(shortChatId(chatId)) ?? [])]),
     awaitMessage: (chatId, test, ms) => awaitMessage(chatId, test, ms),
     // MEMBERSHIP (operator 2026-08-31, router.mjs fallback_handle): true | false | null (UNKNOWN).
     // Cached + TTL'd + free for a 1:1 — see chatHasParticipant above.

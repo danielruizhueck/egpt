@@ -399,16 +399,42 @@ describe('/split — new conversation with each resident being\'s thread COPIED 
   });
 });
 
+// ── the other node links a /split from its opener (2026-10-19): /split's own copy, its own residents ──
+describe('linkSideGroup — a /split opener on the other node forks THIS node\'s residents through /split\'s copy', () => {
+  it('REPRODUCE: its own conversation with parent_chat; each resident\'s thread copied to a new id (sessionId + cwd rewritten); nothing created', async () => {
+    seedSourceThreads('e', 'wren');
+    const { cmds, calls, getState } = harness({ config: cfg({ node_name: 'do', node_role: 'secondary' }), state: seedStateBeing('e', 'wren'), copyArrives: false });
+    await cmds.linkSideGroup({ chatId: SPLIT_CHAT, surface: 'whatsapp', chatName: 'SI+egpt split de Proyecto X', fromNode: 'kg', canary: { group: SPLIT_CHAT, origin: C_CHAT, kind: 'split', transcript: null } });
+    const st = getState();
+    const split = getContact(st, 'whatsapp', SPLIT_CHAT);
+    expect(split.jid).toBe(SPLIT_CHAT);
+    expect(split.entry.parent_chat).toBe(C_CHAT);
+    const splitFolder = slugDir('whatsapp', split.slug);
+    for (const being of ['e', 'wren']) {
+      const newId = getBeing(st, 'whatsapp', SPLIT_CHAT, being)?.threadId;
+      expect(newId).toBeTruthy();
+      expect(newId).not.toBe(SRC_BY_BEING[being]);
+      const projects = join(STORE, newId, 'projects');
+      const copy = readdirSync(projects).map((d) => join(projects, d, `${newId}.jsonl`)).find((p) => existsSync(p));
+      const r0 = JSON.parse(readFileSync(copy, 'utf8').split('\n')[0]);
+      expect([r0.sessionId, r0.cwd]).toEqual([newId, splitFolder]);
+      expect(getBeing(st, 'whatsapp', C_CHAT, being)?.threadId).toBe(SRC_BY_BEING[being]);
+    }
+    expect(calls.create).toEqual([]);
+    expect(calls.post).toEqual([]);
+  });
+});
+
 /// ── the OPENER (posted by the primary so the empty group surfaces in Beeper) ───────────────────────────
 // Rodz's copy of it names Rodz's own room for the group: stored as its mouth_chat, by id, never by title.
 describe('opener — posted into the new group by the primary; Rodz\'s copy gives the mouth room', () => {
   const JOIN_EV = { chatId: C_CHAT, surface: 'whatsapp', msgId: 'cmd1', chatName: 'Proyecto X', isSender: true, body: '/join' };
   const SPLIT_EV = { chatId: C_CHAT, surface: 'whatsapp', msgId: 'cmd1', chatName: 'Proyecto X', isSender: true, body: '/split' };
 
-  it('/join posts config.join.opener ({group}=parent title) into the new group from the primary, its canary naming the group', async () => {
+  it('/join posts config.join.opener ({group}=parent title) into the new group from the primary, its canary naming the group, origin, kind and transcript key', async () => {
     const { cmds, calls, getState } = harness({ config: cfg() });
     await cmds.run({ ...JOIN_EV });
-    expect(calls.post).toEqual([{ chatId: JOIN_CHAT, text: '🔗 sala espejo de Proyecto X', replyToMessageID: null, via: 'primary', canary: JOIN_CHAT }]);
+    expect(calls.post).toEqual([{ chatId: JOIN_CHAT, text: '🔗 sala espejo de Proyecto X', replyToMessageID: null, via: 'primary', canary: { group: JOIN_CHAT, origin: C_CHAT, kind: 'join', transcript: getState().contacts.whatsapp[JOIN_CHAT].transcript } }]);
     expect(getState().contacts.whatsapp[JOIN_CHAT].mouth_chat).toBe(SEC_JOIN_ROOM);
     expect(calls.byTitle).toEqual([]);
   });
@@ -417,7 +443,7 @@ describe('opener — posted into the new group by the primary; Rodz\'s copy give
     seedSourceThreads('e');
     const { cmds, calls, getState } = harness({ config: cfg() });
     await cmds.run({ ...SPLIT_EV });
-    expect(calls.post).toEqual([{ chatId: SPLIT_CHAT, text: '🍴 bifurcación de Proyecto X', replyToMessageID: null, via: 'primary', canary: SPLIT_CHAT }]);
+    expect(calls.post).toEqual([{ chatId: SPLIT_CHAT, text: '🍴 bifurcación de Proyecto X', replyToMessageID: null, via: 'primary', canary: { group: SPLIT_CHAT, origin: C_CHAT, kind: 'split', transcript: null } }]);
     expect(getContact(getState(), 'whatsapp', SPLIT_CHAT).entry.mouth_chat).toBe(SEC_SPLIT_ROOM);
     expect(calls.byTitle).toEqual([]);
   });
@@ -443,12 +469,12 @@ describe('opener — posted into the new group by the primary; Rodz\'s copy give
   it('opener falls back to the built-in DEFAULTS when config unset ({group} still filled) — /join and /split', async () => {
     const j = harness({ config: cfg({ texts: false }) });
     await j.cmds.run({ ...JOIN_EV });
-    expect(j.calls.post).toEqual([{ chatId: JOIN_CHAT, text: JOIN_OPENER_DEFAULT.replace('{group}', 'Proyecto X'), replyToMessageID: null, via: 'primary', canary: JOIN_CHAT }]);
+    expect(j.calls.post).toEqual([{ chatId: JOIN_CHAT, text: JOIN_OPENER_DEFAULT.replace('{group}', 'Proyecto X'), replyToMessageID: null, via: 'primary', canary: { group: JOIN_CHAT, origin: C_CHAT, kind: 'join', transcript: j.getState().contacts.whatsapp[JOIN_CHAT].transcript } }]);
 
     seedSourceThreads('e');
     const s = harness({ config: cfg({ texts: false }) });
     await s.cmds.run({ ...SPLIT_EV });
-    expect(s.calls.post).toEqual([{ chatId: SPLIT_CHAT, text: SPLIT_OPENER_DEFAULT.replace('{group}', 'Proyecto X'), replyToMessageID: null, via: 'primary', canary: SPLIT_CHAT }]);
+    expect(s.calls.post).toEqual([{ chatId: SPLIT_CHAT, text: SPLIT_OPENER_DEFAULT.replace('{group}', 'Proyecto X'), replyToMessageID: null, via: 'primary', canary: { group: SPLIT_CHAT, origin: C_CHAT, kind: 'split', transcript: null } }]);
   });
 });
 
@@ -734,6 +760,18 @@ describe('/send — relays the replied-to message back to the original (alias OR
     expect(calls.post[0].text).toBe('la respuesta elegida');
     expect(calls.archive).toHaveLength(0);
     expect(aliasTargetOf(getState(), 'whatsapp', JOIN_CHAT)).toBe(getContact(getState(), 'whatsapp', C_CHAT).jid);
+  });
+
+  // Both nodes hold the group once the other links it from the opener (2026-10-19): one relay, from the primary.
+  it('REPRODUCE: on the node_role secondary node holding the same linked group, /send relays nothing and says nothing', async () => {
+    for (const state of [stateWithJoin(), stateWithSplit()]) {
+      const chatId = state.contacts.whatsapp[JOIN_CHAT] ? JOIN_CHAT : SPLIT_CHAT;
+      const { cmds, calls, sent } = harness({ state, rooms: roomWith(chatId), config: cfg({ node_name: 'do', node_role: 'secondary' }) });
+      await cmds.run({ chatId, surface: 'whatsapp', msgId: 'snd1', replyToId: 'M1', body: '/send', isSender: true });
+      await cmds.run({ chatId, surface: 'whatsapp', msgId: 'snd2', body: '/send', isSender: true });
+      expect(calls.post).toEqual([]);
+      expect(sent).toEqual([]);
+    }
   });
 
   it('REPRODUCE-FIRST: the relay requests an UNSIGNED post (unsigned:true) so it lands as the operator, with no node signature', async () => {

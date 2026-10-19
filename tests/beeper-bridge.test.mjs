@@ -5084,6 +5084,13 @@ describe('beeper bridge — recentMessages / awaitMessage', () => {
     expect(fake.msgListGets()).toBe(gets);
   });
 
+  it('with no chat: the arrivals of every chat (a side group\'s opener copy that came before anyone asked)', async () => {
+    const { bridge, incoming } = await startBridge();
+    fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: 'n-1', text: 'uno' }), { ...liveMsg({ id: 'n-2', text: 'dos' }), chatID: CHAT('room-r') }] });
+    await waitFor(() => incoming.length === 2);
+    expect(bridge.recentMessages(null).map((m) => [m.id, m.chatID])).toEqual([['n-1', 'chat-1'], ['n-2', 'room-r']]);
+  });
+
   it('awaitMessage resolves on the next matching arrival, or null at the timeout', async () => {
     const { bridge } = await startBridge();
     const waiting = bridge.awaitMessage(CHAT('chat-1'), (m) => m.text === 'the one', 5000);

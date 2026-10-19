@@ -112,30 +112,43 @@ export function renderNodeSignature(text) {
   });
 }
 
-// ── THE CANARY (a side group's opener, 2026-10-18) ──
-// A second frame beside the node frame carrying the group's own id (and the automatic group's origin),
-// so Rodz's copy names its room and the other node links the same group (commands.postOpener,
-// commands.linkSideGroup). Same TAGS codec; its interior leads with
-// '/', which a node name never does, so decodeNodeSignature reads the node frame alone and
-// renderNodeSignature erases this one.
+// ── THE CANARY (a side group's opener, 2026-10-18; kind + transcript 2026-10-19) ──
+// A second frame beside the node frame naming everything the other node needs to hold the same group
+// (commands.postOpener, commands.linkSideGroup), and by which Rodz's copy names Rodz's own room:
+//   '/<group> <origin> <kind> <transcript>'
+// group = the primary account's id for it; origin = the conversation it came from; kind = join | split |
+// automatic; transcript = the alias's transcript key, URI-encoded (join/automatic only).
+// Read back too: '/<group>' (a /join or /split opener before 2026-10-19: no origin, so nothing to link)
+// and '/<group> <origin>' (an automatic one). Same TAGS codec; its interior leads with '/', which a
+// node name never does, so decodeNodeSignature reads the node frame alone and renderNodeSignature
+// erases this one.
 const CANARY_LEAD = '/';
-/** The invisible canary frame for `chatId`, or '' when empty. Non-ASCII is dropped. */
-export function encodeChatCanary(chatId) {
-  const id = String(chatId ?? '').trim();
-  if (!id) return '';
+/**
+ * The invisible canary frame for `{ group, origin, kind, transcript }`, or '' with no group. A string is
+ * written as is (the pre-kind form). Non-ASCII is dropped (the transcript key is URI-encoded first).
+ */
+export function encodeChatCanary(canary) {
+  const c = canary && typeof canary === 'object' ? canary : { group: canary };
+  const group = String(c.group ?? '').trim();
+  if (!group) return '';
+  const fields = c.origin ? [group, c.origin, c.kind ?? 'automatic', ...(c.transcript ? [encodeURIComponent(c.transcript)] : [])] : [group];
   let out = '';
-  for (const ch of `${CANARY_LEAD}${id}`) {
-    const c = ch.codePointAt(0);
-    if (c >= 0x20 && c <= 0x7E) out += String.fromCodePoint(TAG_BASE + c);
+  for (const ch of `${CANARY_LEAD}${fields.join(' ')}`) {
+    const code = ch.codePointAt(0);
+    if (code >= 0x20 && code <= 0x7E) out += String.fromCodePoint(TAG_BASE + code);
   }
   return `${TAG_BEGIN}${out}${TAG_CANCEL}`;
 }
-/** The chat id a canary frame in `text` carries, or null. */
+const uriDecoded = (s) => { try { return s ? decodeURIComponent(s) : null; } catch { return null; } };
+/** `{ group, origin, kind, transcript }` from the canary frame in `text` (null fields when absent), or null. */
 export function decodeChatCanary(text) {
   for (const f of String(text ?? '').match(FRAME_G) ?? []) {
     let interior = '';
     for (const ch of f.slice(TAG_BEGIN.length, -TAG_CANCEL.length)) interior += String.fromCodePoint(ch.codePointAt(0) - TAG_BASE);
-    if (interior.startsWith(CANARY_LEAD)) return interior.slice(CANARY_LEAD.length) || null;
+    if (!interior.startsWith(CANARY_LEAD)) continue;
+    const [group, origin, kind, transcript] = interior.slice(CANARY_LEAD.length).split(' ');
+    if (!group) return null;
+    return { group, origin: origin || null, kind: kind || (origin ? 'automatic' : null), transcript: uriDecoded(transcript) };
   }
   return null;
 }

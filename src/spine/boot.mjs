@@ -3280,9 +3280,15 @@ export async function boot({
       // +phone (the API rejects it). Resolved from config.beeper.secondary.phone by scanning this
       // account's rosters (phoneNumber+id ride together on every participant).
       resolveUserIdByPhone: (phoneDigits, opts) => earBridge.resolveUserIdByPhone(phoneDigits, opts),
-      // Rodz's next raw arrival in ANY chat that passes `test` (bridge awaitMessage): its copy of a side
-      // group's opener names Rodz's own room for the group (commands.postOpener). null with no mouth of its own.
-      awaitMouthMessage: (test, ms) => { const mouth = postBridgeFor('secondary'); return mouth === earBridge ? Promise.resolve(null) : (mouth.awaitMessage?.(null, test, ms) ?? Promise.resolve(null)); },
+      // Rodz's raw arrival in ANY chat that passes `test` — already arrived, else the next (bridge awaitMessage):
+      // its copy of a side group's opener names Rodz's own room for the group (commands.postOpener,
+      // linkSideGroup — on the other node it may beat the primary's copy). null with no mouth of its own.
+      awaitMouthMessage: (test, ms) => {
+        const mouth = postBridgeFor('secondary');
+        if (mouth === earBridge) return Promise.resolve(null);
+        const seen = (mouth.recentMessages?.(null) ?? []).find(test);
+        return seen ? Promise.resolve(seen) : (mouth.awaitMessage?.(null, test, ms) ?? Promise.resolve(null));
+      },
     },
     logToGroup,                                          // per-command audit → config.log_to_group (fail-closed, see above); the dispatch chokepoint emits ONE metadata-only line per command
     reportUndelivered,                                   // a side group's lost opener → one log_to_group line (above)

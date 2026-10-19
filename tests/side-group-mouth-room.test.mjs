@@ -15,6 +15,7 @@ const _PRIVATE_HOME = vi.hoisted(() => {
 import { promises as fs } from 'node:fs';
 import { dirname } from 'node:path';
 import { shortChatId } from '../src/bridges/chat-id.mjs';
+import { encodeNodeSignature, encodeChatCanary } from '../src/node-signature.mjs';
 
 let boot, emptyState, ensureContact, recordThread, patchContact, aliasContact;
 beforeAll(async () => {
@@ -221,4 +222,212 @@ describe('the automatic group: its reply goes out on the account that holds it, 
     }
     app.stop();
   }, 30000);
+});
+
+// ── THE OTHER NODE (operator 2026-10-19: "DO makes a correct mapping of the group, so that don and other
+// Do's beings can output to the right channel"). kg and do, each a real boot(), on the SAME two
+// accounts. kg (node_role primary) makes every side group; do links it from the opener. What a primary
+// connection posts into P reaches the other primary connection as its own message in P and every Rodz
+// connection in R — each copy noted before any gate, as the bridge's noteArrival is. `secondaryFirst`:
+// Rodz's copies land before the primary's.
+const DON_THREAD = 'th-do-1';
+const DO = () => ({ ...KG(), node_name: 'do', node_role: 'secondary', agents: { don: { configuration: 'egpt', default: true, handles: ['don'], name: 'Don' } } });
+function sharedAccounts({ secondaryFirst = false, gapMs = 30 } = {}) {
+  const spies = [];
+  let n = 0;
+  const deliver = (spy, chatId, text, from) => {
+    const raw = { id: `w-${++n}`, chatID: chatId, text };
+    spy.arrivals.push(raw);
+    for (const w of [...spy.waiters]) if ((w.chat == null || w.chat === chatId) && w.test(raw)) { spy.waiters.splice(spy.waiters.indexOf(w), 1); w.done(raw); }
+    return spy.onIncoming(text, { chatId, chatName: chatId === ORIGIN ? 'Origen' : 'SI+Origen-x', network: 'whatsapp', authorized: true, msgKey: raw.id, ...from });
+  };
+  const asAn = { userId: '@anrodriguez:beeper.com', senderName: 'An', isSender: true };
+  const toRodz = { userId: 'an@dolly.local', senderName: 'An', isSender: false };
+  const fanOut = (from, text) => {
+    const same = () => spies.filter((s) => s !== from && s.token === from.token).forEach((s) => deliver(s, P, text, asAn));
+    const rodz = () => spies.filter((s) => s.token === SECONDARY).forEach((s) => deliver(s, R, text, toRodz));
+    const [first, second] = secondaryFirst ? [rodz, same] : [same, rodz];
+    setTimeout(first, 0);
+    setTimeout(second, gapMs);
+  };
+  const transport = () => async (opts) => {
+    const token = opts.beeperToken;
+    const spy = { connection: NAME_OF[token], token, onIncoming: opts.onIncoming, sent: [], streams: [], created: [], arrivals: [], waiters: [] };
+    spies.push(spy);
+    return {
+      spy,
+      async send(text, o) {
+        spy.sent.push({ text, chatId: o?.chatId });
+        if (token === PRIMARY && shortChatId(o?.chatId) === P) fanOut(spy, text);
+        return { ok: true, confirmedId: Promise.resolve(`m-${spy.sent.length}`) };
+      },
+      startStreamMessage(init, o) {
+        const h = { delivered: false, finals: [], chatId: o?.chatId, update() {}, async finish(t) { this.finals.push(t); this.delivered = true; } };
+        spy.streams.push(h); return h;
+      },
+      async editMessage() { return true; },
+      async createGroup(o) { spy.created.push(o); return { success: true, chatID: P_FULL }; },
+      async chatHasParticipant(chat, identity) {
+        const roster = WORLD[token][shortChatId(chat)] ?? WORLD[token][chat];
+        return roster ? roster.some((p) => (p.phoneNumber && digits(p.phoneNumber) === digits(identity)) || p.id === identity) : null;
+      },
+      async selfIdentities() { return SELF_IDENTITY[token]; },
+      async chatRaw(chat) { return rawChat(token, chat) ?? rawChat(token, shortChatId(chat)); },
+      async listChatsRaw() { return Object.keys(WORLD[token]).map((id) => rawChat(token, id)); },
+      async listMessagesRaw() { return []; },
+      async resolveUserIdByPhone(d) { return digits(d) === digits(RODZ) ? RODZ_ID : null; },
+      recentMessages: (chat) => (chat == null ? [...spy.arrivals] : spy.arrivals.filter((m) => m.chatID === shortChatId(chat))),
+      awaitMessage(chat, test, ms) {
+        return new Promise((done) => {
+          const w = { chat: chat == null ? null : shortChatId(chat), test, done };
+          spy.waiters.push(w);
+          setTimeout(() => { const i = spy.waiters.indexOf(w); if (i >= 0) { spy.waiters.splice(i, 1); done(null); } }, ms).unref?.();
+        });
+      },
+      async resolveChatIdByTitle() { spy.byTitle = (spy.byTitle ?? 0) + 1; return DECOY; },
+      async resolveChatId(name) { return name; },
+      getChatName: (id) => (shortChatId(id) === P ? 'SI+Origen-x' : null),
+      sendFailure: () => null,
+      isAlive: () => true, stop() {},
+    };
+  };
+  return { transport, deliver, asAn, toRodz };
+}
+async function bootOn(accounts, config, state) {
+  let convState = state;
+  const lines = [];
+  const built = [];
+  const start = accounts.transport();
+  const app = await boot({
+    readConfig: () => config, startBridge: async (opts) => { const b = await start(opts); built.push(b.spy); return b; },
+    makeSession: fakeSession, probeEndpoint: async () => ({ ok: false, status: 0 }),
+    loadState: async () => convState, writeState: async (s) => { convState = s; },
+    io: memIo(), ingest: false, tickMs: 0, now: () => Date.UTC(2026, 9, 18, 22, 0),
+    log: { line: (s) => lines.push(s) },
+  });
+  const byConnection = Object.fromEntries(built.map((s) => [s.connection, s]));
+  return { app, byConnection, lines, state: () => convState };
+}
+
+describe('the other node links every side group from its opener; its beings\' replies there are said by Rodz in Rodz\'s room', () => {
+  const doSeed = () => recordThread(ensureContact(emptyState(), 'whatsapp', ORIGIN, { pushedName: 'Origen' }).state, 'whatsapp', ORIGIN, DON_THREAD, '2026-10-18T00:00:00Z', 'don');
+  const automatic = (st) => patchContact(st, 'whatsapp', ORIGIN, { reply_in_side_group: true });
+  async function twoNodes({ kgState = seed(), doState = doSeed(), ...world } = {}) {
+    const accounts = sharedAccounts(world);
+    const kg = await bootOn(accounts, KG(), kgState);
+    const dolly = await bootOn(accounts, DO(), doState);
+    return { kg, dolly, stop: () => { kg.app.stop(); dolly.app.stop(); } };
+  }
+  // A line typed in a chat both nodes hear on the primary account.
+  const both = (n, chatId, body, extra) => Promise.all([say(n.kg.byConnection.primary, chatId, body, extra), say(n.dolly.byConnection.primary, chatId, body, extra)]);
+  const outOf = (spy) => [...spy.streams, ...spy.sent].map((m) => m.chatId);
+  const sideOn = (node) => node.state().contacts.whatsapp[P];
+  const doCreatedNothing = (n) => expect([...n.dolly.byConnection.primary.created, ...n.dolly.byConnection.secondary.created]).toEqual([]);
+  // don answers; every reply must be Rodz's, in R — never the primary's, never Rodz's addressed by P.
+  async function donSaysItInR(n, chatId = P, body = 'don hola') {
+    const before = outOf(n.dolly.byConnection.secondary).length;
+    await say(n.dolly.byConnection.primary, chatId, body, { atEStart: true, atEAnywhere: true, msgKey: `k-${body}` });
+    await waitFor(() => outOf(n.dolly.byConnection.secondary).length > before || n.dolly.byConnection.primary.streams.length);
+    expect(outOf(n.dolly.byConnection.secondary).length).toBeGreaterThan(before);
+    expect(new Set(outOf(n.dolly.byConnection.secondary))).toEqual(new Set([R]));
+    expect(n.dolly.byConnection.primary.streams).toEqual([]);
+  }
+
+  it('REPRODUCE /join: do records the room as an alias of the origin with kg\'s transcript key and Rodz\'s room R; don\'s reply there is said by Rodz in R', async () => {
+    const n = await twoNodes();
+    await both(n, ORIGIN, '/join x');
+    await waitFor(() => sideOn(n.dolly)?.mouth_chat && sideOn(n.kg)?.mouth_chat);
+    expect(sideOn(n.kg)).toMatchObject({ aliasOf: ORIGIN, transcript: 'SI+Origen-x', join_name: 'x', mouth_chat: R });   // the creator, as before
+    expect(sideOn(n.dolly)).toEqual({ aliasOf: ORIGIN, transcript: sideOn(n.kg).transcript, mouth_chat: R });
+    await donSaysItInR(n);
+    doCreatedNothing(n);
+    n.stop();
+  });
+
+  it('REPRODUCE /split: do records its own conversation with parent_chat, don\'s thread forked by /split\'s copy code, and R', async () => {
+    const n = await twoNodes();
+    await both(n, ORIGIN, '/split y');
+    await waitFor(() => sideOn(n.dolly)?.mouth_chat && sideOn(n.kg)?.mouth_chat);
+    expect(sideOn(n.kg)).toMatchObject({ parent_chat: ORIGIN, mouth_chat: R });
+    const split = sideOn(n.dolly);
+    expect(split).toMatchObject({ parent_chat: ORIGIN, mouth_chat: R });
+    expect(split.aliasOf).toBeUndefined();
+    expect(split.agents.don.threadId).toMatch(/^[0-9a-f-]{36}$/);   // a new, diverging thread for do's own being
+    expect(split.agents.egpt).toBeUndefined();                         // never kg's
+    expect(n.dolly.state().contacts.whatsapp[ORIGIN].agents.don.threadId).toBe(DON_THREAD);
+    expect(n.dolly.lines.some((l) => l.includes(`split: can't find don's thread store for #${DON_THREAD}`))).toBe(true);   // /split's own copy step ran
+    await donSaysItInR(n);
+    doCreatedNothing(n);
+    n.stop();
+  });
+
+  it('REPRODUCE automatic: do links the group and records R; don\'s next reply goes there, said by Rodz', async () => {
+    const n = await twoNodes({ kgState: automatic(seed()), doState: automatic(doSeed()) });
+    await both(n, ORIGIN, 'e eso es cierto?', { atEStart: true, atEAnywhere: true, msgKey: 'k-ask' });
+    await waitFor(() => sideOn(n.dolly)?.mouth_chat);
+    expect(sideOn(n.dolly)).toEqual({ aliasOf: ORIGIN, transcript: sideOn(n.kg).transcript, automatic: true, mouth_chat: R });
+    await donSaysItInR(n, ORIGIN, 'don y ahora?');
+    doCreatedNothing(n);
+    n.stop();
+  });
+
+  it('REPRODUCE: a line in P between the primary\'s copy of the opener and Rodz\'s (live: 0.4–0.8 s apart) is answered by Rodz in R, never from the primary', async () => {
+    const n = await twoNodes({ gapMs: 400 });
+    const typed = both(n, ORIGIN, '/join x');
+    await waitFor(() => n.dolly.byConnection.primary.arrivals.some((m) => m.chatID === P));   // the primary's copy is in; Rodz's is not yet
+    expect(n.dolly.byConnection.secondary.arrivals).toEqual([]);
+    await donSaysItInR(n);
+    expect(sideOn(n.dolly)).toEqual({ aliasOf: ORIGIN, transcript: 'SI+Origen-x', mouth_chat: R });
+    await typed;
+    n.stop();
+  });
+
+  it('do after a restart (the linked group stored, nothing arrived in P since): don\'s reply is still Rodz\'s, in R', async () => {
+    const linked = aliasContact(automatic(doSeed()), 'whatsapp', P, ORIGIN, { transcript: 'SI+Origen', automatic: true, mouth_chat: R });
+    const dolly = await bootOn(sharedAccounts(), DO(), linked);
+    await donSaysItInR({ dolly }, ORIGIN, 'don sigues?');
+    expect(dolly.byConnection.primary.created).toEqual([]);
+    dolly.app.stop();
+  });
+
+  it('REPRODUCE: Rodz\'s copy of the opener reaches do before the primary\'s — linked all the same, R found among what already arrived', async () => {
+    const n = await twoNodes({ secondaryFirst: true });
+    await both(n, ORIGIN, '/join x');
+    await waitFor(() => sideOn(n.dolly)?.mouth_chat);
+    expect(sideOn(n.dolly)).toEqual({ aliasOf: ORIGIN, transcript: 'SI+Origen-x', mouth_chat: R });
+    doCreatedNothing(n);
+    n.stop();
+  });
+
+  it('an automatic opener posted before 2026-10-19 (its canary: group + origin) still links on do, and Rodz\'s copy gives R', async () => {
+    const accounts = sharedAccounts();
+    const dolly = await bootOn(accounts, DO(), automatic(doSeed()));
+    const opener = `🔗 Side-room of Origen${encodeNodeSignature('kg')}${encodeChatCanary(`${P} ${ORIGIN}`)}`;
+    await accounts.deliver(dolly.byConnection.secondary, R, opener, accounts.toRodz);
+    await accounts.deliver(dolly.byConnection.primary, P, opener, accounts.asAn);
+    await waitFor(() => sideOn(dolly)?.mouth_chat);
+    expect(sideOn(dolly)).toEqual({ aliasOf: ORIGIN, transcript: 'SI+Origen-x', automatic: true, mouth_chat: R });
+    dolly.app.stop();
+  });
+
+  it('REPRODUCE: a room do had only seen (a member spoke first, no being thread) is converted to the alias in place', async () => {
+    const n = await twoNodes({ doState: ensureContact(doSeed(), 'whatsapp', P, { pushedName: 'SI+Origen-x' }).state });
+    await both(n, ORIGIN, '/join x');
+    await waitFor(() => sideOn(n.dolly)?.mouth_chat);
+    expect(sideOn(n.dolly)).toEqual({ aliasOf: ORIGIN, transcript: 'SI+Origen-x', mouth_chat: R });
+    n.stop();
+  });
+
+  it('a room do already answered in (its own entry, a being thread) is left alone and logged once', async () => {
+    const own = recordThread(ensureContact(doSeed(), 'whatsapp', P, { pushedName: 'SI+Origen-x' }).state, 'whatsapp', P, 'th-do-p', '2026-10-18T00:00:00Z', 'don');
+    const n = await twoNodes({ doState: own });
+    await both(n, ORIGIN, '/join x');
+    await waitFor(() => sideOn(n.kg)?.mouth_chat && n.dolly.lines.some((l) => /left for the operator/.test(l)));
+    await new Promise((r) => setTimeout(r, 100));
+    expect(sideOn(n.dolly)).toMatchObject({ agents: { don: { threadId: 'th-do-p' } } });
+    expect(sideOn(n.dolly).aliasOf).toBeUndefined();
+    expect(sideOn(n.dolly).mouth_chat).toBeUndefined();
+    expect(n.dolly.lines.filter((l) => /left for the operator/.test(l))).toHaveLength(1);
+    n.stop();
+  });
 });

@@ -1230,7 +1230,8 @@ export function createCommands({
     // 2026-10-18). NOT in
     // NODE_ADDRESSABLE: a /join/split node override is parsed by the handler itself (`/join do` or
     // `/join=do`). Each handler STANDS DOWN SILENTLY on the node that is not the right one (not the
-    // node_role=primary / addressed node for /join+/split; no alias-or-parent for /send+/end), so a
+    // node_role=primary / addressed node for /join+/split; no alias-or-parent for /send+/end, and a
+    // node_role secondary for /send), so a
     // shared Beeper account never double-answers. Written as `<name>Match = /^\/word…` so the /help
     // drift guard (tests/spine-commands.test.mjs) sees them.
     const joinMatch = /^\/join\b[\s\S]*$/i.exec(line);
@@ -3340,8 +3341,9 @@ export function createCommands({
   // matches a KNOWN node name (knownNodeNames) is the override, otherwise it is the `<name>` title
   // arg. On an addressed node, act only if ownNodeNamesOf has it. Every non-selected node stands down
   // SILENTLY. A being must still RESIDE here (residesHere), which is also the "is there a thread to
-  // carry/copy" check. /send+/end gate instead on the alias-or-parent existing on this node — only the
-  // node that created the group wrote it — so the co-account peer is silent there too.
+  // carry/copy" check. /send+/end act only where this node holds the group (an alias or a parent);
+  // both nodes do once the other links it (linkSideGroup), so /send stands down on a node_role
+  // secondary and /end archives (idempotent) on each.
   const residesHere = (state, surface, chatId) => {
     const agents = getContact(state, surface, chatId)?.entry?.agents ?? {};
     return Object.values(agents).some((b) => b && typeof b === 'object' && b.threadId != null);
@@ -3409,19 +3411,20 @@ export function createCommands({
     return { accountID, rodzUserId };
   };
 
-  // A side group's canary (the opener's invisible frame): its own id, then — the automatic group only —
-  // its origin's, which the other node links it to (linkSideGroup).
-  const canaryIds = (canary) => String(canary ?? '').split(' ');
+  // RODZ'S COPY of a side group's opener — already arrived, or within OPENER_COPY_MS — in Rodz's OWN room
+  // for the group, named by the canary; null with no mouth. The creator (postOpener) and the other node
+  // (linkSideGroup) both take the group's mouth_chat from it.
+  const mouthCopyOf = (group) => (hasMouth() ? forkBridge.awaitMouthMessage?.((m) => decodeChatCanary(m?.text)?.group === group, OPENER_COPY_MS) ?? null : null);
   // POST THE OPENER from the PRIMARY (the creator) into the new group so it SURFACES in Beeper (Beeper
-  // hides a chat with no messages). Rodz's copy of it arrives in Rodz's OWN room for the group, named by
-  // the canary, and that room is stored as the group's mouth_chat — by id, never by title (operator
-  // 2026-10-18). Not seen in time → replies there come from the primary until the mouth finds its room.
+  // hides a chat with no messages). Its canary names the group, its origin, its kind and (join/automatic)
+  // the transcript key: all the other node needs to hold the same group (linkSideGroup). Rodz's copy of
+  // it gives the group's mouth_chat — by id, never by title (operator 2026-10-18).
   // A failed opener never fails the command, but it is never called posted: only a confirmed id is.
   // Refused → logged + reported once; unconfirmed → the same, and Rodz's copy is still awaited.
-  const postOpener = async ({ verb, newChatId, openerText, origin = null }) => {
+  const postOpener = async ({ verb, newChatId, openerText, origin, kind, transcript = null }) => {
     try {
-      const copy = hasMouth() ? forkBridge.awaitMouthMessage?.((m) => canaryIds(decodeChatCanary(m?.text))[0] === newChatId, OPENER_COPY_MS) : null;
-      const sent = await forkBridge.postReply(newChatId, openerText, null, { via: 'primary', canary: origin ? `${newChatId} ${origin}` : newChatId });
+      const copy = mouthCopyOf(newChatId);
+      const sent = await forkBridge.postReply(newChatId, openerText, null, { via: 'primary', canary: { group: newChatId, origin, kind, transcript } });
       const id = sent ? await sent.confirmedId : null;
       if (id) onLog(`${verb}: opener posted by the primary into ${newChatId} (#${id})`);
       else {
@@ -3484,7 +3487,7 @@ export function createCommands({
   // "side-room has no context" bug), and ALIAS it onto ev's conversation (aliasContact — so the being
   // keeps writing its ONE thread; two chat surfaces, one on-disk conversation). The side-room's
   // sanitized title is stored as the alias's per-surface transcript key, exactly as /join does.
-  // Returns { chatId, primaryJid } (SHORT chatId), or null on a create failure — the caller then
+  // Returns { chatId, primaryJid, transcript } (SHORT chatId), or null on a create failure — the caller then
   // edits/posts nothing. The caller owns the (already-unique'd) title, the trigger-message edit, the
   // opener post, and `extra` — the fields stored on the alias entry (/join: join_name/join_by;
   // automatic: automatic: true).
@@ -3496,8 +3499,9 @@ export function createCommands({
     return mutateState(writeState, async () => {
       const state = await loadState();
       const primaryJid = getContact(state, surface, ev.chatId)?.jid ?? ev.chatId;
-      await writeState(aliasContact(state, surface, chatId, primaryJid, { transcript: sanitizeSlug(title), ...extra }));
-      return { chatId, primaryJid };
+      const transcript = sanitizeSlug(title);
+      await writeState(aliasContact(state, surface, chatId, primaryJid, { transcript, ...extra }));
+      return { chatId, primaryJid, transcript };
     });
   }
 
@@ -3699,14 +3703,14 @@ export function createCommands({
     //       next /join of the same name). null → no chatId: abort, placeholder NOT edited, nothing posted.
     const aliased = await createAliasedSideGroup(ev, surface, title, plan, '/join', { join_name: key, ...(discreet ? { discreet: true } : {}), ...(ev.senderName ? { join_by: ev.senderName } : {}), ...(invitee ? { join_by_id: invitee } : {}) });
     if (!aliased) return;
-    const { chatId: joinChatId, primaryJid } = aliased;
+    const { chatId: joinChatId, primaryJid, transcript } = aliased;
     // (c) EDIT the operator's /join message into the placeholder (raw, no persona; a reply for anyone
     //     else) — SKIPPED when discreet, so a phrase-triggered /join leaves the natural words in the chat.
     if (!discreet) await announce(placeholder(title));
     onLog(`/join${discreet ? ' (discreet)' : ''}: ${cTitle} -> group ${joinChatId} aliased to ${primaryJid} (invited ${plan.participantIDs.join(', ')})`);
     // (d) POST THE OPENER so the new (otherwise-empty) group surfaces in Beeper — added step AFTER the
     //     success path; a failure here never undoes the alias/placeholder above.
-    await postOpener({ verb: '/join', newChatId: joinChatId, openerText: openerOf(cfg().join, JOIN_OPENER_DEFAULT, cTitle) });
+    await postOpener({ verb: '/join', newChatId: joinChatId, openerText: openerOf(cfg().join, JOIN_OPENER_DEFAULT, cTitle), origin: primaryJid, kind: 'join', transcript });
   }
 
   // /split (anyone types /split [<name>|<node>] in chat C): create a side-group backed by a NEW
@@ -3739,24 +3743,40 @@ export function createCommands({
     // arrival spawns a second entry. null → aborted, placeholder NOT edited.
     const splitChatId = await createSideGroup(plan, title, '/split');
     if (!splitChatId) return;
+    // (b)+(c) its own conversation, each resident's thread copied (registerSplit).
+    state = await loadState();
+    const split = await registerSplit(state, surface, splitChatId, ev.chatId, { title, discreet, verb: '/split' });
+    await writeState(split.state);
+    // (d) EDIT the operator's /split message into the placeholder marker — SKIPPED when discreet
+    //     (a phrase-triggered /split leaves the operator's natural words in the chat) and for anyone
+    //     else's message (not ours to edit; the new group's opener is their answer).
+    if (!discreet && ev.isSender) await forkBridge.editMessage(ev.chatId, ev.msgId, placeholder);
+    onLog(`/split${discreet ? ' (discreet)' : ''}: ${cTitle} -> NEW conv ${splitChatId} (${split.slug}, invited ${plan.participantIDs.join(', ')}); copied threads for ${split.copied.join(', ') || '(none)'} (parent ${ev.chatId})`);
+    // (e) POST THE OPENER so the new group surfaces in Beeper — added step AFTER the copy + placeholder;
+    //     a failure here never undoes the conversation/threads already written.
+    await postOpener({ verb: '/split', newChatId: splitChatId, openerText: openerOf(cfg().split, SPLIT_OPENER_DEFAULT, cTitle), origin: ev.chatId, kind: 'split' });
+  }
+
+  // A /split group's own conversation, on the creator (/split) and on the other node (linkSideGroup):
+  // → { state, slug, copied }; the caller writes the state.
+  async function registerSplit(state, surface, splitChatId, parentChatId, { title, discreet = false, verb }) {
     // (b) REGISTER the new group as its OWN conversation (ensureContact FIRST — recordThread/patch
     //     below no-op on an unknown contact), and record the parent chat so /send+/end find the
     //     original (a split group is NOT an alias).
-    state = await loadState();
-    const cSlug = getContact(state, surface, ev.chatId)?.slug ?? 'conv';
+    const cSlug = getContact(state, surface, parentChatId)?.slug ?? 'conv';
     const ensured = ensureContact(state, surface, splitChatId, { pushedName: title, slugHint: `egpt-split-${cSlug}` });
     state = ensured.state;
     const splitConvDir = slugDir(surface, ensured.slug);
-    state = patchContact(state, surface, splitChatId, { parent_chat: ev.chatId, ...(discreet ? { discreet: true } : {}) });
+    state = patchContact(state, surface, splitChatId, { parent_chat: parentChatId, ...(discreet ? { discreet: true } : {}) });
     // (c) COPY each resident being's thread into the split conversation as a NEW, DIVERGING thread.
     //     The residents + their source thread ids come off the ORIGINAL entry (read fresh). For each:
     //     mint a newThreadId, TRANSFORM-copy the source jsonl into the new thread's store at the
     //     project dir matching the SPLIT conversation's cwd (sessionId→newThreadId, cwd→splitConvDir),
     //     and record the new thread on the split entry's agents.<being> block. `flag:'wx'` never
     //     clobbers an existing dest (EEXIST → refuse that one copy, log, still record the thread id).
-    const origEntry = getContact(state, surface, ev.chatId)?.entry;
+    const origEntry = getContact(state, surface, parentChatId)?.entry;
     const residents = residentsOf(origEntry)
-      .map((being) => [being, getBeing(state, surface, ev.chatId, being)?.threadId ?? null])
+      .map((being) => [being, getBeing(state, surface, parentChatId, being)?.threadId ?? null])
       .filter(([, threadId]) => threadId);
     const copied = [];
     for (const [being, srcThreadId] of residents) {
@@ -3773,22 +3793,14 @@ export function createCommands({
           await writeFile(destJsonl, rewriteForkSessionJsonl(srcRaw, { sessionId: newThreadId, cwd: splitConvDir }), { flag: 'wx' });
           copied.push(being);
         } catch (e) {
-          onLog(`/split: thread copy for ${being} ${srcFound.jsonlPath} -> ${destJsonl} failed — ${e?.message ?? e}`);
+          onLog(`${verb}: thread copy for ${being} ${srcFound.jsonlPath} -> ${destJsonl} failed — ${e?.message ?? e}`);
         }
       } else {
-        onLog(`/split: can't find ${being}'s thread store for #${srcThreadId} — recording the new thread id without a copy`);
+        onLog(`${verb}: can't find ${being}'s thread store for #${srcThreadId} — recording the new thread id without a copy`);
       }
       state = recordThread(state, surface, splitChatId, newThreadId, undefined, being);
     }
-    await writeState(state);
-    // (d) EDIT the operator's /split message into the placeholder marker — SKIPPED when discreet
-    //     (a phrase-triggered /split leaves the operator's natural words in the chat) and for anyone
-    //     else's message (not ours to edit; the new group's opener is their answer).
-    if (!discreet && ev.isSender) await forkBridge.editMessage(ev.chatId, ev.msgId, placeholder);
-    onLog(`/split${discreet ? ' (discreet)' : ''}: ${cTitle} -> NEW conv ${splitChatId} (${ensured.slug}, invited ${plan.participantIDs.join(', ')}); copied threads for ${copied.join(', ') || '(none)'} (parent ${ev.chatId})`);
-    // (e) POST THE OPENER so the new group surfaces in Beeper — added step AFTER the copy + placeholder;
-    //     a failure here never undoes the conversation/threads already written.
-    await postOpener({ verb: '/split', newChatId: splitChatId, openerText: openerOf(cfg().split, SPLIT_OPENER_DEFAULT, cTitle) });
+    return { state, slug: ensured.slug, copied };
   }
 
   // /send (anyone in a join/split group REPLIES /send to a message M there): relay M's text into the
@@ -3805,6 +3817,8 @@ export function createCommands({
       ?? getContact(state, surface, ev.chatId)?.entry?.parent_chat ?? null;
     if (!originalChatId) return;                           // not a join/split group → silent
     if (!residesHere(state, surface, ev.chatId)) return;   // gate (defensive — a group implies it)
+    // Both nodes hold the group once the other links it (linkSideGroup): the node_role secondary leaves /send to the primary.
+    if (String(cfg().node_role ?? '').trim().toLowerCase() === 'secondary') return;
     if (ev.replyToId == null) { await send?.(ev.chatId, 'reply to a message with /send to send it to the original chat'); return; }
     // The quoted message was logged on THIS surface, so read it from THIS surface's own transcript:
     // for a /join side-room that is transcript-<its id>.md beside the shared transcript.md (same
@@ -3913,26 +3927,52 @@ export function createCommands({
     const aliased = await createAliasedSideGroup(ev, surface, title, plan, 'automatic', { automatic: true });
     if (!aliased) return null;
     onLog(`automatic: ${cTitle} -> ${aliased.chatId} "${title}" (invited ${plan.participantIDs.join(', ')})`);
-    await postOpener({ verb: 'automatic', newChatId: aliased.chatId, openerText: openerOf(null, AUTO_OPENER, cTitle), origin: aliased.primaryJid });
+    await postOpener({ verb: 'automatic', newChatId: aliased.chatId, openerText: openerOf(null, AUTO_OPENER, cTitle), origin: aliased.primaryJid, kind: 'automatic', transcript: aliased.transcript });
     return aliased.chatId;
   }
-  // The other node's half: the automatic group's opener names it and its origin (ev.canary, beside the
-  // creator's node frame). Arriving in that group, with no conversation of its own here (unknown, or only
-  // seen — no alias, no parent, no being thread), it is linked to the origin; any other is left alone.
+  // The other node's half: a side group's opener names it, its origin and its kind (ev.canary, beside the
+  // creator's node frame). Arriving in that group on a node that does not hold it, it is linked as the
+  // creator holds it: join/automatic → an alias of the origin (the canary's transcript key), split → its
+  // own conversation, this node's residents' threads forked (registerSplit). A chat only seen here is
+  // converted in place; one with a being thread of its own is left for the operator (logged).
+  // As on the creator, Rodz's copy comes first (mouthCopyOf; it waits on this chat's lane only), so the
+  // group is never usable here before its mouth_chat: one write holds both.
+  const SIDE_KINDS = new Set(['join', 'split', 'automatic']);
   async function linkSideGroup(ev) {
-    const [side, base] = canaryIds(ev?.canary);
-    if (!base || ev.fromNode == null || !loadState || !writeState) return;
+    const c = ev?.canary;
+    if (!c?.origin || ev.fromNode == null || !loadState || !writeState) return;
     const surface = surfaceOf(ev);
     const chatId = shortChatId(ev.chatId);
-    if (shortChatId(side) !== chatId) return;
-    await mutateState(writeState, async () => {
-      const state = await loadState();
+    if (shortChatId(c.group) !== chatId) return;
+    if (!SIDE_KINDS.has(c.kind)) { onLog(`side group: ${chatId} names an unknown kind "${c.kind}" — not linked`); return; }
+    // Why this node does not link it ('' = it already holds it), or null to link.
+    const refusal = (state) => {
       const own = state?.contacts?.[surface]?.[chatId];
-      if (own && (own.aliasOf || own.parent_chat || residesHere(state, surface, chatId))) return;
-      const contact = getContact(state, surface, base);
-      if (!contact) { onLog(`automatic: ${chatId} names ${base} as its chat, which this node does not have — not linked`); return; }
-      await writeState(aliasContact(state, surface, chatId, contact.jid, { transcript: sanitizeSlug(ev.chatName || chatId), automatic: true }));
-      onLog(`automatic: ${chatId} linked to ${contact.jid} from its intro (made by <${ev.fromNode}>)`);
+      if (own?.aliasOf || own?.parent_chat) return '';
+      if (residesHere(state, surface, chatId)) return `${chatId} already has its own conversation here, with a being thread — not linked to ${c.origin}; left for the operator`;
+      return getContact(state, surface, c.origin) ? null : `${chatId} names ${c.origin} as its chat, which this node does not have — not linked`;
+    };
+    const why = refusal(await loadState());
+    if (why != null) { if (why) onLog(`${c.kind}: ${why}`); return; }
+    const copy = mouthCopyOf(chatId);
+    const room = copy ? ((await copy)?.chatID ?? null) : null;
+    await mutateState(writeState, async () => {
+      let state = await loadState();
+      if (refusal(state) != null) return;
+      const own = state.contacts[surface]?.[chatId];
+      let as;
+      if (c.kind === 'split') {
+        const split = await registerSplit(state, surface, chatId, c.origin, { title: ev.chatName || chatId, verb: 'split' });
+        state = split.state;
+        as = `its own conversation (parent ${c.origin}; copied threads for ${split.copied.join(', ') || '(none)'})`;
+      } else {
+        const { jid } = getContact(state, surface, c.origin);
+        state = aliasContact(state, surface, chatId, jid, { transcript: c.transcript ?? sanitizeSlug(ev.chatName || chatId), ...(c.kind === 'automatic' ? { automatic: true } : {}) });
+        as = `an alias of ${jid}`;
+      }
+      await writeState(setAliasMouthChat(state, chatId, room));
+      const mouth = room ? `; Rodz's room ${room} (its copy of the opener)` : copy ? `; Rodz's copy of the opener did not arrive within ${OPENER_COPY_MS}ms — replies there come from the primary until the mouth finds its room` : '';
+      onLog(`${c.kind}: ${chatId} linked as ${as}${own ? ', converting the entry it had from being seen' : ''}${mouth} — from its opener (made by <${ev.fromNode}>)`);
     });
   }
 

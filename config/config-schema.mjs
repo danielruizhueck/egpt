@@ -3186,7 +3186,9 @@ export const CONFIG_SCHEMA = {
     being resides on each, so neither the message nor the being can pick which node creates the group.
     This is the explicit tiebreak: the node whose role is 'primary' creates /join + /split groups by
     default; every other node stands down SILENTLY. Overridden per command by naming a node
-    (/join <node> or /join=<node>). Replaces the old fork.lead_node.
+    (/join <node> or /join=<node>). Replaces the old fork.lead_node. Every other node links the group
+    from its opener (2026-10-19): /join as an alias of the chat, /split as its own conversation with its
+    own beings' threads forked. On a 'secondary' node /send does nothing; the primary relays it.
   `,
 
   group_title: `
