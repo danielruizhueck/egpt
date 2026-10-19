@@ -134,7 +134,7 @@ describe('"SI chat …" opens nothing anywhere', () => {
     it(`"${body}" in a chat whose entry still carries a superchats block is an ordinary message`, async () => {
       const h = harness({ state: seedState({ entry: STRAY }) });
       for (const ev of [inOrigin(body), inOrigin(body, asOperator)]) {
-        expect(await h.cmds.phraseCommand(ev)).toBe(null);
+        expect(h.cmds.aliased(ev)).toBe(null);
         expect(h.cmds.isCommand(ev)).toBe(false);
       }
       expect(h.calls.create).toEqual([]);
@@ -143,7 +143,8 @@ describe('"SI chat …" opens nothing anywhere', () => {
 
   it('a leftover global super_chats block summons nothing either', async () => {
     const h = harness({ config: cfg({ extra: { super_chats: { triggers: ['SI chat'], automatic: true } } }) });
-    expect(await h.cmds.phraseCommand(inOrigin('SI chat'))).toBe(null);
+    expect(h.cmds.aliased(inOrigin('SI chat'))).toBe(null);
+    expect(h.cmds.isCommand(inOrigin('SI chat'))).toBe(false);
     expect(h.calls.create).toEqual([]);
   });
 

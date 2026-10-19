@@ -1,0 +1,14 @@
+# config/commands_alias.yaml — aliases for commands. Operator-only: copy to ~/.egpt/config/.
+#
+# <alias>: <command line>. A message that STARTS with an alias (any case, whole words; the longest
+# alias wins) runs that command line with the rest of the message appended:
+#   "aparte viaje" → /join viaje
+# Exactly like typing the command: whoever may type it may use its alias, and nobody else. A being's
+# own output never triggers one. Any sentence that starts with an alias runs it, so pick words you
+# won't open a sentence with by accident.
+# Refused, one log line each: an alias starting with "/" or with a being handle, a target that is
+# not a command. Read on change: no restart. No file, or nothing in it: no aliases.
+
+# aparte: /join
+# nos vamos aparte: /join
+# reinicia: /restart force

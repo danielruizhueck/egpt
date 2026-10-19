@@ -3229,12 +3229,20 @@ export const CONFIG_SCHEMA = {
                    Rodz's copy of it tells the node Rodz's own room for the group, by id.
                    A {group} template ({group} = the parent chat's title). Unset → a small built-in
                    default.
-      triggers:    OPTIONAL list of extra phrases that invoke /join; the '/'-word is always a trigger.
-                   A message that EQUALS one of these (trimmed, case-insensitive) runs /join DISCREETLY
-                   — a RANDOM group name, the message left UNEDITED — so it reads as ordinary
-                   conversation, not an obvious command. Operator-only (a non-operator saying the phrase
-                   is an ordinary message), EXACT whole-message match only (never prefix/contains). Pick
-                   phrases you won't say by accident. Unset → only the '/'-word triggers.
+
+    ALIASES (operator 2026-10-19) — config/commands_alias.yaml, not a config.yaml key (skeleton:
+    config/skeletons/commands_alias.yaml). A map of alias → command line, for ANY command:
+      aparte: /join
+      nos vamos aparte: /join
+      reinicia: /restart force
+    A message that STARTS with an alias (case-insensitive, whole words; the longest alias wins) runs
+    that command line with the rest of the message appended: "aparte viaje" → /join viaje. It is
+    exactly the typed command: the same gates (an alias works for whoever may type its command), the
+    same placeholder edit; the transcript keeps the words as said, the audit line names the alias.
+    A node-signed line (a being's output) never triggers one. Refused at load, one log line each: an
+    alias starting with "/", an alias starting with a being handle, a target that is not a known
+    command. Read on change, no restart. Absent or empty file → no aliases. Replaces join/split/send/
+    end.triggers (retired; ignored).
   `,
 
   split: `
@@ -3252,11 +3260,6 @@ export const CONFIG_SCHEMA = {
                    Rodz's copy of it tells the node Rodz's own room for the group, by id.
                    A {group} template ({group} = the parent chat's title). Unset → a small built-in
                    default.
-      triggers:    OPTIONAL list of extra phrases that invoke /split; the '/'-word is always a trigger.
-                   A message that EQUALS one of these (trimmed, case-insensitive) runs /split DISCREETLY
-                   — a RANDOM group name, the message left UNEDITED — so it reads as ordinary
-                   conversation. Operator-only, EXACT whole-message match only (never prefix/contains).
-                   Pick phrases you won't say by accident. Unset → only the '/'-word triggers.
   `,
 
   send: `
@@ -3270,17 +3273,13 @@ export const CONFIG_SCHEMA = {
                       account. Unset/invalid → primary.
       origin:         whether the relay says which side group it came from (2026-10-16).
                       ENUM: auto | always | never. DEFAULT auto (also for an invalid value).
-                      auto = prefix origin_template unless the side group is DISCREET (made by a
-                      join/split phrase trigger, stored as discreet: true on its conversations-state
-                      entry; a room made before that flag counts as discreet when its title's {name}
-                      slot is a 5-hex random token). always = prefix even when discreet. never = no
+                      auto = prefix origin_template unless the side group is a legacy DISCREET one
+                      (made by the retired join/split phrase triggers: discreet: true on its
+                      conversations-state entry, or, made before that flag, a 5-hex random token in
+                      its title's {name} slot). always = prefix even when discreet. never = no
                       prefix.
       origin_template: the prefix; {group} = the side group's title (live chat name, else the stored
                       title). DEFAULT "↪ from {group}:\\n". "" = no prefix.
-      triggers:       OPTIONAL list of extra phrases that invoke /send; the '/'-word is always a
-                      trigger. A message that EQUALS one of these (trimmed, case-insensitive) runs
-                      /send. Operator-only, EXACT whole-message match only (never prefix/contains).
-                      Pick phrases you won't say by accident. Unset → only the '/'-word triggers.
   `,
 
   end: `
@@ -3288,10 +3287,6 @@ export const CONFIG_SCHEMA = {
     2026-10-03). Anyone in the side group may run it (2026-10-18); the group is archived on the
     account it was heard on. Posts nothing; silent outside a join/split group. Off in the
     reply_in_side_group group: there it does nothing.
-      triggers:       OPTIONAL list of extra phrases that invoke /end; the '/'-word is always a
-                      trigger. A message that EQUALS one of these (trimmed, case-insensitive) runs
-                      /end. Operator-only, EXACT whole-message match only (never prefix/contains).
-                      Pick phrases you won't say by accident. Unset → only the '/'-word triggers.
   `,
 
   reply_in_side_group: `

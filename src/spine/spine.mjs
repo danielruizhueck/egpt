@@ -235,7 +235,7 @@ export function createSpine({
   // conversations.yaml / rooms.yaml without the registry lock. Chats run at once now; commands do not.
   const inCommandOrder = makeSerialByKey();
   const ordered = (fn) => (...a) => inCommandOrder('commands', () => fn(...a));
-  if (commands) commands = new Proxy(commands, { get: (t, k) => ((k === 'run' || k === 'runPhrase') && typeof t[k] === 'function' ? ordered(t[k].bind(t)) : Reflect.get(t, k)) });
+  if (commands) commands = new Proxy(commands, { get: (t, k) => (k === 'run' && typeof t[k] === 'function' ? ordered(t[k].bind(t)) : Reflect.get(t, k)) });
   // LIVENESS (src/spine/liveness.mjs): a running turn and a being's background work stay visibly
   // alive in the chat; long background work is asked about through the wake path below.
   const liveness = createLiveness({ sender, brain, now: () => clock.now(), everyMs: livenessEveryMs, stopped: () => !!stopSwitch?.present(), labelOf, note, ask: (o) => wakeOnBackground(o), report: logToGroup });
@@ -801,10 +801,8 @@ export function createSpine({
   // in an auto chat. A context turn (send_to_egpt: always) runs a being but answers nobody, so it
   // does not count: a chat of chatter under a mention gate hears nothing about its backlog.
   async function wouldReachABeing(ev) {
-    // A phrase trigger (commands.phraseCommand) is command-like too — it runs a command, reaches no
-    // being — so it is excluded here exactly as the '/'-commands are, or a backlogged operator phrase
-    // would inflate the wake-notice count.
-    if (commands?.isCommand?.(ev) || commands?.phraseCommand?.(ev) || isEnvelope(ev) || isTransit(ev) || advice?.isAnswer?.(ev)) return false;
+    // A line starting with an alias is its command line here too (commands.aliased, as classify reads it).
+    if (commands?.isCommand?.(commands.aliased?.(ev) ?? ev) || isEnvelope(ev) || isTransit(ev) || advice?.isAnswer?.(ev)) return false;
     const { d } = await gateOf((await targetsOf(ev))[0], ev);
     return d.receives && d.mayReply && !(d.mode === 'auto' && ev.isSender);
   }
@@ -904,12 +902,18 @@ export function createSpine({
     // to the brain. Recorded like any inbound, then executed (lifecycle exits the
     // process; the daemon respawns). Runs before gating: a /restart works even in
     // a muted/mention chat.
-    if (commands?.isCommand?.(ev)) {
+    //
+    // ALIAS (config/commands_alias.yaml, operator 2026-10-19): a line starting with an alias is its
+    // command line from here on, so the typed command's own gates decide. Not admitted → the line flows
+    // on as said. The record keeps the words as said (handleFast logs `ev`, never `cmd`).
+    const cmd = commands?.aliased?.(ev) ?? ev;
+    if (commands?.isCommand?.(cmd)) {
+      if (cmd.alias) note(`alias: ${guardChannel(ev)} '${cmd.alias}' → ${cmd.body}`);
       // ALWAYS-AVAILABLE (never blocked, never counted): the lifecycle commands. They are
       // the operator's way back out of a broken node, and a guard that can lock them out
       // turns a flood into an unrecoverable node. Same predicate the command path itself
       // dispatches on (ingest.mjs lifecycleExit), called side-effect-free here.
-      if (isLifecycle(ev)) return async () => { await commands.run(ev); };
+      if (isLifecycle(cmd)) return async () => { await commands.run(cmd); };
       // GUARDED (2026-07-25 incident): every OTHER command is a turn like any other. Command
       // turns used to return from classify BEFORE the guard block below, so a command loop was
       // entirely unbounded — a STOPped channel kept answering commands, which is how a flood of
@@ -937,23 +941,10 @@ export function createSpine({
       // ONE decision — an allowlisted command naming a node that is neither ours nor a
       // co-account peer that already heard this — so a null (every case today) leaves the local
       // command path byte-identical.
-      const remote = commands.remoteNode?.(ev);
-      if (remote && mesh?.forwardCommand) return async () => { await mesh.forwardCommand(ev, remote); };
-      return async () => { await commands.run(ev); };
+      const remote = commands.remoteNode?.(cmd);
+      if (remote && mesh?.forwardCommand) return async () => { await mesh.forwardCommand(cmd, remote); };
+      return async () => { await commands.run(cmd); };
     }
-
-    // PHRASE TRIGGER (operator 2026-10-04): a natural phrase does NOT start with '/', so it never
-    // reaches the isCommand dispatch above — a second, separate check. commands.phraseCommand consumes
-    // the message ONLY when the OPERATOR's whole message EQUALS a configured config.<cmd>.triggers phrase
-    // (it reuses the SAME isOperator gate the '/'-commands sit behind, and matches EXACTLY — a
-    // non-operator, or any non-exact message, returns null and flows on as ordinary chat). When it does,
-    // the command runs DISCREETLY and NO being turn is dispatched (we return the command's own thunk).
-    // The message is still RECORDED like any ordinary inbound (the ingestion point below records every
-    // non-'off' message — a phrase is a real message that doesn't start with '/'); only the being turn
-    // is suppressed. Checked AFTER the '/'-command block so a '/'-word always wins, and like it, before
-    // the relay/transit branches (an operator phrase is command-like, not chatter in a pipe).
-    const phraseCmd = commands?.phraseCommand?.(ev);
-    if (phraseCmd) return async () => { await commands.runPhrase(ev, phraseCmd); };
 
     // Inbound mesh envelope: a message carrying a provenance tail is relay traffic,
     // not chat — decode + act on it (a request at the responder, a reply/mirror-update

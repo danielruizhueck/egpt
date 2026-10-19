@@ -883,21 +883,19 @@ describe('spine — advice answer hook', () => {
   });
 });
 
-// PHRASE TRIGGERS (operator 2026-10-04): a non-slash operator message whose whole text equals a
-// configured config.<cmd>.triggers phrase is CONSUMED by classify — the command runs (discreetly)
-// and NO being turn is dispatched. The matcher/runner live in commands.mjs (commands.phraseCommand /
-// commands.runPhrase, covered by fork-command.test.mjs); this locks the DISPATCH half: consume vs.
-// fall through, and that the consumed message is still recorded like any ordinary inbound.
-describe('spine — phrase-trigger dispatch (classify consumes, no being turn)', () => {
-  function buildPhrase(phraseCommand) {
+// ALIASES (operator 2026-10-19): classify sends commands.aliased's rewrite down the typed-command path,
+// and the record keeps the line as said. The real matcher is covered in commands-alias.test.mjs; this
+// locks the DISPATCH half with fakes.
+describe('spine — alias dispatch (the command line runs, the record keeps the words)', () => {
+  function buildAlias() {
     const bridge = fakeBridge();
     const brain = fakeBrain();
     const transcript = fakeTranscript();
     const ran = [];
     const commands = {
-      isCommand: () => false,                       // not a '/'-command — a natural phrase
-      phraseCommand,
-      runPhrase: async (ev, cmd) => { ran.push({ body: ev.body, cmd }); },
+      isCommand: (ev) => String(ev.body).startsWith('/'),
+      aliased: (ev) => (ev.body.startsWith('aparte') ? { ...ev, body: `/join${ev.body.slice('aparte'.length)}`, alias: 'aparte' } : null),
+      run: async (ev) => { ran.push(ev.body); },
     };
     const spine = createSpine({
       bridge, brain, store: fakeStore(),
@@ -909,17 +907,17 @@ describe('spine — phrase-trigger dispatch (classify consumes, no being turn)',
     return { bridge, brain, transcript, ran };
   }
 
-  it('a matching operator phrase RUNS the command and dispatches NO being turn — but IS logged', async () => {
-    const { bridge, brain, transcript, ran } = buildPhrase((ev) => (ev.body === 'dame un segundo' ? 'join' : null));
-    await bridge.emit({ ...MSG, authorized: true, body: 'dame un segundo' });
-    expect(ran).toEqual([{ body: 'dame un segundo', cmd: 'join' }]);   // the command ran
-    expect(brain.calls).toHaveLength(0);                               // no being turn dispatched (consumed)
-    expect(bridge.sent).toHaveLength(0);                               // nothing surfaced in the chat
-    expect(transcript.entries).toHaveLength(1);                        // but recorded like any ordinary message
+  it('an aliased line RUNS its command line, dispatches NO being turn, and is recorded as said', async () => {
+    const { bridge, brain, transcript, ran } = buildAlias();
+    await bridge.emit({ ...MSG, authorized: true, body: 'aparte viaje' });
+    expect(ran).toEqual(['/join viaje']);
+    expect(brain.calls).toHaveLength(0);
+    expect(bridge.sent).toHaveLength(0);
+    expect(inbounds(transcript).map((e) => e.ev.body)).toEqual(['aparte viaje']);
   });
 
-  it('a non-matching message is ordinary — phraseCommand returns null and the brain runs normally', async () => {
-    const { bridge, brain, ran } = buildPhrase(() => null);
+  it('a line that is not an alias is ordinary — the brain runs normally', async () => {
+    const { bridge, brain, ran } = buildAlias();
     await bridge.emit({ ...MSG, authorized: true, body: 'hola' });
     expect(ran).toHaveLength(0);
     expect(brain.calls).toHaveLength(1);                               // flowed through to the being

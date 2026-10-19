@@ -950,25 +950,22 @@ describe('/send — relays the live message, line breaks intact', () => {
 
 // ── /send names the side group it came from (config.send.origin, 2026-10-16) ───────────────────────
 describe('/send — origin prefix (send.origin auto|always|never, send.origin_template)', () => {
-  const PHRASE = 'dame un segundo';
-  const originCfg = (send = {}) => {
-    const c = cfg({ send });
-    return { ...c, group_title: '{group}-{name}', join: { ...c.join, triggers: [PHRASE] }, split: { ...c.split, triggers: [PHRASE] } };
-  };
+  const originCfg = (send = {}) => ({ ...cfg({ send }), group_title: '{group}-{name}' });
   const inC = (body, over = {}) => ({ chatId: C_CHAT, surface: 'whatsapp', msgId: 'cmd1', chatName: 'EduWeb', senderName: 'An', isSender: true, authorized: true, raw: { chatType: 'group' }, body, ...over });
   const sendFrom = (chatId, over = {}) => ({ chatId, surface: 'whatsapp', msgId: 'snd1', replyToId: 'M1', body: '/send', isSender: true, ...over });
   const relayed = (calls) => calls.post.filter((p) => p.chatId === C_CHAT);
 
+  // discreet: the `discreet: true` a retired phrase trigger stored on the side group's entry (still read).
   async function joined({ send, discreet = false } = {}) {
     const h = harness({ config: originCfg(send), rooms: roomWith(JOIN_CHAT) });
-    if (discreet) await h.cmds.runPhrase(inC(PHRASE), 'join');
-    else await h.cmds.run(inC('/join nue11'));
+    await h.cmds.run(inC('/join nue11'));
+    if (discreet) h.getState().contacts.whatsapp[JOIN_CHAT].discreet = true;
     return h;
   }
   async function splitted({ send, discreet = false } = {}) {
     const h = harness({ config: originCfg(send), rooms: roomWith(SPLIT_CHAT), createChatId: () => SPLIT_CHAT_FULL });
-    if (discreet) await h.cmds.runPhrase(inC(PHRASE), 'split');
-    else await h.cmds.run(inC('/split nue11'));
+    await h.cmds.run(inC('/split nue11'));
+    if (discreet) getContact(h.getState(), 'whatsapp', SPLIT_CHAT).entry.discreet = true;
     return h;
   }
 
@@ -985,9 +982,8 @@ describe('/send — origin prefix (send.origin auto|always|never, send.origin_te
     expect(relayed(calls)[0].text).toBe('↪ from renamed room:\nla respuesta elegida');
   });
 
-  it('a discreet (phrase) /join stores discreet: true, and origin auto adds no prefix', async () => {
-    const { cmds, calls, getState } = await joined({ discreet: true });
-    expect(getState().contacts.whatsapp[JOIN_CHAT].discreet).toBe(true);
+  it('a legacy discreet /join room (discreet: true): origin auto adds no prefix', async () => {
+    const { cmds, calls } = await joined({ discreet: true });
     await cmds.run(sendFrom(JOIN_CHAT));
     expect(relayed(calls)[0].text).toBe('la respuesta elegida');
   });
@@ -1001,7 +997,7 @@ describe('/send — origin prefix (send.origin auto|always|never, send.origin_te
   it('origin always: prefix even when discreet', async () => {
     const { cmds, calls } = await joined({ send: { origin: 'always' }, discreet: true });
     await cmds.run(sendFrom(JOIN_CHAT));
-    expect(relayed(calls)[0].text).toMatch(/^↪ from SI\+EduWeb-[0-9a-f]{5}:\nla respuesta elegida$/);
+    expect(relayed(calls)[0].text).toBe('↪ from SI+EduWeb-nue11:\nla respuesta elegida');
   });
 
   it('an empty origin_template: no prefix', async () => {
@@ -1023,11 +1019,9 @@ describe('/send — origin prefix (send.origin auto|always|never, send.origin_te
     expect(relayed(calls)[0].text).toBe('↪ from SI+EduWeb-nue11:\nla respuesta elegida');
   });
 
-  it('a discreet (phrase) /split stores discreet: true beside parent_chat; auto adds no prefix', async () => {
+  it('a legacy discreet /split room (discreet: true beside parent_chat): auto adds no prefix', async () => {
     const { cmds, calls, getState } = await splitted({ discreet: true });
-    const entry = getContact(getState(), 'whatsapp', SPLIT_CHAT).entry;
-    expect(entry.parent_chat).toBe(C_CHAT);
-    expect(entry.discreet).toBe(true);
+    expect(getContact(getState(), 'whatsapp', SPLIT_CHAT).entry).toMatchObject({ parent_chat: C_CHAT, discreet: true });
     await cmds.run(sendFrom(SPLIT_CHAT));
     expect(relayed(calls)[0].text).toBe('la respuesta elegida');
   });
@@ -1083,59 +1077,18 @@ describe('/end — archives the group and drops its mapping, posting nothing', (
   });
 });
 
-// ── phrase triggers (operator 2026-10-04): config.<cmd>.triggers invoke a command DISCREETLY ──────────
-describe('phrase triggers — config.<cmd>.triggers run a command discreetly (operator-only, exact match)', () => {
-  const PHRASE = 'dame un segundo';
-  // triggerCfg = the normal config PLUS config.join.triggers = [PHRASE].
-  const triggerCfg = () => { const c = cfg(); return { ...c, join: { ...c.join, triggers: [PHRASE] } }; };
-  // An OPERATOR message (authorized) whose whole text is `body`.
-  const opEv = (body) => ({ chatId: C_CHAT, surface: 'whatsapp', msgId: 'cmd1', chatName: 'Proyecto X', authorized: true, isSender: true, body });
-
-  it('phraseCommand: an operator message EQUAL to a configured join.triggers phrase → "join" (trim + case-insensitive)', async () => {
-    const { cmds } = harness({ config: triggerCfg() });
-    expect(await cmds.phraseCommand(opEv(PHRASE))).toBe('join');
-    expect(await cmds.phraseCommand(opEv('  Dame UN Segundo  '))).toBe('join');   // trimmed + lower-cased
+// ── the phrase triggers are gone (operator 2026-10-19: config/commands_alias.yaml replaced them) ──────
+describe('no phrase triggers: /join is its "/"-form or an alias (commands-alias.test.mjs)', () => {
+  it('a leftover config.join.triggers phrase is an ordinary message; the module has no phrase entry point', async () => {
+    const { cmds, calls } = harness({ config: { ...cfg(), join: { triggers: ['dame un segundo'] } } });
+    const ev = { chatId: C_CHAT, surface: 'whatsapp', msgId: 'cmd1', chatName: 'Proyecto X', authorized: true, isSender: true, body: 'dame un segundo' };
+    expect(cmds.isCommand(ev)).toBe(false);
+    expect(cmds.phraseCommand).toBeUndefined();
+    expect(cmds.runPhrase).toBeUndefined();
+    expect(calls.create).toEqual([]);
   });
 
-  it('phraseCommand: a NON-exact message does NOT trigger (never prefix/contains)', async () => {
-    const { cmds } = harness({ config: triggerCfg() });
-    expect(await cmds.phraseCommand(opEv('dame un segundo por favor'))).toBe(null);
-    expect(await cmds.phraseCommand(opEv('ya, dame un segundo'))).toBe(null);
-  });
-
-  it('phraseCommand: a NON-operator saying the exact phrase does NOT trigger (ordinary message)', async () => {
-    const { cmds } = harness({ config: triggerCfg() });
-    expect(await cmds.phraseCommand({ ...opEv(PHRASE), authorized: false, isSender: false })).toBe(null);
-  });
-
-  it('phraseCommand: unset triggers → only the "/"-word triggers (null for any phrase)', async () => {
-    const { cmds } = harness({ config: cfg() });                                 // no triggers configured
-    expect(await cmds.phraseCommand(opEv(PHRASE))).toBe(null);
-  });
-
-  it('runPhrase join: creates a group with a RANDOM name and does NOT edit the operator\'s message', async () => {
-    const { cmds, calls } = harness({ config: triggerCfg() });
-    await cmds.runPhrase(opEv(PHRASE), 'join');
-    expect(calls.create).toHaveLength(1);
-    expect(calls.create[0].title).toMatch(/^SI\+egpt [0-9a-f]{5} de Proyecto X$/);   // random token, not the verb word
-    expect(calls.create[0].title).not.toBe('egpt join de Proyecto X');
-    expect(calls.edit).toHaveLength(0);                                          // message left untouched in the chat
-  });
-
-  it('runPhrase join: the alias is still written (same handler, same residesHere + node_role gate)', async () => {
-    const { cmds, getState } = harness({ config: triggerCfg() });
-    await cmds.runPhrase(opEv(PHRASE), 'join');
-    const st = getState();
-    expect(aliasTargetOf(st, 'whatsapp', JOIN_CHAT)).toBe(getContact(st, 'whatsapp', C_CHAT).jid);
-  });
-
-  it('runPhrase join: stands down SILENTLY on a non-primary node (the node gate is unchanged by discreet)', async () => {
-    const { cmds, calls } = harness({ config: { ...triggerCfg(), node_name: 'do', node_role: 'secondary' } });
-    await cmds.runPhrase(opEv(PHRASE), 'join');
-    expect(calls.create).toHaveLength(0);
-  });
-
-  it('/join parachat (the explicit "/"-form) is UNCHANGED: name "parachat", placeholder edited (NOT discreet)', async () => {
+  it('/join parachat (the explicit "/"-form) is UNCHANGED: name "parachat", placeholder edited', async () => {
     const { cmds, calls } = harness({ config: cfg() });
     await cmds.run({ chatId: C_CHAT, surface: 'whatsapp', msgId: 'cmd1', chatName: 'Proyecto X', isSender: true, body: '/join parachat' });
     expect(calls.create[0].title).toBe('SI+egpt parachat de Proyecto X');           // <name> = parachat
