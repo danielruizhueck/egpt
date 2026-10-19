@@ -274,7 +274,7 @@ describe('warm-cli-session — verboseThinking (operator 2026-08-29, wren\'s "fu
   it('OFF is unchanged; ON only gets verbose-block previews (plain-delta updates suppressed to avoid a divergence/duplicate in sender.mjs)', async () => {
     const updatesOff = [];
     const sOff = createWarmCliSession({ spawn: fakeClaudeAgentic().spawn });
-    await sOff.turn('x', (t) => updatesOff.push(t));
+    await sOff.turn('x', (t, use) => use || updatesOff.push(t));   // text updates only, not the tool signal
     sOff.close();
 
     const updatesOn = [];
@@ -1001,11 +1001,11 @@ describe('warm-cli-session — a background subagent\'s text never reaches the r
   it('THE LIVE CASE: streamed previews and the final text carry only the being\'s own words', async () => {
     const s = createWarmCliSession({ spawn: subagentClaude().spawn });
     const u1 = [];
-    const r1 = await s.turn('START', (t) => u1.push(t));
+    const r1 = await s.turn('START', (t, use) => use || u1.push(t));   // text updates only, not the tool signal
     expect(u1).toEqual(['TOP_RE', 'TOP_REPLY_1']);
     expect(r1.text).toBe('TOP_REPLY_1');
     const u2 = [];
-    const r2 = await s.turn('SEND', (t) => u2.push(t));
+    const r2 = await s.turn('SEND', (t, use) => use || u2.push(t));
     expect(u2).toEqual(['TOP_RE', 'TOP_REPLY_2']);
     expect(r2.text).toBe('TOP_REPLY_2');
     s.close();

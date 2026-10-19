@@ -112,6 +112,9 @@ import { cleanForSpeech } from '../speech-clean.mjs';
 // caller's local being (the turn key / cycle owner), untouched.
 const gateAs = (t, fallback) => t?.being ?? t?.mesh?.being ?? fallback;
 
+// An ambient 'on' turn still running this long opens its ⏳ train (operator 2026-10-18).
+const AMBIENT_OPEN_MS = 10_000;
+
 /**
  * Build the spine. Nothing starts until start(). All deps are injected so the
  * pipe is exercisable end-to-end against fakes.
@@ -1253,7 +1256,7 @@ export function createSpine({
       // written rather than the event: warm-cli-session.inject records `rec.text` as the exact
       // string it puts on stdin and matches the `--replay-user-messages` echo against THAT, so it
       // acks the stripped line without knowing anything changed.
-      if (await steerLiveTurn({ to, ev: trigger == null ? ev : { ...ev, line: trigger }, turnKey })) return withRelay();
+      if (await steerLiveTurn({ to, ev: trigger == null ? ev : { ...ev, line: trigger }, turnKey, addressed: replyAllowed('mention', mention ?? {}) })) return withRelay();
       // Reply branch (the reply train). Open THIS message's OWN placeholder NOW, on
       // arrival — the per-message ack + streaming target, quoting the triggering message
       // (operator: "mentions should always be replied to the message" — now EVERY reply,
@@ -1393,7 +1396,7 @@ export function createSpine({
     // opens no ⏳ — a silence then posts nothing (operator 2026-10-18).
     const ambient = d.mode === 'on' && !replyAllowed('mention', mention ?? {});
     const out = sender.open(at ?? ev.chatId, { being: to, replyTo, replyIn: null, replyKey: { msgKey: ev.msgHash, timestamp: ev.msgTs }, queued: ahead > 0, queuedAhead: ahead, auto: d.mode === 'auto', ambient, origin: at ? null : ev.chatId });
-    return turnBy(turnKey, () => runReplyTurn({ to, ev, d, out, replyTo, turnKey, queued: ahead > 0, pinned, trigger }));
+    return turnBy(turnKey, () => runReplyTurn({ to, ev, d, out, replyTo, turnKey, queued: ahead > 0, pinned, trigger, ambient }));
   }
 
   // A BACKGROUND TASK THE BEING STARTED HAS FINISHED with no turn in flight (operator 2026-10-15:
@@ -1473,8 +1476,8 @@ export function createSpine({
   // `burst` (the auto-dwell fire): this turn answers a whole accumulated burst, so it prompts
   // with the drained cycle verbatim instead of appending its own trigger line. A PROMPT
   // concern only — it says nothing about the record.
-  async function runReplyTurn({ to, ev, d, out, replyTo = null, turnKey, queued, burst = false, pinned = false, trigger = null }) {
-    let live = null;
+  async function runReplyTurn({ to, ev, d, out, replyTo = null, turnKey, queued, burst = false, pinned = false, trigger = null, ambient = false }) {
+    let live = null, opening = null;
     try {
       // THIS turn is now the live one on this key, and this is whose message it answers —
       // the identity the same_sender tier of allow_new_input compares against (2026-08-30) —
@@ -1482,9 +1485,10 @@ export function createSpine({
       // several chats on one key (2026-09-01; admitsNewInput requires it for any steer).
       // Set here, not in openAndRunReply: openAndRunReply runs at ARRIVAL, so a queued turn
       // would claim the live slot from the turn actually streaming.
-      turns.setLive(turnKey, { senderId: ev.senderId ?? null, chatId: ev.chatId ?? null });
+      turns.setLive(turnKey, { senderId: ev.senderId ?? null, chatId: ev.chatId ?? null, out });
       out.activate?.();                                 // queued → live the moment its turn starts
       live = liveness.turnStarted({ out, being: to, ev, chat: d.replyChatId ?? ev.chatId, auto: d.mode === 'auto' });
+      if (ambient) opening = setTimeoutFn(() => out.begin?.(), AMBIENT_OPEN_MS);   // the train opens if the turn runs this long
       // Drain the accumulated cycle. A QUEUED turn prompts with it (ending with its own
       // mention line); an IMMEDIATE turn discards it and keeps the single dispatch line —
       // draining either way advances the baseline the next turn's cycle starts from.
@@ -1592,7 +1596,8 @@ export function createSpine({
       // `text` on item/completed), so before this the earlier output was simply gone.
       // Fire-and-forget — a token delta must not wait on fs; logStream serializes.
       let streamed = '';
-      const onPartial = (partial) => {
+      const onPartial = (partial, use) => {
+        if (use?.tool) return out.begin?.();           // the being used a tool: an ambient turn opens its train
         const raw = typeof partial === 'string' ? partial : (partial?.text ?? '');
         transcript.logStream?.(ev, streamed, raw, { being: to });
         streamed = raw;
@@ -1734,7 +1739,7 @@ export function createSpine({
       try { await out.fail?.(e); } catch { /* best effort */ }
       note(`turn ${to}/${ev.chatId}: ${e?.message ?? e}`);
       return false;
-    } finally { dropTrain(turnKey); turns.clearLive(turnKey); liveness.turnEnded(live); }
+    } finally { if (opening) clearTimeoutFn(opening); dropTrain(turnKey); turns.clearLive(turnKey); liveness.turnEnded(live); }
   }
 
   // `trigger` (operator 2026-09-11): the dispatch line with the addressing handle off, decided

@@ -471,6 +471,10 @@ export function createWarmCliSession(options = {}) {
       // verboseThinking is untouched: it builds its text from verboseBlocks and its onUpdate is
       // fed by that branch alone, so acc's separator never reaches it.
       if (ev.type === 'assistant' && ev.message?.content && pending) pending.msgBreak = true;
+      // The being used a tool: onUpdate's second argument says so, with the text unchanged (the spine opens an ambient train on it).
+      if (ev.type === 'assistant' && pending && ev.message?.content?.some?.((c) => c?.type === 'tool_use')) {
+        try { pending.onUpdate?.(verboseThinking ? pending.verboseBlocks.join('\n\n') : pending.acc, { tool: true }); } catch { /* caller's onUpdate */ }
+      }
       if (ev.type === 'stream_event' && ev.event?.type === 'content_block_delta') {
         const d = ev.event.delta;
         if (d?.type === 'text_delta' && typeof d.text === 'string' && pending) {

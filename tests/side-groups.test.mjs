@@ -376,7 +376,7 @@ const fakeTimers = () => {
 };
 const flush = () => new Promise((r) => setTimeout(r, 0));
 function buildSpine(h, { mode = 'on', node = 'kg', actions = undefined, reply = 'ok', partials = [], timers = null } = {}) {
-  const brain = { calls: [], async turn(being, ev, onPartial) { this.calls.push({ being, chatId: ev.chatId }); for (const p of partials) onPartial?.(p); return { text: typeof reply === 'function' ? reply() : reply }; } };
+  const brain = { calls: [], async turn(being, ev, onPartial) { this.calls.push({ being, chatId: ev.chatId }); for (const p of partials) onPartial?.(...(Array.isArray(p) ? p : [p])); return { text: typeof reply === 'function' ? reply() : reply }; } };
   const bridge = streamingBridge();
   const notes = [];
   const config = { ...h.config, agents: AGENTS, dispatch: { auto_default_mode: mode } };
@@ -609,6 +609,23 @@ describe('every mode replies in the side group; a turn that stays silent makes n
     await say(b.spine, 'hola a todos');
     expect(h.calls.create.map((c) => [c.via, c.participantIDs])).toEqual([['primary', [RODZ_USER_ID, LULU, PEPE]]]);
     expect(b.bridge.streams.map((s) => [s.chat, s.init, s.finals])).toEqual([[SIDE, 'Hola ⏳', ['Hola a todos']]]);
+    expect(b.bridge.sent).toEqual([]);
+  });
+
+  it('on, not addressed, it works first (a tool use, its 10 s): nothing is made or posted until its first text', async () => {
+    const h = harness({ state: seedState({ entry: AUTOMATIC }) });
+    const timers = fakeTimers();
+    const before = {};
+    const b = buildSpine(h, { timers, partials: [['', { tool: true }]], reply: () => {
+      before.armed = timers.size();
+      timers.flush();
+      Object.assign(before, { made: h.calls.create.length, opened: b.opened().length });
+      return 'Listo';
+    } });
+    await say(b.spine, 'hola a todos');
+    expect(before).toEqual({ armed: 1, made: 0, opened: 0 });
+    expect(h.calls.create).toHaveLength(1);
+    expect(b.bridge.streams.map((s) => [s.chat, s.init, s.finals])).toEqual([[SIDE, 'Listo', ['Listo']]]);
     expect(b.bridge.sent).toEqual([]);
   });
 

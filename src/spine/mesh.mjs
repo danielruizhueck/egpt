@@ -672,7 +672,7 @@ export function createMeshService({
               turns?.setLive(turnKey, { senderId: who, chatId: ev.chatId ?? null });
               if (ahead > 0) { try { stream?.update?.(wrap('')); } catch {} }   // queued → live, the local activate()
               try {
-                const r = await brain.turn(being, ev, (partial) => { try { stream?.update?.(wrap(textOf(partial))); } catch {} });
+                const r = await brain.turn(being, ev, (partial, use) => { if (use?.tool) return; try { stream?.update?.(wrap(textOf(partial))); } catch {} });
                 return textOf(r);
               } finally { turns?.drop(turnKey); turns?.clearLive(turnKey); }
             };

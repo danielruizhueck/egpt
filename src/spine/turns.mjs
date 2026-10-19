@@ -96,7 +96,7 @@ export function createTurns({ brain, bridge = null, bridgeOf = null, peerMouth =
   // THE CHAT is recorded beside the sender (operator 2026-09-01) because the KEY no longer
   // implies one: keyOf resolves it through brain.scopeOf, so a SHARED SCOPE puts several chats
   // on one key. Every caller that claims the live slot records both — see admitsNewInput.
-  const liveTurnBy = new Map();                // convKey -> { senderId, chatId } of the message the LIVE turn is answering
+  const liveTurnBy = new Map();                // convKey -> { senderId, chatId, out? } of the message the LIVE turn is answering (out: its reply)
 
   // Per-conversation turn key = the routed being + the conversation its INSTANCE lives in.
   // It maps 1:1 to the warm-pool key (`<being>:<engine>:<surface>:<slug>`) at the
@@ -238,7 +238,8 @@ export function createTurns({ brain, bridge = null, bridgeOf = null, peerMouth =
   // RELAYED turn's synthetic event has `msgId: null` — the real message lives on the ORIGIN
   // node's account, on the other side of the wire — so the responder passes ack:false and the
   // reaction is simply not attempted. Every local caller omits it and is unchanged.
-  async function steerLiveTurn({ to, ev, turnKey, ack = true }) {
+  // `addressed`: the line was addressed to the being — handed in, it opens an ambient live turn's train.
+  async function steerLiveTurn({ to, ev, turnKey, ack = true, addressed = false }) {
     const live = liveTurnBy.get(turnKey);
     if (!live) return false;                          // nothing streaming on this key to steer
     if (typeof brain.steer !== 'function' || typeof brain.allowNewInput !== 'function') return false;
@@ -271,6 +272,7 @@ export function createTurns({ brain, bridge = null, bridgeOf = null, peerMouth =
     // HANDED OVER IS NOT INGESTED, AND THIS LINE NO LONGER PRETENDS OTHERWISE. It used to read
     // "wove … into the live turn", said on the strength of a successful stdin write.
     note(`steer ${to}/${ev.chatId}: handed ${who}'s message to the live turn (allow_new_input=${allow})`);
+    if (addressed) live.out?.begin?.();
 
     // 👀 — THE MODEL'S OWN ACKNOWLEDGEMENT, AND ONLY THAT (operator 2026-09-09). `handed.ack`
     // settles from CLI events alone (warm-cli-session.mjs: the `--replay-user-messages` echo of

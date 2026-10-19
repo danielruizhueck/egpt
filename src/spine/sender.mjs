@@ -5,8 +5,8 @@
 // arrive it edits in place into the answer. A send failure ends it with
 // "… ❌ Sending failed."; an 'on'/'auto'-mode '...' silence resolves it to the quiet limb mark
 // '✓' (posts nothing new, never deleted) — in mention/mention-direct/accum the '...' surfaces.
-// An 'on' turn nobody addressed (`ambient`, operator 2026-10-18) opens nothing until it has text:
-// its silence posts nothing at all, only a log line.
+// An 'on' turn nobody addressed (`ambient`, operator 2026-10-18) opens nothing until it has text
+// or begin() is called (the being started working): its quick silence posts nothing, only a log line.
 //
 // No SEPARATE knee-jerk message: a per-turn "📨 Sending to E..." piled up and
 // cross-deleted in busy chats (its id-resolution races the next turn's). The reply's
@@ -397,6 +397,7 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
     if (opts.status) ask();
     return {
       activate() { if (asked) onOpen((o) => o.activate()); },
+      begin() {},                                     // an early start makes no room: it waits for real text
       update(partial) { const t = textOf(partial); if (asked || (t && !SILENCE_SO_FAR.test(t))) onOpen((o) => o.update(partial)); },
       pulse(ms, label) { return out ? out.pulse(ms, label) : true; },
       async end(text) { if (asked) await onOpen((o) => o.end(text)); },
@@ -610,8 +611,8 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
         streamVia = mouthChat;
         if (mouthChat?.bridge) streamMouth = mouthChat;
         const already = shown();
-        // ambient: the message opens on `init`, else the text so far — never on the ⏳ placeholder
-        stream = mint(mouthChat, ambient ? (init ?? `${already} ${LIVE_FRAME_MARK}`) : undefined);
+        // ambient: the message opens on `init`, else the text so far, else (begin) the ⏳ placeholder
+        stream = mint(mouthChat, ambient ? (init ?? (already ? `${already} ${LIVE_FRAME_MARK}` : undefined)) : undefined);
         if (already && !ambient) stream?.update?.(`${already} ${LIVE_FRAME_MARK}`);
         return stream;
       };
@@ -635,6 +636,8 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
         // its turn starts (before the first token), so the user sees it move. No-op
         // for a placeholder that was never queued.
         activate() { activated = true; if (queued) push(THINKING); },
+        // ambient: open the train now (the being started working, or was addressed). No-op otherwise.
+        begin() { if (!ended) start(); },
         // absorb() runs UNCONDITIONALLY, before the push. `stream?.update?.(`${absorb(t)} …`)`
         // reads as if it did, but optional chaining short-circuits the WHOLE call expression —
         // arguments included — so with no stream yet (a peer route being resolved, or a peer
