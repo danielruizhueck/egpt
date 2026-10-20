@@ -370,6 +370,62 @@ describe('sender — the message never shrinks (append-only living mirror)', () 
     expect(bridge.streams[0].finals).toEqual(['✓']);
   });
 
+  // Operator 2026-10-19: delete; else edit to ✓; else (past the edit window, or the edit failed) reply ✓ fresh.
+  describe('limb-only fallback chain', () => {
+    const limbOnly = async ({ minutes = 0, del = async () => false, finish = null, peerMouth = null } = {}) => {
+      let t = 0;
+      const ear = fakeBridge();
+      const out = createSender({ bridge: ear, peerMouth, now: () => t }).open('!c', { being: 'e', replyTo: 'm1' });
+      const room = peerMouth ? (await peerMouth.route()).bridge : ear;
+      await new Promise((r) => setImmediate(r));   // a mouth route opens its stream once routed
+      if (del) room.streams[0].delete = del;
+      if (finish) room.streams[0].finish = finish;
+      t = minutes * 60_000;
+      await out.finish({ text: '' }, { surface: false, commands: ['react'] });
+      return { ear };
+    };
+
+    it('delete ok → nothing else', async () => {
+      const { ear } = await limbOnly({ del: null, minutes: 20 });
+      expect(ear.streams.map((s) => [s.deleted, s.finals])).toEqual([[true, []]]);
+      expect(ear.sent).toEqual([]);
+    });
+
+    it('delete fails + editable → the placeholder is edited to ✓, nothing fresh', async () => {
+      const { ear } = await limbOnly({ minutes: 12 });
+      expect(ear.streams.map((s) => s.finals)).toEqual([['✓']]);
+      expect(ear.sent).toEqual([]);
+    });
+
+    it('REPRODUCE: delete fails + past the edit window → a fresh ✓ reply quoting the trigger, no edit attempted', async () => {
+      const { ear } = await limbOnly({ minutes: 14 });
+      expect(ear.streams[0].finals).toEqual([]);
+      expect(ear.streams[1]).toMatchObject({ chat: '!c', init: '✓', finals: ['✓'] });
+      expect(ear.streams[1].opts).toMatchObject({ replyTo: 'm1', persona: 'e' });
+      expect(ear.sent).toEqual([]);
+    });
+
+    it('REPRODUCE: delete fails + the edit throws or is not accepted → a fresh ✓ reply quoting the trigger', async () => {
+      const finishes = [async () => { throw new Error('edit refused'); }, async function (t) { this.finals.push(t); }];
+      for (const finish of finishes) {
+        const { ear } = await limbOnly({ finish });
+        expect(ear.streams).toHaveLength(2);
+        expect(ear.streams[1]).toMatchObject({ chat: '!c', init: '✓', finals: ['✓'] });
+        expect(ear.streams[1].opts).toMatchObject({ replyTo: 'm1' });
+        expect(ear.sent).toEqual([]);
+      }
+    });
+
+    it('REPRODUCE: on a local MOUTH route the fresh ✓ comes from the mouth, in its room', async () => {
+      const mouth = fakeBridge();
+      const peerMouth = { route: async () => ({ connection: 'secondary', bridge: mouth, chatId: '!mouth-room' }) };
+      const { ear } = await limbOnly({ minutes: 14, peerMouth });
+      expect(mouth.streams.map((s) => [s.chat, s.init, s.finals])).toEqual([['!mouth-room', '⏳ Thinking…', []], ['!mouth-room', '✓', ['✓']]]);
+      expect(ear.streams).toEqual([]);
+      expect(ear.sent).toEqual([]);
+    });
+  });
+
   it('unchanged: a silence still settles on ✓, text + a limb still delivers the text, an unopened ambient turn posts nothing', async () => {
     const bridge = fakeBridge();
     const sender = createSender({ bridge });
