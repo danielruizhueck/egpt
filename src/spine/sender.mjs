@@ -4,7 +4,7 @@
 // its id before any edit (and during spin-up → smooth edits, no stutter). Once tokens
 // arrive it edits in place into the answer. A send failure ends it with
 // "… ❌ Sending failed."; an 'on'/'auto'-mode '...' silence resolves it to the quiet limb mark
-// '✓' (posts nothing new, never deleted) — in mention/mention-direct/accum the '...' surfaces. A
+// '✓' (an edit, never deleted; a fresh '✓' when it cannot be edited) — in mention/mention-direct/accum the '...' surfaces. A
 // limb-only turn's placeholder is deleted, else edited to '✓', else a fresh '✓' replies (2026-10-19).
 // An 'on' turn on a non-human line (`ambient`, operator 2026-10-18) opens nothing until it has text
 // or begin() is called (the being started working): its quick silence posts nothing, only a log line.
@@ -639,6 +639,15 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
       let fallbackResult = null;
       // A fresh message from the placeholder's mouth; the §7 fallback if that did not deliver.
       const sayFresh = async (text) => { const fresh = await postFresh(text); if (fresh?.delivered) stream = fresh; else fallbackResult = await deliverHere(text, tag); };
+      // A withheld turn settles its placeholder on `text`; past the edit window, or when the edit
+      // fails, `text` goes fresh — never a stuck ⏳ (operator 2026-10-19).
+      const settle = async (text) => {
+        if (!stream) return;
+        if (editable()) { try { await stream.finish?.(absorb(text)); if (stream.delivered === true) return; } catch { /* fresh below */ } }
+        if (!text) return;
+        onLog(`sender: ${being}/${chatId} placeholder could not be edited — ${JSON.stringify(text)} goes fresh`);
+        await sayFresh(text);
+      };
       return {
         // A queued placeholder flips from the queue into the live train the instant
         // its turn starts (before the first token), so the user sees it move. No-op
@@ -709,21 +718,16 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
             // A LIMB-ONLY turn says what it is DOING, never that it heard nothing. With verbose ON
             // that is the legible commandMark record; with verbose OFF the chat shows just the
             // reaction — keep what was already read (append nothing), else DELETE the ⏳-only
-            // placeholder where it opened; else edit it to quietLimbMark; else (past the edit
-            // window, or the edit failed) a fresh quietLimbMark replies (operator 2026-10-19).
+            // placeholder where it opened; a delete that fails settles on quietLimbMark (settle).
             if (commands?.length) {
               if (!verbose && !shown() && stream) {
                 let gone = false;
-                try { gone = (await stream.delete?.()) === true; } catch { /* edited below */ }
+                try { gone = (await stream.delete?.()) === true; } catch { /* settles on ✓ below */ }
                 if (gone) return;
-                let edited = false;
-                if (editable()) { try { await stream.finish?.(absorb(quietLimbMark())); edited = stream.delivered === true; } catch { /* fresh below */ } }
-                onLog(`sender: ${being}/${chatId} limb-only turn — its placeholder could not be deleted, ${edited ? 'settled on ✓' : 'nor edited: a fresh ✓ replies'}`);
-                if (!edited) await sayFresh(quietLimbMark());
-                return;
+                onLog(`sender: ${being}/${chatId} limb-only turn — its placeholder could not be deleted, settling on ✓`);
               }
-              const settled = verbose ? commandMark(commands) : '';
-              if (stream && editable()) await stream.finish?.(absorb(settled));
+              const settled = verbose ? commandMark(commands) : (shown() ? '' : quietLimbMark());
+              await settle(settled);
               return;
             }
             // A DELIBERATE '…' hidden here (on/auto) never held content, so its eager ⏳ placeholder
@@ -743,7 +747,7 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
             const settled = isDeliberateSilence(t) ? (shown() ? '' : quietLimbMark())
               : t.trim() ? t
               : (shown() ? '' : BRIDGE_SILENCE);
-            if (stream && editable()) await stream.finish?.(absorb(settled));
+            await settle(settled);
             return;
           }
           // Surfaced: deliver the reply, OR — when it came back empty — the no-reply

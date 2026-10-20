@@ -371,8 +371,8 @@ describe('sender — the message never shrinks (append-only living mirror)', () 
   });
 
   // Operator 2026-10-19: delete; else edit to ✓; else (past the edit window, or the edit failed) reply ✓ fresh.
-  describe('limb-only fallback chain', () => {
-    const limbOnly = async ({ minutes = 0, del = async () => false, finish = null, peerMouth = null } = {}) => {
+  describe('withheld fallback chain', () => {
+    const withheld = async ({ minutes = 0, del = async () => false, finish = null, peerMouth = null, reply = { text: '' }, how = { surface: false, commands: ['react'] } } = {}) => {
       let t = 0;
       const ear = fakeBridge();
       const out = createSender({ bridge: ear, peerMouth, now: () => t }).open('!c', { being: 'e', replyTo: 'm1' });
@@ -381,24 +381,24 @@ describe('sender — the message never shrinks (append-only living mirror)', () 
       if (del) room.streams[0].delete = del;
       if (finish) room.streams[0].finish = finish;
       t = minutes * 60_000;
-      await out.finish({ text: '' }, { surface: false, commands: ['react'] });
+      await out.finish(reply, how);
       return { ear };
     };
 
     it('delete ok → nothing else', async () => {
-      const { ear } = await limbOnly({ del: null, minutes: 20 });
+      const { ear } = await withheld({ del: null, minutes: 20 });
       expect(ear.streams.map((s) => [s.deleted, s.finals])).toEqual([[true, []]]);
       expect(ear.sent).toEqual([]);
     });
 
     it('delete fails + editable → the placeholder is edited to ✓, nothing fresh', async () => {
-      const { ear } = await limbOnly({ minutes: 12 });
+      const { ear } = await withheld({ minutes: 12 });
       expect(ear.streams.map((s) => s.finals)).toEqual([['✓']]);
       expect(ear.sent).toEqual([]);
     });
 
     it('REPRODUCE: delete fails + past the edit window → a fresh ✓ reply quoting the trigger, no edit attempted', async () => {
-      const { ear } = await limbOnly({ minutes: 14 });
+      const { ear } = await withheld({ minutes: 14 });
       expect(ear.streams[0].finals).toEqual([]);
       expect(ear.streams[1]).toMatchObject({ chat: '!c', init: '✓', finals: ['✓'] });
       expect(ear.streams[1].opts).toMatchObject({ replyTo: 'm1', persona: 'e' });
@@ -408,7 +408,7 @@ describe('sender — the message never shrinks (append-only living mirror)', () 
     it('REPRODUCE: delete fails + the edit throws or is not accepted → a fresh ✓ reply quoting the trigger', async () => {
       const finishes = [async () => { throw new Error('edit refused'); }, async function (t) { this.finals.push(t); }];
       for (const finish of finishes) {
-        const { ear } = await limbOnly({ finish });
+        const { ear } = await withheld({ finish });
         expect(ear.streams).toHaveLength(2);
         expect(ear.streams[1]).toMatchObject({ chat: '!c', init: '✓', finals: ['✓'] });
         expect(ear.streams[1].opts).toMatchObject({ replyTo: 'm1' });
@@ -419,10 +419,39 @@ describe('sender — the message never shrinks (append-only living mirror)', () 
     it('REPRODUCE: on a local MOUTH route the fresh ✓ comes from the mouth, in its room', async () => {
       const mouth = fakeBridge();
       const peerMouth = { route: async () => ({ connection: 'secondary', bridge: mouth, chatId: '!mouth-room' }) };
-      const { ear } = await limbOnly({ minutes: 14, peerMouth });
+      const { ear } = await withheld({ minutes: 14, peerMouth });
       expect(mouth.streams.map((s) => [s.chat, s.init, s.finals])).toEqual([['!mouth-room', '⏳ Thinking…', []], ['!mouth-room', '✓', ['✓']]]);
       expect(ear.streams).toEqual([]);
       expect(ear.sent).toEqual([]);
+    });
+
+    // The same rule for every withheld mark: never a stuck ⏳.
+    const silence = { reply: { text: '…' }, how: { surface: false } };
+
+    it('silence at 12 min → the placeholder is edited to ✓ (lock)', async () => {
+      const { ear } = await withheld({ ...silence, minutes: 12 });
+      expect(ear.streams.map((s) => [s.deleted, s.finals])).toEqual([[false, ['✓']]]);
+      expect(ear.sent).toEqual([]);
+    });
+
+    it('REPRODUCE: silence at 14 min → a fresh ✓ quoting the trigger, no edit', async () => {
+      const { ear } = await withheld({ ...silence, minutes: 14 });
+      expect(ear.streams.map((s) => [s.init, s.finals])).toEqual([['⏳ Thinking…', []], ['✓', ['✓']]]);
+      expect(ear.streams[1].opts).toMatchObject({ replyTo: 'm1' });
+      expect(ear.sent).toEqual([]);
+    });
+
+    it('REPRODUCE: silence with a failed edit (throws or not accepted) → a fresh ✓', async () => {
+      for (const finish of [async () => { throw new Error('edit refused'); }, async function (t) { this.finals.push(t); }]) {
+        const { ear } = await withheld({ ...silence, finish });
+        expect(ear.streams.map((s) => s.init)).toEqual(['⏳ Thinking…', '✓']);
+        expect(ear.streams[1]).toMatchObject({ finals: ['✓'], opts: { replyTo: 'm1' } });
+      }
+    });
+
+    it('REPRODUCE: a verbose limb-only turn at 14 min → its commandMark goes fresh', async () => {
+      const { ear } = await withheld({ how: { surface: false, commands: ['react'], verbose: true }, minutes: 14 });
+      expect(ear.streams.map((s) => [s.deleted, s.init, s.finals])).toEqual([[false, '⏳ Thinking…', []], [false, '⚙️ processing command (/react)', ['⚙️ processing command (/react)']]]);
     });
   });
 
