@@ -97,15 +97,16 @@ describe('beeper-port adapter', () => {
     expect(h.finals).toEqual(['🐶 egpt: Aquí estoy bien']);
   });
 
-  it('exposes NO delete limb — a being never removes a message', async () => {
-    // operator 2026-08-24: there is no use case for deletion. The 2026-10-08 "stray …" fix keeps
-    // this lock — a HIDDEN '…' (on/auto) is EDITED to the quiet limb mark '✓' (src/spine/sender.mjs),
-    // never deleted — so the port wrapper still exposes no delete verb.
+  it('exposes NO delete limb — a being never removes a message; the stream forwards the bridge\'s own delete', async () => {
+    // operator 2026-08-24: no delete limb. 2026-10-19: a limb-only turn's ⏳ placeholder is deleted by
+    // the BRIDGE (src/spine/sender.mjs), through the stream's own delete.
     const { start, spy } = fakeStart();
     const port = await createBeeperBridgePort({}, { start });
+    expect(port.deleteOwn).toBeUndefined();
     const s2 = port.startStream('!room', '⏳', { persona: 'e', bodyEmoji: '🐶', label: 'egpt' });
-    expect(s2.delete).toBeUndefined();
     expect(spy.streams[0].deleted).toBe(false);
+    s2.delete();
+    expect(spy.streams[0].deleted).toBe(true);
   });
 
   // The 🎧 listening mark comes back off (2026-09-16): react and its removal both reach the real bridge.

@@ -2897,6 +2897,17 @@ export async function startBeeperBridge(opts = {}) {
           await applyEdit(`⚠️ could not deliver this reply${handle.lastError ? ` — ${handle.lastError}` : ''}`).catch(() => {});
         }
       };
+      // The bridge removing its OWN placeholder, in the room it opened in (a limb-only turn, operator
+      // 2026-10-19). After any edit in flight. false = still there: finish() still works.
+      handle.delete = async () => {
+        if (finished) return false;
+        if (editTimer) { clearTimeout(editTimer); editTimer = null; }
+        await ready;
+        if (!cid || !realId) return false;
+        const ok = await serial(() => deleteMessage(cid, realId));
+        if (ok) { finished = true; realId = null; }
+        return ok;
+      };
       handle.fail = (e) => { finished = true; handle.lastError = e?.message ?? String(e); onLog(`beeper: stream fail — ${e?.message ?? e}`); };
       return handle;
     },

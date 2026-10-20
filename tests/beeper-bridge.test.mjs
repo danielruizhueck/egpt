@@ -2827,6 +2827,19 @@ describe('beeper bridge — a streamed reply finishes to exactly the frame it wa
     expect(handle.delivered).toBe(true);
     expect(fake.edits.map((e) => e.text)).toEqual(['🌉kg 🤝 don: hola ✅ 💸']);
   });
+
+  // A limb-only turn's placeholder (operator 2026-10-19): deleted by its confirmed id, in the room it opened in.
+  it('delete() removes the placeholder by its confirmed id in its own room; a finish after it edits nothing', async () => {
+    const chat = CHAT('chat-1');
+    const { bridge } = await startBridge();
+    const handle = bridge.startStreamMessage('⏳ Thinking…', { chatId: chat });
+    expect(await handle.delete()).toBe(true);
+    const placeholder = fake.posts.find((p) => p.text === '⏳ Thinking…');
+    expect(fake.deletes).toEqual([{ chatID: chat, messageID: placeholder.confirmedID }]);
+    expect(handle.confirmedId).toBe(null);
+    await handle.finish('✓');
+    expect(fake.edits).toHaveLength(0);
+  });
 });
 
 // The STALE-TWIN LANDMINE (live 2026-07-04, SPOILER — the acceptance rerun on the

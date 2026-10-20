@@ -220,6 +220,7 @@ export async function createBeeperBridgePort(opts = {}, { start = startBeeperBri
       return {
         update: (t) => h.update(frame(mark(t, LIVE_FRAME_MARK))),
         finish: (t) => h.finish(frame(mark(t, DONE_MARK))),
+        delete: () => h.delete?.() ?? false,   // the bridge's own placeholder, never a limb (sender.mjs)
         get delivered() { return h.delivered; },
         get lastError() { return h.lastError; },
         get confirmedId() { return h.confirmedId; },
