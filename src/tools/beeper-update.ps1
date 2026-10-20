@@ -153,8 +153,13 @@ function Wait-Connection([string] $Token) {
   }
   return @{ port = $null; version = $null }
 }
+# Equal as versions, not text: Beeper.exe's ProductVersion is 4.3.209.0, the download and /v1/info say 4.3.209.
+function Test-SameVersion($a, $b) {
+  $four = { param($v) $p = @("$v".Split('.') | ForEach-Object { [int]$_ }); while ($p.Count -lt 4) { $p += 0 }; $p -join '.' }
+  return (& $four $a) -eq (& $four $b)
+}
 function New-ConnectionRow($name, $service, $r, [bool] $hasToken, $expect) {
-  $status = if (-not $hasToken) { 'no-token' } elseif (-not $r.port) { 'no-port' } elseif ($r.version -and $r.version -ne $expect) { "version $($r.version)" } else { 'ok' }
+  $status = if (-not $hasToken) { 'no-token' } elseif (-not $r.port) { 'no-port' } elseif ($r.version -and -not (Test-SameVersion $r.version $expect)) { "version $($r.version)" } else { 'ok' }
   return [ordered]@{ name = $name; service = $service; port = $r.port; version = $r.version; status = $status }
 }
 
@@ -187,7 +192,7 @@ try {
     $proc = Start-Process -FilePath $state.pending.installer -ArgumentList '/S', '--updated' -PassThru -Wait
     $now = (Get-Item $exe).VersionInfo.ProductVersion
     Say "installer exit $($proc.ExitCode); Beeper.exe is now $now"
-    if ($now -ne $plan.to) { throw "installer exit $($proc.ExitCode); Beeper.exe is $now, expected $($plan.to)" }
+    if (-not (Test-SameVersion $now $plan.to)) { throw "installer exit $($proc.ExitCode); Beeper.exe is $now, expected $($plan.to)" }
   }
 } catch { $failStep = $step; $failErr = $_.Exception.Message; Say "FAILED ($step): $failErr - bringing Beeper back as it was" }
 
