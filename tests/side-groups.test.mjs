@@ -250,6 +250,15 @@ describe('/join and /split: the primary creates "SI+<group>-<name>" with Rodz + 
     expect(h.calls.byTitle).toEqual([]);
   });
 
+  // Live 2026-10-19: a /join in "SI+EduWeb" made "SI+SI+EduWeb-facturacion".
+  for (const [origin, title] of [['SI+EduWeb', 'SI+EduWeb-x'], ['si+EduWeb', 'si+EduWeb-x'], ['Familia', 'SI+Familia-x']]) {
+    it(`REPRODUCE: /join x in "${origin}" makes "${title}" — the SI+ prefix once`, async () => {
+      const h = harness();
+      await typed(h, inOrigin('/e join x', { chatName: origin }));
+      expect(h.calls.create.map((c) => c.title)).toEqual([title]);
+    });
+  }
+
   it('no <name>: a random 5-character name, with the SI+<group>- prefix; the retired default_name is ignored', async () => {
     const h = harness({ config: cfg({ extra: { join: { default_name: 'charla' } } }) });
     await typed(h, inOrigin('/e join'));
@@ -454,6 +463,12 @@ describe('reply_in_side_group: the switch on the chat\'s own entry', () => {
       expect(h.calls.create.map((c) => c.title)).toEqual([title]);
       expect(chatsOf(b)).toEqual([SIDE]);
     }
+  });
+
+  it('REPRODUCE: the automatic group of "SI+EduWeb" is "SI+EduWeb", the same title as its origin (titles may repeat)', async () => {
+    const h = harness({ state: seedState({ entry: AUTOMATIC }) });
+    expect(await h.cmds.autoSideGroup(inOrigin('e, hola', { chatName: 'SI+EduWeb' }))).toBe(SIDE);
+    expect(h.calls.create.map((c) => c.title)).toEqual(['SI+EduWeb']);
   });
 
   it('a title that already exists is used as is: no suffix, no lookup by title', async () => {

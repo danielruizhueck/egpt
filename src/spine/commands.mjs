@@ -3170,8 +3170,10 @@ export function createCommands({
   const placeholderOf = (block, dflt) => (block && typeof block.placeholder === 'string' && block.placeholder.trim()) ? block.placeholder : dflt;
   // SIDE_GROUP_PREFIX + config.group_title ({group}=parent chat name, {name}=the <name> arg).
   const groupTitleTpl = () => ((typeof cfg().group_title === 'string' && cfg().group_title.trim()) ? cfg().group_title : GROUP_TITLE_DEFAULT);
+  // The prefix once: a title already starting with it (any case, e.g. a /join inside "SI+EduWeb") keeps its own.
+  const sidePrefixed = (title) => (String(title).toLowerCase().startsWith(SIDE_GROUP_PREFIX.toLowerCase()) ? String(title) : SIDE_GROUP_PREFIX + title);
   const groupTitleOf = (groupName, name) =>
-    SIDE_GROUP_PREFIX + groupTitleTpl().replaceAll('{group}', String(groupName ?? '')).replaceAll('{name}', String(name ?? ''));
+    sidePrefixed(groupTitleTpl().replaceAll('{group}', String(groupName ?? '')).replaceAll('{name}', String(name ?? '')));
   // A discreet side group from the retired phrase triggers, made before the `discreet` flag: its title's
   // {name} slot holds a random 5-hex token (plus the " HHMM-MMDDYYYY" suffix older titles carry). A typed 5-hex name also matches; that only drops the prefix.
   const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -3707,7 +3709,7 @@ export function createCommands({
     const plan = await sideGroupPlan(ev, 'automatic', { everyone: true });
     if (!plan) return null;
     const cTitle = ev.chatName || (await forkBridge.chatTitle(ev.chatId)) || ev.chatId;
-    const title = setting === true ? `${SIDE_GROUP_PREFIX}${cTitle}` : setting;
+    const title = setting === true ? sidePrefixed(cTitle) : setting;
     const aliased = await createAliasedSideGroup(ev, surface, title, plan, 'automatic', { automatic: true });
     if (!aliased) return null;
     onLog(`automatic: ${cTitle} -> ${aliased.chatId} "${title}" (invited ${plan.participantIDs.join(', ')})`);
