@@ -1,7 +1,7 @@
 // lag-probe.test.mjs — the spine's event-loop lag probe (operator 2026-10-18, "1, do probe").
 // 2026-10-15: the spine fell 2+ min behind for every chat and nobody knew until "E isn't answering".
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { createLagProbe, parseTypeperf, parsePs } from '../src/spine/lag-probe.mjs';
+import { createLagProbe, parseTypeperf, parsePs, sleptBetween } from '../src/spine/lag-probe.mjs';
 import { createSpine } from '../src/spine/spine.mjs';
 
 const TOP = [{ name: 'whisper-cli', pct: 610 }, { name: 'node', pct: 104 }, { name: 'chrome', pct: 30 }];
@@ -11,7 +11,7 @@ const TOP = [{ name: 'whisper-cli', pct: 610 }, { name: 'node', pct: 104 }, { na
 function harness({ cfg = null, backlog = null } = {}) {
   vi.useFakeTimers();
   vi.setSystemTime(Date.UTC(2026, 9, 15, 14, 0));
-  const h = { lag: 0, posted: [], logged: [], topCalls: 0, fast: { queueDepth: 3, oldestMs: 2_000 }, turns: [] };
+  const h = { lag: 0, posted: [], logged: [], topCalls: 0, fast: { queueDepth: 3, oldestMs: 2_000 }, turns: [], suspended: 0, sleeps: [], logReads: [], logFails: null, logMs: 0 };
   h.probe = createLagProbe({
     config: () => cfg,
     report: async (text) => { h.posted.push(text); },
@@ -23,6 +23,13 @@ function harness({ cfg = null, backlog = null } = {}) {
     cpus: () => Array.from({ length: 8 }, () => ({ times: { user: Date.now() * 0.97, nice: 0, sys: 0, irq: 0, idle: Date.now() * 0.03 } })),
     memory: () => ({ rss: 512 * 2 ** 20, free: 3 * 2 ** 30, total: 32 * 2 ** 30 }),
     top: async () => { h.topCalls++; return TOP; },
+    mono: () => Date.now() - h.suspended,
+    sleepLog: async (from, to) => {   // the System log: h.sleeps are Kernel-Power 506/507 times
+      h.logReads.push([from, to]);
+      if (h.logMs) await new Promise((r) => setTimeout(r, h.logMs));
+      if (h.logFails) throw h.logFails;
+      return h.sleeps.some((at) => at >= from && at <= to);
+    },
   });
   return h;
 }
@@ -117,12 +124,92 @@ describe('lag probe: alert, repeat, recover', () => {
 
   it('a failing top-processes read still posts the line, without the top', async () => {
     const h = harness();
-    h.probe = createLagProbe({ report: async (t) => { h.posted.push(t); }, note: (s) => h.logged.push(s), loop: { sample: () => ({ p50: 0, p99: 0, max: 11_000 }), summary: () => ({ p50: 0, p99: 0, max: 0 }) }, top: async () => { throw new Error('typeperf missing'); } });
+    h.probe = createLagProbe({ report: async (t) => { h.posted.push(t); }, note: (s) => h.logged.push(s), loop: { sample: () => ({ p50: 0, p99: 0, max: 11_000 }), summary: () => ({ p50: 0, p99: 0, max: 0 }) }, top: async () => { throw new Error('typeperf missing'); }, sleepLog: async () => false });
     h.probe.start();
     await step(5_000);
     expect(h.posted).toHaveLength(1);
     expect(h.posted[0]).not.toContain(' · top ');
     expect(h.logged.some((l) => l.includes('typeperf missing'))).toBe(true);
+    h.probe.stop();
+  });
+});
+
+// kg 2026-10-20: Modern Standby 04:06 → 07:38 (Kernel-Power 506/507) posted "spine lagging 12670s" + "recovered".
+describe('lag probe: asleep is not lag', () => {
+  const GAP = 12_670_000;
+  const hm = (ms) => new Date(ms).toTimeString().slice(0, 5);
+  const sleepThrough = async (h, { mono = true } = {}) => {   // a gap the probe's timer slept through
+    await step(5_000);
+    const from = Date.now();
+    if (!mono) h.suspended += GAP;
+    vi.setSystemTime(from + GAP);
+    h.lag = GAP;
+    await step(5_000);
+    h.lag = 0;
+    return { from, to: Date.now() };
+  };
+
+  it('Windows: a standby logged inside the gap → one 💤 line, no lagging, no recovered', async () => {
+    const h = harness();
+    h.probe.start();
+    h.sleeps = [Date.now() + 6_000, Date.now() + 5_000 + GAP + 2_000];
+    const { from, to } = await sleepThrough(h);
+    await step(5 * 60_000);
+    expect(h.posted).toEqual([`💤 was asleep 3h31m (${hm(from)} → ${hm(to)})`]);
+    expect(h.logReads).toEqual([[from, to]]);
+    h.probe.stop();
+  });
+
+  it('wall clock ≫ monotonic (Linux/macOS suspend) → 💤 without reading the event log', async () => {
+    const h = harness();
+    h.probe.start();
+    const { from, to } = await sleepThrough(h, { mono: false });
+    await step(5 * 60_000);
+    expect(h.posted).toEqual([`💤 was asleep 3h31m (${hm(from)} → ${hm(to)})`]);
+    expect(h.logReads).toEqual([]);
+    h.probe.stop();
+  });
+
+  it('a 19s lag with no sleep in its window → "spine lagging" then "recovered", as before', async () => {
+    const h = harness();
+    h.probe.start();
+    await step(5_000);
+    h.sleeps = [Date.now() - 1];             // a wake just before the window does not count
+    h.lag = 19_000;
+    await step(5_000);
+    h.lag = 0;
+    await step(65_000);
+    expect(h.posted).toHaveLength(2);
+    expect(h.posted[0]).toMatch(/^spine lagging 19s — loop max 19s p99 19s, busy 99%/);
+    expect(h.posted[1]).toBe('spine recovered after 5.0s (worst 19s)');
+    h.probe.stop();
+  });
+
+  it('the event log failing or timing out → the lag alert, as before', async () => {
+    const h = harness();
+    h.logFails = new Error('Command failed: wevtutil (timed out)');
+    h.probe.start();
+    await sleepThrough(h);
+    expect(h.posted).toHaveLength(1);
+    expect(h.posted[0]).toMatch(/^spine lagging 12670s — /);
+    expect(h.logged).toContain('lag probe: sleep check failed — Command failed: wevtutil (timed out)');
+    await step(65_000);
+    expect(h.posted[1]).toMatch(/^spine recovered after /);
+    h.probe.stop();
+  });
+
+  it('after a 💤, a real lag in a later sample still alerts (samples wait behind a slow event-log read)', async () => {
+    const h = harness();
+    h.logMs = 7_000;
+    h.probe.start();
+    h.sleeps = [Date.now() + 5_000 + GAP + 2_000];
+    await sleepThrough(h);
+    await step(60_000);
+    expect(h.posted).toEqual([expect.stringMatching(/^💤 was asleep 3h31m /)]);
+    h.lag = 19_000;
+    await step(5_000 + 7_000);
+    expect(h.posted).toHaveLength(2);
+    expect(h.posted[1]).toMatch(/^spine lagging 19s — /);
     h.probe.stop();
   });
 });
@@ -205,6 +292,21 @@ describe('lag probe: wired into the spine', () => {
     expect(h.probe.slowest()[0]).toEqual({ name: 'transcript', chat: 'Favel', ms: 2_500 });
     expect(names).toEqual(expect.arrayContaining(['classify@Favel', 'refresh@-', 'config@-']));
     expect(cb).toBe(null);   // never started: handleInbound alone drives it
+  });
+});
+
+describe('sleptBetween: the Windows System log', () => {
+  it('Kernel-Power 506/507 or Power-Troubleshooter 1 inside [from, to] → asleep; other platforms never ask', async () => {
+    const calls = [];
+    const exec = async (cmd, args) => { calls.push([cmd, ...args]); return calls.length === 1 ? 'Event[0]:\r\n  Log Name: System\r\n' : ''; };
+    const from = Date.UTC(2026, 9, 20, 8, 7, 42), to = Date.UTC(2026, 9, 20, 11, 38, 55);
+    expect(await sleptBetween(from, to, { platform: 'win32', exec })).toBe(true);
+    expect(await sleptBetween(from, to, { platform: 'win32', exec })).toBe(false);
+    expect(calls[0].slice(0, 3)).toEqual(['wevtutil', 'qe', 'System']);
+    expect(calls[0][3]).toContain("(Provider[@Name='Microsoft-Windows-Kernel-Power'] and (EventID=506 or EventID=507)) or (Provider[@Name='Microsoft-Windows-Power-Troubleshooter'] and EventID=1)");
+    expect(calls[0][3]).toContain("TimeCreated[@SystemTime>='2026-10-20T08:07:42.000Z' and @SystemTime<='2026-10-20T11:38:55.000Z']");
+    expect(await sleptBetween(from, to, { platform: 'linux', exec })).toBe(false);
+    expect(calls).toHaveLength(2);
   });
 });
 

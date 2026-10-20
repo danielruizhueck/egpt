@@ -5,6 +5,7 @@
 // threshold_ms → ONE line to the logging group with what the process can see without a debug port.
 // Re-posted at most every 10 min while it lasts; one "recovered" line after a clean minute.
 // A one-line baseline goes to the node log every 5 min.
+// A gap the node slept through (wall clock ≫ monotonic, or a Windows standby in the System log) → one 💤 line.
 import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
 import { cpus as osCpus, freemem, totalmem } from 'node:os';
 import { execFile } from 'node:child_process';
@@ -16,7 +17,8 @@ const SUMMARY_MS = 5 * 60_000;
 const SLOWEST = 5;
 
 const dur = (ms) => (ms < 1000 ? `${Math.round(ms)}ms` : ms < 10_000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms / 1000)}s`);
-const span = (ms) => (ms < 60_000 ? dur(ms) : `${Math.round(ms / 60_000)}m`);
+const span = (ms) => (ms < 60_000 ? dur(ms) : ms < 3_600_000 ? `${Math.round(ms / 60_000)}m` : `${Math.floor(ms / 3_600_000)}h${Math.floor(ms / 60_000) % 60}m`);
+const hm = (ms) => new Date(ms).toTimeString().slice(0, 5);
 const pct = (x) => `${Math.round(x || 0)}%`;
 const mb = (b) => `${Math.round(b / 2 ** 20)}MB`;
 const gb = (b) => (b / 2 ** 30).toFixed(1);
@@ -55,6 +57,13 @@ export async function topProcesses({ platform = process.platform, exec = run } =
     : parsePs(await exec('ps', ['-Ao', 'pcpu=,comm=']));
   return all.sort((a, b) => b.pct - a.pct).slice(0, 3);
 }
+// Windows keeps the loop's clock running through standby: did the System log record one in [from, to]?
+export async function sleptBetween(from, to, { platform = process.platform, exec = run } = {}) {
+  if (platform !== 'win32') return false;
+  const at = (ms) => new Date(ms).toISOString();
+  const q = `*[System[((Provider[@Name='Microsoft-Windows-Kernel-Power'] and (EventID=506 or EventID=507)) or (Provider[@Name='Microsoft-Windows-Power-Troubleshooter'] and EventID=1)) and TimeCreated[@SystemTime>='${at(from)}' and @SystemTime<='${at(to)}']]]`;
+  return /^Event\[/m.test(await exec('wevtutil', ['qe', 'System', `/q:${q}`, '/c:1', '/f:text']));
+}
 
 // THE INTAKE CAP (spine.mjs lanes): how many chats' fast phases run at once, from the last sample.
 // A quarter of it when memory runs low or the machine or the loop is busy, one past the edge.
@@ -74,12 +83,14 @@ export function createLagProbe({
   note = () => {},              // the node log
   backlog = () => ({}),         // () => ({ fast: { queueDepth, oldestMs }, turns: [[convKey, n]] })
   now = () => Date.now(),
+  mono = () => performance.now(),   // stands still while Linux/macOS sleep
   loop: loopIn = null,          // { sample, summary, stop }; createLoopDelay() at start
   cpuUsage = () => process.cpuUsage(),
   elu = (a, b) => performance.eventLoopUtilization(a, b),
   cpus = osCpus,
   memory = () => ({ rss: process.memoryUsage.rss(), free: freemem(), total: totalmem() }),
   top = topProcesses,
+  sleepLog = sleptBetween,      // (from, to) => Promise<bool>
   setTimeout: setT = globalThis.setTimeout,
   clearTimeout: clearT = globalThis.clearTimeout,
 } = {}) {
@@ -154,9 +165,9 @@ export function createLagProbe({
 
   // --- the sample ---
   let lagging = null;           // { since, postedAt, worst, clearSince }
-  let fastMax = 0, summaryAt = 0, timer = null, loop = null, last = null;
+  let fastMax = 0, summaryAt = 0, timer = null, loop = null, last = null, prev = null, ruling = Promise.resolve();
   function sample() {
-    const t = now();
+    const t = now(), m = mono();
     const l = loop.sample();
     const fast = backlog()?.fast ?? {};
     fastMax = Math.max(fastMax, fast.queueDepth ?? 0);
@@ -164,9 +175,17 @@ export function createLagProbe({
     const { free, total } = memory();
     last = { cpu: sys.node.pct, busy: sys.busy, free, total };
     const lag = Math.max(l.max, fast.oldestMs ?? 0);
+    const gap = { from: prev.t, slept: t - prev.t - (m - prev.m) };
+    prev = { t, m };
+    ruling = ruling.then(() => judge(t, lag, l, sys, gap)).catch((e) => note(`lag probe: ${e?.message ?? e}`));
+    if (t - summaryAt >= SUMMARY_MS) summarize(t);
+  }
+  // In sample order: a sample waits behind the previous one's sleep check.
+  async function judge(t, lag, l, sys, gap) {
     const fire = (head) => alert(head, l, sys).catch((e) => note(`lag probe: ${e?.message ?? e}`));
     if (lag >= knob('threshold_ms')) {
       if (!lagging) {
+        if (await asleep(t, gap)) return post(`💤 was asleep ${span(t - gap.from)} (${hm(gap.from)} → ${hm(t)})`);
         lagging = { since: t, postedAt: t, worst: lag, clearSince: null };
         fire(`spine lagging ${dur(lag)}`);
       } else {
@@ -184,7 +203,10 @@ export function createLagProbe({
         lagging = null;
       }
     }
-    if (t - summaryAt >= SUMMARY_MS) summarize(t);
+  }
+  async function asleep(t, { from, slept }) {
+    if (slept >= knob('threshold_ms')) return true;
+    try { return await sleepLog(from, t); } catch (e) { note(`lag probe: sleep check failed — ${e?.message ?? e}`); return false; }
   }
   function summarize(t) {
     const l = loop.summary();
@@ -208,6 +230,7 @@ export function createLagProbe({
     loop = loopIn ?? createLoopDelay();
     spineCpu.reset(); busy.reset(); nodeCpu.reset();
     summaryAt = now();
+    prev = { t: summaryAt, m: mono() };
     arm();
   }
   function stop() {
