@@ -36,9 +36,14 @@ import { _resetPromotions, ECHO_MARKER } from '../src/incoming-media.mjs';
 import { echoRank } from '../src/spine/echo-priority.mjs';
 import { addressed, createRouter } from '../src/spine/router.mjs';
 import { buildTranscriptionPipeline } from '../src/transcription-pipeline.mjs';
-import { makeOutbound } from '../src/spine/sender.mjs';
+import { makeOutbound, createSender } from '../src/spine/sender.mjs';
 import { boot, makePeerMouth } from '../src/spine/boot.mjs';
-import { emptyState } from '../src/conversations-state.mjs';
+import { emptyState, ensureContact, patchContact } from '../src/conversations-state.mjs';
+import { createBeeperBridgePort } from '../src/bridges/beeper-port.mjs';
+import { shortChatId } from '../src/bridges/chat-id.mjs';
+import { createCommands } from '../src/spine/commands.mjs';
+import { createReplyActions } from '../src/spine/reply-actions.mjs';
+import { superChannelAlive } from '../src/spine/gating.mjs';
 import { startTranscriptorServer } from '../src/tools/transcriptor.mjs';
 import { startSynthesizerServer } from '../src/tools/synthesizer.mjs';
 
@@ -70,7 +75,8 @@ async function startFakeBeeper() {
   const chatGets = [];        // GET /v1/chats/:id served (chat info + the roster it carries) — lets a test prove the membership cache never re-asks
   // stuckCursor models a BROKEN server that re-serves page 1 forever with hasMore:true
   // (the cursor never advances) — the page walk must not spin on it.
-  const chatsOpts = { stuckCursor: false };
+  // unlisted: chats the GET answers but the list leaves out — a group Beeper does not list until it has a message.
+  const chatsOpts = { stuckCursor: false, unlisted: new Set() };
   // accountsDelayMs models a SLOW /v1/accounts answer — what "under full parallel load"
   // does to the startup fetch. It is the deterministic stand-in for the load that used to
   // make this file race a sleep (see the startupReady test below).
@@ -185,7 +191,7 @@ async function startFakeBeeper() {
       const chatList = req.url.match(/^\/v1\/chats(?:\?(.*))?$/);
       if (req.method === 'GET' && chatList) {
         chatListGets += 1;
-        const all = [...chats.entries()].map(([id, c]) => ({ id, ...c }));
+        const all = [...chats.entries()].filter(([id]) => !chatsOpts.unlisted.has(id)).map(([id, c]) => ({ id, ...c }));
         const cursor = new URLSearchParams(chatList[1] ?? '').get('cursor');
         const start = (cursor && !chatsOpts.stuckCursor) ? all.findIndex((c) => c.id === cursor) + 1 : 0;
         const page = all.slice(start, start + CHATS_PER_PAGE);
@@ -1705,21 +1711,6 @@ describe('beeper bridge', () => {
     expect(bridge.getChatSlug(CHAT('room9'))).toBe('dando-ruiz');
   });
 
-  it('resolveChatIdByTitle — the /join+/split opener finder: exact title, accountID-scoped, SHORT id, null when absent', async () => {
-    // A group has a DIFFERENT room per account; the secondary surfaces the new group under the SAME
-    // title but its own id. The opener resolves that id by title (scoped to the group's network).
-    fake.chats.set(CHAT('room9'), { title: 'egpt join de Proyecto X', type: 'group', isMuted: false, accountID: 'whatsapp' });
-    fake.chats.set(CHAT('room-tg'), { title: 'egpt join de Proyecto X', type: 'group', isMuted: false, accountID: 'telegram' });
-    const { bridge } = await startBridge();
-    // exact title, scoped to the account the group lives on → that account's SHORT room id
-    expect(await bridge.resolveChatIdByTitle('egpt join de Proyecto X', { accountID: 'whatsapp' })).toBe('room9');
-    // the SAME title on another account is not matched when the scan is scoped
-    expect(await bridge.resolveChatIdByTitle('egpt join de Proyecto X', { accountID: 'telegram' })).toBe('room-tg');
-    // no chat by that title yet → null (the handler polls, then falls back to the primary)
-    expect(await bridge.resolveChatIdByTitle('nope not here', { accountID: 'whatsapp' })).toBe(null);
-    expect(await bridge.resolveChatIdByTitle('', { accountID: 'whatsapp' })).toBe(null);
-  });
-
   it('default verdict never surfaces: no resolver wired → transcribes but no 👂', async () => {
     const { incoming } = await startBridge();
     fake.emit({ type: 'message.upserted', entries: [liveMsg({ text: null, type: 'VOICE', attachments: [voiceAtt()] })] });
@@ -2248,7 +2239,7 @@ describe('beeper bridge — a reaction placed by an account this node speaks thr
     fake.emit({ type: 'message.upserted', entries: [reacted(post, '@anrodriguez:beeper.com', '❤️')] });
     await waitFor(() => s.fed.some((f) => f.isReaction));
     const r = s.fed.find((f) => f.isReaction);
-    expect(r).toMatchObject({ replyToBeing: 'e', replyToBot: true, atEAnywhere: false });
+    expect(r).toMatchObject({ replyToBeing: 'e', replyToNode: 'kg', replyToBot: true, atEAnywhere: false });
     expect(r.fromNode).toBeUndefined();
     await s.settled();
     expect(s.recorded.find((ev) => ev.kind === 'reaction')).toMatchObject({ fromNode: null, body: 'reacted ❤️ to #26460 "🐶 e: listo"' });
@@ -2650,6 +2641,7 @@ describe('beeper bridge — a quote-reply to a being\'s post names that being (o
     fake.emit(quoteReply('peer-1', 're peer'));
     const m = await arrival(incoming, 're peer');
     expect(m.from.replyToBeing ?? null).toBe(null);   // peer-node frame fails the node check → names nobody here
+    expect(m.from.replyToNode).toBe('do');            // …but says whose it is: the router addresses it there
     expect(m.from.replyToBot).toBe(false);            // …so a bare reply does not wake E (mention rules unchanged)
     expect(m.from.replyToId).toBe('peer-1');
   });
@@ -2700,10 +2692,11 @@ describe('beeper bridge — a quote-reply to a being\'s post names that being (o
       { id: '2', text: `el primo del día es 1637${encodeNodeSignature('kg')}` },
       { id: '3', text: `🤝 don: aquí${encodeNodeSignature('do', 'egpt')}` },   // a co-account spine's being: that spine's to wake
     ]);
-    for (const id of ['1', '2', '3']) {
+    for (const [id, node] of [['1', null], ['2', 'kg'], ['3', 'do']]) {
       fake.emit(quoteReply(id, `re ${id}`));
       const m = await arrival(incoming, `re ${id}`);
       expect(m.from.replyToBeing ?? null, id).toBe(null);
+      expect(m.from.replyToNode, id).toBe(node);
       expect(m.from.replyToBot, id).toBe(false);
       expect(m.from.replyToId, id).toBe(id);
     }
@@ -2833,6 +2826,19 @@ describe('beeper bridge — a streamed reply finishes to exactly the frame it wa
     await handle.finish('🌉kg 🤝 don: hola ✅ 💸');
     expect(handle.delivered).toBe(true);
     expect(fake.edits.map((e) => e.text)).toEqual(['🌉kg 🤝 don: hola ✅ 💸']);
+  });
+
+  // A limb-only turn's placeholder (operator 2026-10-19): deleted by its confirmed id, in the room it opened in.
+  it('delete() removes the placeholder by its confirmed id in its own room; a finish after it edits nothing', async () => {
+    const chat = CHAT('chat-1');
+    const { bridge } = await startBridge();
+    const handle = bridge.startStreamMessage('⏳ Thinking…', { chatId: chat });
+    expect(await handle.delete()).toBe(true);
+    const placeholder = fake.posts.find((p) => p.text === '⏳ Thinking…');
+    expect(fake.deletes).toEqual([{ chatID: chat, messageID: placeholder.confirmedID }]);
+    expect(handle.confirmedId).toBe(null);
+    await handle.finish('✓');
+    expect(fake.edits).toHaveLength(0);
   });
 });
 
@@ -3945,31 +3951,6 @@ describe('beeper bridge — raw chat payloads (crossAccountChatKey needs the ros
     expect(await bridge.chatRaw('boom')).toBeNull();
   });
 
-  // chatOtherPartyId: the 1:1 counterparty's bridged-puppet id (the super-channel invite). The
-  // viewing account's own entry is a :beeper.com matrix id, so "the sole :beeper.local member" IS
-  // the other party, with no self-detection. A group has no single other party → null.
-  it('chatOtherPartyId returns the SOLE :beeper.local member of a single chat (self is :beeper.com)', async () => {
-    fake.chats.set(CHAT('dm'), { title: 'An & Bea', type: 'single', isMuted: false, accountID: 'whatsapp',
-      participants: { items: [{ id: '@anrodriguez:beeper.com', isSelf: true }, { id: '@whatsapp_lid-5:beeper.local', phoneNumber: '+15551112222' }] } });
-    const { bridge } = await startBridge();
-    expect(await bridge.chatOtherPartyId('dm')).toBe('@whatsapp_lid-5:beeper.local');
-  });
-
-  it('chatOtherPartyId is null for a group (no single "other party")', async () => {
-    fake.chats.set(CHAT('grp'), { title: 'Familia', type: 'group', isMuted: false, accountID: 'whatsapp', participants: roster });
-    const { bridge } = await startBridge();
-    expect(await bridge.chatOtherPartyId('grp')).toBeNull();
-  });
-
-  it('chatOtherPartyId is null when the roster is absent or carries no :beeper.local member', async () => {
-    fake.chats.set(CHAT('noroster'), { title: 'Solo', type: 'single', isMuted: false, accountID: 'whatsapp' });
-    fake.chats.set(CHAT('selfonly'), { title: 'Solo', type: 'single', isMuted: false, accountID: 'whatsapp',
-      participants: { items: [{ id: '@anrodriguez:beeper.com', isSelf: true }] } });
-    const { bridge } = await startBridge();
-    expect(await bridge.chatOtherPartyId('noroster')).toBeNull();
-    expect(await bridge.chatOtherPartyId('selfonly')).toBeNull();
-  });
-
   it('listChatsRaw serves ONE page by default and the whole account only when asked — the walk is opt-in', async () => {
     // The fake page size is 2 (live it is 25). The receiving half of the mouth reads page one
     // first and walks only when nothing keys alike, so this bound is the feature's cost promise.
@@ -4121,6 +4102,42 @@ describe('the install moved: the redial asks WHERE before it dials', () => {
   });
 });
 
+// BEEPER RESTARTING FOR UPDATE (operator 2026-10-19, /update beeper): one state on the bridge, set
+// while the update tool restarts Beeper. Calls wait instead of failing, the socket is not redialled,
+// and clearing it redials at once with the backoff reset.
+describe('Beeper restarting for update: the bridge waits, then redials at once', () => {
+  it('a send made while it is set waits and then lands — nothing fails, nothing is reported lost', async () => {
+    const { bridge } = await startBridge();
+    await bridge.setBeeperRestart(true);
+    let done = false;
+    const sending = sendSettled(bridge, 'held for the restart', { chatId: CHAT('chat-1') }).then(() => { done = true; });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(fake.posts).toHaveLength(0);
+    expect(done).toBe(false);
+    await bridge.setBeeperRestart(false);
+    await sending;
+    expect(fake.posts.map((p) => p.text)).toEqual(['held for the restart']);
+    expect(bridge.sendFailure(CHAT('chat-1'))).toBe(null);
+  });
+
+  // Budget note: waits out the REAL 3s RECONNECT_MIN_MS to show no redial happened while set.
+  it('a socket closed while it is set is not redialled; clearing it redials at once and asks WHERE first', { timeout: 20_000 }, async () => {
+    let asked = 0;
+    const { bridge } = await startBridge({ rediscover: async () => { asked += 1; return null; } });
+    await bridge.setBeeperRestart(true);
+    const subsBefore = fake.subscribed();
+    fake.dropSockets();                                  // Beeper stops for the install
+    await new Promise((r) => setTimeout(r, 3_500));
+    expect(fake.subscribed()).toBe(subsBefore);
+    expect(asked).toBe(0);
+    const t0 = Date.now();
+    await bridge.setBeeperRestart(false);                // Beeper is back
+    await waitFor(() => fake.subscribed() > subsBefore, 2_500);
+    expect(Date.now() - t0).toBeLessThan(2_500);         // not a backoff step later
+    expect(asked).toBe(1);
+  });
+});
+
 // 🎧 LISTENING MARK (operator 2026-09-15: "put a reaction on voice message when listening, then
 // remove reaction when done" / "bridge can react to ack, not model. model can't delete").
 //
@@ -4157,12 +4174,13 @@ describe('beeper bridge — 🎧 listening mark: placed where the decode runs, t
     profile, ownTranscriptor: own, transcribeViaEndpoint: remote, reachable: async () => true, cli, residentServing: () => null,
   });
 
-  // The MOUTH: a connection on the other account, holding ITS OWN copy of the note (its own id 2404).
+  // The MOUTH: a connection on the other account, holding ITS OWN copy of the note (its own id 2404),
+  // as it noted it arriving.
   function mouthBridge({ holdsNote = true } = {}) {
     const reactions = [], unreactions = [];
     return {
       reactions, unreactions,
-      async listMessagesRaw() { return holdsNote ? [{ id: '2404', timestamp: NOTE_TS, type: 'VOICE', text: null, attachments: [listedAtt('dolly-egpt_2404')] }] : []; },
+      recentMessages() { return holdsNote ? [{ id: '2404', timestamp: NOTE_TS, type: 'VOICE', text: null, attachments: [listedAtt('dolly-egpt_2404')] }] : []; },
       async react(chatId, msgId, emoji) { reactions.push({ chatId, msgId, emoji }); return true; },
       async unreact(chatId, msgId, emoji) { unreactions.push({ chatId, msgId, emoji }); return true; },
     };
@@ -4764,13 +4782,13 @@ describe('a node that SLEPT is not a node that just started — the backlog cuto
       fake.emit(said(ID('n2'), 'bueno, mañana te cuento', h(2)));
       fake.emit(said(ID('c1'), 'buenas noches a todos', h(3), CHATTER));   // mention mode, nobody addressed
       const plain = (p) => stripNodeSignature(p.text ?? '');
-      const notices = () => fake.posts.filter((p) => plain(p).endsWith('type /recap to list them'));
+      const notices = () => fake.posts.filter((p) => plain(p).endsWith('type /e recap to list them'));
       await waitFor(() => notices().length > 0, 15_000);
       await new Promise((r) => setTimeout(r, 1_500));        // the chatter chat settled at the same moment
-      expect(notices().map((p) => ({ chatID: p.chatID, text: plain(p) }))).toEqual([{ chatID: GROUP, text: '2 messages in the backlog. type /recap to list them' }]);
+      expect(notices().map((p) => ({ chatID: p.chatID, text: plain(p) }))).toEqual([{ chatID: GROUP, text: '2 messages in the backlog. type /e recap to list them' }]);
       expect(node.turns).toEqual([]);                        // told, not answered
 
-      fake.emit(said(ID('recap'), '/recap', node.now() + 1_000));
+      fake.emit(said(ID('recap'), '/e recap', node.now() + 1_000));
       await waitFor(() => fake.posts.some((p) => plain(p).startsWith('2 messages in the backlog:')));
       const listing = plain(fake.posts.find((p) => plain(p).startsWith('2 messages in the backlog:'))).split('\n');
       expect(listing).toContain(`An (${hhmm(h(1))}): @e ¿me escuchas?`);
@@ -4845,6 +4863,112 @@ describe('createGroup (Beeper async group-create)', () => {
     const r = await bridge.createGroup(OPTS);
     expect(r).toBeNull();
     expect(fake.chatGets.length).toBe(before);   // it never polled a chat GET
+  });
+});
+
+// ── A CHAT ID IS ADDRESSED AS IS (operator 2026-10-19, live on reve: "do NOT look by title, we had
+// already agreed to use stable chat-ids"). The automatic SI+ group was created, then its opener and
+// E's reply were DROPPED: the send searched the chat list for the id, and Beeper does not list a new
+// group until it has a message. An id we hold goes straight to the API; only a NAME is searched for.
+describe('beeper bridge — a chat id is addressed as is, never through the chat list', () => {
+  const NEW = 'aheLwZ0u6CpjePxSdbG9';   // the live id
+  const ORIGIN = 'origin';
+  // The live create: the POST 404s with the new id, the first GET 404s, the second 200s — and the
+  // chat list never shows the group.
+  const asyncCreate = (participants = [{ id: '@an:beeper.local', isSelf: true }, { id: '@whatsapp_lid-lulu:beeper.local', phoneNumber: '+34600000000' }]) => {
+    fake.createChatOpts.status = 404;
+    fake.createChatOpts.body = JSON.stringify({ message: `Chat not found: ${CHAT(NEW)}`, code: 'NOT_FOUND' });
+    let gets = 0;
+    fake.chats.set(CHAT(NEW), () => { gets += 1; if (gets < 2) throw Object.assign(new Error('Chat not found'), { status: 404 }); return { id: CHAT(NEW), title: 'SI+Origen', type: 'group', accountID: 'whatsapp', participants: { items: participants } }; });
+    fake.chatsOpts.unlisted.add(CHAT(NEW));
+  };
+
+  it('REPRODUCE: a send to an id the chat list does not hold goes out, with no list call', async () => {
+    fake.chats.set(CHAT('room-a'), { title: 'A', type: 'single', isMuted: false, accountID: 'whatsapp' });
+    const { bridge } = await startBridge();
+    const before = fake.chatListGets();
+    const r = await sendSettled(bridge, 'hola', { chatId: NEW });
+    expect(r?.ok).toBe(true);
+    expect(fake.posts.map((p) => p.chatID)).toEqual([CHAT(NEW)]);
+    expect(fake.chatListGets() - before).toBe(0);
+  });
+
+  it('every path that takes a chat uses the id as is: stream, quoted reply, reaction, media, sendAndGetId, message list', async () => {
+    const { bridge } = await startBridge();
+    const before = fake.chatListGets();
+    const h = bridge.startStreamMessage('⏳', { chatId: NEW });
+    await h.finish('la respuesta');
+    expect(h.delivered).toBe(true);
+    await sendSettled(bridge, 'citando', { chatId: NEW, replyToMessageID: '7' });
+    expect(await bridge.sendReaction(NEW, '7', '👍')).toBe(true);
+    const pic = join(stateDir, 'pic.png');
+    writeFileSync(pic, 'png-bytes');
+    const media = await bridge.sendMedia(NEW, pic, { caption: 'foto' });
+    await media?.confirmedId;
+    expect(media?.ok).toBe(true);
+    expect(await bridge.sendAndGetId('con id', { chatId: NEW })).toBeTruthy();
+    expect((await bridge.listMessagesRaw(NEW)).length).toBeGreaterThan(0);
+    expect(fake.posts.every((p) => p.chatID === CHAT(NEW))).toBe(true);
+    expect(fake.posts.find((p) => p.text === 'citando')?.replyToMessageID).toBe('7');
+    expect(fake.edits.at(-1)).toMatchObject({ chatID: CHAT(NEW), text: 'la respuesta' });
+    expect(fake.reactions.at(-1)).toMatchObject({ chatID: CHAT(NEW), reactionKey: '👍' });
+    expect(fake.chatListGets() - before).toBe(0);
+  });
+
+  it('REPRODUCE (the live SI+ drop): an automatic side group just created — the opener and E\'s reply and /reply land in it by id', async () => {
+    asyncCreate();
+    fake.chats.set(CHAT(ORIGIN), { title: 'Origen', type: 'group', isMuted: false, accountID: 'whatsapp', participants: { items: [{ id: '@an:beeper.local', isSelf: true }, { id: '@whatsapp_lid-lulu:beeper.local', phoneNumber: '+34600000000' }] } });
+    const { bridge } = await startBridge({ sleep: async () => {} });
+    const port = await createBeeperBridgePort({}, { start: async () => bridge });
+    let st = ensureContact(emptyState(), 'whatsapp', ORIGIN, { pushedName: 'Origen' }).state;
+    st = patchContact(st, 'whatsapp', ORIGIN, { reply_in_side_group: true });
+    const logs = [];
+    const commands = createCommands({
+      getConfig: () => ({ node_name: 'kg', node_role: 'primary', beeper: { primary: { phone: '+16468217865' } } }),
+      send: async () => {}, loadState: async () => st, writeState: async (s) => { st = s; }, defaultKey: 'e',
+      forkBridge: {
+        createGroup: (o) => port.createGroup(o),
+        postReply: (chatId, text, replyTo, { canary = null } = {}) => port.send(chatId, text, { replyTo, canary }),
+        chatAccountId: async () => 'whatsapp',
+        chatRaw: (id) => port.chatRaw(id),
+        chatTitle: async () => null,
+        awaitMouthMessage: async () => null,
+      },
+      onLog: (m) => logs.push(m),
+    });
+    const at = await commands.autoSideGroup({ chatId: ORIGIN, surface: 'whatsapp', chatName: 'Origen', senderId: '@whatsapp_lid-lulu:beeper.local', senderName: 'Lulu', msgId: '7', body: 'e eso es cierto?' });
+    expect(at).toBe(NEW);
+    expect(fake.posts.map((p) => p.chatID)).toEqual([CHAT(NEW)]);   // the opener
+    expect(logs.some((m) => m.includes('opener posted by the primary'))).toBe(true);
+
+    const out = createSender({ bridge: port }).open(at, { being: 'e' });
+    await out.finish({ text: 'sí, es cierto' });
+    expect(fake.edits.filter((e) => e.chatID === CHAT(NEW)).map((e) => e.text).join('\n')).toContain('sí, es cierto');
+
+    const actions = createReplyActions({ bridge: port });
+    const { ran } = await actions.execute(actions.parse('/reply #7 eso', { chatId: at }).run, [], { chatId: at, surface: 'whatsapp' }, { being: 'e' });
+    expect(ran).toHaveLength(1);
+    expect(fake.posts.at(-1)).toMatchObject({ chatID: CHAT(NEW), replyToMessageID: '7' });
+    expect(fake.posts.every((p) => p.chatID === CHAT(NEW))).toBe(true);
+  });
+
+  it('the 404 the create poll sees before the group syncs is never read as "the group is gone"', async () => {
+    asyncCreate();
+    const { bridge } = await startBridge({ sleep: async () => {} });
+    const r = await bridge.createGroup({ accountID: 'whatsapp', participantIDs: ['@whatsapp_lid-lulu:beeper.local'], type: 'group', title: 'SI+Origen' });
+    expect(shortChatId(r?.chatID)).toBe(NEW);
+    expect(await bridge.chatRaw(NEW)).toBeTruthy();
+    expect(await superChannelAlive(NEW, { chatRaw: bridge.chatRaw, config: {} })).not.toBe(false);
+  });
+
+  it('a NAME is still looked up in the chat list (regression lock)', async () => {
+    fake.chats.set(CHAT('room-named'), { title: 'Grupo Con Nombre', type: 'group', isMuted: false, accountID: 'whatsapp' });
+    const { bridge } = await startBridge();
+    const before = fake.chatListGets();
+    const r = await sendSettled(bridge, 'por nombre', { chatId: 'Grupo Con Nombre' });
+    expect(r?.chatId).toBe('room-named');
+    expect(fake.posts.at(-1).chatID).toBe(CHAT('room-named'));
+    expect(fake.chatListGets() - before).toBeGreaterThan(0);
   });
 });
 
@@ -5009,11 +5133,25 @@ describe('beeper bridge — recentMessages / awaitMessage', () => {
     expect(fake.msgListGets()).toBe(gets);
   });
 
+  it('with no chat: the arrivals of every chat (a side group\'s opener copy that came before anyone asked)', async () => {
+    const { bridge, incoming } = await startBridge();
+    fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: 'n-1', text: 'uno' }), { ...liveMsg({ id: 'n-2', text: 'dos' }), chatID: CHAT('room-r') }] });
+    await waitFor(() => incoming.length === 2);
+    expect(bridge.recentMessages(null).map((m) => [m.id, m.chatID])).toEqual([['n-1', 'chat-1'], ['n-2', 'room-r']]);
+  });
+
   it('awaitMessage resolves on the next matching arrival, or null at the timeout', async () => {
     const { bridge } = await startBridge();
     const waiting = bridge.awaitMessage(CHAT('chat-1'), (m) => m.text === 'the one', 5000);
     fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: 'w-1', text: 'not it' }), liveMsg({ id: 'w-2', text: 'the one' })] });
     expect((await waiting)?.id).toBe('w-2');
     expect(await bridge.awaitMessage(CHAT('chat-1'), () => true, 20)).toBe(null);
+  });
+
+  it('awaitMessage with no chat resolves on a matching arrival in ANY chat (a side group\'s opener copy names its room)', async () => {
+    const { bridge } = await startBridge();
+    const waiting = bridge.awaitMessage(null, (m) => m.text === 'the one', 5000);
+    fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: 'a-1', text: 'not it' }), { ...liveMsg({ id: 'a-2', text: 'the one' }), chatID: CHAT('room-r') }] });
+    expect(await waiting).toMatchObject({ id: 'a-2', chatID: 'room-r' });
   });
 });

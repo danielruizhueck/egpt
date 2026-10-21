@@ -29,6 +29,9 @@
 # --user-data-dir, quit it, then hand that profile over:
 #   .\setup\adopt-beeper-profile.ps1 -ServiceName egpt-beeper-secondary -From <that dir>
 #
+# The user who runs this (carried through UAC as -GrantSid) is granted start/stop on THIS service
+# (setup\beeper-desktop.ps1), so eGPT can update Beeper later without administrator.
+#
 # Remove:  nssm remove <ServiceName> confirm
 #
 # ASCII ONLY: PowerShell 5.1 decodes a BOM-less UTF-8 script as ANSI, so one em-dash is a
@@ -42,6 +45,8 @@ param(
   # AUTO for the Desktop that must be up BEFORE anyone logs in; MANUAL for one the logon
   # flip owns, so Windows does not start it behind the flip's back at boot.
   [ValidateSet('auto','manual','disabled')][string] $StartMode = 'auto',
+  # The eGPT user, granted start/stop on this service: whoever ran this, before any UAC prompt.
+  [string] $GrantSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value,
   [switch] $Start,
   [switch] $Pause
 )
@@ -50,6 +55,7 @@ $ErrorActionPreference = 'Stop'
 
 # The names and the one-line labels live in ONE file, shared with rename-beeper-s0-service.ps1.
 . (Join-Path $PSScriptRoot 'beeper-s0-naming.ps1')
+. (Join-Path $PSScriptRoot 'beeper-desktop.ps1')
 
 $id = [Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -58,6 +64,7 @@ if (-not (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole([Securit
     if ($kv.Value -is [switch]) { if ($kv.Value.IsPresent) { $a += "-$($kv.Key)" } }
     else { $a += @("-$($kv.Key)", "`"$($kv.Value)`"") }
   }
+  if (-not $PSBoundParameters.ContainsKey('GrantSid')) { $a += @('-GrantSid', $GrantSid) }
   Write-Host "elevating..."
   Start-Process powershell -Verb RunAs -ArgumentList $a
   return
@@ -129,6 +136,10 @@ $startConst = @{ auto = 'SERVICE_AUTO_START'; manual = 'SERVICE_DEMAND_START'; d
 & $nssm set $ServiceName ObjectName LocalSystem        | Out-Null
 & $nssm set $ServiceName DisplayName (Get-BeeperS0DisplayName $ServiceName) | Out-Null
 & $nssm set $ServiceName Description (Get-BeeperS0Description $ServiceName) | Out-Null
+
+# The eGPT user may stop/start THIS service, so a Beeper update never needs UAC.
+Say "granting start/stop on $ServiceName to $GrantSid"
+Set-BeeperServiceAccess -Name $ServiceName -Sid $GrantSid
 
 Say "installed ($StartMode start). user-data-dir: $UserDataDir"
 Say "                    log: $(Join-Path $LogDir "$ServiceName.log")"

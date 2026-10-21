@@ -55,7 +55,7 @@ export function connectionsOf(cfg = {}) {
   // even false, just useless, because we held the working token and never tried it (live 2026-09-04).
   const rows = [];
   for (const [name, v] of Object.entries(b)) {
-    if (name === 'use' || !v || typeof v !== 'object') continue;
+    if (name === 'use' || name === 'auto_update' || !v || typeof v !== 'object') continue;
     const eps = Array.isArray(v.endpoints) && v.endpoints.length ? v.endpoints : null;
     const common = { account: v.account ?? null, ownerNode: v.owner_node ?? null, isUse: b.use === name };
     if (!eps) {

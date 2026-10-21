@@ -79,6 +79,11 @@ every second, exits **42**, and the daemon pulls, builds, respawns — then veri
 prod SHA and a heartbeat that advanced. Exit codes: **42** `/upgrade`, **43**
 `/restart`, **44** `/rewind`.
 
+**Typed in a chat, a command names a being (since 2026-10-19):** `/<handle> <command>` —
+`/e upgrade` runs on kg (E's node), `/d upgrade` on do; every other node records the line and
+does nothing. A bare `/upgrade` in a chat is ordinary text. The ingest box above and the editor
+shell (the node's own console) still take the bare line.
+
 **A deploy waits for turns in progress (since 2026-09-28).** `/upgrade` and `/restart`
 no longer exit on the spot: the spine keeps answering and exits the moment no turn is
 running, or after **30 minutes** regardless (logged loudly). While it waits it writes
@@ -112,7 +117,7 @@ in the node's logged-on session, as the operator (no elevation; the task is the 
 starts the task. A daemon refuses to start while a live spine still holds the profile
 (`state/spine.pid` + a fresh `alive.txt`) and says which pid. A turn in progress is cut.
 Done when `<profile>/config/logs/session1-daemon.log` shows a fresh
-`egpt-daemon up` with no `no chrome-host` line after it, and `/chrome <node>` logs
+`egpt-daemon up` with no `no chrome-host` line after it, and `/<handle> chrome` logs
 `launched "brain" Chrome … held by the daemon`. At start the new daemon kills any
 `--remote-debugging-pipe` Chrome left on a profile under `<profile>/chrome/profiles` (an orphan
 of the old spine); nothing else.

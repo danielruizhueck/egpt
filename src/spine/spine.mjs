@@ -112,6 +112,9 @@ import { cleanForSpeech } from '../speech-clean.mjs';
 // caller's local being (the turn key / cycle owner), untouched.
 const gateAs = (t, fallback) => t?.being ?? t?.mesh?.being ?? fallback;
 
+// An ambient 'on' turn still running this long opens its ⏳ train (operator 2026-10-18).
+const AMBIENT_OPEN_MS = 10_000;
+
 /**
  * Build the spine. Nothing starts until start(). All deps are injected so the
  * pipe is exercisable end-to-end against fakes.
@@ -163,6 +166,7 @@ export function createSpine({
   logToGroup = null,                   // optional (text) => Promise — boot's log_to_group poster (node-prefixed there). Liveness reports a being that did not answer whether its long background work is still needed. Null ⇒ the note is all there is.
   backgroundWork = null,               // optional () => [{ being, chatId, description, since }] — every warm session's live background tasks (boot: the pool's); the restart drain waits for them
   background = null,                   // optional registry (src/spine/background.mjs): pending voice notes at the ingestion point, agents mirrored on the tick
+  beeperUpdate = null,                 // optional (src/tools/beeper-update.mjs): its 6-hourly Beeper check rides the tick
   say = null,                          // optional ({ chatId, text, what }) => Promise<boolean> — boot's sayOnce, i.e. THE outbound placement (sender.mjs makeOutbound `say`), the same one the STOP confirmation and the lifecycle lines go through. The ONE thing the spine says on its own account: the loop guard's pause notice (operator 2026-09-20: "if the bridge pauses, it must emit warning in the channel with instructions on how to recover, instead of leaving everybody hanging"). Null (tests, a bare pipe) ⇒ a pause is logged and nothing is posted.
   // RECENT CONTEXT read seam (operator 2026-07-26) — `(chatId, {chatName, network}) =>
   // Promise<string|null>`, the conversation's transcript.md. THE SAME function boot
@@ -224,13 +228,6 @@ export function createSpine({
   // have ev.chatId's room at all and the send was DROPPED. Its one caller holds `ev`.
   // …and the MOUTH is asked too (2026-09-16): the attach is said through makeOutbound `say`.
   const outbound = makeOutbound({ bridge, bridgeOf, peerMouth, onLog: note });
-  // SI-STATE REACTION (2026-10-13): place ✅/❌ on the TRIGGERING message through the SAME outbound.react
-  // seam the steer 📩/👀 ack uses (turns.mjs placeReaction) — whichever mouth answers places it, keyed by
-  // the inbound's cross-account key. Best-effort: never throws, so a reaction fault cannot undo the reply.
-  async function placeSiReaction(to, ev, emoji) {
-    try { await outbound(to, ev.chatId).react(ev.msgId, emoji, () => ({ msgKey: ev.msgHash, timestamp: ev.msgTs }), 'si-state'); }
-    catch (e) { note(`si-state ${to}/${ev.chatId}: ${e?.message ?? e}`); }
-  }
   // The shared turn machinery, or our own private one (see the option's note above). Built with
   // the SAME bridge/bridgeOf pair `outbound` uses, because the steer-ack react it owns is one of
   // the spine's own direct bridge sends and must ride the acked being's connection.
@@ -239,7 +236,7 @@ export function createSpine({
   // conversations.yaml / rooms.yaml without the registry lock. Chats run at once now; commands do not.
   const inCommandOrder = makeSerialByKey();
   const ordered = (fn) => (...a) => inCommandOrder('commands', () => fn(...a));
-  if (commands) commands = new Proxy(commands, { get: (t, k) => ((k === 'run' || k === 'runPhrase') && typeof t[k] === 'function' ? ordered(t[k].bind(t)) : Reflect.get(t, k)) });
+  if (commands) commands = new Proxy(commands, { get: (t, k) => (k === 'run' && typeof t[k] === 'function' ? ordered(t[k].bind(t)) : Reflect.get(t, k)) });
   // LIVENESS (src/spine/liveness.mjs): a running turn and a being's background work stay visibly
   // alive in the chat; long background work is asked about through the wake path below.
   const liveness = createLiveness({ sender, brain, now: () => clock.now(), everyMs: livenessEveryMs, stopped: () => !!stopSwitch?.present(), labelOf, note, ask: (o) => wakeOnBackground(o), report: logToGroup });
@@ -468,11 +465,10 @@ export function createSpine({
     try { d = await gating.decide(to, ev, mention); }
     catch (e) { note(`dwell ${turnKey}: re-decide failed — ${e?.message ?? e}`); return; }
     if (d.mode !== 'auto' || !d.mayReply) { note(`dwell ${turnKey}: mode ${d.mode} — dwell dropped (no auto reply)`); return; }
-    const replyTo = ev.msgId ?? null;                 // quote UNIFORMLY — including auto (see openAndRunReply)
+    const at = d.replyChatId ?? null;                 // the chat's automatic SI+ group (see openAndRunReply)
+    const replyTo = at ? null : (ev.msgId ?? null);   // quote UNIFORMLY — including auto (see openAndRunReply)
     const ahead = bumpTrain(turnKey);
-    // CHUNK 2 super-channel routing: the reply goes to this conversation's super channel when it has
-    // one right now (gating.decide's live lookup), else the arrival chat — unchanged otherwise.
-    const out = sender.open(d.replyChatId ?? ev.chatId, { being: to, replyTo, auto: true, origin: ev.chatId });
+    const out = sender.open(at ?? ev.chatId, { being: to, replyTo, auto: true, origin: at ? null : ev.chatId });
     // `trigger` (operator 2026-09-11) — the handle-stripped dispatch line of the message that
     // armed this dwell. It is the BASE only when the drained cycle came back empty (a burst with
     // lines prompts with those verbatim), and each of those lines was already stripped on its way
@@ -598,7 +594,8 @@ export function createSpine({
     const rec = { since: new Date(d.since).toISOString(), busy: t.busy.map(([k]) => k), turns: t.n, cap: RESTART_DRAIN_CAP_MS, background };
     Promise.resolve().then(() => d.onWait?.(rec)).catch((e) => note(`drain: could not publish the drain state — ${e?.message ?? e}`));
   }
-  function drainForRestart(done, { onWait = null, force = false } = {}) {
+  // `purpose` names what waits in the log lines: /update beeper drains the same way and does not exit.
+  function drainForRestart(done, { onWait = null, force = false, purpose = 'restarting' } = {}) {
     if (restartDrain) {
       if (!force || restartDrain.force) { note('drain: already waiting for turns in flight — no second drain'); return; }
       restartDrain.force = true;   // the operator's override reaches the drain already waiting
@@ -613,10 +610,10 @@ export function createSpine({
     const bg = force ? [] : liveBackground(since);
     if (!t.n && !bg.length) { done(); return; }
     // NOT unref'd: while it waits, this timer is what keeps the process here to leave with 42/43.
-    restartDrain = { since, lastLog: since, done, onWait, force, turnsSince: since, noticeAt: since + RESTART_DRAIN_CAP_MS, bgSeenAt: bg.length ? since : null, timer: setIntervalFn(pollRestartDrain, RESTART_DRAIN_POLL_MS) };
+    restartDrain = { since, lastLog: since, done, onWait, force, purpose, turnsSince: since, noticeAt: since + RESTART_DRAIN_CAP_MS, bgSeenAt: bg.length ? since : null, timer: setIntervalFn(pollRestartDrain, RESTART_DRAIN_POLL_MS) };
     const what = [t.n && `${t.n} turn(s)`, bg.length && `${bg.length} background task(s)`].filter(Boolean).join(' and ');
     const who = [t.n && t.list, ...bg.map(bgLabel)].filter(Boolean).join('; ');
-    note(`drain: waiting for ${what} before restarting — ${who} (cap ${RESTART_DRAIN_CAP_MS / 60_000} min${bg.length ? ' for turns; background work has none — /restart force skips it' : ''}; new messages are still answered)`);
+    note(`drain: waiting for ${what} before ${purpose} — ${who} (cap ${RESTART_DRAIN_CAP_MS / 60_000} min${bg.length ? ' for turns; background work has none — /restart force skips it' : ''}; new messages are still answered)`);
     publishDrain(restartDrain, t, bg);
   }
   function pollRestartDrain() {
@@ -628,7 +625,7 @@ export function createSpine({
     const waited = now - d.since;
     if (!t.n && !bg.length) {
       if (d.bgSeenAt != null && now - d.bgSeenAt < RESTART_DRAIN_BG_SETTLE_MS) return;   // a finished task's wake may be on its way
-      endRestartDrain(`drain: nothing in flight after ${Math.round(waited / 1000)}s — restarting`); return;
+      endRestartDrain(`drain: nothing in flight after ${Math.round(waited / 1000)}s — ${d.purpose}`); return;
     }
     if (bg.length) {
       d.turnsSince = d.bgSeenAt = now;   // the turns' cap counts only while no background work holds the drain
@@ -638,7 +635,7 @@ export function createSpine({
         note(`drain: ${line}`);
         if (logToGroup) Promise.resolve(logToGroup(line)).catch((e) => note(`drain: logging group refused the line — ${e?.message ?? e}`));
       }
-    } else if (now - d.turnsSince >= RESTART_DRAIN_CAP_MS) { endRestartDrain(`drain: CAP — ${t.n} turn(s) STILL in flight after ${RESTART_DRAIN_CAP_MS / 60_000} min: ${t.list} — restarting ANYWAY; they die with this process`); return; }
+    } else if (now - d.turnsSince >= RESTART_DRAIN_CAP_MS) { endRestartDrain(`drain: CAP — ${t.n} turn(s) STILL in flight after ${RESTART_DRAIN_CAP_MS / 60_000} min: ${t.list} — ${d.purpose} ANYWAY${d.purpose === 'restarting' ? '; they die with this process' : ''}`); return; }
     if (now - d.lastLog < RESTART_DRAIN_LOG_MS) return;
     d.lastLog = now;
     note(`drain: still waiting after ${Math.round(waited / 1000)}s — ${[t.n && `${t.n} turn(s): ${t.list}`, bg.length && `${bg.length} background task(s): ${bg.map(bgLabel).join('; ')}`].filter(Boolean).join('; ')}`);
@@ -682,11 +679,9 @@ export function createSpine({
     timed('config', null, () => maybeApplyConfigChange({ mayRestart: false }));
     await timed('refresh', null, () => refreshConfig?.());
     const ev = built ?? identity.build(msg);   // built at arrival, to find the message's lane
-    // SI PEER-LINK (2026-10-13): a canary-stamped super-channel intro arriving in a side-group this
-    // node has no alias for yet links the SAME channel (commands.linkSuperChannel decodes ev.canary →
-    // its own base conversation → writes the super alias). BEFORE classify so this message's own routing
-    // already sees it; idempotent and a no-op on every message without an intro canary (ev.canary null).
-    await timed('link', ev, () => commands?.linkSuperChannel?.(ev));
+    // A side group's opener names it, its origin and its kind (ev.canary): a node that does not hold
+    // that group yet links it before this message is routed (commands.linkSideGroup). No canary → no-op.
+    await timed('link', ev, () => commands?.linkSideGroup?.(ev));
     // GUARD (C7.7): the channel is the CONVERSATION (surface + chatId). Resolved once here
     // for the safe-word + the loop counter inside classify; null when no guard is wired.
     //
@@ -808,10 +803,9 @@ export function createSpine({
   // in an auto chat. A context turn (send_to_egpt: always) runs a being but answers nobody, so it
   // does not count: a chat of chatter under a mention gate hears nothing about its backlog.
   async function wouldReachABeing(ev) {
-    // A phrase trigger (commands.phraseCommand) is command-like too — it runs a command, reaches no
-    // being — so it is excluded here exactly as the '/'-commands are, or a backlogged operator phrase
-    // would inflate the wake-notice count.
-    if (commands?.isCommand?.(ev) || commands?.phraseCommand?.(ev) || isEnvelope(ev) || isTransit(ev) || advice?.isAnswer?.(ev)) return false;
+    // A command (commands.commandOf, as classify reads it) — this node's or another's — reaches no being.
+    const cmd = commands?.commandOf?.(ev) ?? ev;
+    if (cmd.commandElsewhere || await commands?.isCommand?.(cmd) || isEnvelope(ev) || isTransit(ev) || advice?.isAnswer?.(ev)) return false;
     const { d } = await gateOf((await targetsOf(ev))[0], ev);
     return d.receives && d.mayReply && !(d.mode === 'auto' && ev.isSender);
   }
@@ -911,12 +905,21 @@ export function createSpine({
     // to the brain. Recorded like any inbound, then executed (lifecycle exits the
     // process; the daemon respawns). Runs before gating: a /restart works even in
     // a muted/mention chat.
-    if (commands?.isCommand?.(ev)) {
+    //
+    // A COMMAND NAMES ITS BEING (operator 2026-10-19): commands.commandOf reads `/<handle> <command>`
+    // (typed, or an alias's expansion) into the command line its gates decide, the being attached. A
+    // handle of another node's being: that node runs it; here it is recorded and prompts nobody. Not a
+    // command (a bare `/join` included) or not admitted → the line flows on as said. The record keeps
+    // the words as said (handleFast logs `ev`, never `cmd`).
+    const cmd = commands?.commandOf?.(ev) ?? ev;
+    if (cmd.commandElsewhere) return () => { note(`command: ${guardChannel(ev)} '/${cmd.commandElsewhere} …' names no being on this node — recorded, prompts nobody`); };
+    if (await commands?.isCommand?.(cmd)) {
+      if (cmd.alias) note(`alias: ${guardChannel(ev)} '${cmd.alias}' → ${cmd.body}`);
       // ALWAYS-AVAILABLE (never blocked, never counted): the lifecycle commands. They are
       // the operator's way back out of a broken node, and a guard that can lock them out
       // turns a flood into an unrecoverable node. Same predicate the command path itself
       // dispatches on (ingest.mjs lifecycleExit), called side-effect-free here.
-      if (isLifecycle(ev)) return async () => { await commands.run(ev); };
+      if (isLifecycle(cmd)) return async () => { await commands.run(cmd); };
       // GUARDED (2026-07-25 incident): every OTHER command is a turn like any other. Command
       // turns used to return from classify BEFORE the guard block below, so a command loop was
       // entirely unbounded — a STOPped channel kept answering commands, which is how a flood of
@@ -936,31 +939,8 @@ export function createSpine({
         if (humanTurn(ev)) guard.noteHuman(channel);
         else await guardCountNonHuman(ev, channel);
       }
-      // NODE-ADDRESSED AT ANOTHER NODE (operator 2026-07-26 — egpt as a remote control for the
-      // network): `/chrome do` typed on the SHELL can never be heard by do (the shell is
-      // node-local — the spine dials the editor on 127.0.0.1), so the command has to TRAVEL. It
-      // rides the SAME mesh envelope a `@don` being-prompt rides, the target executes it locally,
-      // and the reply mirrors home through the same living mirror. `commands.remoteNode` is the
-      // ONE decision — an allowlisted command naming a node that is neither ours nor a
-      // co-account peer that already heard this — so a null (every case today) leaves the local
-      // command path byte-identical.
-      const remote = commands.remoteNode?.(ev);
-      if (remote && mesh?.forwardCommand) return async () => { await mesh.forwardCommand(ev, remote); };
-      return async () => { await commands.run(ev); };
+      return async () => { await commands.run(cmd); };
     }
-
-    // PHRASE TRIGGER (operator 2026-10-04): a natural phrase does NOT start with '/', so it never
-    // reaches the isCommand dispatch above — a second, separate check. commands.phraseCommand consumes
-    // the message ONLY when the OPERATOR's whole message EQUALS a configured config.<cmd>.triggers phrase
-    // (it reuses the SAME isOperator gate the '/'-commands sit behind, and matches EXACTLY — a
-    // non-operator, or any non-exact message, returns null and flows on as ordinary chat). When it does,
-    // the command runs DISCREETLY and NO being turn is dispatched (we return the command's own thunk).
-    // The message is still RECORDED like any ordinary inbound (the ingestion point below records every
-    // non-'off' message — a phrase is a real message that doesn't start with '/'); only the being turn
-    // is suppressed. Checked AFTER the '/'-command block so a '/'-word always wins, and like it, before
-    // the relay/transit branches (an operator phrase is command-like, not chatter in a pipe).
-    const phraseCmd = commands?.phraseCommand?.(ev);
-    if (phraseCmd) return async () => { await commands.runPhrase(ev, phraseCmd); };
 
     // Inbound mesh envelope: a message carrying a provenance tail is relay traffic,
     // not chat — decode + act on it (a request at the responder, a reply/mirror-update
@@ -1085,19 +1065,6 @@ export function createSpine({
   // and take its own branch. Runs strictly AFTER the ingestion append, so every reply line it
   // can produce lands below the inbound line it answers.
   async function dispatchChat({ ev, d, to, mention, meshTarget, targets, channel }) {
-    // SI ACCESS GATE (PART D, 2026-10-13): when an SI channel EXISTS for this conversation, a sender
-    // who is NOT a current member of it does not wake the bot — their triggering message gets the fixed
-    // "member of SI group" reply (rate-limited) and nothing dispatches. Only a message that WOULD wake
-    // (d.mayReply) is gated; non-members' non-triggering chatter flows as context, unchanged. No channel
-    // / SI off / unreadable roster → superMemberGate returns false (no gate). The record is already
-    // written (handleFast's ingestion), so a blocked message stays on the transcript; it just runs no turn.
-    if (d.mayReply && commands?.superMemberGate && await commands.superMemberGate(ev)) return;
-    // SI-STATE REACTION (2026-10-13): signal the SI state to the base chat — ✅ this conversation has an
-    // SI channel (incl. one auto-created this turn), ❌ none (reply siphoned to admin / base chat). It is
-    // a REACTION on the TRIGGERING message via the SAME seam the steer 📩/👀 ack uses (outbound.react →
-    // whichever mouth answers); gated + resolved by decide (d.siReaction, null when SI off / not replying).
-    // Fire-and-forget: best-effort, a reaction fault never touches the reply. ONE per message (here only).
-    if (d.siReaction) void placeSiReaction(to, ev, d.siReaction);
     // PHASE 4 — brain-member fan-out (design B: re-entry). Kicked off HERE, concurrently with
     // E's own dispatch below (never blocking E's turn). It delivers this received room message
     // to each brain member whose mode admits it; each member's finalized reply is streamed into
@@ -1213,7 +1180,7 @@ export function createSpine({
       // THE ORIGIN IS ALSO THE ONLY NODE THAT CAN DO IT: the token is THIS node's relay-agent
       // handle, resolved by THE matcher here, and the far node has no vocabulary for it.
       // addressedBody, not triggerFor — a dispatch line never crosses — and the rewritten event
-      // is the same `{ ...ev, body }` shape forwardCommand already forwards under (mesh.mjs).
+      // is the same `{ ...ev, body }` shape.
       //
       // meshBody, not addressedBody (operator 2026-09-11): the OPEN CHANNEL keeps its handle,
       // because there the handle IS the routing. See meshBody's header.
@@ -1276,7 +1243,7 @@ export function createSpine({
       // written rather than the event: warm-cli-session.inject records `rec.text` as the exact
       // string it puts on stdin and matches the `--replay-user-messages` echo against THAT, so it
       // acks the stripped line without knowing anything changed.
-      if (await steerLiveTurn({ to, ev: trigger == null ? ev : { ...ev, line: trigger }, turnKey })) return withRelay();
+      if (await steerLiveTurn({ to, ev: trigger == null ? ev : { ...ev, line: trigger }, turnKey, human: humanTurn(ev) })) return withRelay();
       // Reply branch (the reply train). Open THIS message's OWN placeholder NOW, on
       // arrival — the per-message ack + streaming target, quoting the triggering message
       // (operator: "mentions should always be replied to the message" — now EVERY reply,
@@ -1390,6 +1357,10 @@ export function createSpine({
     return openChannel(target?.mesh) ? null : addressedBody(ev, target);
   }
 
+  // A turn's later outputs (voice, limbs) go where its reply went: the side group, made now if the reply
+  // did not make it, else ev's chat. null = the side group could not be made.
+  const replyChatOf = async (d, ev) => (typeof d.replyChatId === 'function' ? (await d.replyChatId()) || null : (d.replyChatId ?? ev.chatId));
+
   // Open THIS mention's placeholder + enqueue its reply turn on the per-conversation FIFO.
   // Returns the turn's completion promise.
   //
@@ -1401,14 +1372,18 @@ export function createSpine({
   // case: E's /reply at the message it is answering is now GENUINELY redundant, so it strips
   // instead of tearing the placeholder down and posting a fresh quote in its place.
   function openAndRunReply({ to, ev, d, turnKey, pinned = false, trigger = null }) {
-    const replyTo = ev.msgId ?? null;
+    // d.replyChatId: the chat's side group (gating.decide; a function when it is made only once the reply
+    // has something to post) — the reply goes there, unquoted, and never falls back to ev's chat. The
+    // transcript stays keyed to ev.
+    const at = d.replyChatId ?? null;
+    const replyTo = at ? null : (ev.msgId ?? null);
     const ahead = bumpTrain(turnKey);
-    // CHUNK 2 super-channel routing: post to the conversation's super channel when it has one right
-    // now (gating.decide's live lookup), else the arrival chat — unchanged otherwise. The transcript/
-    // limbs below stay keyed to ev.chatId (the alias shares that one on-disk conversation).
     // replyIn null: replyTo is this chat's own id — a local mouth quotes its own copy (sender quoteIn).
-    const out = sender.open(d.replyChatId ?? ev.chatId, { being: to, replyTo, replyIn: null, replyKey: { msgKey: ev.msgHash, timestamp: ev.msgTs }, queued: ahead > 0, queuedAhead: ahead, auto: d.mode === 'auto', origin: ev.chatId });
-    return turnBy(turnKey, () => runReplyTurn({ to, ev, d, out, replyTo, turnKey, queued: ahead > 0, pinned, trigger }));
+    // ambient: an 'on' turn on a non-human line opens no ⏳ — a silence then posts nothing. A human's
+    // opens at arrival, addressed or not (operator 2026-10-18).
+    const ambient = d.mode === 'on' && !humanTurn(ev);
+    const out = sender.open(at ?? ev.chatId, { being: to, replyTo, replyIn: null, replyKey: { msgKey: ev.msgHash, timestamp: ev.msgTs }, queued: ahead > 0, queuedAhead: ahead, auto: d.mode === 'auto', ambient, hideSilence: d.mode === 'on', origin: at ? null : ev.chatId });
+    return turnBy(turnKey, () => runReplyTurn({ to, ev, d, out, replyTo, turnKey, queued: ahead > 0, pinned, trigger, ambient }));
   }
 
   // A BACKGROUND TASK THE BEING STARTED HAS FINISHED with no turn in flight (operator 2026-10-15:
@@ -1457,7 +1432,8 @@ export function createSpine({
     return Promise.all(extras.map(async (t) => {
       const being = t.being ?? defaultBeing;
       try {
-        const d = await gating.decide(gateAs(t, being), ev, t.mention ?? ev.mention);
+        const mention = t.mention ?? ev.mention;
+        const d = await gating.decide(gateAs(t, being), ev, mention);
         if (!d.receives || !d.mayReply) return;
         // …and a relay target reached by FAN-OUT is treated exactly as the primary one is (see the
         // mesh branch in dispatchChat): `@e y @don, vengan` forwards `y @don, vengan` on E's turn
@@ -1487,8 +1463,8 @@ export function createSpine({
   // `burst` (the auto-dwell fire): this turn answers a whole accumulated burst, so it prompts
   // with the drained cycle verbatim instead of appending its own trigger line. A PROMPT
   // concern only — it says nothing about the record.
-  async function runReplyTurn({ to, ev, d, out, replyTo = null, turnKey, queued, burst = false, pinned = false, trigger = null }) {
-    let live = null;
+  async function runReplyTurn({ to, ev, d, out, replyTo = null, turnKey, queued, burst = false, pinned = false, trigger = null, ambient = false }) {
+    let live = null, opening = null;
     try {
       // THIS turn is now the live one on this key, and this is whose message it answers —
       // the identity the same_sender tier of allow_new_input compares against (2026-08-30) —
@@ -1496,9 +1472,10 @@ export function createSpine({
       // several chats on one key (2026-09-01; admitsNewInput requires it for any steer).
       // Set here, not in openAndRunReply: openAndRunReply runs at ARRIVAL, so a queued turn
       // would claim the live slot from the turn actually streaming.
-      turns.setLive(turnKey, { senderId: ev.senderId ?? null, chatId: ev.chatId ?? null });
+      turns.setLive(turnKey, { senderId: ev.senderId ?? null, chatId: ev.chatId ?? null, out });
       out.activate?.();                                 // queued → live the moment its turn starts
       live = liveness.turnStarted({ out, being: to, ev, chat: d.replyChatId ?? ev.chatId, auto: d.mode === 'auto' });
+      if (ambient) opening = setTimeoutFn(() => out.begin?.(), AMBIENT_OPEN_MS);   // the train opens if the turn runs this long
       // Drain the accumulated cycle. A QUEUED turn prompts with it (ending with its own
       // mention line); an IMMEDIATE turn discards it and keeps the single dispatch line —
       // draining either way advances the baseline the next turn's cycle starts from.
@@ -1606,7 +1583,8 @@ export function createSpine({
       // `text` on item/completed), so before this the earlier output was simply gone.
       // Fire-and-forget — a token delta must not wait on fs; logStream serializes.
       let streamed = '';
-      const onPartial = (partial) => {
+      const onPartial = (partial, use) => {
+        if (use?.tool) return out.begin?.();           // the being used a tool: an ambient turn opens its train
         const raw = typeof partial === 'string' ? partial : (partial?.text ?? '');
         transcript.logStream?.(ev, streamed, raw, { being: to });
         streamed = raw;
@@ -1712,11 +1690,7 @@ export function createSpine({
               // Said like /media (makeOutbound `say`), replying to the text. That text's id lives
               // where the sender put it (`confirmedIn`: a local mouth's room, else this chat's own
               // connection), so its key is read off that copy and the id itself is handed on only there.
-              // Same target the TEXT reply used (d.replyChatId — the super channel when one exists):
-              // the voice note replies to that delivered text, so it must land in the SAME chat, not
-              // the arrival chat. This changes only the destination chatId — the wantsVoice gate and
-              // the settle path above/below are untouched (CHUNK 2 super-channel routing).
-              const o = outbound(to, d.replyChatId ?? ev.chatId);
+              const o = outbound(to, await replyChatOf(d, ev));   // the chat the text went to
               const heldBy = out.confirmedIn ?? null;
               try { await o.say((on, room, replyTo) => on.sendMedia(room, tmpPath, { replyTo }), { msgId: heldBy ? null : textId, keyOf: o.keyOf(textId, 'voice', heldBy), what: 'voice' }); }
               catch (e) { note(`voice-send ${to}/${ev.chatId}: ${e?.message ?? e}`); }
@@ -1734,7 +1708,11 @@ export function createSpine({
       // Optional-chained: a transcript service without the method (older fakes) just records less.
       if (parsed && hadActions) {
         try {
-          const { ran = [] } = (await actions.execute(parsed.run, parsed.stripped, ev, { being: to })) ?? {};
+          // A reply routed to the side group takes its limbs there too: none acts in the origin.
+          const at = await replyChatOf(d, ev);
+          if (!at) throw new Error('its side group could not be made — no limb run');
+          const limbEv = at === ev.chatId ? ev : { ...ev, chatId: at };
+          const { ran = [] } = (await actions.execute(parsed.run, parsed.stripped, limbEv, { being: to })) ?? {};
           for (const a of ran) await transcript.logAction?.(ev, a, { being: to });
         } catch (e) { note(`actions ${to}/${ev.chatId}: ${e?.message ?? e}`); }
       }
@@ -1748,7 +1726,7 @@ export function createSpine({
       try { await out.fail?.(e); } catch { /* best effort */ }
       note(`turn ${to}/${ev.chatId}: ${e?.message ?? e}`);
       return false;
-    } finally { dropTrain(turnKey); turns.clearLive(turnKey); liveness.turnEnded(live); }
+    } finally { if (opening) clearTimeoutFn(opening); dropTrain(turnKey); turns.clearLive(turnKey); liveness.turnEnded(live); }
   }
 
   // `trigger` (operator 2026-09-11): the dispatch line with the addressing handle off, decided
@@ -1779,6 +1757,7 @@ export function createSpine({
     resumedAt();
     liveness.tick();
     background?.sync();
+    beeperUpdate?.tick(clock.now());
     heartbeats.runDue(clock.now());
   }
 
@@ -1882,7 +1861,7 @@ export function createSpine({
     if (!b.reaches || b.told) return;
     b.told = true;
     const n = b.messages.length;
-    try { await say({ chatId: b.chatId, text: `${n} message${n === 1 ? '' : 's'} in the backlog. type /recap to list them`, what: 'backlog' }); }
+    try { await say({ chatId: b.chatId, text: `${n} message${n === 1 ? '' : 's'} in the backlog. type ${commands?.hintOf?.('recap') ?? '/recap'} to list them`, what: 'backlog' }); }
     catch (e) { note(`backlog: could not tell ${b.chatId} — ${e?.message ?? e}`); }
   }
   function clearBacklog() {

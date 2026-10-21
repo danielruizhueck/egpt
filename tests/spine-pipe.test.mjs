@@ -883,21 +883,19 @@ describe('spine — advice answer hook', () => {
   });
 });
 
-// PHRASE TRIGGERS (operator 2026-10-04): a non-slash operator message whose whole text equals a
-// configured config.<cmd>.triggers phrase is CONSUMED by classify — the command runs (discreetly)
-// and NO being turn is dispatched. The matcher/runner live in commands.mjs (commands.phraseCommand /
-// commands.runPhrase, covered by fork-command.test.mjs); this locks the DISPATCH half: consume vs.
-// fall through, and that the consumed message is still recorded like any ordinary inbound.
-describe('spine — phrase-trigger dispatch (classify consumes, no being turn)', () => {
-  function buildPhrase(phraseCommand) {
+// ALIASES (operator 2026-10-19): classify sends commands.aliased's rewrite down the typed-command path,
+// and the record keeps the line as said. The real matcher is covered in commands-alias.test.mjs; this
+// locks the DISPATCH half with fakes.
+describe('spine — alias dispatch (the command line runs, the record keeps the words)', () => {
+  function buildAlias() {
     const bridge = fakeBridge();
     const brain = fakeBrain();
     const transcript = fakeTranscript();
     const ran = [];
     const commands = {
-      isCommand: () => false,                       // not a '/'-command — a natural phrase
-      phraseCommand,
-      runPhrase: async (ev, cmd) => { ran.push({ body: ev.body, cmd }); },
+      isCommand: (ev) => String(ev.body).startsWith('/'),
+      commandOf: (ev) => (ev.body.startsWith('aparte') ? { ...ev, body: `/join${ev.body.slice('aparte'.length)}`, alias: 'aparte', commandBeing: 'e', commandHandle: 'e' } : null),
+      run: async (ev) => { ran.push(ev.body); },
     };
     const spine = createSpine({
       bridge, brain, store: fakeStore(),
@@ -909,17 +907,17 @@ describe('spine — phrase-trigger dispatch (classify consumes, no being turn)',
     return { bridge, brain, transcript, ran };
   }
 
-  it('a matching operator phrase RUNS the command and dispatches NO being turn — but IS logged', async () => {
-    const { bridge, brain, transcript, ran } = buildPhrase((ev) => (ev.body === 'dame un segundo' ? 'join' : null));
-    await bridge.emit({ ...MSG, authorized: true, body: 'dame un segundo' });
-    expect(ran).toEqual([{ body: 'dame un segundo', cmd: 'join' }]);   // the command ran
-    expect(brain.calls).toHaveLength(0);                               // no being turn dispatched (consumed)
-    expect(bridge.sent).toHaveLength(0);                               // nothing surfaced in the chat
-    expect(transcript.entries).toHaveLength(1);                        // but recorded like any ordinary message
+  it('an aliased line RUNS its command line, dispatches NO being turn, and is recorded as said', async () => {
+    const { bridge, brain, transcript, ran } = buildAlias();
+    await bridge.emit({ ...MSG, authorized: true, body: 'aparte viaje' });
+    expect(ran).toEqual(['/join viaje']);
+    expect(brain.calls).toHaveLength(0);
+    expect(bridge.sent).toHaveLength(0);
+    expect(inbounds(transcript).map((e) => e.ev.body)).toEqual(['aparte viaje']);
   });
 
-  it('a non-matching message is ordinary — phraseCommand returns null and the brain runs normally', async () => {
-    const { bridge, brain, ran } = buildPhrase(() => null);
+  it('a line that is not an alias is ordinary — the brain runs normally', async () => {
+    const { bridge, brain, ran } = buildAlias();
     await bridge.emit({ ...MSG, authorized: true, body: 'hola' });
     expect(ran).toHaveLength(0);
     expect(brain.calls).toHaveLength(1);                               // flowed through to the being
@@ -956,7 +954,7 @@ describe('spine — /reply handled BEFORE posting (no visible token, no delete+r
           chat, init, opts, frames: [], finals: [], deleted: false, delivered: false,
           update(t) { h.frames.push(t); },
           async finish(t) { h.finals.push(t); h.delivered = true; },
-          async delete() { h.deleted = true; },
+          async delete() { h.deleted = true; return true; },
         };
         streams.push(h); return h;
       },
@@ -1141,18 +1139,16 @@ describe('spine — /reply handled BEFORE posting (no visible token, no delete+r
   // THE LIVE BUG (operator 2026-10-06, with E/opus): same action-only /react, but verbose_thinking
   // OFF (the system default). "verbose thinking is off, and yet [the] reaction also appear as a
   // thinking process." The reaction still lands on its target; the placeholder must NOT carry the
-  // "⚙️ processing command" debug line. End-to-end through the real spine + sender: it resolves to
-  // the quiet mark, never commandMark, never a silence it did not receive, never deleted.
-  it('verbose OFF: an action-only reply resolves QUIETLY — no "processing command" line in the chat', async () => {
+  // "⚙️ processing command" debug line. End-to-end through the real spine + sender: since
+  // 2026-10-19 (live "🐶 E: ✓" in SI+EduWeb) the bridge deletes its ⏳-only placeholder.
+  it('REPRODUCE: verbose OFF, an action-only reply deletes its placeholder — no ✓, no "processing command"', async () => {
     const { bridge } = buildStreaming({ replyText: '/react #7 👍', partials: ['/re', '/react #7', '/react #7 👍'], verbose: false });
     await bridge.emit(MSG);
 
     expect(bridge.streams[0].init).toBe('⏳ Thinking…');
     expect(bridge.streams[0].frames).toEqual([]);                 // still never renders the half-typed token
-    expect(bridge.streams[0].finals).toEqual(['✓']);             // quiet — the ⏳ comes off, no debug line
-    expect(bridge.streams[0].finals[0]).not.toContain('processing command');   // the operator's exact complaint
-    expect(bridge.streams[0].finals[0]).not.toContain('received silence');     // a limb turn is not silence
-    expect(bridge.streams[0].deleted).toBe(false);               // resolved, never destructively deleted
+    expect(bridge.streams[0].deleted).toBe(true);                // the limb is the reply
+    expect(bridge.streams[0].finals).toEqual([]);                // no ✓ edit
     expect(bridge.sent).toHaveLength(0);
   });
 

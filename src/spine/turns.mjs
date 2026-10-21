@@ -96,7 +96,7 @@ export function createTurns({ brain, bridge = null, bridgeOf = null, peerMouth =
   // THE CHAT is recorded beside the sender (operator 2026-09-01) because the KEY no longer
   // implies one: keyOf resolves it through brain.scopeOf, so a SHARED SCOPE puts several chats
   // on one key. Every caller that claims the live slot records both — see admitsNewInput.
-  const liveTurnBy = new Map();                // convKey -> { senderId, chatId } of the message the LIVE turn is answering
+  const liveTurnBy = new Map();                // convKey -> { senderId, chatId, out? } of the message the LIVE turn is answering (out: its reply)
 
   // Per-conversation turn key = the routed being + the conversation its INSTANCE lives in.
   // It maps 1:1 to the warm-pool key (`<being>:<engine>:<surface>:<slug>`) at the
@@ -238,7 +238,8 @@ export function createTurns({ brain, bridge = null, bridgeOf = null, peerMouth =
   // RELAYED turn's synthetic event has `msgId: null` — the real message lives on the ORIGIN
   // node's account, on the other side of the wire — so the responder passes ack:false and the
   // reaction is simply not attempted. Every local caller omits it and is unchanged.
-  async function steerLiveTurn({ to, ev, turnKey, ack = true }) {
+  // `human`: the line is a human's — handed in, it opens an ambient live turn's train.
+  async function steerLiveTurn({ to, ev, turnKey, ack = true, human = false }) {
     const live = liveTurnBy.get(turnKey);
     if (!live) return false;                          // nothing streaming on this key to steer
     if (typeof brain.steer !== 'function' || typeof brain.allowNewInput !== 'function') return false;
@@ -248,20 +249,17 @@ export function createTurns({ brain, bridge = null, bridgeOf = null, peerMouth =
     // 📩 — THE BRIDGE'S OWN RECEIPT, PLACED BEFORE THE STEER IS EVEN ATTEMPTED (operator
     // 2026-09-09: "a message to the bridge should be reacted to immediately by the bridge").
     // Its truth does not depend on anything below it, which is the entire reason it exists.
-    // STARTED here rather than awaited, so it never delays the write into the live turn, and
-    // JOINED before either exit below, so it can never land after the 👀 or after the caller
-    // has already opened a queued placeholder.
+    // NEVER AWAITED (2026-10-18): its lookup may wait for the mouth's copy to arrive, and this runs
+    // on the chat's lane. The 👀 below waits for it instead, so it still lands second.
     const receipt = ack ? placeReaction(to, ev, RECEIPT_EMOJI) : null;
 
     const who = ev.senderName ?? ev.senderId ?? '?';
     let handed = false;
     try { handed = await brain.steer(to, ev); }
     catch (e) {
-      if (receipt) await receipt;
       note(`steer FAILED ${to}/${ev.chatId}: the brain threw handing ${who}'s message to the live turn — ${e?.message ?? e}; queueing it instead`);
       return false;
     }
-    if (receipt) await receipt;
     // NOTHING WAS HANDED OVER — and it is an error, not a shrug. The caller queues (that
     // fallthrough is unchanged and is what keeps a false structurally safe), but the reason it
     // had to is now in the log instead of nowhere. The layers below name it more precisely
@@ -271,6 +269,7 @@ export function createTurns({ brain, bridge = null, bridgeOf = null, peerMouth =
     // HANDED OVER IS NOT INGESTED, AND THIS LINE NO LONGER PRETENDS OTHERWISE. It used to read
     // "wove … into the live turn", said on the strength of a successful stdin write.
     note(`steer ${to}/${ev.chatId}: handed ${who}'s message to the live turn (allow_new_input=${allow})`);
+    if (human) live.out?.begin?.();
 
     // 👀 — THE MODEL'S OWN ACKNOWLEDGEMENT, AND ONLY THAT (operator 2026-09-09). `handed.ack`
     // settles from CLI events alone (warm-cli-session.mjs: the `--replay-user-messages` echo of
@@ -289,6 +288,7 @@ export function createTurns({ brain, bridge = null, bridgeOf = null, peerMouth =
       evidence.then(async (r) => {
         if (r?.ok) {
           note(`steer ${to}/${ev.chatId}: the model took the steered message — placing the ${STEER_ACK_EMOJI}`);
+          await receipt;
           await placeReaction(to, ev, STEER_ACK_EMOJI);
         } else {
           note(`steer NEVER INGESTED ${to}/${ev.chatId}: ${who}'s message was handed to the live turn and the model never took it (${r?.reason ?? 'no reason given'}) — the ${RECEIPT_EMOJI} stands alone; there is no ${STEER_ACK_EMOJI} to place`);

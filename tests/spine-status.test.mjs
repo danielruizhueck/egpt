@@ -42,7 +42,7 @@ function threeContacts() {
 // The chat's group Chrome is a fake pipe Chrome answering like `cdp` (tests/fake-pipe-chrome.mjs);
 // /status reads it only when it is already up, so a test that wants `chrome: up` launches it first
 // (launchChat). `spawns` records every launch.
-function harness({ io, gitOut, loadState, brains, getConfig, onLog, cdp = {}, warmStats, shellConnected, dueFor } = {}) {
+function harness({ io, gitOut, loadState, brains, getConfig, onLog, cdp = {}, warmStats, shellConnected, dueFor, defaultKey } = {}) {
   const sent = [];
   const chrome = fakePipeChrome(cdp);
   const cmds = createCommands({
@@ -61,6 +61,7 @@ function harness({ io, gitOut, loadState, brains, getConfig, onLog, cdp = {}, wa
     ...(shellConnected ? { shellConnected } : {}),
     // the compaction probe reads ~/.claude/projects for real — always fake it here
     dueFor: dueFor ?? (() => ({ due: false })),
+    ...(defaultKey ? { defaultKey } : {}),
   });
   return { cmds, sent, spawns: chrome.calls, launchChat: (chatId) => cmds.chatChromeOf('whatsapp', chatId) };
 }
@@ -167,16 +168,17 @@ describe('/status', () => {
     expect(sent[0].text).toMatch(/mode: mute/);
   });
 
-  it('/status is intercepted only from an authorized chat (isCommand gate)', () => {
+  it('/e status is intercepted only from an authorized chat (isCommand gate); a bare /status is no command', async () => {
     const { cmds } = harness({});
-    expect(cmds.isCommand({ body: '/status', chatId: '!self' })).toBe(true);          // Self DM
-    expect(cmds.isCommand({ body: '/status', chatId: '!rando' })).toBe(false);         // random chat
+    expect(await cmds.isCommand(cmds.commandOf({ body: '/e status', chatId: '!self' }))).toBe(true);    // Self DM
+    expect(await cmds.isCommand(cmds.commandOf({ body: '/e status', chatId: '!rando' }))).toBe(false);  // random chat
+    expect(cmds.commandOf({ body: '/status', chatId: '!self' })).toBe(null);
   });
 
-  it('the fallback recognized-list now advertises /status', async () => {
+  it('the fallback for a registered, unwired command points at /<handle> help', async () => {
     const { cmds, sent } = harness({});
     await cmds.run({ body: '/channels', chatId: '!self', surface: 'whatsapp' });
-    expect(sent[0].text).toMatch(/\/status/);
+    expect(sent[0].text).toMatch(/\/e help/);
   });
 });
 
@@ -686,20 +688,18 @@ describe('/status: enriched fields', () => {
   });
 });
 
-// `/status <node>` — the NODE-FIRST gate (operator ruling 2026-07-25): "since '/status'
-// alone is replied by a spine, '/status <node_name>' is a special case so that only that
-// node replies... operator can change <slug> if it conflicts with <node_name>".
-//
-// Same wake-word mechanism /chrome <node> already uses (ownNodeNamesOf = node_name ∪
-// node_alias, non-match silent). The anti-flood assertion is the PEER case: `/status do`
-// typed on kg must produce NOTHING — before this gate kg ran the conversation-fragment
-// search for "do", hit 9 matches, and emitted the ambiguity reply that seeded the
-// 2026-07-25 two-node message flood.
-describe('/status <node> — node-first gate', () => {
+// `/status <node>` was the NODE-FIRST gate (operator ruling 2026-07-25) against the 2026-07-25
+// two-node flood: `/status do` on kg ran the fragment search and the sibling parsed the reply.
+// Since 2026-10-19 a command names its being (`/e status`): the being's node answers, the other
+// node does not, and a node name after /status is an ordinary conversation fragment.
+describe('/status runs on the node of the being it is typed to (was: the node-first gate)', () => {
   const HEALTHY_IO = { stat: async () => ({ mtimeMs: Date.now() }), readFile: async () => READONLY_YAML };
   const HEALTHY_GIT = (args) => (args.includes('--short') ? 'abc1234' : 's');
-  const KG = { whatsapp: { chat_id: '!self' }, node_name: 'kg', peer_nodes: ['kg', 'do'] };
+  const KG = { whatsapp: { chat_id: '!self' }, node_name: 'kg', peer_nodes: ['kg', 'do'], agents: { egpt: { handles: ['e', 'egpt'], default: true } } };
+  const DO = { whatsapp: { chat_id: '!self' }, node_name: 'do', peer_nodes: ['kg', 'do'], agents: { egpt: { handles: ['d', 'don'], default: true } } };
   const self = { chatId: '!self', surface: 'whatsapp' };
+  // The spine's reading (classify): commandOf, then isCommand, then run.
+  const typed = async (cmds, ev) => { const c = cmds.commandOf(ev); if (c && await cmds.isCommand(c)) await cmds.run(c); return c; };
 
   // Contacts whose slugs all contain "do" — the live shape that made `/status do`
   // ambiguous on the peer node. Plus one unrelated chat for the fragment regression.
@@ -711,9 +711,9 @@ describe('/status <node> — node-first gate', () => {
     return st;
   }
 
-  it('/status kg on the kg node answers with the NODE-HEALTH payload (not a conversation search)', async () => {
+  it('/e status on the kg node answers with the NODE-HEALTH payload', async () => {
     const { cmds, sent } = harness({ io: HEALTHY_IO, gitOut: HEALTHY_GIT, loadState: async () => doAmbiguousContacts(), getConfig: () => KG });
-    await cmds.run({ ...self, body: '/status kg' });
+    await typed(cmds, { ...self, body: '/e status' });
     expect(sent).toHaveLength(1);
     const { text } = sent[0];
     expect(text).toContain(`pid: ${process.pid}`);      // the node-health payload
@@ -723,50 +723,35 @@ describe('/status <node> — node-first gate', () => {
     expect(text).not.toMatch(/no chat matches/);
   });
 
-  // THE ANTI-FLOOD ASSERTION. kg must not answer a question addressed to do — and must
-  // NOT fall through to the fragment search either (that is what emitted the ambiguity
-  // reply the sibling node then parsed as a command).
-  it('/status do on the kg node replies NOTHING AT ALL — no answer, no "unknown node", no fragment search', async () => {
-    const { cmds, sent } = harness({ io: HEALTHY_IO, gitOut: HEALTHY_GIT, loadState: async () => doAmbiguousContacts(), getConfig: () => KG });
-    await cmds.run({ ...self, body: '/status do' });
+  // Exactly one node answers: the other node reads `/e status` as another node's command.
+  it('/e status on the do node is not a command there — nothing said', async () => {
+    const { cmds, sent } = harness({ io: HEALTHY_IO, gitOut: HEALTHY_GIT, loadState: async () => doAmbiguousContacts(), getConfig: () => DO, defaultKey: 'egpt' });
+    const c = await typed(cmds, { ...self, body: '/e status' });
+    expect(c.commandElsewhere).toBe('e');
     expect(sent).toHaveLength(0);
   });
 
-  it('/status do on the do node answers with the node-health payload (exactly one node replies)', async () => {
-    const cfg = { whatsapp: { chat_id: '!self' }, node_name: 'do', peer_nodes: ['kg', 'do'] };
-    const { cmds, sent } = harness({ io: HEALTHY_IO, gitOut: HEALTHY_GIT, loadState: async () => doAmbiguousContacts(), getConfig: () => cfg });
-    await cmds.run({ ...self, body: '/status do' });
-    expect(sent).toHaveLength(1);
-    expect(sent[0].text).toContain(`pid: ${process.pid}`);
-    expect(sent[0].text).toMatch(/node_name: do/);
-  });
-
-  it('a node_alias answers like the node name (ownNodeNamesOf covers aliases)', async () => {
-    const cfg = { ...KG, node_alias: ['reve'] };
-    const { cmds, sent } = harness({ io: HEALTHY_IO, gitOut: HEALTHY_GIT, loadState: async () => doAmbiguousContacts(), getConfig: () => cfg });
-    await cmds.run({ ...self, body: '/status reve' });
-    expect(sent).toHaveLength(1);
-    expect(sent[0].text).toContain(`pid: ${process.pid}`);
-    expect(sent[0].text).toMatch(/node_name: kg/);
-  });
-
-  it('the node match is case-insensitive (same as /chrome)', async () => {
+  // THE ANTI-FLOOD ASSERTION (2026-07-25: `/status do` on kg emitted an ambiguity reply the sibling
+  // parsed as a command). A node name is a plain fragment now, and the reply is no command anywhere.
+  it('/e status do on kg answers the fragment search once, and that reply is no command on either node', async () => {
     const { cmds, sent } = harness({ io: HEALTHY_IO, gitOut: HEALTHY_GIT, loadState: async () => doAmbiguousContacts(), getConfig: () => KG });
-    await cmds.run({ ...self, body: '/status KG' });
+    await typed(cmds, { ...self, body: '/e status do' });
     expect(sent).toHaveLength(1);
-    expect(sent[0].text).toContain(`pid: ${process.pid}`);
+    expect(sent[0].text).toMatch(/"do" matches 3/);
+    const peer = harness({ getConfig: () => DO, defaultKey: 'egpt' }).cmds;
+    for (const c of [cmds, peer]) expect(c.commandOf({ ...self, body: sent[0].text, authorized: true })).toBe(null);
   });
 
-  // Precedence is NODE-FIRST per the ruling ("operator can change <slug> if it conflicts
-  // with <node_name>") — a colliding slug is the operator's to rename; no disambiguation.
-  it('node-first precedence: a conversation slug colliding with this node\'s name loses to the node', async () => {
+  it('a conversation slug equal to this node\'s name resolves as a conversation (no node-first precedence)', async () => {
     let st = emptyState();
     st = ensureContact(st, 'whatsapp', '!kg:beeper.local', { pushedName: 'kg', slugHint: 'kg' }).state;
-    const { cmds, sent } = harness({ io: HEALTHY_IO, gitOut: HEALTHY_GIT, loadState: async () => st, getConfig: () => KG });
-    await cmds.run({ ...self, body: '/status kg' });
+    const { cmds, sent } = harness({
+      loadState: async () => st, getConfig: () => KG,
+      io: { readFile: readFileBySuffix({ 'transcript.md': new Error('ENOENT'), 'heartbeats.readonly.yaml': new Error('no readonly file') }) },
+    });
+    await typed(cmds, { ...self, body: '/e status kg' });
     expect(sent).toHaveLength(1);
-    expect(sent[0].text).toContain(`pid: ${process.pid}`);
-    expect(sent[0].text).not.toMatch(/conversation_path:/);
+    expect(sent[0].text).toMatch(/conversation_path: /);
   });
 
   // REGRESSION: an ordinary fragment is untouched — the conversation path still resolves
@@ -783,8 +768,7 @@ describe('/status <node> — node-first gate', () => {
     expect(sent[0].text).toMatch(/conversation_path: /);
   });
 
-  // REGRESSION: a SOLO node (no node identity at all) is byte-identical to today — the
-  // gate can only fire on a configured node name/alias/peer.
+  // REGRESSION: a SOLO node (no node identity at all) is byte-identical to today.
   it('a node with no node_name/peer_nodes falls through to the fragment path unchanged', async () => {
     const { cmds, sent } = harness({ io: HEALTHY_IO, gitOut: HEALTHY_GIT, loadState: async () => doAmbiguousContacts() });
     await cmds.run({ ...self, body: '/status do' });
@@ -792,8 +776,8 @@ describe('/status <node> — node-first gate', () => {
     expect(sent[0].text).toMatch(/^`\/status`: "do" matches 3:/);
   });
 
-  // REGRESSION: bare /status is UNCHANGED — both nodes answer, node payload as today.
-  it('bare /status is unchanged on a node with a node identity (both nodes still answer)', async () => {
+  // REGRESSION: the dispatcher's /status payload is UNCHANGED on a node with a node identity.
+  it('/status with no target is unchanged on a node with a node identity', async () => {
     const { cmds, sent } = harness({ io: HEALTHY_IO, gitOut: HEALTHY_GIT, loadState: async () => doAmbiguousContacts(), getConfig: () => KG });
     await cmds.run({ ...self, body: '/status' });
     expect(sent).toHaveLength(1);

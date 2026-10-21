@@ -72,7 +72,7 @@ import { fileURLToPath } from 'node:url';
 import { join, basename } from 'node:path';
 import { EGPT_HOME } from '../egpt-home.mjs';
 import { cleanForSpeech } from '../speech-clean.mjs';
-import { shortChatId, fullChatId } from './chat-id.mjs';
+import { shortChatId, fullChatId, isChatId } from './chat-id.mjs';
 import { createEarProbe, injectViaTelegram } from '../ear-probe.mjs';
 
 // Profile-aware (NOT hardcoded ~/.egpt): EGPT_HOME selects the node, so two
@@ -752,8 +752,17 @@ export async function startBeeperBridge(opts = {}) {
   // below). One cutoff.
   let backlogCutoffMs = Date.now();
 
+  // BEEPER RESTARTING FOR UPDATE (operator 2026-10-19; /update beeper, src/tools/beeper-update.mjs):
+  // the one state this bridge holds while the update tool restarts Beeper. Set: every REST call
+  // waits here (nothing fails, so nothing is reported lost), the socket is not redialled and the
+  // ear probe gives no verdict. Cleared: the install is looked up again, the socket redials at
+  // once with the backoff reset, and the waiting calls go.
+  let _beeperRestart = null;   // { over: Promise, end } while set
+  const beeperRestartOver = () => _beeperRestart?.over;
+
   // --- REST ---
   async function api(method, path, body) {
+    await beeperRestartOver();
     const res = await fetch(baseUrl + path, {
       method,
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -869,6 +878,7 @@ export async function startBeeperBridge(opts = {}) {
   // chatHasParticipant below re-asks on its own TTL rather than trusting a hit forever. Same ONE
   // GET, same ONE cache entry: no second HTTP path was opened for membership.
   async function chatInfo(chatID, { refresh = false } = {}) {
+    chatID = shortChatId(chatID);   // createGroup polls the full id; the cache is keyed short like every reader
     if (!refresh && _chatCache.has(chatID)) return _chatCache.get(chatID);
     // `participants: null` is UNKNOWN, never "empty" — the catch below leaves it null, and the
     // membership answer must never read a failed fetch as "nobody is in this chat".
@@ -942,20 +952,6 @@ export async function startBeeperBridge(opts = {}) {
     const fresh = info?.raw && (info.type === 'single' || Date.now() - (info.at ?? 0) < PARTICIPANTS_TTL_MS);
     if (!fresh) info = await chatInfo(id, { refresh: true });
     return info?.raw ?? (info?.gone ? false : null);
-  }
-
-  // THE 1:1 COUNTERPARTY (operator 2026-10-10, the super-channel invite) — the OTHER party's
-  // bridged-puppet id in a single chat, the one a `-super` group must invite so they can read the
-  // reply there. Off the SAME chatRaw payload. null for a group (no single other party) or an
-  // ambiguous/empty roster. Self is a :beeper.com matrix id, so the sole :beeper.local member IS the
-  // counterparty — no self-detection.
-  async function chatOtherPartyId(chatID) {
-    const c = await chatRaw(chatID);
-    if ((c?.type ?? 'single') !== 'single') return null;
-    const others = (participantItems(c) ?? [])
-      .map((p) => p?.id)
-      .filter((id) => typeof id === 'string' && id.endsWith(':beeper.local'));
-    return others.length === 1 ? others[0] : null;
   }
 
   // ── A PICKER @-MENTION OF THE MOUTH IS AN ADDRESS (operator 2026-09-16) ─────────────────────
@@ -1141,24 +1137,6 @@ export async function startBeeperBridge(opts = {}) {
     return null;
   }
 
-  // TITLE → this account's own chatID (operator 2026-10-03, the /join+/split OPENER). A group created
-  // on the PRIMARY account is created on the SECONDARY too, ASYNCHRONOUSLY, under the SAME title but
-  // the secondary's OWN room id — so the opener, which must come FROM RODZ (the secondary) for the
-  // empty group to surface in Beeper, needs that id. Scans this account's OWN chat list — the SAME
-  // cached walk resolveUserIdByPhone/chatRaw share, NO new fetch — and returns the SHORT id of the
-  // chat whose title === `title` (exact; the title is our own group_title render, byte-for-byte).
-  // `accountID` scopes the scan to the network the group lives on (absent → first match across all).
-  // null = no chat by that title on this account YET (the caller polls, then falls back to the primary).
-  async function resolveChatIdByTitle(title, { accountID = null } = {}) {
-    const want = String(title ?? '');
-    if (!want) return null;
-    for (const c of await listChatsRaw({ full: true })) {
-      if (accountID && String(c?.accountID ?? '') !== String(accountID)) continue;
-      if (String(c?.title ?? '') === want) return shortChatId(c.id);
-    }
-    return null;
-  }
-
   // All chats from the Desktop API, normalized + briefly cached (60s) —
   // powers /channels-style listings and name→chatID resolution.
   // `full` is part of the cache identity: a cached FIRST PAGE must never satisfy a
@@ -1213,10 +1191,9 @@ export async function startBeeperBridge(opts = {}) {
   async function resolveChatId(nameOrId, { network = null } = {}) {
     const s = String(nameOrId ?? '');
     if (!s) return null;
-    // Legacy/defensive: a full-form Matrix room id is recognized without a
-    // listChats round-trip (same short-circuit the '!' prefix always gave), just
-    // normalized down to the short form egpt uses past this point.
-    if (s.startsWith('!')) { const id = shortChatId(s); _knownChatIds.add(id); return id; }
+    // A chat ID (full or short, isChatId) is used as is — never looked up in the chat list, which does
+    // not show a new group until it has a message (operator 2026-10-19). Only a NAME is searched for.
+    if (isChatId(s)) { const id = shortChatId(s); _knownChatIds.add(id); return id; }
     // Already-known real id (see _knownChatIds above) — resolves with NO lookup,
     // same free short-circuit the '!' prefix used to give every raw id.
     if (_knownChatIds.has(s)) return s;
@@ -1496,11 +1473,19 @@ export async function startBeeperBridge(opts = {}) {
       return { r, confirmedId };
     } catch (e) { settle(null); throw e; }
   }
+  // Why the last send to a chat failed, until one there lands — what a lost opener/reply/limb reports
+  // (operator 2026-10-19: "why is the error not bubbling up?"). Read through sendFailure().
+  const _sendFailures = new Map();
+  const noteSendFailure = (chat, why) => { _sendFailures.set(shortChatId(chat), why); _capMap(_sendFailures, 500); };
   // chatID may be a room id, an exact chat title, or a deterministic slug —
   // one resolution chokepoint so config/outbox entries never need raw ids.
   async function sendMessage(chatIdOrName, text, { replyToMessageID } = {}) {
     const chatID = await resolveChatId(chatIdOrName);
-    if (!chatID || !text) { onLog(`beeper: send DROPPED — chat=${JSON.stringify(chatIdOrName)} resolved=${chatID} textLen=${(text || '').length}`); return null; }
+    if (!chatID || !text) {
+      onLog(`beeper: send DROPPED — chat=${JSON.stringify(chatIdOrName)} resolved=${chatID} textLen=${(text || '').length}`);
+      noteSendFailure(chatIdOrName, !chatID ? `no chat named ${JSON.stringify(String(chatIdOrName ?? ''))}` : 'empty text');
+      return null;
+    }
     try {
       // `@Nombre` -> a real mention, resolved against THIS chat's roster (rosterNamesAsMentions,
       // above). Here rather than in any caller, so /reply, a media caption's sibling text, a node
@@ -1511,8 +1496,9 @@ export async function startBeeperBridge(opts = {}) {
       const body = { text: await rosterNamesAsMentions(text, chatID) };
       if (replyToMessageID) body.replyToMessageID = String(replyToMessageID);
       const { r, confirmedId } = await postAndConfirm(chatID, body, body.text);
+      _sendFailures.delete(chatID);
       return { ok: true, chatId: chatID, pendingMessageID: r?.pendingMessageID, confirmedId };
-    } catch (e) { onLog(`beeper: send failed [${chatID}] — ${e?.message ?? e}`); return null; }
+    } catch (e) { onLog(`beeper: send failed [${chatID}] — ${e?.message ?? e}`); noteSendFailure(chatID, e?.message ?? String(e)); return null; }
   }
 
   // --- edit / delete (Beeper Desktop API: PUT/DELETE a message by its CONFIRMED
@@ -1558,6 +1544,7 @@ export async function startBeeperBridge(opts = {}) {
   // onLog, unchanged.
   async function createGroup({ accountID, participantIDs, type = 'group', title, messageText } = {}) {
     if (!accountID || !Array.isArray(participantIDs) || !participantIDs.length) return null;
+    await beeperRestartOver();
     try {
       const res = await fetch(baseUrl + '/v1/chats', {
         method: 'POST',
@@ -1651,6 +1638,7 @@ export async function startBeeperBridge(opts = {}) {
     const buf = await readFile(filePath);
     const form = new FormData();
     form.append('file', new Blob([buf], { type: mimeTypeFor(filePath) }), basename(filePath));
+    await beeperRestartOver();
     const res = await fetch(baseUrl + '/v1/assets/upload', { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: form });
     if (!res.ok) throw new Error(`POST /v1/assets/upload → ${res.status} ${(await res.text()).slice(0, 200)}`);
     const t = await res.text();
@@ -1658,10 +1646,14 @@ export async function startBeeperBridge(opts = {}) {
   }
   async function sendMedia(chatIDOrName, filePath, { caption = null, replyTo = null } = {}) {
     const chatID = await resolveChatId(chatIDOrName);
-    if (!chatID || !filePath) { onLog(`beeper: media DROPPED — chat=${JSON.stringify(chatIDOrName)} resolved=${chatID} file=${JSON.stringify(filePath)}`); return false; }
+    if (!chatID || !filePath) {
+      onLog(`beeper: media DROPPED — chat=${JSON.stringify(chatIDOrName)} resolved=${chatID} file=${JSON.stringify(filePath)}`);
+      noteSendFailure(chatIDOrName, !chatID ? `no chat named ${JSON.stringify(String(chatIDOrName ?? ''))}` : 'no file');
+      return false;
+    }
     try {
       const up = await uploadAsset(filePath);
-      if (!up?.uploadID) { onLog(`beeper: media upload returned no uploadID [${filePath}]`); return false; }
+      if (!up?.uploadID) { onLog(`beeper: media upload returned no uploadID [${filePath}]`); noteSendFailure(chatID, 'the upload returned no uploadID'); return false; }
       // A CAPTION IS A LINE A BEING WROTE, so it carries `@Nombre` like any other — the same
       // conversion through the same rosterNamesAsMentions above, resolved once here and used for
       // BOTH the body and the match text below (the _matchKey reason sendMessage states: matching
@@ -1688,8 +1680,9 @@ export async function startBeeperBridge(opts = {}) {
         try { rememberSent(sha256Hex(await readFile(filePath)), chatID); }
         catch (e) { onLog(`beeper: could not key own voice send for echo suppression [${chatID}/${filePath}] — ${e?.message ?? e}`); }
       }
+      _sendFailures.delete(chatID);
       return { ok: true, chatId: chatID, pendingMessageID: r?.pendingMessageID, confirmedId };
-    } catch (e) { onLog(`beeper: media send failed [${chatID}/${filePath}] — ${e?.message ?? e}`); return false; }
+    } catch (e) { onLog(`beeper: media send failed [${chatID}/${filePath}] — ${e?.message ?? e}`); noteSendFailure(chatID, e?.message ?? String(e)); return false; }
   }
   // Resolve the CONFIRMED id of a message we just sent: poll the recent list and
   // match our own text; pick the newest match (largest numeric id). TRANSFORM-TOLERANT:
@@ -1781,13 +1774,13 @@ export async function startBeeperBridge(opts = {}) {
     _arrivals.delete(chatID);
     _arrivals.set(chatID, list);
     _capMap(_arrivals, ARRIVAL_CHATS);
-    for (const w of [..._arrivalWaiters]) if (w.chatID === chatID && w.test(msg)) w.done(msg);
+    for (const w of [..._arrivalWaiters]) if ((w.chatID == null || w.chatID === chatID) && w.test(msg)) w.done(msg);
   }
-  // The next arrival in `chatId` that passes `test`, or null after `ms`.
+  // The next arrival in `chatId` (null: in any chat) that passes `test`, or null after `ms`.
   function awaitMessage(chatId, test, ms) {
     return new Promise((resolve) => {
       let timer = null;
-      const w = { chatID: shortChatId(chatId), test, done: (m) => { clearTimeout(timer); _arrivalWaiters.delete(w); resolve(m); } };
+      const w = { chatID: chatId == null ? null : shortChatId(chatId), test, done: (m) => { clearTimeout(timer); _arrivalWaiters.delete(w); resolve(m); } };
       _arrivalWaiters.add(w);
       timer = setTimeout(() => w.done(null), ms);
       timer.unref?.();
@@ -1953,7 +1946,8 @@ export async function startBeeperBridge(opts = {}) {
     // The target's frame names the TARGET's author, not the reactor: off the snippet, and read as the
     // replyToBeing a text reply to it would carry (dispatchMessage, below).
     const snippet = stripNodeSignature(target);
-    const replyToBeing = decodeNodeSignature(target) === String(nodeName).trim() ? decodeBeingSignature(target) : null;
+    const replyToNode = decodeNodeSignature(target);
+    const replyToBeing = replyToNode === String(nodeName).trim() ? decodeBeingSignature(target) : null;
     const replyToBot = wasSentByUs(msg.chatID, msg.id) || !!replyToBeing;
     // OURS = an account a being speaks through, the ear's excepted (operator 2026-10-11). Its reaction
     // (/react, 📩/👀, ✅, 🎧 — this node's or a co-account peer's) is OUTPUT (operator 2026-10-18):
@@ -1974,7 +1968,7 @@ export async function startBeeperBridge(opts = {}) {
         network,   // per-surface authorization namespace
         userId: reactor, username: undefined, firstName: name, senderName: name,
         isSender: false, authorized: isAllowedUser(reactor, network),
-        atEStart: false, atEAnywhere: false, replyToBot, replyToBeing,
+        atEStart: false, atEAnywhere: false, replyToBot, replyToBeing, replyToNode,
         isReaction: true, isTranscriptFromVoice: false,
         msgKey: msg.id || null,   // the reacted-to message id (referenced as #id in the body)
       };
@@ -2377,10 +2371,12 @@ export async function startBeeperBridge(opts = {}) {
     //      quote-reply to a being is exactly such a message.
     const replyToId = msg.linkedMessageID ?? msg.replyToMessageID ?? msg.quotedMessageID ?? null;
     let replyToBeing = null;
+    let replyToNode = null;   // the quoted frame's node, any node (router: another node's post is addressed there)
     if (replyToId) {
       const quoted = _seenText.get(msgKeyOf(chatID, replyToId))
         ?? (await listMessagesRaw(chatID)).find((m) => m?.id != null && String(m.id) === String(replyToId))?.text;
-      if (decodeNodeSignature(quoted) === String(nodeName).trim()) replyToBeing = decodeBeingSignature(quoted);
+      replyToNode = decodeNodeSignature(quoted);
+      if (replyToNode === String(nodeName).trim()) replyToBeing = decodeBeingSignature(quoted);
     }
     const replyToBot = !!(replyToId && wasSentByUs(chatID, replyToId)) || !!replyToBeing;
 
@@ -2551,6 +2547,7 @@ export async function startBeeperBridge(opts = {}) {
       replyToBot,                           // true when this is a reply to a message WE sent (gates a reply without @e)
       replyToId,                            // the quoted message id (→ `↩#<id>` in the dispatch line), null when not a reply
       replyToBeing,                         // the being key in the quoted message's frame (this node's), null otherwise — the router addresses it
+      replyToNode,                          // the node in the quoted message's frame, null when unsigned
       isReaction: false,
       // a voice note's ARRIVAL carries no transcript (yet); its outcome line, below, does
       isTranscriptFromVoice: isVoice && !_voicePending,
@@ -2566,7 +2563,7 @@ export async function startBeeperBridge(opts = {}) {
       msgHash: crossAccountMsgKey(msg),
       msgTs: tsMs,
     };
-    onLog(`beeper: incoming [${info.title}] ${msg.senderName}: ${JSON.stringify((text || '').slice(0, 60))} (atE=${st.atEAnywhere}${replyToBot ? ' replyToBot' : ''}${replyToBeing ? ` replyToBeing=${replyToBeing}` : ''}${replyToId ? ` ↩${replyToId}` : ''}${isVoice ? ' voice' : ''})`);
+    onLog(`beeper: incoming [${info.title}] ${msg.senderName}: ${JSON.stringify((text || '').slice(0, 60))} (atE=${st.atEAnywhere}${replyToBot ? ' replyToBot' : ''}${replyToBeing ? ` replyToBeing=${replyToBeing}` : ''}${replyToNode && !replyToBeing ? ` replyToNode=${replyToNode}` : ''}${replyToId ? ` ↩${replyToId}` : ''}${isVoice ? ' voice' : ''})`);
     // Hand off to the host WITHOUT awaiting the reply turn. The host (spine) enqueues
     // this message synchronously — so the order messages REACH here is the order the
     // spine sees (dispatches now run concurrently, so that is arrival order only up to
@@ -2619,6 +2616,7 @@ export async function startBeeperBridge(opts = {}) {
       ? (text) => injectViaTelegram({ ...earProbeTelegram, text })
       : null,
     restart: () => { try { if (ws?.terminate) ws.terminate(); else ws?.close?.(); } catch { /* already gone */ } },
+    paused: () => !!_beeperRestart,
     onLog: (m) => onLog(`beeper: ${m}`),
   });
 
@@ -2683,6 +2681,7 @@ export async function startBeeperBridge(opts = {}) {
     ws.on('close', () => {
       _wsReady = false;
       if (_stopped) return;
+      if (_beeperRestart) { onLog('beeper: WS closed — Beeper is restarting for an update; redialling when it is back'); return; }
       onLog(`beeper: WS closed — reconnecting in ${Math.round(_reconnectMs / 1000)}s`);
       _reconnectTimer = setTimeout(redial, _reconnectMs);
       _reconnectMs = Math.min(_reconnectMs * 2, RECONNECT_MAX_MS);
@@ -2699,8 +2698,7 @@ export async function startBeeperBridge(opts = {}) {
   // BOTH catches are load-bearing. A failed lookup must never stop the reconnect loop — the whole
   // point is to keep redialling — and connect() throwing inside an async function would be an
   // unhandled rejection where the old setTimeout(connect) would merely have thrown.
-  async function redial() {
-    if (_stopped) return;
+  async function rediscoverInstall() {
     try {
       const found = await rediscover?.();
       if (found?.baseUrl && found.baseUrl !== baseUrl) {
@@ -2709,7 +2707,30 @@ export async function startBeeperBridge(opts = {}) {
         wsUrl = found.wsUrl ?? wsUrl;
       }
     } catch (e) { onLog(`beeper: rediscovery failed (${e?.message ?? e}) — redialling the address we have`); }
+  }
+  async function redial() {
+    if (_stopped) return;
+    await rediscoverInstall();
     try { connect(); } catch (e) { onLog(`beeper: redial failed — ${e?.message ?? e}`); }
+  }
+  // Set before the update tool restarts Beeper, cleared after (see _beeperRestart above).
+  async function setBeeperRestart(on) {
+    if (on) {
+      if (_beeperRestart) return;
+      let end;
+      _beeperRestart = { over: new Promise((r) => { end = r; }), end };
+      onLog('beeper: Beeper restarting for update — calls wait, no redial, no ear verdict');
+      return;
+    }
+    const r = _beeperRestart;
+    if (!r) return;
+    if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
+    _reconnectMs = RECONNECT_MIN_MS;
+    await rediscoverInstall();   // before the waiting calls go: the install may answer on another port now
+    _beeperRestart = null;
+    r.end();
+    onLog('beeper: Beeper restart for update over — redialling now');
+    if (!_wsReady && !_stopped) { try { connect(); } catch (e) { onLog(`beeper: redial failed — ${e?.message ?? e}`); } }
   }
   connect();
 
@@ -2747,6 +2768,7 @@ export async function startBeeperBridge(opts = {}) {
     sendReaction:  (chatId, messageId, key)  => sendReaction(chatId, messageId, key),
     removeReaction: (chatId, messageId, key) => removeReaction(chatId, messageId, key),   // the 🎧 mark's removal (port `unreact`)
     sendMedia:     (chatId, filePath, opts)  => sendMedia(chatId, filePath, opts),
+    sendFailure:   (chatId)                  => _sendFailures.get(shortChatId(chatId)) ?? null,   // why the last send there failed (null once one lands)
     wasSentByUs:   (chatId, messageId)       => wasSentByUs(chatId, messageId),
     // Deterministic-name surface (operator 2026-06-10): callers and slash
     // files work with names/slugs; room ids stay an internal detail.
@@ -2756,15 +2778,9 @@ export async function startBeeperBridge(opts = {}) {
     // caches; see listChatsRaw / chatRaw for the cost bound.
     listChatsRaw,
     chatRaw: (chatId) => chatRaw(chatId),
-    // THE 1:1 COUNTERPARTY (operator 2026-10-10) — the super-channel invite in a single chat.
-    chatOtherPartyId: (chatId) => chatOtherPartyId(chatId),
     // PHONE → BEEPER USER ID (operator 2026-10-03) — the /fork create needs Rodz's `@whatsapp_lid-…`
     // id, not his +phone (the API rejects the latter). Reads the SAME rosters chatRaw/listChatsRaw do.
     resolveUserIdByPhone: (phoneDigits, opts) => resolveUserIdByPhone(phoneDigits, opts),
-    // TITLE → this account's chatID (operator 2026-10-03) — the /join+/split OPENER resolves the
-    // SECONDARY's OWN room id for the new group (created async under the same title) so the opener can
-    // be posted FROM RODZ. Reads the SAME chat list listChats/resolveUserIdByPhone do.
-    resolveChatIdByTitle: (title, opts) => resolveChatIdByTitle(title, opts),
     // THE RECENT MESSAGES OF ONE CHAT, raw (operator 2026-09-07, the mouth link's reaction verb).
     // The co-account node names a message by CONTENT (crossAccountMsgKey) because no id crosses
     // the link, so this end has to look at its own copies to find which one it means. Same GET the
@@ -2772,8 +2788,8 @@ export async function startBeeperBridge(opts = {}) {
     // steer ack, and a cached page would hand back a list that predates the very message being
     // pointed at. Returns [] on any failure — the caller refuses rather than guessing.
     listMessagesRaw: (chatId, opts) => listMessagesRaw(chatId, opts),
-    // …and the ones this account has SEEN arrive, with no GET (noteArrival above).
-    recentMessages: (chatId) => [...(_arrivals.get(shortChatId(chatId)) ?? [])],
+    // …and the ones this account has SEEN arrive, with no GET (noteArrival above). null: in every chat.
+    recentMessages: (chatId) => (chatId == null ? [..._arrivals.values()].flat() : [...(_arrivals.get(shortChatId(chatId)) ?? [])]),
     awaitMessage: (chatId, test, ms) => awaitMessage(chatId, test, ms),
     // MEMBERSHIP (operator 2026-08-31, router.mjs fallback_handle): true | false | null (UNKNOWN).
     // Cached + TTL'd + free for a 1:1 — see chatHasParticipant above.
@@ -2881,10 +2897,22 @@ export async function startBeeperBridge(opts = {}) {
           await applyEdit(`⚠️ could not deliver this reply${handle.lastError ? ` — ${handle.lastError}` : ''}`).catch(() => {});
         }
       };
+      // The bridge removing its OWN placeholder, in the room it opened in (a limb-only turn, operator
+      // 2026-10-19). After any edit in flight. false = still there: finish() still works.
+      handle.delete = async () => {
+        if (finished) return false;
+        if (editTimer) { clearTimeout(editTimer); editTimer = null; }
+        await ready;
+        if (!cid || !realId) return false;
+        const ok = await serial(() => deleteMessage(cid, realId));
+        if (ok) { finished = true; realId = null; }
+        return ok;
+      };
       handle.fail = (e) => { finished = true; handle.lastError = e?.message ?? String(e); onLog(`beeper: stream fail — ${e?.message ?? e}`); };
       return handle;
     },
     isAlive: () => _wsReady,
+    setBeeperRestart,
     stop: () => {
       _stopped = true;
       if (_reconnectTimer) clearTimeout(_reconnectTimer);

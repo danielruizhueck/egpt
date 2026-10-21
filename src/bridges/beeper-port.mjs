@@ -220,6 +220,7 @@ export async function createBeeperBridgePort(opts = {}, { start = startBeeperBri
       return {
         update: (t) => h.update(frame(mark(t, LIVE_FRAME_MARK))),
         finish: (t) => h.finish(frame(mark(t, DONE_MARK))),
+        delete: () => h.delete?.() ?? false,   // the bridge's own placeholder, never a limb (sender.mjs)
         get delivered() { return h.delivered; },
         get lastError() { return h.lastError; },
         get confirmedId() { return h.confirmedId; },
@@ -263,6 +264,8 @@ export async function createBeeperBridgePort(opts = {}, { start = startBeeperBri
     },
     editOwn(chat, msgId, text, opts = {}) { return real.editMessage?.(chat, msgId, wrapPersona(opts, text)); },
     wasSentByUs(chat, msgId) { return real.wasSentByUs?.(chat, msgId); },
+    // Why the last send to `chat` failed (beeper.mjs sendFailure) — the reason a lost reply reports. null without one.
+    sendFailure(chat) { return real.sendFailure ? real.sendFailure(chat) : null; },
     // MEMBERSHIP (operator 2026-08-31) — "is <identity> a participant of this chat?", the ONE
     // question a `fallback_handle:` asks before waking (src/spine/router.mjs fallbackWake). Not an
     // outbound: a READ of this account's own copy of the roster, cached and TTL'd in the bridge.
@@ -323,10 +326,6 @@ export async function createBeeperBridgePort(opts = {}, { start = startBeeperBri
     async chatRaw(chat) {
       return real.chatRaw ? await real.chatRaw(chat) : null;
     },
-    // 1:1 counterparty id — the super-channel invite. Thin-forward like chatRaw (a roster read).
-    async chatOtherPartyId(chat) {
-      return real.chatOtherPartyId ? await real.chatOtherPartyId(chat) : null;
-    },
 
     // /fork + /end OPS (operator 2026-10-01) — forwarded to the raw bridge where they are DEFINED
     // (src/bridges/beeper.mjs), the same thin-forward shape as chatRaw/listChats/selfIdentities
@@ -346,13 +345,6 @@ export async function createBeeperBridgePort(opts = {}, { start = startBeeperBri
     // create. A transport that lacks it answers null, which the handler reads as "unresolvable → STOP".
     async resolveUserIdByPhone(phoneDigits, opts) {
       return real.resolveUserIdByPhone ? await real.resolveUserIdByPhone(phoneDigits, opts) : null;
-    },
-    // TITLE → this account's own room id (operator 2026-10-03) — a READ of this account's chat list,
-    // forwarded so the /join+/split opener can find the SECONDARY's OWN room id for the new group
-    // (created async under the same title) and post the opener FROM RODZ. A transport that lacks it
-    // answers null, which the handler reads as "not surfaced yet → poll, then fall back to primary".
-    async resolveChatIdByTitle(title, opts) {
-      return real.resolveChatIdByTitle ? await real.resolveChatIdByTitle(title, opts) : null;
     },
     async archiveChat(chat, opts) {
       return real.archiveChat ? await real.archiveChat(chat, opts) : false;
@@ -374,6 +366,8 @@ export async function createBeeperBridgePort(opts = {}, { start = startBeeperBri
     awaitMessage(chat, test, ms) { return real.awaitMessage ? real.awaitMessage(chat, test, ms) : Promise.resolve(null); },
 
     isAlive: () => real.isAlive(),
+    // /update beeper's "Beeper restarting for update" state (beeper.mjs _beeperRestart); a fake without it: no-op.
+    setBeeperRestart: (on) => real.setBeeperRestart?.(on),
     stop: () => real.stop(),
   };
 }

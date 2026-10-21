@@ -64,37 +64,43 @@ function harness({ config = AGENTS, state = null, brains, io = {}, cdp = {}, pro
   });
   return { cmds, sent, exits, rewinds, writes, evicts, files, roomChanges, logged, spawns: chrome.calls, getState: () => st };
 }
+// A typed line as the spine reads it: `/<handle> <command>` → the command (commandOf), else the line.
+const typed = (cmds, ev) => cmds.commandOf(ev) ?? ev;
 
 describe('commands.isCommand', () => {
-  it('recognizes a slash command in the Self DM', () => {
+  it('recognizes a slash command in the Self DM', async () => {
     const { cmds } = harness({ config: { ...AGENTS,  whatsapp: { chat_id: '!self' } } });
-    expect(cmds.isCommand({ body: '/restart', chatId: '!self' })).toBe(true);
+    expect(await cmds.isCommand(typed(cmds, { body: '/e restart', chatId: '!self' }))).toBe(true);
   });
-  it('recognizes a slash command from an authorized sender / own send anywhere', () => {
+  it('a bare slash command is no command, even in the Self DM (operator 2026-10-19: a command names its being)', async () => {
+    const { cmds } = harness({ config: { ...AGENTS,  whatsapp: { chat_id: '!self' } } });
+    expect(await cmds.isCommand(typed(cmds, { body: '/restart', chatId: '!self' }))).toBe(false);
+  });
+  it('recognizes a slash command from an authorized sender / own send anywhere', async () => {
     const { cmds } = harness();
-    expect(cmds.isCommand({ body: '/restart', chatId: '!group', authorized: true })).toBe(true);
-    expect(cmds.isCommand({ body: '/restart', chatId: '!group', isSender: true })).toBe(true);
+    expect(await cmds.isCommand(typed(cmds, { body: '/e restart', chatId: '!group', authorized: true }))).toBe(true);
+    expect(await cmds.isCommand(typed(cmds, { body: '/e restart', chatId: '!group', isSender: true }))).toBe(true);
   });
-  it('does NOT recognize a slash command from a random chat/sender', () => {
+  it('does NOT recognize a slash command from a random chat/sender', async () => {
     const { cmds } = harness({ config: { ...AGENTS,  whatsapp: { chat_id: '!self' } } });
-    expect(cmds.isCommand({ body: '/restart', chatId: '!group' })).toBe(false);
+    expect(await cmds.isCommand(typed(cmds, { body: '/e restart', chatId: '!group' }))).toBe(false);
   });
-  it('recognizes a slash command in the TELEGRAM surface Self DM (per-surface chat_id)', () => {
+  it('recognizes a slash command in the TELEGRAM surface Self DM (per-surface chat_id)', async () => {
     const { cmds } = harness({ config: { ...AGENTS,  whatsapp: { chat_id: '!self' }, telegram: { chat_id: '!tg-self' } } });
-    expect(cmds.isCommand({ body: '/restart', chatId: '!tg-self', surface: 'telegram' })).toBe(true);
+    expect(await cmds.isCommand(typed(cmds, { body: '/e restart', chatId: '!tg-self', surface: 'telegram' }))).toBe(true);
   });
-  it('does NOT recognize a slash command from a random telegram chat', () => {
+  it('does NOT recognize a slash command from a random telegram chat', async () => {
     const { cmds } = harness({ config: { ...AGENTS,  telegram: { chat_id: '!tg-self' } } });
-    expect(cmds.isCommand({ body: '/restart', chatId: '!tg-group', surface: 'telegram' })).toBe(false);
+    expect(await cmds.isCommand(typed(cmds, { body: '/e restart', chatId: '!tg-group', surface: 'telegram' }))).toBe(false);
   });
-  it('the whatsapp Self chat_id does NOT authorize the same id on the telegram surface (namespace)', () => {
+  it('the whatsapp Self chat_id does NOT authorize the same id on the telegram surface (namespace)', async () => {
     const { cmds } = harness({ config: { ...AGENTS,  whatsapp: { chat_id: '!self' } } });
-    expect(cmds.isCommand({ body: '/restart', chatId: '!self', surface: 'telegram' })).toBe(false);
+    expect(await cmds.isCommand(typed(cmds, { body: '/e restart', chatId: '!self', surface: 'telegram' }))).toBe(false);
   });
-  it('does NOT treat plain text (or @e) as a command', () => {
+  it('does NOT treat plain text (or @e) as a command', async () => {
     const { cmds } = harness();
-    expect(cmds.isCommand({ body: 'hola', chatId: '!self', authorized: true })).toBe(false);
-    expect(cmds.isCommand({ body: '@e estas?', chatId: '!self', authorized: true })).toBe(false);
+    expect(await cmds.isCommand({ body: 'hola', chatId: '!self', authorized: true })).toBe(false);
+    expect(await cmds.isCommand({ body: '@e estas?', chatId: '!self', authorized: true })).toBe(false);
   });
 });
 
@@ -1383,7 +1389,7 @@ describe('/agents access_level all|regular <handle>|all — points access_level 
       await cmds.run({ chatId: '1234@s.whatsapp.net', surface: 'whatsapp', body });
       // The refusal NAMES EVERY LEVEL, because it is built from ACCESS_LEVELS. It used to say
       // all|regular, which hid the third tier from the one person guaranteed to be reading it.
-      expect(sent[0].text).toBe('usage: /agents access_level regular|all|sandbox <handle>|force all');
+      expect(sent[0].text).toBe('usage: /e agents access_level regular|all|sandbox [<handle>|force all]');
       expect(sent[0].text).not.toMatch(/recognized/);
     }
   });
@@ -1817,7 +1823,7 @@ describe('loop intercept', () => {
       transcript, heartbeats: { runDue() {} },
     });
     spine.start();
-    await cb({ body: '/restart', chatId: '!self' });
+    await cb({ body: '/e restart', chatId: '!self' });
     expect(brain.calls).toHaveLength(0);   // intercepted — not the persona
     expect(exits).toEqual([43]);
     expect(transcript.entries).toHaveLength(1);
@@ -2003,50 +2009,63 @@ describe('/agents across two nodes — only the host answers; `all` refused, `fo
   };
   const both = async (body) => {
     const kg = node(KG_CFG, KG_BEINGS), dn = node(DO_CFG, DO_BEINGS);
-    for (const n of [kg, dn]) await n.cmds.run({ chatId: CHAT, surface: SURFACE, body, authorized: true });
+    // Both nodes hear the line; each runs it only when the handle names one of its beings (commandOf).
+    for (const n of [kg, dn]) {
+      const cmd = n.cmds.commandOf({ chatId: CHAT, surface: SURFACE, body, authorized: true });
+      if (cmd && await n.cmds.isCommand(cmd)) await n.cmds.run(cmd);
+    }
     return { kg, dn };
   };
   const modes = (n) => Object.fromEntries(Object.entries(getContact(n.getState(), SURFACE, CHAT).entry.agents).map(([b, v]) => [b, v.mode]));
 
-  it('`/agents mode accum e`: kg applies it to egpt; do posts NOTHING and writes nothing (THE reproduce)', async () => {
-    const { kg, dn } = await both('/agents mode accum e');
+  it('`/e agents mode accum e`: kg applies it to egpt; do posts NOTHING and writes nothing (THE reproduce)', async () => {
+    const { kg, dn } = await both('/e agents mode accum e');
     expect(kg.sent.map((s) => s.text)).toEqual(['✅ e (egpt) mode here → accum']);
     expect(modes(kg).egpt).toBe('accum');
     expect(dn.sent).toEqual([]);
     expect(dn.writes).toHaveLength(0);
-    expect(dn.logs.some((l) => /"e"/.test(l))).toBe(true);
+    expect(dn.audit).toEqual([]);   // another node's command: do never runs it
   });
 
   it('a name nobody hosts: no chat reply on either node, nothing written', async () => {
-    const { kg, dn } = await both('/agents rethread zzz');
+    const { kg, dn } = await both('/e agents rethread zzz');
     for (const n of [kg, dn]) { expect(n.sent).toEqual([]); expect(n.writes).toHaveLength(0); }
   });
 
-  // Operator 2026-10-17: the silence becomes one logging-group line per node that does not host it.
-  it('a node that does not host the being logs ONE line "no <agent> in node <node>"; the host is unchanged', async () => {
-    const { kg, dn } = await both('/agents mode accum e');
-    expect(dn.audit).toEqual([`/agents in ${CHAT} by someone → no e in node do`]);
-    expect(kg.audit).toEqual([`/agents in ${CHAT} by someone`]);
-    expect(kg.sent.map((s) => s.text)).toEqual(['✅ e (egpt) mode here → accum']);
+  // Operator 2026-10-17: the silence becomes one logging-group line on the node that does not host it.
+  it('the handle\'s node logs ONE line "no <agent> in node <node>" for a target it does not host', async () => {
+    const { kg, dn } = await both('/e agents mode accum don');
+    expect(kg.audit).toEqual([`/agents in ${CHAT} by someone → no don in node kg`]);
+    expect(kg.sent).toEqual([]);
+    expect(dn.audit).toEqual([]);
+    const host = await both('/e agents mode accum e');
+    expect(host.kg.audit).toEqual([`/agents in ${CHAT} by someone`]);
+    expect(host.kg.sent.map((s) => s.text)).toEqual(['✅ e (egpt) mode here → accum']);
   });
 
-  it('a name nobody hosts: each node logs its own line', async () => {
-    const { kg, dn } = await both('/agents rethread zzz');
-    expect(kg.audit).toEqual([`/agents in ${CHAT} by someone → no zzz in node kg`]);
-    expect(dn.audit).toEqual([`/agents in ${CHAT} by someone → no zzz in node do`]);
+  it('a name nobody hosts: only the handle\'s node logs its line', async () => {
+    const onKg = await both('/e agents rethread zzz');
+    expect(onKg.kg.audit).toEqual([`/agents in ${CHAT} by someone → no zzz in node kg`]);
+    expect(onKg.dn.audit).toEqual([]);
+    const onDo = await both('/d agents rethread zzz');
+    expect(onDo.dn.audit).toEqual([`/agents in ${CHAT} by someone → no zzz in node do`]);
+    expect(onDo.kg.audit).toEqual([]);
   });
 
-  it('`/agents mode accum all`: ONE refusal, from the primary only, naming `force all`; nothing changes anywhere', async () => {
-    const { kg, dn } = await both('/agents mode accum all');
+  it('`/e agents mode accum all`: ONE refusal, from the handle\'s node, naming `force all`; nothing changes anywhere', async () => {
+    const { kg, dn } = await both('/e agents mode accum all');
     expect(kg.sent).toHaveLength(1);
-    expect(kg.sent[0].text).toMatch(/`\/agents mode accum force all`/);
+    expect(kg.sent[0].text).toMatch(/`\/e agents mode accum force all`/);
     expect(kg.sent[0].text).toMatch(/Nothing was changed/);
     expect(dn.sent).toEqual([]);
     for (const n of [kg, dn]) expect(n.writes).toHaveLength(0);
+    const onDo = await both('/d agents mode accum all');   // the secondary refuses too when it is named
+    expect(onDo.dn.sent).toHaveLength(1);
+    expect(onDo.kg.sent).toEqual([]);
   });
 
   it('every verb and the bare status form refuse `all` the same way (case-insensitive)', async () => {
-    for (const body of ['/agents all', '/agents rethread all', '/agents reset ALL', '/agents refresh all', '/agents access_level regular all']) {
+    for (const body of ['/e agents all', '/e agents rethread all', '/e agents reset ALL', '/e agents refresh all', '/e agents access_level regular all']) {
       const { kg, dn } = await both(body);
       expect(kg.sent, body).toHaveLength(1);
       expect(kg.sent[0].text, body).toMatch(/force all/);
@@ -2055,12 +2074,15 @@ describe('/agents across two nodes — only the host answers; `all` refused, `fo
     }
   });
 
-  it('`/agents mode accum force all`: each node changes ONLY its own residents and reports only those', async () => {
-    const { kg, dn } = await both('/agents mode accum force all');
-    expect(modes(kg)).toEqual(Object.fromEntries(KG_BEINGS.map((b) => [b, 'accum'])));
-    expect(modes(dn)).toEqual(Object.fromEntries(DO_BEINGS.map((b) => [b, 'accum'])));
-    expect(kg.sent.map((s) => s.text)).toEqual(['✅ egpt, codex, ken, eplus, pi mode here → accum']);
-    expect(dn.sent.map((s) => s.text)).toEqual(['✅ egpt, dren mode here → accum']);
+  it('`force all`: the handle\'s node changes ONLY its own residents and reports only those', async () => {
+    const onKg = await both('/e agents mode accum force all');
+    expect(modes(onKg.kg)).toEqual(Object.fromEntries(KG_BEINGS.map((b) => [b, 'accum'])));
+    expect(modes(onKg.dn)).toEqual(Object.fromEntries(DO_BEINGS.map((b) => [b, 'mention'])));
+    expect(onKg.kg.sent.map((s) => s.text)).toEqual(['✅ egpt, codex, ken, eplus, pi mode here → accum']);
+    const onDo = await both('/d agents mode accum force all');
+    expect(modes(onDo.dn)).toEqual(Object.fromEntries(DO_BEINGS.map((b) => [b, 'accum'])));
+    expect(onDo.dn.sent.map((s) => s.text)).toEqual(['✅ egpt, dren mode here → accum']);
+    expect(onDo.kg.sent).toEqual([]);
   });
 
   it('`force all` on a node with no resident beings in the chat says nothing', async () => {
@@ -2070,10 +2092,21 @@ describe('/agents across two nodes — only the host answers; `all` refused, `fo
     expect(n.writes).toHaveLength(0);
   });
 
-  // No handle-less fan-out exists: `/agents mode accum` gets usage and changes nothing.
-  it('the bare `/agents mode accum` (no target) changes nothing', async () => {
-    const { kg, dn } = await both('/agents mode accum');
-    for (const n of [kg, dn]) { expect(n.writes).toHaveLength(0); expect(n.sent.map((s) => s.text)).toEqual([AGENTS_USAGE]); }
+  // A verb with no target acts on the being the command was typed to (operator 2026-10-19).
+  it('`/e agents mode accum` (no target) sets E\'s mode on kg; do changes nothing', async () => {
+    const { kg, dn } = await both('/e agents mode accum');
+    expect(kg.sent.map((s) => s.text)).toEqual(['✅ e (egpt) mode here → accum']);
+    expect(modes(kg).egpt).toBe('accum');
+    expect(modes(kg).codex).toBe('mention');
+    expect(dn.writes).toHaveLength(0);
+    expect(dn.sent).toEqual([]);
+  });
+
+  it('the dispatcher with no target and no handle (the console\'s bare line) still answers usage', async () => {
+    const n = node(KG_CFG, KG_BEINGS);
+    await n.cmds.run({ chatId: CHAT, surface: SURFACE, body: '/agents mode accum', authorized: true });
+    expect(n.writes).toHaveLength(0);
+    expect(n.sent.map((s) => s.text)).toEqual([AGENTS_USAGE]);
   });
 
   it('a lone node (node_role unset) answers its own beings and refuses `all` itself', async () => {
@@ -2104,10 +2137,10 @@ describe('/agents <handle>|all — bare status view, usage, and /e/egpt retireme
     const ev = { chatId: '!room', surface: 'whatsapp', authorized: true };
     await cmds.run({ ...ev, body: '/agents' });
     expect(sent[0].text).toBe(AGENTS_USAGE);            // verb-first since 2026-08-28
-    expect(sent[0].text).toMatch(/^usage: \/agents \[<verb>\] \[<value>\] <handle>/);   // ...verb slot first, target after
+    expect(sent[0].text).toMatch(/^usage: \/<handle> agents \[<verb>\] \[<value>\] \[<handle>/);   // ...verb slot first, target after
     expect(writes).toHaveLength(0);
     // a plain follow-up message is NOT claimed as a command (nothing was armed)
-    expect(cmds.isCommand({ chatId: '!room', surface: 'whatsapp', body: '1', authorized: true })).toBe(false);
+    expect(await cmds.isCommand({ chatId: '!room', surface: 'whatsapp', body: '1', authorized: true })).toBe(false);
   });
 
   it('/agents <handle> <unknown-subcommand> gets a usage-shaped reply, not a fallthrough', async () => {
@@ -2277,11 +2310,10 @@ describe('/agents <handle>|all — bare status view, usage, and /e/egpt retireme
   });
 });
 
-// /chrome <node> — the chat's group Chrome (brain when the chat has no group row), answered ONLY by
-// the addressed node. The spawn is a fake pipe Chrome everywhere here: no real Chrome, no socket.
-// The node gate is the same wake-word principle as the mesh's self-set (node_name ∪ node_alias): a
-// non-addressed node says NOTHING, so on a shared Beeper account exactly one node answers.
-describe('/chrome <node>', () => {
+// /chrome — the chat's group Chrome (brain when the chat has no group row), on the node of the being the
+// command names (`/e chrome`; operator 2026-10-19). The spawn is a fake pipe Chrome everywhere here: no
+// real Chrome, no socket. Another node's handle is not a command here, so exactly one node answers.
+describe('/chrome', () => {
   const self = { chatId: '!self', surface: 'whatsapp' };
   const kg = { node_name: 'kg', whatsapp: { chat_id: '!self' } };
   const reachable = {
@@ -2292,9 +2324,9 @@ describe('/chrome <node>', () => {
   };
   const tabsFail = { listTabs: async () => { throw new Error('tab list failed'); } };
 
-  it('/chrome kg on the kg node launches brain\'s Chrome over the pipe and reports it + the tabs', async () => {
+  it('/chrome launches brain\'s Chrome over the pipe and reports it + the tabs', async () => {
     const { cmds, sent, spawns } = harness({ config: { ...AGENTS, ...kg }, cdp: reachable });
-    await cmds.run({ ...self, body: '/chrome kg' });
+    await cmds.run({ ...self, body: '/chrome' });
     expect(sent).toHaveLength(1);
     expect(sent[0].text).toMatch(/attached: the "brain" browser \(pipe\)/);
     expect(sent[0].text).toMatch(/launched: pid \d+/);
@@ -2304,99 +2336,73 @@ describe('/chrome <node>', () => {
     expect(spawns.map((s) => s.profileDir)).toEqual([CHROME_BRAIN_PROFILE]);
   });
 
-  it('a second /chrome kg attaches to the running Chrome — no relaunch, no pid line', async () => {
+  it('a second /chrome attaches to the running Chrome — no relaunch, no pid line', async () => {
     const { cmds, sent, spawns } = harness({ config: { ...AGENTS, ...kg }, cdp: reachable });
-    await cmds.run({ ...self, body: '/chrome kg' });
-    await cmds.run({ ...self, body: '/chrome kg' });
+    await cmds.run({ ...self, body: '/chrome' });
+    await cmds.run({ ...self, body: '/chrome' });
     expect(spawns).toHaveLength(1);
     expect(sent[1].text).toMatch(/attached/);
     expect(sent[1].text).not.toMatch(/launched:/);
   });
 
-  // The whole point of the gate: `do` must not answer a question addressed to `kg`.
-  it('/chrome kg on the `do` node replies NOTHING AT ALL and launches nothing', async () => {
-    const { cmds, sent, spawns } = harness({ config: { ...AGENTS,  node_name: 'do', whatsapp: { chat_id: '!self' } }, cdp: reachable });
-    await cmds.run({ ...self, body: '/chrome kg' });
+  // The whole point: `do` must not answer a command typed to kg's being.
+  it('`/e chrome` heard by a node whose persona answers to `d` is no command there', async () => {
+    const { cmds, sent, spawns } = harness({ config: { agents: { e: { handles: ['d'] } }, node_name: 'do', whatsapp: { chat_id: '!self' } }, cdp: reachable });
+    const cmd = typed(cmds, { ...self, body: '/e chrome' });
+    expect(cmd.commandElsewhere).toBe('e');
+    expect(await cmds.isCommand(cmd)).toBe(false);
     expect(sent).toHaveLength(0);
     expect(spawns).toHaveLength(0);
   });
 
-  it('a node_alias matches too (the addressed name is any of node_name ∪ node_alias)', async () => {
-    const { cmds, sent } = harness({ config: { ...AGENTS,  node_name: 'kg', node_alias: ['reve'], whatsapp: { chat_id: '!self' } }, cdp: reachable });
-    await cmds.run({ ...self, body: '/chrome reve' });
-    expect(sent).toHaveLength(1);
-    expect(sent[0].text).toMatch(/attached/i);
-  });
-
-  it('the node match is case-insensitive', async () => {
+  it('the handle is case-insensitive', async () => {
     const { cmds, sent } = harness({ config: { ...AGENTS, ...kg }, cdp: reachable });
-    await cmds.run({ ...self, body: '/chrome KG' });
+    const cmd = typed(cmds, { ...self, body: '/E CHROME' });
+    expect(await cmds.isCommand(cmd)).toBe(true);
+    await cmds.run(cmd);
     expect(sent).toHaveLength(1);
     expect(sent[0].text).toMatch(/attached/i);
   });
 
   it('the brain profile open in a normal window → the clear answer, nothing launched over it', async () => {
     const { cmds, sent, spawns } = harness({ config: { ...AGENTS, ...kg }, cdp: reachable, profileHolder: () => 'EBUSY' });
-    await cmds.run({ ...self, body: '/chrome kg' });
+    await cmds.run({ ...self, body: '/chrome' });
     expect(sent[0].text).toBe('no browser for this chat — the "brain" browser is open in a normal window; close it to hand it back to the spine');
     expect(spawns).toHaveLength(0);
   });
 
   it('a tab-list failure on a live Chrome is reported, never a throw', async () => {
     const { cmds, sent } = harness({ config: kg, cdp: tabsFail });
-    await expect(cmds.run({ ...self, body: '/chrome kg' })).resolves.toBeUndefined();
+    await expect(cmds.run({ ...self, body: '/chrome' })).resolves.toBeUndefined();
     expect(sent).toHaveLength(1);
     expect(sent[0].text).toMatch(/its tab list failed/);
   });
 
-  // Bare /chrome = usage, self-naming. Every node answers this ONE short line (it is
-  // the discovery path: it tells the operator the valid args). The expensive status
-  // payload stays strictly single-node.
-  it('bare /chrome shows a short usage line naming THIS node', async () => {
-    const { cmds, sent, spawns } = harness({ config: { ...AGENTS,  node_name: 'kg', node_alias: ['reve'], whatsapp: { chat_id: '!self' } }, cdp: reachable });
-    await cmds.run({ ...self, body: '/chrome' });
-    expect(sent).toHaveLength(1);
-    expect(sent[0].text).toMatch(/`\/chrome` <node>/);   // token quoted — the reply is not itself a command
-    expect(sent[0].text).toMatch(/kg/);
-    expect(sent[0].text).toMatch(/reve/);
-    expect(sent[0].text).not.toMatch(/attached/i);   // never the status payload
-    expect(spawns).toHaveLength(0);
-  });
-
-  // An unknown arg is a NON-MATCH, and a non-match is silent — same rule as `do`
-  // ignoring `/chrome kg`. If every node answered "unknown node" the operator would
-  // get exactly the double-answer the gate exists to prevent.
-  it('/chrome <unknown node> is silent (a non-match is a non-match, on every node)', async () => {
-    const { cmds, sent } = harness({ config: { ...AGENTS, ...kg }, cdp: reachable });
-    await cmds.run({ ...self, body: '/chrome zzz' });
-    expect(sent).toHaveLength(0);
-  });
-
-  it('/chrome is gated on the operator exactly like the other commands', () => {
+  it('/chrome is gated on the operator exactly like the other commands', async () => {
     const { cmds } = harness({ config: { ...AGENTS, ...kg }, cdp: reachable });
-    expect(cmds.isCommand({ body: '/chrome kg', chatId: '!self', surface: 'whatsapp' })).toBe(true);
-    expect(cmds.isCommand({ body: '/chrome kg', chatId: '!group', surface: 'whatsapp' })).toBe(false);
-    expect(cmds.isCommand({ body: '/chrome kg', chatId: '!group', surface: 'whatsapp', authorized: true })).toBe(true);
+    expect(await cmds.isCommand(typed(cmds, { body: '/e chrome', chatId: '!self', surface: 'whatsapp' }))).toBe(true);
+    expect(await cmds.isCommand(typed(cmds, { body: '/e chrome', chatId: '!group', surface: 'whatsapp' }))).toBe(false);
+    expect(await cmds.isCommand(typed(cmds, { body: '/e chrome', chatId: '!group', surface: 'whatsapp', authorized: true }))).toBe(true);
   });
 
   it('a non-operator /chrome is never run (no reply, no launch)', async () => {
     const { cmds, sent, spawns } = harness({ config: kg, cdp: reachable });
-    const ev = { body: '/chrome kg', chatId: '!group', surface: 'whatsapp' };
-    expect(cmds.isCommand(ev)).toBe(false);   // the loop never reaches run()
+    const ev = typed(cmds, { body: '/e chrome', chatId: '!group', surface: 'whatsapp' });
+    expect(await cmds.isCommand(ev)).toBe(false);   // the loop never reaches run()
     expect(sent).toHaveLength(0);
     expect(spawns).toHaveLength(0);
   });
 
   // Regression lock: /chrome must not fall through to the "recognized" catch-all.
-  it('/chrome kg is NOT answered by the unwired-command catch-all', async () => {
+  it('/chrome is NOT answered by the unwired-command catch-all', async () => {
     const { cmds, sent } = harness({ config: { ...AGENTS, ...kg }, cdp: reachable });
-    await cmds.run({ ...self, body: '/chrome kg' });
+    await cmds.run({ ...self, body: '/chrome' });
     expect(sent[0].text).not.toMatch(/recognized/);
   });
 
   it('it launches into config\'s chrome.profile_dir with config\'s chrome.bin', async () => {
     const { cmds, spawns } = harness({ config: { ...AGENTS, ...kg, chrome: { bin: 'C:/x/chrome.exe', profile_dir: 'C:/x/brain' } }, cdp: reachable });
-    await cmds.run({ ...self, body: '/chrome kg' });
+    await cmds.run({ ...self, body: '/chrome' });
     expect(spawns.map((s) => [s.profileDir, s.bin])).toEqual([['C:/x/brain', 'C:/x/chrome.exe']]);
   });
 });
@@ -2495,7 +2501,7 @@ describe('/rooms create <name>', () => {
       io: { mkdir: async (p) => { mkdirs.push(p); }, stat: async () => { throw new Error('ENOENT'); } },
     });
     await cmds.run({ ...self, body: '/rooms create' });
-    expect(sent[0].text).toMatch(/usage: \/rooms create <name>/);
+    expect(sent[0].text).toMatch(/usage: \/<handle> rooms create <name>/);
     expect(mkdirs).toHaveLength(0);
     expect(Object.keys(files)).toHaveLength(0);
   });
@@ -2592,11 +2598,11 @@ describe('/rooms /members /activate — dispatch recognition', () => {
   const self = { chatId: '!self', surface: 'whatsapp' };
   const cfg = { whatsapp: { chat_id: '!self' } };
 
-  it('are recognized from the Self DM, refused from a random chat', () => {
+  it('are recognized from the Self DM, refused from a random chat', async () => {
     const { cmds } = harness({ config: cfg });
-    for (const body of ['/rooms', '/members', '/activate chatgpt']) {
-      expect(cmds.isCommand({ body, chatId: '!self', surface: 'whatsapp' })).toBe(true);
-      expect(cmds.isCommand({ body, chatId: '!group', surface: 'whatsapp' })).toBe(false);
+    for (const body of ['/e rooms', '/e members', '/e activate chatgpt']) {
+      expect(await cmds.isCommand(typed(cmds, { body, chatId: '!self', surface: 'whatsapp' }))).toBe(true);
+      expect(await cmds.isCommand(typed(cmds, { body, chatId: '!group', surface: 'whatsapp' }))).toBe(false);
     }
   });
 
@@ -2690,7 +2696,7 @@ describe('/tabs /open /tab /close', () => {
   it('a chat with no browser gets the friendly fallback, never a throw', async () => {
     const { cmds, sent } = harness({ config: cfg, profileHolder: () => 'EBUSY' });
     await cmds.run({ ...self, body: '/tabs' });
-    expect(sent[0].text).toMatch(/no Chrome to list tabs from — try \/chrome first/);
+    expect(sent[0].text).toMatch(/no Chrome to list tabs from — try \/<handle> chrome first/);
   });
 });
 
@@ -2710,7 +2716,7 @@ describe('/help', () => {
     // renderer's own "NOT YET WIRED" tail label, which also happens to contain the word
     // "recognized".
     expect(sent[0].text).not.toMatch(/wired in v2 so far/);
-    expect(sent[0].text).toMatch(/\/status/);   // a real, wired command shows up
+    expect(sent[0].text).toMatch(/\/<handle> status/);   // a real, wired command shows up
   });
 
   it('lists an unwired command only in the labelled tail, never as if it worked', async () => {
@@ -2718,7 +2724,7 @@ describe('/help', () => {
     await cmds.run({ ...self, body: '/help' });
     const text = sent[0].text;
     const tailIdx = text.indexOf('NOT YET WIRED');
-    const rulesIdx = text.indexOf('/rules');   // registered, but nothing dispatches it
+    const rulesIdx = text.indexOf('/<handle> rules');   // registered, but nothing dispatches it
     expect(tailIdx).toBeGreaterThan(-1);
     expect(rulesIdx).toBeGreaterThan(tailIdx);
   });
@@ -2734,10 +2740,10 @@ describe('/help', () => {
     }
   });
 
-  it('is recognized from the Self DM, refused from a random chat (same operator gate as every other command)', () => {
+  it('is recognized from the Self DM, refused from a random chat (same operator gate as every other command)', async () => {
     const { cmds } = harness({ config: cfg });
-    expect(cmds.isCommand({ body: '/help', chatId: '!self', surface: 'whatsapp' })).toBe(true);
-    expect(cmds.isCommand({ body: '/help', chatId: '!group', surface: 'whatsapp' })).toBe(false);
+    expect(await cmds.isCommand(typed(cmds, { body: '/e help', chatId: '!self', surface: 'whatsapp' }))).toBe(true);
+    expect(await cmds.isCommand(typed(cmds, { body: '/e help', chatId: '!group', surface: 'whatsapp' }))).toBe(false);
   });
 });
 
@@ -2775,29 +2781,31 @@ describe('/recap — the backlog of the last wake, read out where it was written
     expect(sent).toEqual([]);
   });
 
-  // "anybody can type /recap" (operator 2026-09-27): it only reads a chat's own backlog back to
-  // that chat, so isCommand admits it from ANY sender — and nothing else. Every other command,
-  // lifecycle included, still needs the operator (the Self chat, the owner, allowed_users).
-  it('REPRODUCE-FIRST: anybody may run it — and it is the ONLY command a non-operator reaches', async () => {
-    const { cmds, sent, exits } = harness({ config: { ...AGENTS, whatsapp: { chat_id: '!self' } }, backlogOf: () => BACKLOG });
+  // Public only where public_commands lists it (operator 2026-10-19; it was public to anybody from
+  // 2026-09-27). Every other command, lifecycle included, still needs the operator.
+  it('a non-operator runs it only where public_commands lists it', async () => {
     const stranger = { chatId: '!palma', surface: 'whatsapp' };   // not Self, not the owner, not on allowed_users
-    expect(cmds.isCommand({ ...stranger, body: '/recap' })).toBe(true);
-    await cmds.run({ ...stranger, body: '/recap' });
+    const closed = harness({ config: { ...AGENTS, whatsapp: { chat_id: '!self' } }, backlogOf: () => BACKLOG });
+    expect(await closed.cmds.isCommand(typed(closed.cmds, { ...stranger, body: '/e recap' }))).toBe(false);
+    const { cmds, sent, exits } = harness({ config: { ...AGENTS, whatsapp: { chat_id: '!self' }, public_commands: ['recap'] }, backlogOf: () => BACKLOG });
+    const recap = typed(cmds, { ...stranger, body: '/e recap' });
+    expect(await cmds.isCommand(recap)).toBe(true);
+    await cmds.run(recap);
     expect(sent.map((s) => s.chatId)).toEqual(['!palma']);
-    for (const body of ['/restart', '/status', '/help', '/agents e', '/config', '/recaps', 'recap']) {
-      expect(cmds.isCommand({ ...stranger, body })).toBe(false);
+    for (const body of ['/e restart', '/e status', '/e help', '/e agents e', '/e config', '/e recaps', 'recap', '/recap']) {
+      expect(await cmds.isCommand(typed(cmds, { ...stranger, body })), body).toBe(false);
     }
     expect(exits).toEqual([]);
     // …and the operator's own gate is unchanged
-    expect(cmds.isCommand({ chatId: '!self', surface: 'whatsapp', body: '/status' })).toBe(true);
-    expect(cmds.isCommand({ ...stranger, authorized: true, body: '/status' })).toBe(true);
+    expect(await cmds.isCommand(typed(cmds, { chatId: '!self', surface: 'whatsapp', body: '/e status' }))).toBe(true);
+    expect(await cmds.isCommand(typed(cmds, { ...stranger, authorized: true, body: '/e status' }))).toBe(true);
   });
 
   it('/help lists it among the WIRED commands', async () => {
     const { cmds, sent } = harness({ config: { ...AGENTS, whatsapp: { chat_id: '!self' } } });
     await cmds.run({ chatId: '!self', surface: 'whatsapp', body: '/help' });
     const [wired] = sent[0].text.split('NOT YET WIRED');
-    expect(wired).toMatch(/^\/recap\s/m);
+    expect(wired).toMatch(/^\/<handle> recap\s/m);
   });
 });
 
@@ -3010,7 +3018,7 @@ describe('/agents grammar — verb first, target last, no legacy order', () => {
   it('/agents e restart — retired order AND retired word — is rebuilt under the LIVE verb', async () => {
     const { cmds, sent } = harness({ state: emptyState() });
     await cmds.run({ chatId: '!self', surface: 'whatsapp', body: '/agents e restart' });
-    expect(sent[0].text).toContain('`/agents rethread e`');
+    expect(sent[0].text).toContain('`/e agents rethread e`');
     expect(sent[0].text).not.toMatch(/`\/agents restart/);
   });
 });

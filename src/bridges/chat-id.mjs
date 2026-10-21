@@ -41,3 +41,11 @@ export function fullChatId(id) {
   if (!s || (s.startsWith('!') && s.slice(1).includes(':'))) return s;
   return `!${s}${SUFFIX}`;
 }
+
+// A chat ID, not a name: the full '!…' form, or the short one — Beeper's local room ids are 20
+// letters/digits (every '!…:beeper.local' id in the live logs, 2026-10-19); no title or slug in use is.
+const SHORT_ID = /^[A-Za-z0-9]{20}$/;
+export function isChatId(id) {
+  const s = String(id ?? '');
+  return s.startsWith('!') || SHORT_ID.test(s);
+}

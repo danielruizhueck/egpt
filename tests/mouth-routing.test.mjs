@@ -1197,19 +1197,22 @@ function earAndMouth({ earMessages = [STEERED_ON_PRIMARY], mouthMessages = [STEE
     async chatRaw() { return AS_PRIMARY; },
     async listMessagesRaw(chatId) { earListed.push(chatId); return earMessages; },
   };
-  // `secondary`: the MOUTH — its own room id and its own ids for the same messages.
+  // `secondary`: the MOUTH — its own room id and its own ids for the same messages, as its bridge
+  // noted them arriving (recentMessages: the only place its own copy is looked for).
+  const mouthListed = [];
   const mouthBridge = {
     ...fakeBridge(),
     async selfIdentities() { return [SECONDARY_NUM]; },
     async listChatsRaw() { return [AS_SECONDARY]; },
-    async listMessagesRaw() { return mouthMessages; },
+    recentMessages() { return mouthMessages; },
+    async listMessagesRaw(chatId) { mouthListed.push(chatId); return mouthMessages; },
   };
   const peerMouth = withMouth
     ? makePeerMouth({ peer: null, bridge: ear, localMouth: () => ({ name: 'secondary', home: 'primary', bridge: mouthBridge }), onLog: (m) => logs.push(`[mouth] ${m}`) })
     : null;
   const actions = createReplyActions({ bridge: ear, peerMouth, bodyEmojiOf: () => '🐶', labelOf: () => 'e', resolveConvDir, onLog: (m) => logs.push(`[actions] ${m}`) });
   const run = async (line) => actions.execute(actions.parse(line, LIMB_EV).run, [], LIMB_EV, { being: 'e' });
-  return { ear, mouthBridge, peerMouth, earListed, logs, run, react: () => run(`/react #${STEERED_ON_PRIMARY.id} 👍`) };
+  return { ear, mouthBridge, peerMouth, earListed, mouthListed, logs, run, react: () => run(`/react #${STEERED_ON_PRIMARY.id} 👍`) };
 }
 
 describe('the /react limb is placed by the MOUTH, on its own copy — never from the ear\'s account', () => {
@@ -1650,11 +1653,8 @@ describe("an ordinary reply quotes the mouth's own copy of the message it answer
   const TEXT_EV = { surface: 'wa', node: 'wa', chatId: CHAT_ID, chatName: 'Group', senderId: 'u-1', senderName: 'An', msgId: STEERED_ON_PRIMARY.id, ts: 1000, body: STEERED_TEXT, kind: 'text', raw: {} };
   const node = (shape = {}) => {
     const n = earAndMouth(shape);
-    const mouthListed = [];
-    const list = n.mouthBridge.listMessagesRaw;
-    n.mouthBridge.listMessagesRaw = (chatId) => { mouthListed.push(chatId); return list(chatId); };
     const sender = createSender({ bridge: n.ear, bodyEmojiOf: () => '🐶', peerMouth: n.peerMouth, onLog: (m) => n.logs.push(`[mouth] ${m}`) });
-    return { ...n, mouthListed, sender };
+    return { ...n, sender };
   };
   // The whole turn, real, as §11's voiceNode: createSpine + createSender + makePeerMouth.
   const spineNode = (shape) => {
@@ -1681,7 +1681,7 @@ describe("an ordinary reply quotes the mouth's own copy of the message it answer
     expect(opened(mouthBridge)).toEqual([[SECONDARY_CHAT_ID, STEERED_ON_SECONDARY.id]]);
     expect(ear.streams).toEqual([]);
     expect(earListed).toEqual([CHAT_ID]);                 // the key, off the ear's copy
-    expect(mouthListed).toEqual([SECONDARY_CHAT_ID]);     // its own copy, in the mouth's room
+    expect(mouthListed).toEqual([]);                      // its own copy from its arrival record — never a GET
   });
 
   it('NO mouth, or one not in the chat: the ear quotes its own id and no message list is read', async () => {
@@ -1722,10 +1722,10 @@ describe("an ordinary reply quotes the mouth's own copy of the message it answer
     expect(logs.join('\n')).toMatch(/reply e\/chat-1: 'secondary' cannot find #2901 on its own copy \(no-match/);
   });
 
-  it('a lookup that hangs: the placeholder opens UNQUOTED at WAIT, not later', async () => {
+  it('a copy that never arrives: the placeholder opens UNQUOTED at WAIT, not later', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    const { mouthBridge, logs, sender } = node();
-    mouthBridge.listMessagesRaw = () => new Promise(() => {});
+    const { mouthBridge, logs, sender } = node({ mouthMessages: [] });
+    mouthBridge.awaitMessage = () => new Promise(() => {});
     open(sender);
     await vi.advanceTimersByTimeAsync(WAIT - 1);
     expect(mouthBridge.streams).toEqual([]);
@@ -1734,14 +1734,14 @@ describe("an ordinary reply quotes the mouth's own copy of the message it answer
     expect(logs.join('\n')).toMatch(/reply e\/chat-1: 'secondary' did not find #2901 within 1000ms — unquoted/);
   });
 
-  it('one message answered by two beings: each room is listed once', async () => {
+  it('one message answered by two beings: the ear is listed once, the mouth never', async () => {
     const { mouthBridge, earListed, mouthListed, sender } = node();
     open(sender);
     open(sender, { being: 'k' });
     await settled();
     expect(opened(mouthBridge)).toEqual([[SECONDARY_CHAT_ID, STEERED_ON_SECONDARY.id], [SECONDARY_CHAT_ID, STEERED_ON_SECONDARY.id]]);
     expect(earListed).toEqual([CHAT_ID]);
-    expect(mouthListed).toEqual([SECONDARY_CHAT_ID]);
+    expect(mouthListed).toEqual([]);
   });
 
   // ── FROM DATA ALREADY AT HAND (2026-10-18: the quote held the placeholder ~1s on two GETs) ──
@@ -1776,6 +1776,119 @@ describe("an ordinary reply quotes the mouth's own copy of the message it answer
     for (const w of waiters) if (w.test(STEERED_ON_SECONDARY)) w.r(STEERED_ON_SECONDARY);
     await settled();
     expect(opened(mouthBridge)).toEqual([[SECONDARY_CHAT_ID, STEERED_ON_SECONDARY.id]]);
+  });
+});
+
+// ── 10d. THE MOUTH'S OWN COPY, FROM ITS ARRIVAL ALONE (live 2026-10-18, reve) ────────────────────
+// "e" from the operator's Beeper client: the ear's copy carries ms (…16.013Z), the mouth's arrives
+// ~0.8s later truncated (…16.000Z). The waiter compared the timestamp exactly, so the 📩 / quote
+// found nothing; with an older "e" in the chat it picked the old one, or refused both. The copy is
+// now taken from the mouth's arrival record only (no GET), matched to the second.
+describe("the mouth's own copy is found by its arrival, to the second — never by a search", () => {
+  const KEY = 'e:wa:chat-1';
+  const LIVE = { senderId: 'an', chatId: CHAT_ID };
+  const EAR_TS = Date.parse('2026-10-19T01:44:16.013Z');
+  const E_ON_EAR = { id: '34360', text: 'e', timestamp: EAR_TS };
+  const NEW_E = { id: '14688', text: 'e', timestamp: '2026-10-19T01:44:16.000Z' };
+  const OLD_E = { id: '14685', text: 'e', timestamp: '2026-10-19T01:33:51.000Z' };
+  const E_KEY = crossAccountMsgKey(E_ON_EAR);
+  const EV = { surface: 'wa', chatId: CHAT_ID, senderId: 'an', senderName: 'An', body: 'e', msgId: E_ON_EAR.id, msgHash: E_KEY, msgTs: EAR_TS };
+  // The mouth bridge's arrival record as beeper.mjs keeps it: noted on arrival, waiters fired then.
+  const arrivals = (bridge, seen) => {
+    const waiters = new Set();
+    bridge.recentMessages = () => [...seen];
+    bridge.awaitMessage = (_chat, test, ms) => new Promise((resolve) => {
+      const w = { test, done: (m) => { clearTimeout(t); waiters.delete(w); resolve(m); } };
+      const t = setTimeout(() => w.done(null), ms);
+      waiters.add(w);
+    });
+    return (msg) => { seen.push(msg); for (const w of [...waiters]) if (w.test(msg)) w.done(msg); };
+  };
+  const steerNode = (already = []) => {
+    const n = earAndMouth({ earMessages: [E_ON_EAR], mouthMessages: [...already] });
+    const arrive = arrivals(n.mouthBridge, [...already]);
+    const notes = [];
+    const brain = { async allowNewInput() { return 'any'; }, steer: () => ({ ack: Promise.resolve({ ok: true }) }) };
+    const turns = createTurns({ brain, bridge: n.ear, peerMouth: n.peerMouth, log: { line: (s) => notes.push(s) } });
+    turns.setLive(KEY, LIVE);
+    return { ...n, arrive, notes, steer: () => turns.steerLiveTurn({ to: 'e', ev: EV, turnKey: KEY }) };
+  };
+  const on = (id, ...emojis) => emojis.map((emoji) => ({ chatId: SECONDARY_CHAT_ID, msgId: id, emoji }));
+  afterEach(() => vi.useRealTimers());
+
+  it('THE REPRODUCTION (21:33): the copy lands 800ms after the lookup, ms vs whole second — the 📩 goes on it', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const { ear, mouthBridge, mouthListed, arrive, steer } = steerNode();
+    const steered = steer();
+    await vi.advanceTimersByTimeAsync(800);
+    arrive(NEW_E);
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(await steered).toBe(true);
+    expect(mouthBridge.reactions).toEqual(on('14688', '📩', '👀'));
+    expect(ear.reactions).toEqual([]);
+    expect(mouthListed).toEqual([]);                      // no search
+  });
+
+  it('THE REPRODUCTION (21:44): an older "e" and the new one, ms vs whole second — the new one', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const { mouthBridge, mouthListed, steer } = steerNode([OLD_E, NEW_E]);
+    const steered = steer();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(await steered).toBe(true);
+    expect(mouthBridge.reactions).toEqual(on('14688', '📩', '👀'));
+    expect(mouthListed).toEqual([]);
+  });
+
+  it('only the older "e" has arrived: it is never taken — the new one is waited for', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const { mouthBridge, mouthListed, arrive, steer } = steerNode([OLD_E]);
+    const steered = steer();
+    await vi.advanceTimersByTimeAsync(300);
+    expect(mouthBridge.reactions).toEqual([]);            // not on 14685
+    arrive(NEW_E);
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(await steered).toBe(true);
+    expect(mouthBridge.reactions).toEqual(on('14688', '📩', '👀'));
+    expect(mouthListed).toEqual([]);
+  });
+
+  it('the reply quote: the copy lands 400ms late — the placeholder quotes it', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const n = earAndMouth({ earMessages: [E_ON_EAR], mouthMessages: [] });
+    const arrive = arrivals(n.mouthBridge, []);
+    const sender = createSender({ bridge: n.ear, bodyEmojiOf: () => '🐶', peerMouth: n.peerMouth, onLog: (m) => n.logs.push(m) });
+    sender.open(CHAT_ID, { being: 'e', replyTo: E_ON_EAR.id, replyIn: null, replyKey: { msgKey: E_KEY, timestamp: EAR_TS } });
+    await vi.advanceTimersByTimeAsync(400);
+    expect(n.mouthBridge.streams).toEqual([]);
+    arrive(NEW_E);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(n.mouthBridge.streams.map((s) => [s.chat, s.opts.replyTo])).toEqual([[SECONDARY_CHAT_ID, '14688']]);
+    expect(n.mouthListed).toEqual([]);
+  });
+
+  it('REGRESSION LOCK: a copy that never arrives — no-match after COPY_WAIT_MS, no reaction anywhere, logged', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const { ear, mouthBridge, mouthListed, notes, steer } = steerNode([OLD_E]);
+    const steered = steer();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(notes.join('\n')).not.toMatch(/could not place the 📩/);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(await steered).toBe(true);
+    expect(mouthBridge.reactions).toEqual([]);
+    expect(ear.reactions).toEqual([]);
+    expect(notes.join('\n')).toMatch(/could not place the 📩 \(no-match: .*nor did it arrive within 1000ms\)/);
+    expect(mouthListed).toEqual([]);
+  });
+
+  it('REGRESSION LOCK: two "e" in the same second — refused, no reaction anywhere', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const { ear, mouthBridge, notes, steer } = steerNode([NEW_E, { ...NEW_E, id: '14689' }]);
+    const steered = steer();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(await steered).toBe(true);
+    expect(mouthBridge.reactions).toEqual([]);
+    expect(ear.reactions).toEqual([]);
+    expect(notes.join('\n')).toMatch(/could not place the 📩 \(ambiguous: .*refusing to pick/);
   });
 });
 

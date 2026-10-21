@@ -526,24 +526,8 @@ export const CONFIG_SCHEMA = {
         (src/auto-mode.mjs mentionHits): the beeper + shell limbs' persona gate
         (mentionStatus) and the agent registry (src/spine/router.mjs addressed).
       default_node
-        String — a node_name/node_alias — or unset. DEFAULT: unset.
-        The node a node-addressable command targets when it names no node
-        itself: no "=<name>" bound to the command token, and (for /chrome
-        only) no positional node either. Applies to every member of the set —
-        /chrome, /status, /tabs, /members, /tab, /open, /close — regardless of
-        whether the command carries arguments: "/open https://x.com" and
-        "/members add tab 3 cgpt" reach this fallback exactly like a bare
-        "/tabs" does, since none of them name a node of their own.
-          unset  today's behaviour exactly, a strict no-op: bare /chrome stays
-                 the discovery form, bare /status/tabs/members run on whichever
-                 node heard them.
-          set    a command with no node of its own operates on the named node
-                 instead — exactly as if "<cmd>=<name>" had been typed
-                 (arguments carried along unchanged), including travelling
-                 the mesh to a node that is neither ours nor a co-account
-                 peer. Set to THIS node's own name is identical to local; no
-                 separate branch for it.
-        See src/spine/commands.mjs nodeAddressed.
+        RETIRED (2026-10-19), ignored: a command names its being ("/e tabs"), and that
+        being's node runs it, so no command is addressed to a node any more.
       stranger_agent
         Map — beeper connection name -> local agent key. DEFAULT: unset (off).
           stranger_agent: { secondary: edw-marketer }
@@ -766,6 +750,19 @@ export const CONFIG_SCHEMA = {
       <name>:
         account   label — the Beeper address this token belongs to
         token     that account's Desktop API token
+      auto_update:
+        <os>: { method: auto | manual | none }      os = windows | linux | mac
+        Keeping Beeper Desktop itself current (src/tools/beeper-update.mjs).
+          none    no checks, no notices.
+          manual  checks at boot, every 6 h and on /<handle> update beeper; ONE
+                  line per newly downloaded version to log_to_group; installs
+                  only on /<handle> update beeper (operator only).
+          auto    as manual, then installs by itself at the next quiet moment.
+        Installing is a controlled Beeper restart: it waits for turns like
+        /restart, eGPT stays up, the result is one line in log_to_group.
+        DEFAULT: windows manual. linux / mac: accepted, not implemented yet —
+        treated as none (one log line at boot). Not a connection. beeper: is a
+        restart-only key, so a change applies at the next restart.
 
     THE PORT IS DISCOVERED — there is none to configure (operator 2026-09-07).
     Beeper Desktop's local API binds the FIRST FREE PORT starting at 23373, so
@@ -894,11 +891,10 @@ export const CONFIG_SCHEMA = {
           default_speaker: egpt
 
     Room configs are PER-NODE (each machine has its own conversation
-    config.yaml), so this map is what makes "/radio join <name>" a real check
-    rather than a dead one: /radio join looks up <name> in THIS node's map
-    only, and refuses when it's absent, naming what IS configured here. The
-    addressed spine of "/radio=<node> join <name>" is what decides which
-    node's map gets checked — there is no cross-node lookup.
+    config.yaml), so this map is what makes "/<handle> radio join <name>" a real
+    check rather than a dead one: it looks up <name> in the map of the handle's
+    node only, and refuses when it's absent, naming what IS configured there —
+    there is no cross-node lookup.
 
     KEYS, per <radio-name>:
       name
@@ -966,14 +962,8 @@ export const CONFIG_SCHEMA = {
     echo rotation will use (a LATER phase consumes it; for now it is parsed +
     exposed only, NO behavior). Omit for a solo node.
 
-    TRAP ⚠️ — THESE NAMES ARE RESERVED AS COMMAND TARGETS (2026-07-25):
-      /status <name> and /chrome <name> address a NODE, and a node not addressed
-      replies NOTHING — so a conversation SLUG equal to one of these names is
-      unreachable by fragment, SILENTLY (the addressed node answers with node
-      health; this one says nothing). Rename the slug, not the node.
-      A collision with THIS node's own name is merely shadowed by a visible
-      reply; a collision with a PEER's name is total silence, which is the
-      harder failure to attribute.
+    (Until 2026-10-19 /status <name> and /chrome <name> addressed a NODE by these names; a command
+    now names its being instead — "/e status" — so they are ordinary conversation fragments there.)
   `,
 
   egpt_nodes: `
@@ -2959,8 +2949,18 @@ export const CONFIG_SCHEMA = {
     does not switch that one off.
   `,
 
+  public_commands: `
+    The commands ANYONE in a chat may run (operator 2026-10-19); every other command is
+    the node's allowed users' only (Self DM, networks.<surface>.allowed_users, the owner).
+    Command words, with or without the '/'. A node-signed line is never admitted.
+      config.yaml, root key:           DEFAULT [join, split, send, end]
+      conversations.yaml, a chat's own entry: REPLACES the root list there; [] = none.
+    A listed agents opens only the bare /agents list (agents_list); its verbs stay
+    allowed-users only. Each command's own rules still apply (/end only in a side group).
+  `,
+
   agents_list: `
-    Bare /agents from a NON-operator (operator 2026-10-16): a short public list of this
+    Bare /agents from a NON-operator (operator 2026-10-16; only where public_commands lists agents): a short public list of this
     node's local agents (the persona first) that read the chat — emoji + name, handles, voice handles, the reply
     mode in plain words, and whether THAT sender can call it (its allowed_users). Relays,
     public agents and 'off' beings are not listed. The operator's /agents is unchanged
@@ -3181,35 +3181,40 @@ export const CONFIG_SCHEMA = {
   `,
 
   node_role: `
-    The role THIS node plays in the /join + /split side-group commands (operator 2026-10-03): one of
-    'primary' | 'secondary', set PER NODE. Both nodes ingest the same primary Beeper account and the
-    being resides on each, so neither the message nor the being can pick which node creates the group.
-    This is the explicit tiebreak: the node whose role is 'primary' creates /join + /split groups by
-    default; every other node stands down SILENTLY. Overridden per command by naming a node
-    (/join <node> or /join=<node>). Replaces the old fork.lead_node.
+    The role THIS node plays: 'primary' | 'secondary', set PER NODE (operator 2026-10-03). Both nodes
+    ingest the same primary Beeper account. Since 2026-10-19 a command names its being ("/e join"),
+    so the being's node runs it — and makes a /join or /split group — and the role picks nothing
+    there. The log_to_group audit merge reads it (the secondary edits the primary's line). The other
+    node links a side group from its opener: /join as an alias of the chat, /split as its own
+    conversation with its own beings' threads forked.
   `,
 
   group_title: `
     The title of the side-group /join or /split creates (operator 2026-10-03). A template:
       {group}  the parent chat's title
-      {name}   the command's optional <name> arg (/join spoiler → {name}=spoiler; absent → the verb
-               word, "join" or "split")
-    Unset → a small built-in default. Replaces the old fork.title.
+      {name}   the command's optional <name> arg ("/e join spoiler" → {name}=spoiler; absent → 5
+               random lowercase letters/digits, e.g. "k7f2q")
+    Every side group's title starts with "SI+" (fixed, not part of the template; 2026-10-18).
+    Unset → "{group}-{name}", so "SI+<group>-<name>". Replaces the old fork.title.
   `,
 
   join: `
-    /join — the SUPERPOSITION side-group (operator 2026-10-03). /join [<name>|<node>] creates a
-    private group (the operator + the secondary account) whose chatId is ALIASED to this chat's
-    conversation — one shared on-disk thread, two chat surfaces, nothing copied. It is a VIEW, not a
-    branch. Reply /send to relay a chosen message back to the original chat; reply /end to archive the
-    group and drop the alias. The two accounts' phones come from beeper.primary.phone /
-    beeper.secondary.phone; the group title is config.group_title; and the texts that live here are:
-      default_name: the {name} used in the group title when /join carries NO <name> arg. Unset → the
-                   built-in "egpt super". (A nameless /join no longer titles the group "…-join".)
-      placeholder: what the operator's /join message is edited into (a member's /join gets it as a
-                   reply). A template (2026-10-16): {name} the /join name, {title} the group title,
-                   {group} the parent chat's title, {by} the sender; no braces → used as-is. Unset → a
-                   built-in default naming the group and the command to join it.
+    /join — the SUPERPOSITION side-group (operator 2026-10-03). "/<handle> join [<name>]" (e.g.
+    "/e join viaje"; the handle's node runs it) creates a
+    private group whose chatId is ALIASED to this chat's conversation — one shared on-disk thread, two
+    chat surfaces, nothing copied. It is a VIEW, not a branch. Anyone in a group chat may run it
+    (2026-10-18): the primary account creates it, inviting the secondary (Rodz) and that person; the
+    operator's own join invites Rodz alone; no secondary → just that person. Reply
+    "/<handle> send" to relay a chosen message back to the original chat; "/<handle> end" to archive
+    the group and drop the alias. The two accounts' phones come from beeper.primary.phone /
+    beeper.secondary.phone; the group title is config.group_title ({name} absent → a random 5-character
+    name); and the texts that live here are:
+      default_name: RETIRED (2026-10-19), ignored — a nameless join gets a random name.
+      placeholder: what the operator's join message is edited into (a member's gets it as a
+                   reply). A template (2026-10-16): {name} the join name, {title} the group title,
+                   {group} the parent chat's title, {by} the sender, {handle} the handle it was typed
+                   to; no braces → used as-is. Unset → a built-in default naming the group and the
+                   command to join it.
       exists:      the reply when /join <name> matches a live side-room of this chat the sender is not
                    in (no second group is created; the Desktop API cannot add a member). {name} {by}
                    ({by} = who made it). Unset → a built-in default.
@@ -3219,111 +3224,96 @@ export const CONFIG_SCHEMA = {
                    never capped. (operator 2026-10-16)
       limit:       the reply when member_cap is reached; {name} lists that member's rooms. Unset → a
                    built-in default.
-      opener:      the one message posted from Rodz into the new group right after it is created, so
+      opener:      the one message posted by the primary into the new group right after it is created, so
                    the otherwise-empty group surfaces in Beeper (Beeper hides chats with no messages).
-                   A {group} template ({group} = the parent chat's title). Unset → a small built-in
-                   default.
-      triggers:    OPTIONAL list of extra phrases that invoke /join; the '/'-word is always a trigger.
-                   A message that EQUALS one of these (trimmed, case-insensitive) runs /join DISCREETLY
-                   — a RANDOM group name, the message left UNEDITED — so it reads as ordinary
-                   conversation, not an obvious command. Operator-only (a non-operator saying the phrase
-                   is an ordinary message), EXACT whole-message match only (never prefix/contains). Pick
-                   phrases you won't say by accident. Unset → only the '/'-word triggers.
+                   Rodz's copy of it tells the node Rodz's own room for the group, by id.
+                   A template: {group} = the parent chat's title, {handle} = the handle the command
+                   was typed to. Unset → a small built-in default.
+
+    ALIASES (operator 2026-10-19) — config/commands_alias.yaml, not a config.yaml key (skeleton:
+    config/skeletons/commands_alias.yaml). A map of alias → "/<handle> <command> [args]", for ANY
+    command:
+      aparte: /e join
+      nos vamos aparte: /e join
+      reinicia: /e restart force
+    A message that STARTS with an alias (case-insensitive, whole words; the longest alias wins) runs
+    that command line with the rest of the message appended: "aparte viaje" → /e join viaje. It is
+    exactly the typed command: the same node (the handle's — any node's being may be named, and every
+    other node ignores it), the same gates (an alias works for whoever may type its command), the
+    same placeholder edit; the transcript keeps the words as said, the audit line names the alias.
+    A node-signed line (a being's output) never triggers one. Refused at load, one log line each: an
+    alias starting with "/", an alias starting with a being handle, a target that is a bare command
+    ("/join": no being) or not "/<handle> <known command>". Read on change, no restart. Absent or empty
+    file → no aliases. Replaces join/split/send/end.triggers (retired; ignored).
   `,
 
   split: `
-    /split — the REAL-FORK side-group (operator 2026-10-03). /split [<name>|<node>] creates a private
+    /split — the REAL-FORK side-group (operator 2026-10-03). "/<handle> split [<name>]" creates a private
     group backed by a NEW conversation (its own folder/entry, NOT an alias) whose resident beings'
-    threads are COPIED from this chat so it DIVERGES. Reply /send to relay a chosen message back to the
-    original chat; reply /end to archive the group and retire the split conversation's mapping. Group
-    title is config.group_title; the texts that live here are:
-      default_name: the {name} used in the group title when /split carries NO <name> arg. Unset → the
-                   built-in "egpt split".
-      placeholder: what the operator's /split message is edited into. Unset → a small built-in default.
-      opener:      the one message posted from Rodz into the new group right after it is created, so
+    threads are COPIED from this chat so it DIVERGES. Who may run it, which node creates it and whom it
+    invites: as join. Reply "/<handle> send" to relay a chosen message back to the original chat;
+    "/<handle> end" to archive the group and retire the split conversation's mapping. Group title is
+    config.group_title ({name} absent → a random 5-character name); the texts that live here are:
+      default_name: RETIRED (2026-10-19), ignored — a nameless split gets a random name.
+      placeholder: what the operator's split message is edited into. Unset → a small built-in default.
+      opener:      the one message posted by the primary into the new group right after it is created, so
                    the otherwise-empty group surfaces in Beeper (Beeper hides chats with no messages).
+                   Rodz's copy of it tells the node Rodz's own room for the group, by id.
                    A {group} template ({group} = the parent chat's title). Unset → a small built-in
                    default.
-      triggers:    OPTIONAL list of extra phrases that invoke /split; the '/'-word is always a trigger.
-                   A message that EQUALS one of these (trimmed, case-insensitive) runs /split DISCREETLY
-                   — a RANDOM group name, the message left UNEDITED — so it reads as ordinary
-                   conversation. Operator-only, EXACT whole-message match only (never prefix/contains).
-                   Pick phrases you won't say by accident. Unset → only the '/'-word triggers.
   `,
 
   send: `
-    /send — relay a replied-to message from a /join or /split group back to the ORIGINAL chat
-    (operator 2026-10-03). Repeatable; posts nothing to the group and never closes it.
-      post_back_from: which account posts the relayed message to the original chat —
+    /send — "/<handle> send", replying to a message in a join or split group, relays it back to the
+    ORIGINAL chat (operator 2026-10-03); the handle's node posts it. Repeatable; posts nothing to the
+    group and never closes it. Anyone in the
+    side group may run it (2026-10-18); a non-operator's relay is posted by the secondary, signed, in
+    its own room for the original (found by id, never by title; else the primary), never as the operator.
+      post_back_from: which account posts the operator's relayed message to the original chat —
                       'primary' (the operator's OWN account; the DEFAULT) posts so it appears from the
                       operator; 'secondary' (the mouth) makes it appear from the bot's secondary
                       account. Unset/invalid → primary.
       origin:         whether the relay says which side group it came from (2026-10-16).
                       ENUM: auto | always | never. DEFAULT auto (also for an invalid value).
-                      auto = prefix origin_template unless the side group is DISCREET (made by a
-                      join/split phrase trigger, stored as discreet: true on its conversations-state
-                      entry; a room made before that flag counts as discreet when its title's {name}
-                      slot is a 5-hex random token). always = prefix even when discreet. never = no
+                      auto = prefix origin_template unless the side group is a legacy DISCREET one
+                      (made by the retired join/split phrase triggers: discreet: true on its
+                      conversations-state entry, or, made before that flag, a 5-hex random token in
+                      its title's {name} slot). always = prefix even when discreet. never = no
                       prefix.
       origin_template: the prefix; {group} = the side group's title (live chat name, else the stored
                       title). DEFAULT "↪ from {group}:\\n". "" = no prefix.
-      triggers:       OPTIONAL list of extra phrases that invoke /send; the '/'-word is always a
-                      trigger. A message that EQUALS one of these (trimmed, case-insensitive) runs
-                      /send. Operator-only, EXACT whole-message match only (never prefix/contains).
-                      Pick phrases you won't say by accident. Unset → only the '/'-word triggers.
   `,
 
   end: `
-    /end — archive a /join or /split group (both kinds) and drop its mapping, closing it (operator
-    2026-10-03). Posts nothing; silent outside a join/split group.
-      triggers:       OPTIONAL list of extra phrases that invoke /end; the '/'-word is always a
-                      trigger. A message that EQUALS one of these (trimmed, case-insensitive) runs
-                      /end. Operator-only, EXACT whole-message match only (never prefix/contains).
-                      Pick phrases you won't say by accident. Unset → only the '/'-word triggers.
+    /end — "/<handle> end" archives a join or split group (both kinds) and drops its mapping on the
+    handle's node, closing it (operator 2026-10-03). Anyone in the side group may run it (2026-10-18);
+    the group is archived on the
+    account it was heard on. Posts nothing; silent outside a join/split group. Off in the
+    reply_in_side_group group: there it does nothing.
   `,
 
-  super_chats: `
-    SI / the SUPER CHANNEL (operator 2026-10-08; renamed from \`super\` 2026-10-13) — a per-conversation
-    side channel (SI group) where the bot speaks so its replies stop polluting the main chat. Like /join
-    it is an ALIAS of the original conversation (one shared on-disk thread/transcript, two chat surfaces),
-    NOT a diverging /split copy. Summoned by an inbound message EQUAL to one of \`triggers\` from ANY participant —
-    NOT operator-only, because the point is a counterparty summoning it so they can read the reply there.
-    Close it with /end (an SI group is an alias, so /end already archives it + drops
-    the mapping). The two accounts come from beeper.primary.phone / beeper.secondary.phone, as for /join;
-    SI also works with NO secondary (the ear creates + posts, one-account baseline). Two co-account nodes
-    CONVERGE on the SAME SI group with no RPC: whoever creates first stamps the intro with the base chat's
-    shared-account id (an invisible node-signature frame); the other links from it.
+  reply_in_side_group: `
+    The automatic side group (operator 2026-10-18). Set it on ONE conversation's OWN entry in
+    config/conversations.yaml. Read nowhere else: in config/config.yaml, on a side group's entry or in
+    a folder config.yaml it does nothing. There is no trigger phrase.
 
-    KEYS:
-      triggers
-        DEFAULT: unset ⇒ OFF. A LIST of exact whole-message phrases (trimmed, case-insensitive), and
-        THE switch: SI is on exactly when one is non-blank (no \`enabled\` key since migration 0046).
-        On ⇒ a phrase from ANY sender summons / reuses this chat's SI group (created only by the
-        node_role 'primary' node), and a non-member of an existing SI group does not wake the bot.
-        Off ⇒ the bot replies in the chat as usual. "…" never summons.
-      automatic
-        DEFAULT: false. When ON (and SI is on), the bot AUTO-CREATES this chat's SI group the first time
-        it would reply there (no trigger needed) and replies in it. When OFF (the default) with no SI group
-        yet, the bot does NOT reply in the base chat: its answer is SIPHONED to admin_channel (eGPT
-        Admin), visible to the operator only, carrying a one-time warning + the recovery phrase — so the
-        base chat stays clean. Create a channel explicitly with a \`triggers\` phrase.
-      suffix
-        DEFAULT: "-super". The channel's title is <this chat's title> + suffix.
-      mode
-        DEFAULT: "on". The auto-mode the channel runs under. Read LIVE at the reply gate (operator
-        2026-10-08, CHUNK 2): a message that ARRIVED in the super channel is gated by THIS value, not
-        the shared stored mode — group-independent, so the channel and its origin never conflict.
-        Summoning stores NOTHING (the mode is intrinsic), so /end reverts it for free. Must be one of
-        the auto-mode tokens.
-        ⚠ QUOTE IT. Bare on/off are YAML BOOLEANS (on → true, off → false), not the strings this wants.
-        A boolean that slips through is COERCED (true → "on", false → "off"); an unrecognized value
-        falls back to the default and is logged.
-      opener
-        The bridge-voice INTRO posted once (FROM the secondary when a mouth exists, else the ear) when
-        the channel is created, so the otherwise-empty group surfaces in Beeper (Beeper hides chats with
-        no messages). It also carries the invisible canary that lets the peer node link the SAME group. A
-        {chat}/{group} template (both = this chat's title); it should name /send and /end. Unset → a small
-        built-in default.
+    VALUE:
+      true / yes / on / 1 (any case)   → on; the group is titled "SI+<chat title>".
+      false / no / off / 0 / "" / unset → off: replies in place (the DEFAULT).
+      any other text                   → on; that text (trimmed) is the group's title, as is.
+
+    On: no being replies in this chat, in any mode; every reply (its limbs and voice too) goes to the
+    side group, unquoted. The node whose being is about to reply creates it when it holds none, on its
+    primary account, inviting Rodz (the secondary) and every
+    member of the chat it can see; no secondary → the members alone. An addressed reply makes it
+    before the turn; any other (on/auto) only once the reply has something to post, so a silence
+    makes nothing. It is a /join-kind alias of the chat (same folder and thread, its own transcript),
+    marked automatic: true. /send works in it; /end does nothing there. Once the group is gone the
+    next reply opens a new one. A title may repeat: the group is known by its id. The other node links
+    it from the opener and, when its own entry for the chat says nothing, sets reply_in_side_group: on
+    there too — so only the creating node needs configuring (2026-10-19). Both nodes making one at
+    once is fine: two groups, each node links the other's, and each keeps replying in the first it
+    holds (its own); a line in either reaches both, as an alias of the chat.
   `,
 
   aliases: `

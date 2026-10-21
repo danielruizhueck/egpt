@@ -75,6 +75,8 @@ export async function injectViaTelegram({ token, chatId, text, apiBase = TELEGRA
  * @param {{set:Function, clear:Function}} o.scheduler timer seam (tests drive a fake clock).
  * @param {(s: any) => string} [o.normalize]           undo the transport's lossy encoding before
  *   the equality compare (Beeper delivers HTML).
+ * @param {() => boolean} [o.paused]                   true while Beeper restarts for an update: no
+ *   probe starts and a probe in flight gives no verdict.
  * @param {(m: string) => void} [o.onLog]
  * @param {() => number} [o.now]
  */
@@ -86,6 +88,7 @@ export function createEarProbe({
   firstMs = 20_000,
   scheduler,
   normalize = (s) => String(s ?? '').trim(),
+  paused = () => false,
   onLog = () => {},
   now = () => Date.now(),
 } = {}) {
@@ -108,13 +111,14 @@ export function createEarProbe({
     waiting = null;
     if (w.timer) { try { scheduler.clear(w.timer); } catch { /* already fired */ } }
     if (arrived) { onLog('ear probe OK — the out-of-band message came back through the bridge'); return; }
+    if (paused()) { onLog('ear probe: no verdict — Beeper is restarting for an update'); return; }
     const why = `an out-of-band message injected ${Math.round(timeoutMs / 1000)}s ago never arrived through the bridge`;
     onLog(`EAR DEAF — ${why}`);
     try { restart(why); } catch (e) { onLog(`ear probe: restart threw — ${e?.message ?? e}`); }
   }
 
   async function run() {
-    if (waiting || stopped) return;   // never overlap: a tick during a probe is DROPPED, not queued
+    if (waiting || stopped || paused()) return;   // never overlap: a tick during a probe is DROPPED, not queued
     // The nonce IS the correlation key — a string only this probe knows, matched by equality.
     // No dots (a domain-like token gets auto-linkified in transit and would not compare equal).
     const text = `egpt ear check ${now()} ${Math.random().toString(36).slice(2, 8)}`;

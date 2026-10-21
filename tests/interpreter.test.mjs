@@ -140,10 +140,10 @@ describe('help renderers', () => {
 
   it('helpText() marks shell-only and ext-only commands; leaves "both" unmarked', () => {
     const out = helpText([]);
-    expect(out).toMatch(/\/save\s+.*\(shell\)/);
+    expect(out).toMatch(/\/<handle> save\s+.*\(shell\)/);
     expect(out).toMatch(/\/bus-key\s+.*\(ext\)/);
     // /help is "both" — should not have a (shell)/(ext) marker on its line.
-    const helpLine = out.split('\n').find(l => l.startsWith('/help'));
+    const helpLine = out.split('\n').find(l => l.startsWith('/<handle> help'));
     expect(helpLine).toBeDefined();
     expect(helpLine).not.toMatch(/\((shell|ext)\)/);
   });
@@ -154,7 +154,7 @@ describe('help renderers', () => {
 
   it('helpHtml() wraps usages in <code> and sections in <b>', () => {
     const out = helpHtml([]);
-    expect(out).toMatch(/<code>\/save/);
+    expect(out).toMatch(/<code>\/&lt;handle&gt; save/);
     expect(out).toMatch(/<b>ROOM<\/b>/);
   });
 });
@@ -175,7 +175,7 @@ describe('help renderer: surface-filtered (the spine\'s /help)', () => {
   it('a wired shell command renders in the main list, above the tail', () => {
     const out = helpText([], 'shell');
     const tailIdx = out.indexOf('NOT YET WIRED');
-    const statusIdx = out.indexOf('/status');
+    const statusIdx = out.indexOf('/<handle> status');
     expect(statusIdx).toBeGreaterThan(-1);
     expect(tailIdx).toBeGreaterThan(-1);
     expect(statusIdx).toBeLessThan(tailIdx);
@@ -184,7 +184,7 @@ describe('help renderer: surface-filtered (the spine\'s /help)', () => {
   it('an unwired shell command renders ONLY after the "NOT YET WIRED" tail marker', () => {
     const out = helpText([], 'shell');
     const tailIdx = out.indexOf('NOT YET WIRED');
-    const rulesIdx = out.indexOf('/rules');
+    const rulesIdx = out.indexOf('/<handle> rules');
     expect(rulesIdx).toBeGreaterThan(tailIdx);
   });
 

@@ -79,6 +79,10 @@ describe('beeper-whoami', () => {
     expect(c.baseUrl).toBe('http://127.0.0.1:23373');
   });
 
+  it('beeper.auto_update is not a connection', () => {
+    expect(connectionsOf({ beeper: { main: { token: 't' }, auto_update: { windows: { method: 'manual' } } } }).map((c) => c.name)).toEqual(['main']);
+  });
+
   it('names the session that owns each port, and whose account answers there', async () => {
     const out = await report({ cfg, deps: { probe: fakeProbe, localOwners: fakeOwners } });
     expect(out).toMatch(/:23373\s+pid 100, SESSION 0/);

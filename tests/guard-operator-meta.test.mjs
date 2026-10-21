@@ -61,7 +61,7 @@ function build({ levels = {}, turns = 3, stopSwitch = null, isSelfChat = () => f
   // THE COMMAND PATH'S OWN AUTHORITY — the real isCommand, not a model of it.
   const real = createCommands({ getConfig: () => ({ whatsapp: { chat_id: '!self' } }), send: async () => {}, exit: () => {}, brains: { resolve: (name) => ({ name, type: 'ccode' }) } });
   const ran = [];
-  const commands = { isCommand: real.isCommand, run: async (e) => { ran.push(e.body); } };
+  const commands = { commandOf: real.commandOf, isCommand: real.isCommand, run: async (e) => { ran.push(e.body); } };
   const mesh = {
     handled: [], forwarded: [],
     isEnvelope: (e) => String(e.body).startsWith('ENV:'),
@@ -95,7 +95,7 @@ describe('ruling 1 — the operator\'s commands run in every chat, stopped or no
     await tripWithPeerPosts(spine, guard);
     const before = brain.calls.length;
 
-    await spine.handleInbound(op('/agents wren refresh'));
+    await spine.handleInbound(op('/e agents wren refresh'));
     expect(ran).toEqual(['/agents wren refresh']);
 
     // a command is not "the loop is over" — only RESUME is
@@ -107,11 +107,11 @@ describe('ruling 1 — the operator\'s commands run in every chat, stopped or no
   it("a group member's command in a stopped channel is still suppressed — the command path's own authority decides", async () => {
     const { spine, guard, brain, ran } = build();
     guard.stopChannel(CH);
-    await spine.handleInbound(member('/status'));
+    await spine.handleInbound(member('/e status'));
     expect(ran).toEqual([]);
     expect(brain.calls).toEqual([]);
     // …and the same line from the operator runs
-    await spine.handleInbound(op('/status'));
+    await spine.handleInbound(op('/e status'));
     expect(ran).toEqual(['/status']);
   });
 
@@ -120,7 +120,7 @@ describe('ruling 1 — the operator\'s commands run in every chat, stopped or no
     // Provenance is what keeps a stopped channel from answering machine-made commands again.
     const { spine, guard, ran } = build();
     guard.stopChannel(CH);
-    await spine.handleInbound(peer('/status', { isSender: true, authorized: true }));
+    await spine.handleInbound(peer('/e status', { isSender: true, authorized: true }));
     expect(ran).toEqual([]);
   });
 });
@@ -232,8 +232,8 @@ describe('regression locks — what does not change', () => {
   it('the lifecycle commands are still exempt — from the operator, and from a non-human source', async () => {
     const { spine, guard, ran } = build();
     guard.stopChannel(CH);
-    await spine.handleInbound(op('/restart'));
-    await spine.handleInbound(peer('/upgrade', { isSender: true, authorized: true }));
+    await spine.handleInbound(op('/e restart'));
+    await spine.handleInbound(peer('/e upgrade', { isSender: true, authorized: true }));
     expect(ran).toEqual(['/restart', '/upgrade']);
   });
 

@@ -32,10 +32,6 @@ import { createMeshRelay, encodeMesh, parseMesh, agentPaths, ANON_SENDER } from 
 // ("the bridge must have ONE path", 2026-07-25). The RESPONDER renders its reply through THIS —
 // the same renderer a local reply gets — before encodeMesh, because the payload is what travels.
 import { personaStamp, makeWrapPersona } from '../bridges/persona-wrap.mjs';
-// THE routing table, derived from the AGENTS block (there is no mesh.nodes since 2026-07-25):
-// an agent with a relay_channel and `to: <being>.<node>` IS the statement that its channel
-// reaches that node. The SAME derivation the command service reads to know what a node name is.
-import { agentRoutes } from './node-names.mjs';
 // addressed: THE mention matcher (declared `handles:`, else the map key — router.mjs's wake
 // vocabulary), imported so an envelope's `<being>.<node>` resolves identically to a typed @token.
 // findAgentByToken below is a single-already-parsed-token lookup (bare form, addressWithoutAt),
@@ -77,7 +73,7 @@ export function createMeshService({
   // carry an id that only the ear's account has:
   //   · THE ORIGIN CHAT — a human TYPED there, so it is a room on the ear by definition. The 🤔
   //     placeholder, the living mirror that is the entire visible output of a mesh hop, the
-  //     "⏱️ … did not answer" notice and forwardCommand's "no agent routes" refusal all land there.
+  //     "⏱️ … did not answer" notice all land there.
   //   · THE ARRIVING ENVELOPE'S OWN CHAT — `handle` builds `route.room_id = ev.chatId`, the id the
   //     EAR delivered, and the RESPONDER streams its whole reply back into exactly that id.
   //   · THE SELF CHAT — selfRoute's notice target, the one id provably on the ear.
@@ -97,11 +93,6 @@ export function createMeshService({
   // Absent (every unit test, every one-connection node) ⇒ the injected `bridge`, byte for byte.
   bridgeOf = null,
   brain,                               // the Brain port (turn) — runs the local being for the responder
-  // The command service (createCommands). A node-addressed command can travel as an envelope
-  // (operator 2026-07-26 — egpt as a remote control for the network); at the RESPONDER the
-  // arriving prompt is executed through this instead of being handed to the being. Null (tests,
-  // standalone) → an arriving command is ordinary relayed text, exactly as before.
-  commands = null,
   getConfig = () => ({}),
   bodyEmojiOf = () => '',              // (being) => body_emoji — stamps the relayed reply
   // THE DISPLAY NAME, not the being-id (operator 2026-09-01). do's persona is KEYED `egpt` and
@@ -205,13 +196,12 @@ export function createMeshService({
   // agents.<handle>.conversation_defaults.allowed_users). UNSET at both tiers = no restriction
   // (today's default, unchanged). Returns the denial string to surface, or null when the turn
   // may proceed. Checked in relayDispatch BEFORE brain.turn ever runs for a local being — never
-  // for a relay hop (those don't reach here) and never for a command (commandReply has its own,
-  // separate authorization gate).
+  // for a relay hop (those don't reach here).
   //
   // EXPLICIT DENIAL, deliberately unlike router.mjs's silent drop: this file's own convention is
-  // "NEVER silence" (see forwardCommand's docstring above) — the requester here is a DIFFERENT,
-  // already-trusted node peer (it got this far through the mesh), so it gets a reason, the same
-  // way commandReply answers "⚠️ not authorized to run …" instead of going quiet. The sender-id
+  // "NEVER silence" — the requester here is a DIFFERENT,
+  // already-trusted node peer (it got this far through the mesh), so it gets a reason instead of
+  // going quiet. The sender-id
   // match itself (including the "*" wildcard) is the shared allowedUsersPermits predicate
   // (conversations-state.mjs, operator 2026-08-16) — the same one router.mjs's resolve() uses.
   const allowedUsersDenial = async (being, route, surface, chatId) => {
@@ -352,26 +342,6 @@ export function createMeshService({
     if (chat != null) inFlight.delete(inFlightKey(returnTo?.surface, chat, returnTo?.relayBeing));
   };
 
-  // NODE → ROUTE (operator 2026-07-25: "we do agent-base routing"). Every relay path in the
-  // AGENTS block that names <node> in its `to:` is a way to reach it; agentRoutes flattens them.
-  // A SURFACE-PINNED agent wins on its own surface and is invisible on every other one — exactly
-  // how the router treats a pin, and exactly what the pin means (kg pins `don` to `surface: shell`
-  // because on Beeper `do` hears him directly, so the shell is where kg must relay). All of ONE
-  // agent's paths to the node fan out together (multipath); no agent names it → null, and the
-  // caller says so out loud rather than dropping the command in silence.
-  function routeToNode(node, surface) {
-    const n = String(node ?? '').toLowerCase();
-    const s = String(surface ?? '').toLowerCase();
-    const hits = agentRoutes(cfg()).filter((r) => r.node === n && (r.surface == null || r.surface === s));
-    if (!hits.length) return null;
-    const pinned = hits.filter((r) => r.surface != null);
-    const use = pinned.length ? pinned : hits;
-    const paths = use.filter((r) => r.name === use[0].name);
-    const routeOf = (r) => ({ room_id: r.relay_channel, ...(r.network ? { network: r.network } : {}) });
-    if (paths.length > 1) return { being: paths[0].name, paths: paths.map((r) => ({ route: routeOf(r), to: r.to, label: r.label })) };
-    return { being: paths[0].name, route: routeOf(paths[0]), to: paths[0].to };
-  }
-
   // THE ORIGIN CHAT'S NAME → THIS NODE'S OWN ADDRESS FOR IT (operator 2026-08-31: "the mesh tail
   // should get from/to agents separate, and so the threads. there should be relation between
   // thread-id and the egpt-mesh. mesh is transport, not mixing." / "E on the radio and E on acim
@@ -430,7 +400,7 @@ export function createMeshService({
   // ORIGIN conversation (`from` = its name, resolved by originConv above) and everything downstream
   // — resolveConv, the a569ada scope lookup, the warm key, access_level — follows unchanged.
   //
-  // `from` omitted (commandReply) or unresolvable → the relay channel, byte for byte as before.
+  // `from` omitted or unresolvable → the relay channel, byte for byte as before.
   async function meshEv(route, prompt, from = null) {
     const surface = route?.limb ?? route?.surface ?? 'whatsapp';
     const conv = await originConv(from);
@@ -438,45 +408,7 @@ export function createMeshService({
     return { surface, node, chatId: chat, chatName: conv?.name ?? chat, senderId: null, senderName: null, msgId: null, ts: Date.now(), body: prompt, line: prompt, kind: 'text', raw: null, cause: 'relay' };
   }
 
-  // RESPONDER: is this arriving prompt a node-addressed command for THIS node, and if so what
-  // does it answer? (operator 2026-07-26 — egpt as a remote control for the network.) The
-  // ALLOWLIST is the command service's own (nodeCommandForMe): lifecycle and the STOP safe word
-  // are not in it, so an envelope can never restart, upgrade, rewind or kill this node — a
-  // non-addressable command is ordinary relayed text and goes to the being, exactly as today.
-  //
-  // AUTHORIZATION IS THE ONE THAT ALREADY EXISTS. The arriving envelope EVENT rides on the route
-  // (mesh.handle), carrying the `authorized`/`isSender` the bridge computed for it — the peer
-  // shares this Beeper account (isSender), or the sender's id sits in this node's allowed_users.
-  // commands.isCommand reads exactly those, the same gate a typed command passes. Nothing is
-  // added here.
-  //
-  // The reply is CAPTURED (runCaptured) rather than posted: it has to ride home inside the
-  // envelope. It still passes the command service's no-self-parsing chokepoint, so the body the
-  // origin mirrors into its own chat can never begin with '/' (the 2026-07-25 flood fix).
-  let cmdSeq = 0;
   let askerSeq = 0;   // per-turn unique id for an UNNAMEABLE relayed asker (see relayDispatch's `who`)
-  async function commandReply(route, prompt) {
-    if (!commands?.nodeCommandForMe?.(prompt)) return null;
-    const src = route?.ev ?? {};
-    const ev = {
-      // NO ORIGIN CONVERSATION, deliberately (operator 2026-08-31): a node-addressed command is
-      // node plumbing, not a conversation — it is answered by THIS node about ITSELF, and the
-      // chatId below is a private per-command id anyway. meshEv without a `from` is the
-      // pre-2026-08-31 event exactly, so this path costs no lookup and cannot move.
-      ...(await meshEv(route, prompt)),
-      chatId: `${chatOf(route)}#cmd${++cmdSeq}`,   // a private id: the captured replies key off it
-      mesh: true,   // EXPLICIT MARK (bug #23 half A, 2026-07-27): this chatId is a private
-                    // per-command id, never a real room — a room-scoped command (/members,
-                    // /activate) must resolve to THIS node's own lobby instead, so add and
-                    // list agree and no throwaway contact-<ts> room gets minted. Read once,
-                    // in commands.mjs's room-resolution seam.
-      senderId: src.senderId ?? null, senderName: src.senderName ?? null,
-      authorized: !!src.authorized, isSender: !!src.isSender,
-    };
-    if (!commands.isCommand(ev)) return `⚠️ not authorized to run "${prompt}" on ${node}`;
-    const out = String(await commands.runCaptured(ev) ?? '').trim();
-    return out || `(no output from "${prompt}" on ${node})`;
-  }
 
   const relay = createMeshRelay({
     node,
@@ -603,81 +535,73 @@ export function createMeshService({
       let final = '';
       let stream = null;
       try {
-        const cmd = await commandReply(route, prompt);
-        if (cmd != null) final = cmd;
+        // ALLOWED_USERS GATE: checked here, BEFORE the placeholder stream
+        // opens and BEFORE brain.turn ever runs — an unauthorized envelope never starts a turn.
+        //
+        // KEYED ON THE CHANNEL, and it stays there (operator 2026-08-31, when the TURN moved to
+        // the origin conversation). This is REACHABILITY — may this peer wake this being through
+        // this transport — not identity: it is the responder-side half of the rule router.mjs
+        // enforces at the origin, its per-conversation override is written against the relay chat
+        // (locked in tests/spine-mesh.test.mjs), and re-keying it would silently re-scope who may
+        // reach a being over the mesh. Only the conversation the turn RUNS in moved.
+        const denial = await allowedUsersDenial(being, route, surface, chat);
+        if (denial) final = denial;
         else {
-          // ALLOWED_USERS GATE: checked here, AFTER the command branch (a node-addressed command
-          // is unrelated to which being was nominally addressed) but BEFORE the placeholder stream
-          // opens and BEFORE brain.turn ever runs — an unauthorized envelope never starts a turn.
-          //
-          // KEYED ON THE CHANNEL, and it stays there (operator 2026-08-31, when the TURN moved to
-          // the origin conversation). This is REACHABILITY — may this peer wake this being through
-          // this transport — not identity: it is the responder-side half of the rule router.mjs
-          // enforces at the origin, its per-conversation override is written against the relay chat
-          // (locked in tests/spine-mesh.test.mjs), and re-keying it would silently re-scope who may
-          // reach a being over the mesh. Only the conversation the turn RUNS in moved.
-          const denial = await allowedUsersDenial(being, route, surface, chat);
-          if (denial) final = denial;
-          else {
-            // Only the being path ever streams (onPartial below) — open the placeholder HERE, once
-            // the branch is known, so a static command never pays for a "🤔" it never uses plus an
-            // extra outbound edit against the send-guard budget (operator 2026-07-27: "no AI involved,
-            // it's static tubing").
-            // THE ONE PLACE the origin conversation enters: `from` (the origin chat's name, off the
-            // tail) reaches meshEv only on the being path, so a static command still pays for no
-            // name lookup. `chat` above — the transport — is untouched: the reply streams home
-            // exactly where it came from, whatever conversation the turn ran in.
-            const ev = await meshEv(route, prompt, from);
-            // THE TURN KEY — turns.keyOf, the SAME derivation (and the same brain.scopeOf lookup)
-            // the spine's own dispatch uses. Since the turn runs in the ORIGIN conversation this
-            // lands on the SAME key a LOCAL message in that chat lands on, which is the collision
-            // that has to exist for one warm entry to see one turn at a time. Unwired → null, and
-            // every `turns?.` below is inert: byte-for-byte the pre-2026-08-31 body.
-            // (keyOf returns { key, pinned } since 2026-09-01 — the pin decides how the SPINE
-            // builds a prompt, and a relayed turn builds none of its own, so only the key is read.)
-            const turnKey = (await turns?.keyOf(being, ev))?.key ?? null;
-            // WHO ASKED, as far as the wire knows (operator 2026-08-31). `by:` carries the origin
-            // human's display NAME and has since the first envelope, so nothing new crosses. The
-            // synthetic event's own senderId stays null BY DESIGN (the allowed_users gate reads the
-            // REAL requester off route.ev and must keep doing so), hence the copy rather than a
-            // mutation. Namespaced `mesh:` so it can never equal a surface id — which is what makes
-            // allow_new_input's same_sender tier read a LOCAL message against a live RELAYED turn,
-            // and the reverse, as "a different person": the safe direction, since we cannot prove
-            // they are the same. An UNNAMEABLE asker gets a per-turn UNIQUE id rather than a shared
-            // sentinel, because two anonymous envelopes must not read as one person — same_sender
-            // then falls to queueing, which is what every gap here falls to.
-            const asker = String(sender ?? '').trim();
-            const who = asker && asker !== ANON_SENDER ? `mesh:${asker}` : `mesh:#${++askerSeq}`;
-            const asked = { ...ev, senderId: who };
-            // STEER FIRST, AND THE ORDER IS THE POINT (the same order spine.mjs takes it in): the
-            // verdict is taken BEFORE anything opens a placeholder, because a woven message must
-            // produce NOTHING NEW — here that means no stream, no envelope, no train. The ORIGIN
-            // took the same verdict before forwarding and opened no placeholder for this line, so
-            // nothing is left waiting on us. ack:false — the ack sits on the inbound message and the
-            // real message lives on the ORIGIN node's account (meshEv has msgId: null), so there is
-            // nothing here to react to, and the operator ruled that nothing new crosses.
-            if (turnKey && await turns.steerLiveTurn({ to: being, ev: asked, turnKey, ack: false })) return;
-            // Open the placeholder AT ARRIVAL — in the QUEUED state when a turn is already running
-            // on this key — and let the turn WAIT its turn on the FIFO, exactly as a local mention
-            // does. This is the fix: the two envelopes used to run brain.turn concurrently and both
-            // showed a bare placeholder.
-            const ahead = turns?.bump(turnKey) ?? 0;
-            stream = bridgeFor(being, chat).startStream(chat, wrap('', false, ahead), {});
-            const runTurn = async () => {
-              // THIS turn is now the live one on this key, and this is whose message it answers,
-              // and IN WHICH CHAT (2026-09-01: a shared scope puts several chats on one key).
-              // Set here, not above: openAndRunReply's lesson — a QUEUED turn must not claim the
-              // live slot from the turn actually streaming. Cleared in the `finally`, which is what
-              // makes it correct on the throw path too.
-              turns?.setLive(turnKey, { senderId: who, chatId: ev.chatId ?? null });
-              if (ahead > 0) { try { stream?.update?.(wrap('')); } catch {} }   // queued → live, the local activate()
-              try {
-                const r = await brain.turn(being, ev, (partial) => { try { stream?.update?.(wrap(textOf(partial))); } catch {} });
-                return textOf(r);
-              } finally { turns?.drop(turnKey); turns?.clearLive(turnKey); }
-            };
-            final = turnKey ? await turns.serial(turnKey, runTurn) : await runTurn();
-          }
+          // Only the being path ever streams (onPartial below) — open the placeholder HERE, once
+          // the branch is known, so a denial never pays for a "🤔" it never uses.
+          // THE ONE PLACE the origin conversation enters: `from` (the origin chat's name, off the
+          // tail) reaches meshEv only on the being path. `chat` above — the transport — is untouched: the reply streams home
+          // exactly where it came from, whatever conversation the turn ran in.
+          const ev = await meshEv(route, prompt, from);
+          // THE TURN KEY — turns.keyOf, the SAME derivation (and the same brain.scopeOf lookup)
+          // the spine's own dispatch uses. Since the turn runs in the ORIGIN conversation this
+          // lands on the SAME key a LOCAL message in that chat lands on, which is the collision
+          // that has to exist for one warm entry to see one turn at a time. Unwired → null, and
+          // every `turns?.` below is inert: byte-for-byte the pre-2026-08-31 body.
+          // (keyOf returns { key, pinned } since 2026-09-01 — the pin decides how the SPINE
+          // builds a prompt, and a relayed turn builds none of its own, so only the key is read.)
+          const turnKey = (await turns?.keyOf(being, ev))?.key ?? null;
+          // WHO ASKED, as far as the wire knows (operator 2026-08-31). `by:` carries the origin
+          // human's display NAME and has since the first envelope, so nothing new crosses. The
+          // synthetic event's own senderId stays null BY DESIGN (the allowed_users gate reads the
+          // REAL requester off route.ev and must keep doing so), hence the copy rather than a
+          // mutation. Namespaced `mesh:` so it can never equal a surface id — which is what makes
+          // allow_new_input's same_sender tier read a LOCAL message against a live RELAYED turn,
+          // and the reverse, as "a different person": the safe direction, since we cannot prove
+          // they are the same. An UNNAMEABLE asker gets a per-turn UNIQUE id rather than a shared
+          // sentinel, because two anonymous envelopes must not read as one person — same_sender
+          // then falls to queueing, which is what every gap here falls to.
+          const asker = String(sender ?? '').trim();
+          const who = asker && asker !== ANON_SENDER ? `mesh:${asker}` : `mesh:#${++askerSeq}`;
+          const asked = { ...ev, senderId: who };
+          // STEER FIRST, AND THE ORDER IS THE POINT (the same order spine.mjs takes it in): the
+          // verdict is taken BEFORE anything opens a placeholder, because a woven message must
+          // produce NOTHING NEW — here that means no stream, no envelope, no train. The ORIGIN
+          // took the same verdict before forwarding and opened no placeholder for this line, so
+          // nothing is left waiting on us. ack:false — the ack sits on the inbound message and the
+          // real message lives on the ORIGIN node's account (meshEv has msgId: null), so there is
+          // nothing here to react to, and the operator ruled that nothing new crosses.
+          if (turnKey && await turns.steerLiveTurn({ to: being, ev: asked, turnKey, ack: false })) return;
+          // Open the placeholder AT ARRIVAL — in the QUEUED state when a turn is already running
+          // on this key — and let the turn WAIT its turn on the FIFO, exactly as a local mention
+          // does. This is the fix: the two envelopes used to run brain.turn concurrently and both
+          // showed a bare placeholder.
+          const ahead = turns?.bump(turnKey) ?? 0;
+          stream = bridgeFor(being, chat).startStream(chat, wrap('', false, ahead), {});
+          const runTurn = async () => {
+            // THIS turn is now the live one on this key, and this is whose message it answers,
+            // and IN WHICH CHAT (2026-09-01: a shared scope puts several chats on one key).
+            // Set here, not above: openAndRunReply's lesson — a QUEUED turn must not claim the
+            // live slot from the turn actually streaming. Cleared in the `finally`, which is what
+            // makes it correct on the throw path too.
+            turns?.setLive(turnKey, { senderId: who, chatId: ev.chatId ?? null });
+            if (ahead > 0) { try { stream?.update?.(wrap('')); } catch {} }   // queued → live, the local activate()
+            try {
+              const r = await brain.turn(being, ev, (partial, use) => { if (use?.tool) return; try { stream?.update?.(wrap(textOf(partial))); } catch {} });
+              return textOf(r);
+            } finally { turns?.drop(turnKey); turns?.clearLive(turnKey); }
+          };
+          final = turnKey ? await turns.serial(turnKey, runTurn) : await runTurn();
         }
       } catch (e) { final = `(${being}.${node} error: ${e?.message ?? e})`; }
       final = String(final ?? '').trim() || '…';
@@ -727,8 +651,7 @@ export function createMeshService({
       const prov = parseMesh(ev?.body ?? '');
       if (!prov) return false;
       // The arriving EVENT rides along on the route — transparent to the engine (which reads
-      // room_id and nothing else). The responder's command branch reads its authorization off
-      // it: the existing allowed_users / same-account signal, never a fabricated one.
+      // room_id and nothing else). The responder's allowed_users gate reads the requester off it.
       const route = { limb: ev.surface, room_id: ev.chatId, ev };
       return relay.onRoomMessage({ route, text: ev.body, msgId: ev.msgId });
     },
@@ -746,10 +669,8 @@ export function createMeshService({
     //                                through the awaiting/re: machinery either way.
     //   { being, paths:[…] }       — a MULTIPATH relay agent (its `paths:` list); see below.
     //
-    // `structural` (operator 2026-07-27): true only when this forward carries a `/command`
-    // (forwardCommand sets it — it already knows, at the allowlist gate, that no AI turn is
-    // involved). Threaded straight through to relay.relayOut, never re-derived here. Default
-    // false leaves every existing `@being` being-prompt call site byte-identical.
+    // `structural` (operator 2026-07-27): true when this forward carries a `/command`. Nothing sets
+    // it since commands name their being (2026-10-19). Threaded straight through to relay.relayOut.
     // `quiet` (operator 2026-08-31): the spine already took the allow_new_input verdict for this
     // line — a relay from this conversation is still unanswered and the policy admits it — so it
     // travels with NO placeholder and NO origin-wait timer. The bet is that the responder weaves
@@ -790,31 +711,6 @@ export function createMeshService({
       if (ok && !quiet) armTimeout(origin.waitKey, ev.chatId, label, ev.surface, being);   // relayOut already surfaced a failure
       if (ok && !quiet && !structural) noteInFlight(ev, being);
       return ok;
-    },
-
-    // ORIGIN: a node-addressed COMMAND for a node that cannot hear where it was typed (operator
-    // 2026-07-26 — "i open a local shell, type '/chrome mo' and a chrome in mo's spine … opens.
-    // i can drive it by typing commands on the egpt shell"). It travels as the SAME envelope a
-    // `@don` being-prompt travels in, so the reply mirrors home the same way. NEVER silence: a
-    // node no agent routes to is reported to the operator, in the chat he typed it in.
-    //
-    // structural: true — forwardCommand is ONLY ever reached for an allowlisted `/command`
-    // (spine.mjs gates on commands.remoteNode before calling it), so the origin's placeholder
-    // and done-marker are the plumbing ("🔗 relaying…" / no "✅ Done"), never the AI-thinking ones.
-    async forwardCommand(ev, node) {
-      const target = routeToNode(node, ev.surface);
-      if (!target) {
-        onLog(`no agent routes to node "${node}" on surface ${ev.surface}`);
-        await bridgeFor(null, ev.chatId).send(ev.chatId, `⚠️ no agent routes to node "${node}" — add an agent with a relay_channel and "to: <being>.${node}" to reach it.`);
-        return false;
-      }
-      // Resolution happens ONCE, here at the origin, and must travel EXPLICITLY (operator
-      // 2026-07-27 — live miss: a bare command resolved via dispatch.default_node forwarded with
-      // its ORIGINAL body, so the responder's own nodeCommandForMe re-parsed it bare, resolved no
-      // node of its own, and fell through to the being). commands.makeNodeExplicit binds `=<node>`
-      // to the command token; an already-explicit command (`/tabs=do`) comes back unchanged.
-      const body = commands?.makeNodeExplicit?.(ev.body, node) ?? ev.body;
-      return api.forward(body === ev.body ? ev : { ...ev, body }, target, { structural: true });
     },
 
     // A streamed edit in a relay chat mirrors onward (responder edits → origin mirror,

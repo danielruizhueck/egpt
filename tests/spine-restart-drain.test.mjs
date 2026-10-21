@@ -128,6 +128,20 @@ describe('spine.drainForRestart — /restart and /upgrade wait for the turns in 
     expect(drainLines().at(-1)).toBe('drain: nothing in flight after 0s — restarting');
   });
 
+  it('/update beeper drains the same way under its own name, and nothing exits', async () => {
+    const { spine, bridge, brain, timers, drainLines } = build();
+    const p1 = bridge.emit(msg('one', A, 'm1'));
+    await flush();
+    const ran = [];
+    spine.drainForRestart(() => ran.push('update'), { purpose: 'restarting Beeper for the update' });
+    expect(drainLines()).toEqual([`drain: waiting for 1 turn(s) before restarting Beeper for the update — ${KEY_A} (cap 30 min; new messages are still answered)`]);
+    brain.release('one');
+    await p1;
+    timers.fire();
+    expect(ran).toEqual(['update']);
+    expect(drainLines().at(-1)).toBe('drain: nothing in flight after 0s — restarting Beeper for the update');
+  });
+
   it('nothing in flight: it leaves synchronously — no timer, no line, no added delay', () => {
     const { spine, timers, drainLines } = build();
     const exits = [];
@@ -490,7 +504,7 @@ describe('boot — a typed /upgrade with a turn in flight (the kg 16:10 incident
     const turn = say('e busca esto', { atE: true });            // not awaited: it is held open
     expect(await waitFor(() => sessions.started.length === 1)).toBe(true);
 
-    await say('/upgrade');
+    await say('/e upgrade');
     await flush();
     expect(exits).toEqual([]);                                    // ← before this change: [42], the turn still open
 
@@ -510,7 +524,7 @@ describe('boot — a typed /upgrade with a turn in flight (the kg 16:10 incident
 
   it('nothing in flight: /upgrade exits 42 as fast as before, and publishes no drain', async () => {
     const { exits, say } = await bootHeld();
-    await say('/upgrade');
+    await say('/e upgrade');
     expect(await waitFor(() => exits.length > 0)).toBe(true);
     expect(exits).toEqual([42]);
     expect(existsSync(DRAINING)).toBe(false);
@@ -520,8 +534,8 @@ describe('boot — a typed /upgrade with a turn in flight (the kg 16:10 incident
     const { sessions, timers, exits, say, lines } = await bootHeld();
     const turn = say('e busca esto', { atE: true });
     await waitFor(() => sessions.started.length === 1);
-    await say('/restart');
-    await say('/upgrade');
+    await say('/e restart');
+    await say('/e upgrade');
     await flush();
     expect(exits).toEqual([]);
     expect(lines.filter((l) => l.includes('drain: waiting for'))).toHaveLength(1);
@@ -537,7 +551,7 @@ describe('boot — a typed /upgrade with a turn in flight (the kg 16:10 incident
     const { sessions, exits, say } = await bootHeld();
     const turn = say('e busca esto', { atE: true });
     await waitFor(() => sessions.started.length === 1);
-    await say('/rewind abc1234');
+    await say('/e rewind abc1234');
     expect(await waitFor(() => exits.length > 0)).toBe(true);
     expect(exits).toEqual([44]);
     sessions.release();
@@ -577,7 +591,7 @@ describe('boot — a /restart with background work live on a warm session (step 
 
   it('(a)(e) waits, names the task in state/draining.json — and /restart force proceeds', async () => {
     const { timers, exits, say } = await bootWithBackground();
-    await say('/restart');
+    await say('/e restart');
     await flush();
     expect(exits).toEqual([]);
     expect(await waitFor(() => existsSync(DRAINING))).toBe(true);
@@ -588,14 +602,14 @@ describe('boot — a /restart with background work live on a warm session (step 
     timers.fire();
     await flush();
     expect(exits).toEqual([]);
-    await say('/restart force');
+    await say('/e restart force');
     expect(await waitFor(() => exits.length > 0)).toBe(true);
     expect(exits).toEqual([43]);
   });
 
   it('(f) /rewind stays immediate with background work live', async () => {
     const { exits, say } = await bootWithBackground();
-    await say('/rewind abc1234');
+    await say('/e rewind abc1234');
     expect(await waitFor(() => exits.length > 0)).toBe(true);
     expect(exits).toEqual([44]);
   });

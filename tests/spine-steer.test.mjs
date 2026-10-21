@@ -28,7 +28,7 @@ import { createTurns } from '../src/spine/turns.mjs';
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
-function fakeBridge({ reactThrows = false } = {}) {
+function fakeBridge({ reactThrows = false, reactHangs = false } = {}) {
   let cb = null;
   const reactions = [];
   return {
@@ -40,6 +40,7 @@ function fakeBridge({ reactThrows = false } = {}) {
     async react(chatId, msgId, emoji) {
       reactions.push({ chatId, msgId, emoji });
       if (reactThrows) throw new Error('reaction boom');
+      if (reactHangs) return new Promise(() => {});      // a mouth still waiting for its own copy
       return true;
     },
   };
@@ -193,6 +194,22 @@ describe('spine — allow_new_input steers the live turn (operator 2026-08-30)',
     expect(sender.placeholders).toHaveLength(1);          // still no second placeholder
     brain.releaseFirst();
     await Promise.all([p1, p2]);
+  });
+
+  // Live 2026-10-18: the 📩's lookup waits for the mouth's copy (up to COPY_WAIT_MS). That wait was
+  // awaited on the chat's lane, so the next message in the chat queued behind a reaction.
+  it('a 📩 still being placed does not hold the lane: the next message in the chat steers at once', async () => {
+    const { bridge, brain } = build({ allow: 'any' }, { reactHangs: true });
+    const p1 = bridge.emit(msg('one', 'm1', 'an'));
+    await flush();
+    bridge.emit(msg('two', 'm2', 'an'));
+    await flush();
+    bridge.emit(msg('three', 'm3', 'an'));
+    await flush();
+    expect(brain.steered).toEqual(['two', 'three']);
+    expect(bridge.reactions.map((r) => [r.msgId, r.emoji])).toEqual([['m2', '📩'], ['m3', '📩']]);   // no 👀 before its 📩
+    brain.releaseFirst();
+    await p1;
   });
 
   // Best-effort (operator constraint): a reaction fault must never undo a steer that already

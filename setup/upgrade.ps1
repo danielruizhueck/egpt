@@ -56,9 +56,10 @@ $git = (Get-Command git -ErrorAction SilentlyContinue).Source
 # .Trim() on that throws and kills the deploy. Guard both reads; '?' is already the unknown value.
 function Get-ShortHead($gitExe, $repo) {
   if (-not $gitExe -or -not (Test-Path $repo)) { return '?' }
-  $out = (& $gitExe -C $repo rev-parse --short HEAD 2>$null)
+  # Exactly 7 chars, like $target: `--short` grows with the repo (8 on reve, 2026-10-19) and never matched.
+  $out = (& $gitExe -C $repo rev-parse HEAD 2>$null)
   if ($LASTEXITCODE -ne 0 -or -not $out) { return '?' }
-  return ([string]$out).Trim()
+  return ([string]$out).Trim().Substring(0, 7)
 }
 
 # --- SOURCE TREES ---------------------------------------------------------------------

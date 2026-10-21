@@ -191,6 +191,28 @@ describe('warm-cli-session — the injection ACK is evidence, not a successful w
     s.close();
   });
 
+  // Measured on claude 2.1.303 (2026-10-18): a steered "e" is its dispatch head plus an empty body,
+  // "…#34353: ". Absorbed mid-turn, the CLI replays it as it REWROTE it, trailing space gone
+  // (its transcript: queued_command promptRewritten:true, then queue-operation absorbed_mid_turn).
+  const HEAD = 'An@[eGPT Rodz Lulu An].wa (21:33) #34353: ';
+  const absorbed = (f, text) => f.emit({ type: 'user', message: { role: 'user', content: [{ type: 'text', text }] }, session_id: 'sess-1', parent_tool_use_id: null, uuid: 'u-1', timestamp: '2026-10-19T03:16:54.930Z', isReplay: true });
+
+  it('a line the CLI rewrote when absorbing it mid-turn still acks (absorbed_mid_turn)', async () => {
+    const f = fakeClaude();
+    const s = createWarmCliSession({ spawn: f.spawn });
+    const pr = s.turn('ORIGINAL');
+    await tick();
+    const handed = s.inject(HEAD);
+    let acked = null;
+    handed.ack.then((r) => { acked = r; });
+    absorbed(f, HEAD.trimEnd());
+    f.result('done');
+    await pr;
+    await flush();
+    expect(acked).toEqual({ ok: true });
+    s.close();
+  });
+
   it('closing a session with an un-ingested injection says so instead of leaving it hanging', async () => {
     const f = fakeClaude({ consuming: false });
     const s = createWarmCliSession({ spawn: f.spawn });
@@ -325,6 +347,22 @@ describe('turns.steerLiveTurn — 📩 is the bridge, 👀 is the model', () => 
     expect(await turns.steerLiveTurn({ to: 'e', ev: EV, turnKey: KEY })).toBe(false);
     await flush();
     expect(reactions).toEqual([]);
+  });
+
+  it('THE 21:33 SHAPE END TO END: the CLI absorbs the rewritten line — 👀 placed, no "never ingested"', async () => {
+    const f = fakeClaude();
+    const pool = createWarmPool({ makeSession: (o) => createWarmCliSession({ ...o, spawn: f.spawn }) });
+    const run = pool.run('k', 'ORIGINAL');
+    await flush();
+    const line = 'An@[eGPT Rodz Lulu An].wa (21:33) #34353: ';
+    const { turns, reactions, notes } = harness((to, ev) => pool.steer('k', ev.line));
+    expect(await turns.steerLiveTurn({ to: 'e', ev: { ...EV, line }, turnKey: KEY })).toBe(true);
+    f.emit({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: line.trimEnd() }] }, session_id: 'sess-1', parent_tool_use_id: null, uuid: 'u-1', isReplay: true });
+    f.result('done');
+    await run;
+    await flush();
+    expect(reactions.map((r) => r.emoji)).toEqual(['📩', '👀']);
+    expect(notes.join('\n')).not.toMatch(/NEVER INGESTED/);
   });
 
   it('ack:false (a relayed turn, no local message to sit on) places NEITHER reaction', async () => {

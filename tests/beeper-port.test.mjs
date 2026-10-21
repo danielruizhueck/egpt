@@ -97,15 +97,16 @@ describe('beeper-port adapter', () => {
     expect(h.finals).toEqual(['🐶 egpt: Aquí estoy bien']);
   });
 
-  it('exposes NO delete limb — a being never removes a message', async () => {
-    // operator 2026-08-24: there is no use case for deletion. The 2026-10-08 "stray …" fix keeps
-    // this lock — a HIDDEN '…' (on/auto) is EDITED to the quiet limb mark '✓' (src/spine/sender.mjs),
-    // never deleted — so the port wrapper still exposes no delete verb.
+  it('exposes NO delete limb — a being never removes a message; the stream forwards the bridge\'s own delete', async () => {
+    // operator 2026-08-24: no delete limb. 2026-10-19: a limb-only turn's ⏳ placeholder is deleted by
+    // the BRIDGE (src/spine/sender.mjs), through the stream's own delete.
     const { start, spy } = fakeStart();
     const port = await createBeeperBridgePort({}, { start });
+    expect(port.deleteOwn).toBeUndefined();
     const s2 = port.startStream('!room', '⏳', { persona: 'e', bodyEmoji: '🐶', label: 'egpt' });
-    expect(s2.delete).toBeUndefined();
     expect(spy.streams[0].deleted).toBe(false);
+    s2.delete();
+    expect(spy.streams[0].deleted).toBe(true);
   });
 
   // The 🎧 listening mark comes back off (2026-09-16): react and its removal both reach the real bridge.
@@ -440,15 +441,13 @@ describe('beeper-port adapter — layered signatures (bridge + agent wrap)', () 
     const port = await createBeeperBridgePort({}, { start });
     expect(await port.listChatsRaw()).toEqual([]);       // the fake transport has no raw readers
     expect(await port.chatRaw('!room')).toBeNull();
-    expect(await port.chatOtherPartyId('!room')).toBeNull();   // super-channel invite — null without the transport method (the editMessage-class port-forward bug)
 
     const withRaw = await createBeeperBridgePort({}, {
-      start: async (o) => ({ ...(await start(o)), listChatsRaw: async (opts) => { spy.rawOpts = opts; return raw; }, chatRaw: async (c) => ({ id: c }), chatOtherPartyId: async (c) => `@whatsapp_lid-OTHER:beeper.local` }),
+      start: async (o) => ({ ...(await start(o)), listChatsRaw: async (opts) => { spy.rawOpts = opts; return raw; }, chatRaw: async (c) => ({ id: c }) }),
     });
     expect(await withRaw.listChatsRaw({ full: true })).toBe(raw);
     expect(spy.rawOpts).toEqual({ full: true });         // `full` reaches the transport — the walk is the caller's choice
     expect(await withRaw.chatRaw('!room')).toEqual({ id: '!room' });
-    expect(await withRaw.chatOtherPartyId('!room')).toBe('@whatsapp_lid-OTHER:beeper.local');
   });
 
   // /fork + /end OPS (operator 2026-10-01) — REPRODUCE-FIRST for the live bug. The fork handler is
@@ -463,7 +462,6 @@ describe('beeper-port adapter — layered signatures (bridge + agent wrap)', () 
       archiveChat: async (...a) => { calls.push(['archive', ...a]); return true; },
       getChatName: (id) => (id === '!room' ? 'Proyecto X' : null),
       resolveUserIdByPhone: async (digits, opts) => { calls.push(['resolve', digits, opts]); return '@whatsapp_lid-99:beeper.local'; },
-      resolveChatIdByTitle: async (title, opts) => { calls.push(['resolveTitle', title, opts]); return title === 'egpt join de X' ? '!secRoom' : null; },
       isAlive: () => true, stop() {},
     }) });
     expect(typeof port.editMessage).toBe('function');     // the method the live node was missing
@@ -474,12 +472,9 @@ describe('beeper-port adapter — layered signatures (bridge + agent wrap)', () 
     expect(port.getChatName('!room')).toBe('Proyecto X');
     // the create's participant is resolved from a phone → the person's Beeper user id
     expect(await port.resolveUserIdByPhone('13472576794', { accountID: 'wa' })).toBe('@whatsapp_lid-99:beeper.local');
-    // the OPENER resolves the SECONDARY's own room id for the new group BY TITLE (so it posts FROM RODZ)
-    expect(await port.resolveChatIdByTitle('egpt join de X', { accountID: 'wa' })).toBe('!secRoom');
     // RAW: the /fork marker edit is NOT persona-wrapped (no bridge signature stapled on)
     expect(calls[0]).toEqual(['edit', '!room', 'm1', '🤖↔️🤔 ...']);
     expect(calls).toContainEqual(['resolve', '13472576794', { accountID: 'wa' }]);
-    expect(calls).toContainEqual(['resolveTitle', 'egpt join de X', { accountID: 'wa' }]);
   });
 
   it('editMessage / createGroup / archiveChat / getChatName / resolveUserIdByPhone answer false/null on a transport without them', async () => {
@@ -489,7 +484,6 @@ describe('beeper-port adapter — layered signatures (bridge + agent wrap)', () 
     expect(await port.archiveChat('!room')).toBe(false);
     expect(port.getChatName('!room')).toBe(null);
     expect(await port.resolveUserIdByPhone('1347', {})).toBe(null);
-    expect(await port.resolveChatIdByTitle('T', {})).toBe(null);
   });
 
   // skipSignature (operator 2026-10-04, the /send relay) — the ONE outbound that posts back AS THE

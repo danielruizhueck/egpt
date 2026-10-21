@@ -4,7 +4,10 @@
 // its id before any edit (and during spin-up → smooth edits, no stutter). Once tokens
 // arrive it edits in place into the answer. A send failure ends it with
 // "… ❌ Sending failed."; an 'on'/'auto'-mode '...' silence resolves it to the quiet limb mark
-// '✓' (posts nothing new, never deleted) — in mention/mention-direct/accum the '...' surfaces.
+// '✓' (an edit, never deleted; a fresh '✓' when it cannot be edited) — in mention/mention-direct/accum the '...' surfaces. A
+// limb-only turn's placeholder is deleted, else edited to '✓', else a fresh '✓' replies (2026-10-19).
+// An 'on' turn on a non-human line (`ambient`, operator 2026-10-18) opens nothing until it has text
+// or begin() is called (the being started working): its quick silence posts nothing, only a log line.
 //
 // No SEPARATE knee-jerk message: a per-turn "📨 Sending to E..." piled up and
 // cross-deleted in busy chats (its id-resolution races the next turn's). The reply's
@@ -39,6 +42,8 @@ const noReplyMark = () => `⚠️ no reply (turn failed/empty)`;
 // a silence the bridge invented is indistinguishable from one the being chose.
 // When the bridge has nothing from the model, it says so in its OWN voice.
 const BRIDGE_SILENCE = '<received silence (error?)>';
+// A partial that may still become the '…' silence: an 'on' turn shows nothing while it is this.
+const SILENCE_SO_FAR = /^[\s.…]*$/;
 // A LIMB-ONLY turn is not silence (operator 2026-09-01, reading his own SPOILER transcript:
 // "the bridge acted on it but forgot that the reply was non empty" ... "then bridge can say
 // 'processing command' (/react is a command), something like that, so that there is legible
@@ -53,13 +58,10 @@ const commandMark = (verbs = []) => `⚙️ processing ${verbs.length > 1 ? 'com
 // [the] reaction also appear as a thinking process"). commandMark is the DEBUG/record view — the
 // legible "a limb ran" line the note above keeps for the verbose reader. With verbose OFF the chat
 // should show JUST the reaction (which already landed on its target, visibly). The ⏳-only
-// placeholder a limb-only turn opened holds no model content, so losing it loses nothing — but it
-// CANNOT be cleanly blanked/removed: the stream surface exposes no delete (only the test fake does),
-// and the real handle's finish('') leaves the placeholder text in place (beeper.mjs: `if (t) latest
-// = t` skips an empty settle), which would strand the "Thinking…" clock forever. So verbose OFF
-// resolves it the QUIETEST HONEST way instead: keep whatever was already read and append nothing
-// (the mirror of "the silence mark never lands beside prose", below), and when nothing was read,
-// settle the placeholder on this minimal neutral mark. NOT commandMark (the record), NOT
+// placeholder a limb-only turn opened holds no model content, so with verbose OFF the bridge DELETES
+// it (operator 2026-10-19: "that leftover is not needed in the train"). Text already read is kept,
+// nothing appended (the mirror of "the silence mark never lands beside prose", below). This minimal
+// neutral mark is where a placeholder whose delete failed settles. NOT commandMark (the record), NOT
 // BRIDGE_SILENCE (a limb turn is not silence/error), NOT a faked '…' (the model's own word). The
 // legible record of WHAT ran is the transcript stage-direction (dispatch-line.limbAction), written
 // regardless of verbose — so suppressing this chat line drops no record.
@@ -377,13 +379,45 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
   const textOf = (v) => (typeof v === 'string' ? v : v?.text ?? '');
   const outbound = makeOutbound({ bridge, bridgeOf, peerMouth, onLog });
   const copies = new Map();   // one lookup per message and mouth room, shared by concurrent opens; misses are dropped
-  return {
+  // `chatId` a function → a room made only once the reply has something to post (a side group not made
+  // yet, gating.decide): asked at the first real text or a finish with a reply, at once for a status. A
+  // silence asks nothing. The reply then opens there like any other.
+  const later = (room, opts) => {
+    let asked = null, out = null;
+    const ask = () => (asked ??= Promise.resolve().then(room)
+      .catch((e) => { onLog(`sender: ${opts.being ?? defaultKey} — making its room threw: ${e?.message ?? e}`); return null; })
+      .then((id) => {
+        if (id) out = sender.open(id, opts);
+        else onLog(`sender: ${opts.being ?? defaultKey} — its room could not be made, nothing posted`);
+        return out;
+      }));
+    const onOpen = (f) => ask().then((o) => (o ? f(o) : undefined));
+    if (opts.status) ask();
+    return {
+      activate() { if (asked) onOpen((o) => o.activate()); },
+      begin() {},                                     // an early start makes no room: it waits for real text
+      update(partial) { const t = textOf(partial); if (asked || (t && !SILENCE_SO_FAR.test(t))) onOpen((o) => o.update(partial)); },
+      pulse(ms, label) { return out ? out.pulse(ms, label) : true; },
+      async end(text) { if (asked) await onOpen((o) => o.end(text)); },
+      async finish(reply, o = {}) {
+        if (asked || (o.surface !== false && textOf(reply).trim())) return onOpen((x) => x.finish(reply, o));
+        onLog(`sender: ${opts.being ?? defaultKey} turn withheld before its room was made — nothing posted`);
+      },
+      async fail(e) { if (asked) await onOpen((o) => o.fail(e)); },
+      get confirmedId() { return out?.confirmedId ?? null; },
+      get confirmedIn() { return out?.confirmedIn ?? null; },
+    };
+  };
+  const sender = {
     // `status`: a liveness status message (src/spine/liveness.mjs) — opens on that line instead of THINKING.
     // `replyIn`: the room `replyTo` (an id, or a promise of one) lives in — a local mouth's route answer, or
     // null for this chat's own connection. Given, the quote is resolved for the room the stream opens in.
     // `replyKey`: replyTo's cross-account key ({ msgKey, timestamp }) when the caller holds it (the
     // inbound event's own) — the mouth is told it as is, with no list read to compute it.
-    open(chatId, { being = defaultKey, replyTo = null, replyIn = undefined, replyKey = null, queued = false, queuedAhead = 0, auto = false, origin = null, status = null } = {}) {
+    // `hideSilence`: an 'on' turn — a partial that may still be its '…' silence is never shown (operator 2026-10-18).
+    open(chatId, opts = {}) {
+      if (typeof chatId === 'function') return later(chatId, opts);
+      let { being = defaultKey, replyTo = null, replyIn = undefined, replyKey = null, queued = false, queuedAhead = 0, auto = false, ambient = false, hideSilence = false, origin = null, status = null } = opts;
       const { bridge: bridgeForThisBeing, route: peerRoute, keyOf } = outbound(being, chatId);
       // ROUTED-TARGET FALLBACK (never a silent drop): a send the sending account can't place on the
       // routed room (a super/alias room it isn't a member of → resolveChatId null → DROPPED) re-sends
@@ -391,14 +425,21 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
       // the sender it may be in NEITHER (not the base chat either) → both sends null: NOT a silent
       // return — notify (onUndeliverable, default no-op → byte-identical when unset), so the drop is
       // at least surfaced to the logging group instead of vanishing.
+      // Any reply that lands nowhere is reported ONCE, with the bridge's reason (operator 2026-10-19).
+      const why = (chat) => bridgeForThisBeing.sendFailure?.(chat) ?? 'the send returned nothing';
       const deliverHere = async (payload, sendOpts) => {
         const r = await bridgeForThisBeing.send(chatId, payload, sendOpts);
-        if (r || !origin || origin === chatId) return r;
+        if (r) return r;
+        if (!origin || origin === chatId) {
+          onLog(`sender: ${being} reply undeliverable to ${chatId} — notifying`);
+          await onUndeliverable({ being, chatId, origin, what: 'reply', reason: why(chatId) });
+          return r;
+        }
         onLog(`sender: ${being} reply undeliverable to routed ${chatId} — delivering to origin ${origin}`);
         const r2 = await bridgeForThisBeing.send(origin, payload, sendOpts);
         if (!r2) {
           onLog(`sender: ${being} reply ALSO undeliverable to origin ${origin} — neither room accepted it, notifying`);
-          await onUndeliverable({ being, chatId, origin, reason: `routed room ${chatId} and origin ${origin} both refused the send` });
+          await onUndeliverable({ being, chatId, origin, what: 'reply', reason: `routed room ${chatId} and origin ${origin} both refused the send — ${why(origin)}` });
         }
         return r2;
       };
@@ -567,38 +608,65 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
         ? openLocalStream(via.bridge, via.chatId, text)
         : via ? peerMouth.startStream(via, text ?? placeholderText(), { fallback: () => openLocalStream(undefined, undefined, text), render: renderForPeer }) : openLocalStream(undefined, undefined, text));
       let streamVia = null;                            // the route answer the placeholder was opened through
-      const openStream = (mouthChat = null) => {
+      let started = false;                             // an open was asked for (ambient: not before there is text)
+      const openStream = (mouthChat = null, init = undefined) => {
+        started = true;
         if (streamOpened) return stream;
         streamOpened = true;
         openedAt = now();
         streamVia = mouthChat;
         if (mouthChat?.bridge) streamMouth = mouthChat;
-        stream = mint(mouthChat);
         const already = shown();
-        if (already) stream?.update?.(`${already} ${LIVE_FRAME_MARK}`);
+        // ambient: the message opens on `init`, else the text so far, else (begin) the ⏳ placeholder
+        stream = mint(mouthChat, ambient ? (init ?? (already ? `${already} ${LIVE_FRAME_MARK}` : undefined)) : undefined);
+        if (already && !ambient) stream?.update?.(`${already} ${LIVE_FRAME_MARK}`);
         return stream;
       };
-      if (!route) openStream();
-      // …and a placeholder that cannot be opened is LOGGED, never an unhandled rejection: on the
-      // no-peer path a throwing startStream propagates out of open() as it always has, but on this
-      // path there is no caller left to catch it. finish() then finds no stream and posts the
-      // reply fresh, which is the branch it already has for a bridge with no streaming at all.
-      else route.then((peerChat) => openStream(peerChat)).catch((e) => onLog(`mouth: could not open the placeholder for ${chatId} — the reply will be posted whole: ${e?.message ?? e}`));
+      const start = () => {
+        if (started) return;
+        started = true;
+        if (!route) openStream();
+        // …and a placeholder that cannot be opened is LOGGED, never an unhandled rejection: on the
+        // no-peer path a throwing startStream propagates out of open() as it always has, but on this
+        // path there is no caller left to catch it. finish() then finds no stream and posts the
+        // reply fresh, which is the branch it already has for a bridge with no streaming at all.
+        else route.then((peerChat) => openStream(peerChat)).catch((e) => onLog(`mouth: could not open the placeholder for ${chatId} — the reply will be posted whole: ${e?.message ?? e}`));
+      };
+      if (!ambient) start();
       // fallbackResult (operator 2026-08-10, voice-reply-as-a-reply-to-the-text chunk): set
       // ONLY when the §7 fallback below fires (a FRESH send, not an edit-in-place) — its own
       // confirmedId then supersedes the stream's, which never delivered.
       let fallbackResult = null;
+      // A fresh message from the placeholder's mouth; the §7 fallback if that did not deliver.
+      const sayFresh = async (text) => { const fresh = await postFresh(text); if (fresh?.delivered) stream = fresh; else fallbackResult = await deliverHere(text, tag); };
+      // A withheld turn settles its placeholder on `text`; past the edit window, or when the edit
+      // fails, `text` goes fresh — never a stuck ⏳ (operator 2026-10-19).
+      const settle = async (text) => {
+        if (!stream) return;
+        if (editable()) { try { await stream.finish?.(absorb(text)); if (stream.delivered === true) return; } catch { /* fresh below */ } }
+        if (!text) return;
+        onLog(`sender: ${being}/${chatId} placeholder could not be edited — ${JSON.stringify(text)} goes fresh`);
+        await sayFresh(text);
+      };
       return {
         // A queued placeholder flips from the queue into the live train the instant
         // its turn starts (before the first token), so the user sees it move. No-op
         // for a placeholder that was never queued.
         activate() { activated = true; if (queued) push(THINKING); },
+        // ambient: open the train now (the being started working, or a human steered in). No-op otherwise.
+        begin() { if (!ended) start(); },
         // absorb() runs UNCONDITIONALLY, before the push. `stream?.update?.(`${absorb(t)} …`)`
         // reads as if it did, but optional chaining short-circuits the WHOLE call expression —
         // arguments included — so with no stream yet (a peer route being resolved, or a peer
         // route outright) the running text was silently never accumulated, and a fallback post
         // would have carried only the settled value with the narration above it lost.
-        update(partial) { const t = textOf(partial); if (!t) return; const frame = `${absorb(t)} ${LIVE_FRAME_MARK}`; push(frame); },
+        update(partial) {
+          const t = textOf(partial); if (!t) return;
+          // on: nothing is shown while the text may still be the hidden '…' silence; ambient opens on the first other text
+          if ((ambient || hideSilence) && SILENCE_SO_FAR.test(t)) return;
+          if (ambient && !started) { absorb(t); start(); return; }
+          const frame = `${absorb(t)} ${LIVE_FRAME_MARK}`; push(frame);
+        },
         // LIVENESS: the live frame again with the time since `ms` ago, never absorbed into what was
         // read. `label` relabels a status. false = past the edit window.
         pulse(ms, label = null) {
@@ -629,11 +697,17 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
           const peerChat = route ? await route : null;
           const t = textOf(reply);
           // Gate-withheld ('on'-mode silence / not surfaced). NOTHING IS EVER
-          // DELETED (operator 2026-08-24): the placeholder resolves to the
+          // DELETED (operator 2026-08-24) — except a limb-only turn's own ⏳-only
+          // placeholder (operator 2026-10-19, below). The placeholder resolves to the
           // silence mark instead of vanishing. 40-rules.md already names it —
           // "A polite silence is '...' or '…'" — so the withheld turn reads as
           // a deliberate silence rather than a message that disappeared.
           if (!surface) {
+            // ambient, nothing posted: a withheld turn posts nothing — logged only (operator 2026-10-18)
+            if (ambient && !started) {
+              onLog(`sender: ${being}/${chatId} on-mode ambient turn withheld (${commands?.length ? commands.map((v) => `/${v}`).join(' ') : JSON.stringify(t.trim().slice(0, 40))}) — nothing posted`);
+              return;
+            }
             // A WITHHELD TURN RESOLVES THE PLACEHOLDER IT ACTUALLY OPENED — which, on a peer
             // route, is the one on the peer's account. The rule this branch exists for is that a
             // placeholder must never be left stuck (operator 2026-08-24, "nothing is ever
@@ -643,11 +717,17 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
             openStream(peerChat);
             // A LIMB-ONLY turn says what it is DOING, never that it heard nothing. With verbose ON
             // that is the legible commandMark record; with verbose OFF the chat shows just the
-            // reaction — keep what was already read (append nothing), else the minimal quietLimbMark
-            // (see commandMark/quietLimbMark notes for why the ⏳-only placeholder can't be blanked).
+            // reaction — keep what was already read (append nothing), else DELETE the ⏳-only
+            // placeholder where it opened; a delete that fails settles on quietLimbMark (settle).
             if (commands?.length) {
+              if (!verbose && !shown() && stream) {
+                let gone = false;
+                try { gone = (await stream.delete?.()) === true; } catch { /* settles on ✓ below */ }
+                if (gone) return;
+                onLog(`sender: ${being}/${chatId} limb-only turn — its placeholder could not be deleted, settling on ✓`);
+              }
               const settled = verbose ? commandMark(commands) : (shown() ? '' : quietLimbMark());
-              if (stream && editable()) await stream.finish?.(absorb(settled));
+              await settle(settled);
               return;
             }
             // A DELIBERATE '…' hidden here (on/auto) never held content, so its eager ⏳ placeholder
@@ -667,7 +747,7 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
             const settled = isDeliberateSilence(t) ? (shown() ? '' : quietLimbMark())
               : t.trim() ? t
               : (shown() ? '' : BRIDGE_SILENCE);
-            if (stream && editable()) await stream.finish?.(absorb(settled));
+            await settle(settled);
             return;
           }
           // Surfaced: deliver the reply, OR — when it came back empty — the no-reply
@@ -679,11 +759,11 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
           // Past the edit window the placeholder stays on its last frame; the reply is a fresh message
           // from the same mouth, and the §7 fallback only if that did not deliver.
           if (stream && !editable()) {
-            const fresh = await postFresh(settled);
-            if (fresh?.delivered) stream = fresh; else fallbackResult = await deliverHere(settled, tag);
+            await sayFresh(settled);
             return;
           }
           const body = alreadyRead(settled) ? shown() : absorb(settled);
+          if (ambient && !started) openStream(peerChat, body);   // ambient, nothing posted yet: the reply opens on itself
           // AND THAT IS THE WHOLE MOUTH DECISION, spent. A peer stream settles the message the peer
           // has been editing; a local one settles this account's. Either way `delivered` says
           // whether it was said, and the §7 line below — unchanged, and the only fallback in this
@@ -701,7 +781,8 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
         async fail() {                                 // visible failure: the message ends with ❌
           ended = true;
           try {
-            if (route) await route;                    // …after the mouth decision, so the placeholder that was opened is the one this EDITS rather than posting a fresh ❌ beside it
+            const peerChat = route ? await route : null;   // …after the mouth decision, so the placeholder that was opened is the one this EDITS rather than posting a fresh ❌ beside it
+            if (ambient && !started) openStream(peerChat, FAIL_SUFFIX);   // ambient, nothing posted yet: the failure is the message
             // The failure ends the placeholder wherever it lives — the peer's account on a peer
             // route, this one otherwise — because that is where a human is watching a "⏳" that
             // must not be left thinking forever. Only a turn that never opened a stream at all
@@ -729,4 +810,5 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
       };
     },
   };
+  return sender;
 }

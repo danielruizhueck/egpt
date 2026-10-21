@@ -6,7 +6,7 @@
 // config is a NO-OP and a migrated config reads the same value from the new home.
 import { describe, it, expect } from 'vitest';
 import { createGating } from '../src/spine/gating.mjs';
-import { emptyState, ensureContact, recordThread, patchBeing, aliasContact, dropContact, getContact } from '../src/conversations-state.mjs';
+import { emptyState, ensureContact, recordThread, patchBeing, aliasContact, getContact } from '../src/conversations-state.mjs';
 
 // No loadState → no per-conversation view (beingView returns null), so decide()
 // resolves purely from config: exactly the GLOBAL-default path we want to lock.
@@ -123,91 +123,34 @@ describe('gating surfaces: — the model\'s "…" silence is HIDDEN only in on/a
   });
 });
 
-// ── CHUNK 2: the SUPER CHANNEL at the reply gate — group-independent mode + reply routing ───────────
-// A super channel is a /join-style alias of its origin conversation carrying one marker, `super:
-// true` (conversations-state.superChannelFor / isSuperChannel). gating.decide reads that marker off
-// the SAME single state load it already makes, and reports two things the reply path needs: the
-// per-surface MODE (a message arriving in the super channel is gated by config.super.mode, not the
-// shared stored mode) and the reply TARGET (a conversation with a super channel replies THERE).
-describe('gating — the super channel (CHUNK 2): per-surface mode + reply routing', () => {
+// ── the global super_chats block is retired (2026-10-18; SI chats are per conversation) ──
+// A `super: true` alias left on disk is a plain /join-kind alias: its own block's mode, else the
+// origin's. config.super_chats is read by nobody, and decide reports no other reply target.
+describe('gating — a legacy super alias is a plain alias', () => {
   const MAIN = '!main:beeper.com';
   const SUPER = '!super:beeper.com';
-  const evIn = (chatId, mention) => ({ surface: 'whatsapp', chatId, kind: 'message', mention });
-  // MAIN with a resident 'e' whose STORED mode is 'mention'; a super channel aliased to it (super:true).
-  const withSuper = ({ mainMode = 'mention' } = {}) => {
-    let st = ensureContact(emptyState(), 'whatsapp', MAIN, { pushedName: 'Main' }).state;
-    st = recordThread(st, 'whatsapp', MAIN, 'thr-e', '2026-10-08T00:00:00Z', 'e');
-    if (mainMode) st = patchBeing(st, 'whatsapp', MAIN, 'e', { mode: mainMode });
-    const primaryJid = getContact(st, 'whatsapp', MAIN).jid;
-    st = aliasContact(st, 'whatsapp', SUPER, primaryJid, { transcript: 'main-super', super: true });
-    return st;
-  };
-  const gatingFor = (st, config = { super_chats: { triggers: ['SI chat'], mode: 'on' } }) =>
-    createGating({ getConfig: () => config, loadState: async () => st, defaultKey: 'e' });
+  const evIn = (chatId) => ({ surface: 'whatsapp', chatId, kind: 'message' });
+  let st = ensureContact(emptyState(), 'whatsapp', MAIN, { pushedName: 'Main' }).state;
+  st = recordThread(st, 'whatsapp', MAIN, 'thr-e', '2026-10-08T00:00:00Z', 'e');
+  st = patchBeing(st, 'whatsapp', MAIN, 'e', { mode: 'mention' });
+  st = aliasContact(st, 'whatsapp', SUPER, getContact(st, 'whatsapp', MAIN).jid, { transcript: 'main-super', super: true });
+  const config = { super_chats: { triggers: ['SI chat'], mode: 'on' }, agents: { codex: { mode: 'off' } } };
+  const g = createGating({ getConfig: () => config, loadState: async () => st, defaultKey: 'e' });
 
-  it('GATE (group-independent): the SAME being uses super.mode in the super surface and its own stored mode in main', async () => {
-    const g = gatingFor(withSuper({ mainMode: 'mention' }));
-    // Super surface → config.super.mode ("on"): replies to everything, no @mention needed.
-    const inSuper = await g.decide('e', evIn(SUPER));
-    expect(inSuper.mode).toBe('on');
-    expect(inSuper.mayReply).toBe(true);
-    // Main surface → its OWN stored mode ("mention"): an unmentioned message does NOT reply.
-    const inMain = await g.decide('e', evIn(MAIN));
-    expect(inMain.mode).toBe('mention');
-    expect(inMain.mayReply).toBe(false);                 // no conflict: the two surfaces resolve independently
+  it('inherits the origin mode; super_chats.mode is not read', async () => {
+    const d = await g.decide('e', evIn(SUPER));
+    expect(d.mode).toBe('mention');
+    expect(d.mayReply).toBe(false);
   });
 
-  it('GATE honours config.super.mode (string + YAML-boolean coercion) on the super surface only', async () => {
-    expect((await gatingFor(withSuper(), { super_chats: { mode: 'mute' } }).decide('e', evIn(SUPER))).mode).toBe('mute');
-    expect((await gatingFor(withSuper(), { super_chats: { mode: true } }).decide('e', evIn(SUPER))).mode).toBe('on');
-    expect((await gatingFor(withSuper(), { super_chats: {} }).decide('e', evIn(SUPER))).mode).toBe('on');   // unset → default
+  it('a being whose own mode is off stays off there', async () => {
+    expect((await g.decide('codex', evIn(SUPER), { anywhere: true })).mode).toBe('off');
   });
 
-  it('ROUTING: a conversation that HAS a super channel replies THERE (from either surface), not main', async () => {
-    const g = gatingFor(withSuper());
-    expect((await g.decide('e', evIn(MAIN))).replyChatId).toBe(SUPER);    // main reply reroutes to the super channel
-    expect((await g.decide('e', evIn(SUPER))).replyChatId).toBe(SUPER);   // a super arrival stays in the super channel
-  });
-
-  it('ROUTING: a conversation with NO super channel replies to the arrival chat (unchanged)', async () => {
-    let st = ensureContact(emptyState(), 'whatsapp', MAIN, { pushedName: 'Main' }).state;
-    st = recordThread(st, 'whatsapp', MAIN, 'thr-e', '2026-10-08T00:00:00Z', 'e');
-    const g = gatingFor(st);
-    const d = await g.decide('e', evIn(MAIN));
-    expect(d.replyChatId).toBe(MAIN);
-    expect(d.mode).toBe('mention');                       // no super surface → no override, stored mode stands
-  });
-
-  it('/end REVERTS for free: once the super alias is dropped, the lookup returns null → reply goes to main again (nothing to restore)', async () => {
-    let st = withSuper();
-    // loadState closes over THIS `st` (not gatingFor's param), so a later reassignment is seen live.
-    const g = createGating({ getConfig: () => ({ super_chats: { triggers: ['SI chat'], mode: 'on' } }), loadState: async () => st, defaultKey: 'e' });
-    expect((await g.decide('e', evIn(MAIN))).replyChatId).toBe(SUPER);   // while the channel exists
-    st = dropContact(st, 'whatsapp', SUPER);              // what /end does to the alias
-    const after = await g.decide('e', evIn(MAIN));
-    expect(after.replyChatId).toBe(MAIN);                 // routing reverts automatically
-    expect(after.mode).toBe('mention');                   // and the stored mode was never touched, so nothing to restore
-  });
-
-  // LIVENESS (reve 2026-10-10, Reencuentro pjcOWW…): the operator left the -super room, the primary's
-  // GET 404s, yet every E reply kept routing there. Routing honours a DEFINITE death only.
-  describe('ROUTING follows the channel only while it is alive (superChannelAlive)', () => {
-    const config = { beeper: { primary: { phone: '16468217865' }, secondary: { phone: '13472576794' } }, super_chats: { triggers: ['SI chat'], mode: 'on' } };
-    const SELF = { id: '@anrodriguez:beeper.com', isSelf: true };
-    const RODZ = { id: '@whatsapp_lid-1:beeper.local', phoneNumber: '+13472576794' };
-    const decideWith = (chatRaw) => createGating({ getConfig: () => config, loadState: async () => withSuper(), defaultKey: 'e', chatRaw }).decide('e', evIn(MAIN));
-
-    it('the channel 404s (chatRaw → false) → the reply falls back to the origin chat', async () => {
-      expect((await decideWith(async () => false)).replyChatId).toBe(MAIN);
-    });
-    it('a roster read with only our mouth accounts → falls back to the origin chat', async () => {
-      expect((await decideWith(async () => ({ participants: { items: [RODZ] } }))).replyChatId).toBe(MAIN);
-    });
-    it('the read failed (chatRaw → null, UNKNOWN) → keeps routing to the channel', async () => {
-      expect((await decideWith(async () => null)).replyChatId).toBe(SUPER);
-    });
-    it('operator + Rodz only → alive (the operator is a human)', async () => {
-      expect((await decideWith(async () => ({ participants: { items: [SELF, RODZ] } }))).replyChatId).toBe(SUPER);
-    });
+  it('decide names no reply target and no SI reaction, from either chat', async () => {
+    for (const chatId of [MAIN, SUPER]) {
+      const d = await g.decide('e', evIn(chatId));
+      expect(Object.keys(d).sort()).toEqual(['mayReply', 'mode', 'receives', 'sendToEgpt']);
+    }
   });
 });

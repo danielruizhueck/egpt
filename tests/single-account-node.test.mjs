@@ -214,6 +214,17 @@ describe('ONE beeper token, ONE account, ONE node — the baseline that must nev
     app.stop();
   });
 
+  // beeper.auto_update (Beeper's own updates, src/tools/beeper-update.mjs) is a block under beeper:
+  // but not a connection: the lone connection stays the ear and the mouth, with no `use:`.
+  it('a beeper.auto_update block is not a connection', async () => {
+    const cfg = { ...MINIMAL(), beeper: { main: { account: 'you@example.com', token: TOKEN }, auto_update: { windows: { method: 'manual' } } } };
+    const { app, built, opts, lines } = await bootWith(cfg);
+    expect(built).toHaveLength(1);
+    expect(opts.beeperToken).toBe(TOKEN);
+    expect(lines.filter((l) => /auto_update|NO connection resolved/.test(l))).toEqual([]);
+    app.stop();
+  });
+
   // WAKES. With no `owner_node` the bridge is the real port, not the outbound-only Proxy whose
   // onMessage/onEdit/onMedia are no-ops — so an inbound registration actually reaches it. Proven
   // end to end rather than by inspecting a flag: a message arrives on the one connection and a

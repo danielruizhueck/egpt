@@ -145,7 +145,7 @@ describe('boot — the daemon holds the sessions across a spine restart', () => 
     await one.say('e, bg: run the audit');
     await vi.waitFor(() => expect(finals(one.spy)).toHaveLength(1), { timeout: 5000 });
     expect(one.app.pool.background(one.app.pool.stats().keys[0])).toHaveLength(1);
-    await one.say('/restart', SELF_DM);
+    await one.say('/e restart', SELF_DM);
     await vi.waitFor(() => expect(d.exits).toEqual([43]), { timeout: 5000 });
     expect(d.lines.some((l) => l.includes('drain: waiting for'))).toBe(false);
     expect(d.spawns[0].child.killed).toBe(false);

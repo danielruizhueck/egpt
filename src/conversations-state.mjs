@@ -1160,14 +1160,13 @@ export function getBeing(state, surface, jid, being) {
   if (!c) return null;
   const e = c.entry ?? {};
   const b = _beingBlock(e, being);
-  // MODE IS THE ROOM'S (operator 2026-10-11): an alias room's own block wins; a /join room
-  // inherits the origin's, a super channel never does (config.super.mode, at the gate).
+  // MODE IS THE ROOM'S (operator 2026-10-11): an alias room's own block wins, else it inherits the origin's.
   const own = _obj(state.contacts?.[surface]?.[jid]);
   const alias = own?.aliasOf ? own : null;
   return {
     jid: c.jid, slug: c.slug, surface, being,
     present:            !!b,
-    mode:               _beingBlock(alias ?? {}, being)?.mode ?? (alias?.super === true ? null : b?.mode) ?? null,
+    mode:               _beingBlock(alias ?? {}, being)?.mode ?? b?.mode ?? null,
     send_to_egpt:       b?.send_to_egpt       ?? null,  // per-conv 'always'|'mode' override
     threadId:           b?.threadId           ?? null,
     // PER-CONVERSATION allowed_paths OVERRIDE (operator 2026-10-01, /fork's read-only grant). Same
@@ -1731,38 +1730,6 @@ export function aliasTranscriptKeyOf(state, surface, jid) {
   return (entry && entry.aliasOf) ? (entry.transcript ?? null) : null;
 }
 
-// ── the SUPER CHANNEL resolvers (operator 2026-10-08, CHUNK 2) ────────────────
-// A super channel is a /join-style ALIAS of its origin conversation (shares folder/thread/
-// transcript) carrying ONE extra marker — `super: true` — set on the alias entry at creation
-// (commands.ensureSuperChannel). That marker is the smallest group-independent state the operator
-// authorized for chunk 2, and it is what makes a super channel identifiable from the REPLY PATH
-// (the per-surface gate + the reply routing) — which the chunk-1 transcript-key heuristic buried
-// inside commands.mjs could neither reach nor key robustly. ONE definition of each question here,
-// reused by commands.mjs (existingSuperChannel/ensureSuperChannel) AND gating.mjs (the gate + the
-// routing) — never a parallel scan.
-
-// Is THIS exact chatId a super channel? (the GATE: a message that ARRIVED here is gated by
-// config.super.mode, not the shared stored mode.) An alias entry carrying the super marker.
-export function isSuperChannel(state, surface, chatId) {
-  const entry = state?.contacts?.[surface]?.[chatId];
-  return !!(entry && entry.aliasOf && entry.super === true);
-}
-
-// Does the conversation `chatId` belongs to HAVE a super channel right now, and what is its chatId?
-// (the ROUTING: a reply for this conversation posts there instead of the main chat.) Resolves
-// `chatId` to its origin primary (getContact follows the alias), then finds that primary's super
-// alias. LIVE by design: /end drops the alias, so this returns null again and replies revert to the
-// main chat with nothing stored to restore. Returns the super chatId or null.
-export function superChannelFor(state, surface, chatId) {
-  const primaryJid = getContact(state, surface, chatId)?.jid;
-  if (!primaryJid) return null;
-  const bucket = state?.contacts?.[surface] ?? {};
-  for (const [id, entry] of Object.entries(bucket)) {
-    if (entry?.aliasOf === primaryJid && entry?.super === true) return id;
-  }
-  return null;
-}
-
 // ── THE PERSISTED MOUTH ROOM (operator 2026-10-12) ───────────────────────────
 // A super/side-room lives on BOTH accounts under DIFFERENT ids; the mouth (second account) must
 // deliver to ITS id. That main↔second mapping was re-derived LIVE every reply and never stored, so a
@@ -1771,14 +1738,15 @@ export function superChannelFor(state, surface, chatId) {
 // super — a plain scalar that rides aliasContact's `extra` and that every registry reader skips
 // (entry.aliasOf short-circuits them), so it never leaks into config/resident resolution and
 // survives serialize (alias entries pass through untouched). Read RAW, like aliasTranscriptKeyOf.
-// The mouth route has no ev.surface, so BOTH helpers key by chatId across surfaces.
+// The mouth route has no ev.surface, so BOTH helpers key by chatId across surfaces. A /split group's own
+// entry (parent_chat) is a side group too and carries it the same way (2026-10-18).
 
 // { isAlias, mouthChat } for `chatId`: whether it is an alias at all (so the mouth knows whether a
 // freshly-derived id is worth persisting) and its stored second-account room, if any.
 export function aliasMouthInfo(state, chatId) {
   for (const bucket of Object.values(state?.contacts ?? {})) {
     const entry = bucket?.[chatId];
-    if (entry?.aliasOf) return { isAlias: true, mouthChat: entry.mouth_chat ?? null };
+    if (entry?.aliasOf || entry?.parent_chat) return { isAlias: true, mouthChat: entry.mouth_chat ?? null };
   }
   return { isAlias: false, mouthChat: null };
 }
@@ -1790,7 +1758,7 @@ export function setAliasMouthChat(state, chatId, mouthChatId) {
   if (!chatId || !mouthChatId) return state;
   for (const [surface, bucket] of Object.entries(state?.contacts ?? {})) {
     const entry = bucket?.[chatId];
-    if (!entry?.aliasOf) continue;
+    if (!entry?.aliasOf && !entry?.parent_chat) continue;
     if (entry.mouth_chat === mouthChatId) return state;        // unchanged → no write
     const nextBucket = { ...bucket, [chatId]: { ...entry, mouth_chat: mouthChatId } };
     return { ...state, contacts: { ...(state.contacts ?? {}), [surface]: nextBucket } };

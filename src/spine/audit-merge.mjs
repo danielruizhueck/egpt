@@ -1,12 +1,10 @@
 // audit-merge.mjs — converge the per-command audit onto ONE message across the two co-account nodes.
 //
 // (operator 2026-10-08, the follow-up to the per-command audit in commands.mjs run().) eGPT runs as
-// TWO co-account spines (cfg.node_role primary=kg, secondary=do) that ingest ONE Beeper account. The
-// default_node gate dedups most commands to one node (the other returns NO_AUDIT), but a few pick
-// their node by node_role / statusNodeGate instead — /join, /split, /status <sibling>, /end typed in
-// a side-room that exists on only one node — so BOTH nodes audit the SAME command EVENT and post TWO
-// lines to log_to_group (for /end, one says "archived <chat>", the other the "no-op" reason). This
-// converges them onto ONE message:
+// TWO co-account spines (cfg.node_role primary=kg, secondary=do) that ingest ONE Beeper account.
+// Since 2026-10-19 a command runs only on the node of the being it names (`/e join`), so one node
+// audits it; when BOTH nodes do audit the SAME command EVENT and post TWO lines to log_to_group,
+// this converges them onto ONE message:
 //
 //   PRIMARY   posts immediately, READ-FREE:  "<node>: <text>  <marker>".
 //   SECONDARY staggers ~1.5s, then reads log_to_group's recent messages for the marker:

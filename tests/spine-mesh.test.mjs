@@ -462,28 +462,16 @@ describe('mesh service — the RESPONDER answers in the ORIGIN conversation, not
     expect(brain.calls[0].ev.chatName).toBe(CHANNEL);
   });
 
-  it("LOCK: a node-addressed COMMAND still runs in the responder's own private per-command id, never the origin chat", async () => {
-    // A `/command` is node plumbing, not a conversation: commandReply mints `<channel>#cmd<n>`
-    // and marks the event `mesh:true` so a room-scoped command resolves to THIS node's lobby
-    // (bug #23 half A, 2026-07-27). The origin conversation has nothing to do with it, so it is
-    // never resolved for one — and the name is never even looked up.
-    const captured = [];
-    const commands = {
-      nodeCommandForMe: (p) => p.startsWith('/'),
-      isCommand: () => true,
-      runCaptured: async (ev) => { captured.push(ev); return 'chrome tabs: 3 open'; },
-    };
-    const bridge = fakeBridge({ chatIds });
-    const mesh = createMeshService({ bridge, brain: fakeBrain(), commands, getConfig: () => ({ node_name: 'do', agents: persona }), bodyEmojiOf });
+  it('a command-shaped prompt is no command over the mesh (2026-10-19): it reaches the being as text, in the origin conversation', async () => {
+    const brain = fakeBrain({ reply: 'ok' });
+    const { mesh } = svc({ node: 'do', agents: persona, brain, chatIds });
 
     await mesh.handle({ surface: 'whatsapp', chatId: CHANNEL, msgId: 'm1', body: req('perrito traducciones', '/tabs', 'p1') });
     await flush();
 
-    expect(captured).toHaveLength(1);
-    expect(captured[0].chatId).toBe(`${CHANNEL}#cmd1`);
-    expect(captured[0].chatName).toBe(CHANNEL);
-    expect(captured[0].mesh).toBe(true);
-    expect(bridge.resolveCalls).toEqual([]);
+    expect(brain.calls).toHaveLength(1);
+    expect(brain.calls[0].ev.body).toBe('/tabs');
+    expect(brain.calls[0].ev.chatId).toBe('do-perrito');
   });
 });
 
@@ -511,26 +499,26 @@ describe('mesh service — origin (the reply streams home as a living mirror)', 
 });
 
 // STRUCTURAL vs THINKING (operator 2026-07-27: "seems like there's an AI thinking, when it's
-// actually water through pipes"). forwardCommand is the ORIGIN's ONLY entry point for a
-// node-addressed `/command` (spine.mjs gates on commands.remoteNode before calling it) — it
-// already knows no AI turn is involved, so it must show plumbing, not thinking: a different
-// placeholder AND no "✅ Done" theatre on the reply. mesh.forward (the @being-prompt path) must
-// stay byte-identical.
+// actually water through pipes"). A forward with `structural: true` shows plumbing, not thinking:
+// a different placeholder AND no "✅ Done" theatre on the reply. Nothing sets it since commands
+// name their being (2026-10-19, forwardCommand is gone); the flag itself is locked here.
+// mesh.forward (the @being-prompt path) must stay byte-identical.
 describe('mesh service — structural relay (a forwarded /command is plumbing, not an AI turn)', () => {
   const agents = { don: { configuration: 'egpt', name: 'don', relay_channel: 'RELAY', to: 'don.do' } };
+  const target = { being: 'don', route: { room_id: 'RELAY' }, to: 'don.do' };
 
-  it('forwardCommand posts the STRUCTURAL placeholder ("🔗 relaying…"), never the AI "🤔 thinking…" one', async () => {
+  it('a structural forward posts the STRUCTURAL placeholder ("🔗 relaying…"), never the AI "🤔 thinking…" one', async () => {
     const { bridge, mesh } = svc({ node: 'kg', agents });
     const ev = { surface: 'whatsapp', chatId: 'CHAT', chatName: 'HFM', senderName: 'An', body: '/tabs' };
-    const ok = await mesh.forwardCommand(ev, 'do');
+    const ok = await mesh.forward(ev, target, { structural: true });
     expect(ok).toBe(true);
     expect(bridge.statusPosts).toEqual([{ chat: 'CHAT', text: '🔗 relaying…', id: 'post-1' }]);
   });
 
-  it('a forwarded command finishes to just the reply body — no "✅ Done" theatre', async () => {
+  it('a structural forward finishes to just the reply body — no "✅ Done" theatre', async () => {
     const { bridge, mesh } = svc({ node: 'kg', agents });
     const ev = { surface: 'whatsapp', chatId: 'CHAT', chatName: 'HFM', senderName: 'An', body: '/tabs' };
-    await mesh.forwardCommand(ev, 'do');
+    await mesh.forward(ev, target, { structural: true });
 
     // the responder answers in ONE frame (a static command never streams partials — the
     // 2026-07-25 fix already stops it opening a placeholder it doesn't use)
@@ -1083,8 +1071,7 @@ describe('spine seam — handleInbound ↔ mesh', () => {
 //    dangerousDenial, meta-engineer.yaml — "i think the 'dangerous' key is mistake"). UNLIKE
 //    router.mjs's silent drop, this file's own convention is NEVER SILENCE: the requester here is
 //    a different, already-trusted node peer (it reached this node at all), so it gets an explicit
-//    reason — the same pattern commandReply already uses ("⚠️ not authorized to run …") for its
-//    own separate authorization gate. ──
+//    reason. ──
 describe('mesh service — allowed_users gate (operator 2026-08-15)', () => {
   const agents = { wren: { configuration: 'sonnet-high', name: 'wren', conversation_defaults: { allowed_users: ['boss'] } } };
 
@@ -1220,7 +1207,7 @@ describe('mesh service — allowed_users gate (operator 2026-08-15)', () => {
 //
 //   · THE ORIGIN CHAT — a human TYPED there, so it is a room on the ear by definition. The 🤔
 //     placeholder, the living mirror that is the whole visible output of a mesh hop, the
-//     "⏱️ … did not answer" notice and forwardCommand's "no agent routes" refusal all go there.
+//     "⏱️ … did not answer" notice all go there.
 //   · THE ARRIVING ENVELOPE'S OWN CHAT — mesh.handle builds `route.room_id = ev.chatId`, the id
 //     the EAR delivered, and the RESPONDER streams its reply straight back into it.
 //   · THE SELF CHAT — the unresolved-channel notice's target, and the one id provably on the ear.
@@ -1285,15 +1272,6 @@ describe('mesh service — every line the mesh places follows the chat, not the 
     expect(notices(mouth)).toHaveLength(0);
   });
 
-  it('REPRODUCE-FIRST: forwardCommand\'s "no agent routes" refusal goes to the chat the operator typed in', async () => {
-    const { ear, mouth, bridgeOf } = kg();
-    const { mesh } = svc({ node: 'kg', bridge: mouth, bridgeOf });
-    expect(await mesh.forwardCommand({ surface: 'whatsapp', chatId: ORIGIN, body: '/tabs' }, 'zz')).toBe(false);
-    expect(ear.sent).toHaveLength(1);
-    expect(ear.sent[0].chat).toBe(ORIGIN);
-    expect(ear.sent[0].text).toContain('no agent routes to node "zz"');
-    expect(mouth.sent).toHaveLength(0);
-  });
 
   it('REPRODUCE-FIRST: the RESPONDER answers on the connection the envelope ARRIVED on', async () => {
     // mesh.handle's route IS the arrival (`room_id: ev.chatId`), and an arrival only ever comes in

@@ -425,12 +425,14 @@ export function createWarmCliSession(options = {}) {
       // "👍" — not exotic in a chat) would be acknowledged by an event that predates it.
       // A tool_result also arrives as a `user` event, and carries no `isReplay`, so it is not
       // seen here — same as before.
+      // TRIMMED on both sides: the CLI echoes the line as it REWROTE it (measured 2.1.303, a mid-turn
+      // absorption: "…#34353: " written, "…#34353:" replayed, `promptRewritten` in its transcript).
       if (ev.type === 'user' && ev.isReplay === true && pending) {
         const echoed = (Array.isArray(ev.message?.content) ? ev.message.content : [])
-          .filter((c) => c?.type === 'text').map((c) => c.text).join('');
-        if (!pending.openerReplayed && echoed === pending.openerText) pending.openerReplayed = true;
+          .filter((c) => c?.type === 'text').map((c) => c.text).join('').trim();
+        if (!pending.openerReplayed && echoed === pending.openerText.trim()) pending.openerReplayed = true;
         else {
-          const rec = pending.injections.find((r) => !r.done && r.text === echoed);
+          const rec = pending.injections.find((r) => !r.done && r.text.trim() === echoed);
           if (rec) { rec.done = true; rec.settle({ ok: true }); }
         }
       }
@@ -471,6 +473,10 @@ export function createWarmCliSession(options = {}) {
       // verboseThinking is untouched: it builds its text from verboseBlocks and its onUpdate is
       // fed by that branch alone, so acc's separator never reaches it.
       if (ev.type === 'assistant' && ev.message?.content && pending) pending.msgBreak = true;
+      // The being used a tool: onUpdate's second argument says so, with the text unchanged (the spine opens an ambient train on it).
+      if (ev.type === 'assistant' && pending && ev.message?.content?.some?.((c) => c?.type === 'tool_use')) {
+        try { pending.onUpdate?.(verboseThinking ? pending.verboseBlocks.join('\n\n') : pending.acc, { tool: true }); } catch { /* caller's onUpdate */ }
+      }
       if (ev.type === 'stream_event' && ev.event?.type === 'content_block_delta') {
         const d = ev.event.delta;
         if (d?.type === 'text_delta' && typeof d.text === 'string' && pending) {

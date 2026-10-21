@@ -20,8 +20,8 @@
 // E is a sibling, not a network); the whatsapp.* reads stay as back-compat fallbacks
 // so an un-migrated config is a no-op. The old config.auto_modes route is GONE —
 // modes live in the agents registry + conversations.yaml.
-import { getBeing, isSuperChannel, superChannelFor } from '../conversations-state.mjs';
-import { receives, replyAllowed, mayEmitChat, isSilenceReply, isAutoMode, DEFAULT_AUTO_MODE, superModeOf, superChatsOn } from '../auto-mode.mjs';
+import { getBeing } from '../conversations-state.mjs';
+import { receives, replyAllowed, mayEmitChat, isSilenceReply, isAutoMode, DEFAULT_AUTO_MODE } from '../auto-mode.mjs';
 
 const _send = (v) => (v === 'always' || v === 'mode') ? v : null;
 
@@ -49,9 +49,9 @@ export function resolveMode(bv, being, c = {}) {
   return isAutoMode(def) ? { mode: def, source: 'node' } : { mode: DEFAULT_AUTO_MODE, source: 'default' };
 }
 
-// Is super channel `chatId` still read by a human? true | false (DEFINITE: the GET 404'd, or the roster
+// Is side group `chatId` still read by a human? true | false (DEFINITE: the GET 404'd, or the roster
 // holds only our mouth accounts) | null (unknown — keep using it). The operator counts as a human; a
-// mouth is any config.beeper phone other than the primary's. Shared by ensureSuperChannel and decide.
+// mouth is any config.beeper phone other than the primary's. Shared by /join and the automatic group.
 export async function superChannelAlive(chatId, { chatRaw, config = {} }) {
   const raw = await chatRaw(chatId);
   if (raw === false) return false;
@@ -63,14 +63,16 @@ export async function superChannelAlive(chatId, { chatRaw, config = {} }) {
   return items.some((p) => !mouths.has(digits(p?.phoneNumber)));
 }
 
-export function createGating({ getConfig = () => ({}), loadState = null, defaultKey = 'e', chatRaw = async () => null, ensureSuperChannel = null, siphonReplyToAdmin = null } = {}) {
+// sideGroupFor(ev, { create }) → the chat a reply here goes to instead (a chat id, or a function that
+// makes it, for sender.open to call), false = withhold it, null = in place (commands.autoSideGroup:
+// reply_in_side_group, operator 2026-10-18). Absent → always in place.
+export function createGating({ getConfig = () => ({}), loadState = null, defaultKey = 'e', sideGroupFor = null } = {}) {
   const cfg = () => getConfig() ?? {};
 
   // The single per-message decision. ONE conversations.yaml read resolves the conversation's
-  // mode + send_to_egpt AND the two super-channel facts the reply path needs (CHUNK 2), so there
-  // is still exactly one state load per message. `mention` is passed explicitly by the loop (it's
-  // the ROUTED being's mention — a sibling routed by its own @name is mentioned for ITS gate, not
-  // @e's); default to ev.mention for direct callers.
+  // mode + send_to_egpt, so there is exactly one state load per message. `mention` is passed
+  // explicitly by the loop (it's the ROUTED being's mention — a sibling routed by its own @name
+  // is mentioned for ITS gate, not @e's); default to ev.mention for direct callers.
   // `denied` is the router's allowed_users answer for this target (router.resolve): a denied
   // sender is recorded but runs no turn, in any mode.
   async function decide(being, ev, mention = ev.mention, { denied = false } = {}) {
@@ -79,18 +81,19 @@ export function createGating({ getConfig = () => ({}), loadState = null, default
     if (loadState) { try { state = await loadState(); } catch { state = null; } }
     let bv = null;
     if (state) { try { bv = getBeing(state, ev.surface, ev.chatId, being); } catch { bv = null; } }
-    let { mode, source } = resolveMode(bv, being, c);
-    // Did this message ARRIVE IN a super channel? (an SI group is an alias carrying super:true.) Read
-    // once — it drives both the per-surface mode gate AND the ✅ reaction (we ARE in an SI channel).
-    const inSuper = !!(state && isSuperChannel(state, ev.surface, ev.chatId));
-    // PER-SURFACE SUPER GATE (operator 2026-10-08, CHUNK 2): a message that ARRIVED in a super
-    // channel is gated by config.super_chats.mode, NOT the origin's stored mode — unless `/agents mode`
-    // was set IN that channel (stored on its alias entry, getBeing's room mode; operator
-    // 2026-10-11). /end drops the alias, so it reverts for free.
-    if (source !== 'conversation' && inSuper) mode = superModeOf(c.super_chats?.mode);
+    const { mode } = resolveMode(bv, being, c);
     const paused = !!(c.dispatch?.auto_paused ?? c.whatsapp?.auto_e_paused);
     const allowed = replyAllowed(mode, mention ?? {});
-    const mayReply = !denied && mayEmitChat({ paused, mode, replyAllowed: allowed, isReaction: ev.kind === 'reaction' });
+    let mayReply = !denied && mayEmitChat({ paused, mode, replyAllowed: allowed, isReaction: ev.kind === 'reaction' });
+    // Not asked for a backlog read or the operator's own line in an auto chat: no reply follows either.
+    let replyChatId = null;
+    if (mayReply && sideGroupFor && !ev.backlog && !(mode === 'auto' && ev.isSender)) {
+      let at = null;
+      // An addressed reply makes the group now; an unaddressed one (on/auto) once it has something to post.
+      try { at = await sideGroupFor(ev, { create: replyAllowed('mention', mention ?? {}) }); } catch { at = false; }
+      if (at === false) mayReply = false;
+      else if (at) replyChatId = at;
+    }
     // send_to_egpt keeps the persona in a chat's context even when it won't reply — that's a
     // persona concern. A sibling is an engineer, not a context-follower: it runs ONLY when it
     // may reply, so force 'mode' for any non-persona being (never 'always'). A denied sender
@@ -98,41 +101,7 @@ export function createGating({ getConfig = () => ({}), loadState = null, default
     const sendToEgpt = (being !== defaultKey || denied || mode === 'mute')
       ? 'mode'
       : (_send(bv?.send_to_egpt) ?? _send(c.dispatch?.send_to_egpt) ?? _send(c.whatsapp?.send_to_egpt) ?? 'mode');
-    // REPLY ROUTING (operator 2026-10-08, CHUNK 2): when this conversation HAS a super channel
-    // right now, the reply is posted THERE instead of the main chat (the Mouth "pinned" to the
-    // super channel). LIVE lookup off the same state read — /end drops the alias, so this reverts
-    // to the arrival chat automatically with no un-pin to undo. No super channel, or a DEFINITELY dead
-    // one (superChannelAlive → false) → ev.chatId.
-    let superId = state && superChatsOn(c.super_chats) && superChannelFor(state, ev.surface, ev.chatId);
-    let replyChatId = null;   // resolved below (siphon may set it first)
-    // SI ON-REPLY, NO CHANNEL YET (SI on + a being ABOUT TO REPLY + !backlog):
-    //   · automatic ON  → AUTO-CREATE through the EXISTING ensureSuperChannel (node-role gate,
-    //     idempotency, invite-the-members, AND the canary intro the peer links from), then re-resolve
-    //     off a FRESH read → the reply routes to the just-created channel (the chunk-2 line below).
-    //   · automatic OFF → SIPHON the reply to admin_channel (eGPT Admin) so the base chat stays clean
-    //     (the SI principle); siphonReplyToAdmin returns that chat id (and posts a rate-limited warning
-    //     + recovery blurb), or null when admin is unresolvable → fall through to the base chat.
-    // Skipped for a backlog wake (wouldReachABeing reuses decide but dispatches nothing). A create
-    // failure NEVER blocks the reply. Both seams unwired (standalone gating/tests) → inert.
-    if (!superId && mayReply && !ev.backlog && superChatsOn(c.super_chats)) {
-      if (c.super_chats?.automatic && ensureSuperChannel) {
-        try {
-          await ensureSuperChannel(ev);
-          const s2 = loadState ? await loadState() : null;
-          if (s2) { state = s2; superId = superChannelFor(s2, ev.surface, ev.chatId); }
-        } catch { /* create failed — fall through to the arrival chat, same as no channel */ }
-      } else if (!c.super_chats?.automatic && siphonReplyToAdmin) {
-        try { replyChatId = (await siphonReplyToAdmin(ev)) ?? null; } catch { replyChatId = null; }
-      }
-    }
-    if (replyChatId == null) replyChatId = (superId && (await superChannelAlive(superId, { chatRaw, config: c })) !== false) ? superId : ev.chatId;
-    // SI-STATE REACTION (2026-10-13): a BASE-CHAT signal only — ✅ this conversation HAS an SI channel
-    // (superChannelFor set, incl. one auto-created above → the reply routed to SI), ❌ none (reply went
-    // to the base chat / was siphoned to admin). INSIDE an SI group there is nothing to signal — everyone
-    // is already a member — so NO auto-reaction (inSuper → null); the being may place its own if it wishes.
-    // null also when SI is off or the being isn't replying.
-    const siReaction = (mayReply && superChatsOn(c.super_chats) && !inSuper) ? (superId ? '✅' : '❌') : null;
-    return { mode, receives: receives(mode), mayReply, sendToEgpt, replyChatId, siReaction };
+    return { mode, receives: receives(mode), mayReply, sendToEgpt, ...(replyChatId ? { replyChatId } : {}) };
   }
 
   // POST-brain surfacing: the reply surfaces when mayReply held AND it isn't an

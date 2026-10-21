@@ -119,6 +119,7 @@ export function createIdentity({ formatLine = formatDispatchLine, now = () => Da
         msgTs: f.msgTs ?? null,
         replyToId: f.replyToId ?? null,   // the quoted message id (→ `↩#<id>`), null when not a reply
         replyToBeing: f.replyToBeing ?? null,   // the being whose post is quoted, read off its invisible frame by the bridge — router.mjs addresses it
+        replyToNode: f.replyToNode ?? null,     // the node in that frame (any node); another node's post is addressed there (router.mjs)
         ts, body, kind,
         // mention status the bridge already computed — the gating service's input.
         mention: { atEStart: !!f.atEStart, atEAnywhere: !!f.atEAnywhere, replyToBot: !!f.replyToBot },
@@ -159,11 +160,7 @@ export function createIdentity({ formatLine = formatDispatchLine, now = () => Da
         // gate reads it to suppress a wake of the AUTHOR only (spine.mjs). null = a node-only frame
         // or an unsigned message. A synthetic may hand it over as f.fromBeing (none today → null).
         fromBeing: signed ? decodeBeingSignature(rawBody) : (f.fromBeing ?? null),
-        // THE SI CANARY (super-channel intro, 2026-10-13) — the base conversation's shared-account
-        // chat-id a creating node stamped on the intro, read off the SAME raw body as fromNode/
-        // fromBeing (a second '/'-led frame decodeNodeSignature ignores). A co-account peer that has
-        // no alias for this side-group yet links the SAME channel from it (commands.linkSuperChannel).
-        // null on every ordinary message (no canary frame) → no effect.
+        // A side group's opener: the ids its creator stamped (commands.postOpener, linkSideGroup). null otherwise.
         canary: typeof rawBody === 'string' ? decodeChatCanary(rawBody) : null,
         // WHERE THIS MESSAGE ACTUALLY ARRIVED, when that is not where it is being dispatched:
         // { surface, chatId, chatName } of the ORIGIN conversation. Carried exactly as fromMember

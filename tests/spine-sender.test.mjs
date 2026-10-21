@@ -20,7 +20,7 @@ function fakeBridge() {
         chat, init, opts, frames: [], finals: [], deleted: false, delivered: false,
         update(t) { h.frames.push(t); },
         async finish(t) { h.finals.push(t); h.delivered = true; },
-        async delete() { h.deleted = true; },
+        async delete() { h.deleted = true; return true; },
       };
       streams.push(h); return h;
     },
@@ -319,31 +319,150 @@ describe('sender — the message never shrinks (append-only living mirror)', () 
     expect(bridge.streams[1].finals).toEqual([`lo estoy mirando${RETAINED_SEAM}⚙️ processing commands (/react /reply)`]);
   });
 
-  // VERBOSE OFF (operator 2026-10-06, live with E/opus: "verbose thinking is off, and yet [the]
-  // reaction also appear as a thinking process"). commandMark is the debug/record view; with
-  // verbose OFF the chat must show just the reaction and no "⚙️ processing command" line. The
-  // reaction already landed on its target; the ⏳-only placeholder holds no model content and
-  // cannot be cleanly blanked (the real handle's finish('') leaves the "Thinking…" text in place),
-  // so it resolves to the minimal neutral quietLimbMark — NOT commandMark, NOT the silence mark.
-  it('verbose OFF: a LIMB-ONLY turn with nothing shown resolves QUIETLY (just the reaction) — no "processing command" line', async () => {
+  // VERBOSE OFF (operator 2026-10-06: no "⚙️ processing command" line). Live 2026-10-19 SI+EduWeb:
+  // E's whole answer was a /react 👍 and its ⏳ was edited to "🐶 E: ✓". Ruling: "that leftover is
+  // not needed in the train … evict anyway" — the bridge deletes its own placeholder.
+  it('REPRODUCE: verbose OFF, a LIMB-ONLY /react turn with nothing shown DELETES its placeholder — no ✓ edit', async () => {
     const bridge = fakeBridge();
     const sender = createSender({ bridge });
     const out = sender.open('!c', { being: 'e' });
     await out.finish({ text: '' }, { surface: false, commands: ['react'], verbose: false });
-    expect(bridge.streams[0].finals).toEqual(['✓']);                         // quiet mark — the ⏳ comes off, no debug line
-    expect(bridge.streams[0].finals[0]).not.toContain('processing command'); // the operator's exact complaint
-    expect(bridge.streams[0].deleted).toBe(false);                           // placeholder resolved, never destructively deleted
+    expect(bridge.streams[0].deleted).toBe(true);
+    expect(bridge.streams[0].finals).toEqual([]);
+    expect(bridge.sent).toHaveLength(0);
   });
 
-  // …and the DEFAULT when no `verbose` is passed is quiet (matching the system default of
-  // verbose_thinking = off, and the operator's intent). Locks the absent-case so a caller that
-  // forgets the flag fails quiet, never leaks the debug line.
-  it('verbose ABSENT: a LIMB-ONLY turn defaults to the quiet resolution (off)', async () => {
+  // …and the DEFAULT when no `verbose` is passed is quiet (verbose_thinking = off).
+  it('verbose ABSENT: a LIMB-ONLY turn defaults to the quiet resolution (off) — deleted', async () => {
     const bridge = fakeBridge();
     const sender = createSender({ bridge });
     const out = sender.open('!c', { being: 'e' });
     await out.finish({ text: '' }, { surface: false, commands: ['react'] });   // no `verbose` key
+    expect(bridge.streams[0].deleted).toBe(true);
+    expect(bridge.streams[0].finals).toEqual([]);
+  });
+
+  it('REPRODUCE: on a local MOUTH route the placeholder is deleted in the mouth\'s room, nothing on the ear', async () => {
+    const ear = fakeBridge(), mouth = fakeBridge();
+    const peerMouth = { route: async () => ({ connection: 'secondary', bridge: mouth, chatId: '!mouth-room' }) };
+    const out = createSender({ bridge: ear, peerMouth }).open('!c', { being: 'e' });
+    await out.finish({ text: '' }, { surface: false, commands: ['react'] });
+    expect(ear.streams).toHaveLength(0);
+    expect(mouth.streams.map((s) => [s.chat, s.deleted, s.finals])).toEqual([['!mouth-room', true, []]]);
+  });
+
+  it('a delete that fails (false or a throw) settles on ✓ as before, with one log line', async () => {
+    for (const del of [async () => false, async () => { throw new Error('403'); }]) {
+      const bridge = fakeBridge(), logs = [];
+      const out = createSender({ bridge, onLog: (m) => logs.push(m) }).open('!c', { being: 'e' });
+      bridge.streams[0].delete = del;
+      await out.finish({ text: '' }, { surface: false, commands: ['react'] });
+      expect(bridge.streams[0].finals).toEqual(['✓']);
+      expect(logs.filter((l) => l.includes('could not be deleted'))).toHaveLength(1);
+    }
+  });
+
+  it('a stream with no delete (a peer-spine mouth) settles on ✓', async () => {
+    const bridge = fakeBridge();
+    const out = createSender({ bridge }).open('!c', { being: 'e' });
+    delete bridge.streams[0].delete;
+    await out.finish({ text: '' }, { surface: false, commands: ['react'] });
     expect(bridge.streams[0].finals).toEqual(['✓']);
+  });
+
+  // Operator 2026-10-19: delete; else edit to ✓; else (past the edit window, or the edit failed) reply ✓ fresh.
+  describe('withheld fallback chain', () => {
+    const withheld = async ({ minutes = 0, del = async () => false, finish = null, peerMouth = null, reply = { text: '' }, how = { surface: false, commands: ['react'] } } = {}) => {
+      let t = 0;
+      const ear = fakeBridge();
+      const out = createSender({ bridge: ear, peerMouth, now: () => t }).open('!c', { being: 'e', replyTo: 'm1' });
+      const room = peerMouth ? (await peerMouth.route()).bridge : ear;
+      await new Promise((r) => setImmediate(r));   // a mouth route opens its stream once routed
+      if (del) room.streams[0].delete = del;
+      if (finish) room.streams[0].finish = finish;
+      t = minutes * 60_000;
+      await out.finish(reply, how);
+      return { ear };
+    };
+
+    it('delete ok → nothing else', async () => {
+      const { ear } = await withheld({ del: null, minutes: 20 });
+      expect(ear.streams.map((s) => [s.deleted, s.finals])).toEqual([[true, []]]);
+      expect(ear.sent).toEqual([]);
+    });
+
+    it('delete fails + editable → the placeholder is edited to ✓, nothing fresh', async () => {
+      const { ear } = await withheld({ minutes: 12 });
+      expect(ear.streams.map((s) => s.finals)).toEqual([['✓']]);
+      expect(ear.sent).toEqual([]);
+    });
+
+    it('REPRODUCE: delete fails + past the edit window → a fresh ✓ reply quoting the trigger, no edit attempted', async () => {
+      const { ear } = await withheld({ minutes: 14 });
+      expect(ear.streams[0].finals).toEqual([]);
+      expect(ear.streams[1]).toMatchObject({ chat: '!c', init: '✓', finals: ['✓'] });
+      expect(ear.streams[1].opts).toMatchObject({ replyTo: 'm1', persona: 'e' });
+      expect(ear.sent).toEqual([]);
+    });
+
+    it('REPRODUCE: delete fails + the edit throws or is not accepted → a fresh ✓ reply quoting the trigger', async () => {
+      const finishes = [async () => { throw new Error('edit refused'); }, async function (t) { this.finals.push(t); }];
+      for (const finish of finishes) {
+        const { ear } = await withheld({ finish });
+        expect(ear.streams).toHaveLength(2);
+        expect(ear.streams[1]).toMatchObject({ chat: '!c', init: '✓', finals: ['✓'] });
+        expect(ear.streams[1].opts).toMatchObject({ replyTo: 'm1' });
+        expect(ear.sent).toEqual([]);
+      }
+    });
+
+    it('REPRODUCE: on a local MOUTH route the fresh ✓ comes from the mouth, in its room', async () => {
+      const mouth = fakeBridge();
+      const peerMouth = { route: async () => ({ connection: 'secondary', bridge: mouth, chatId: '!mouth-room' }) };
+      const { ear } = await withheld({ minutes: 14, peerMouth });
+      expect(mouth.streams.map((s) => [s.chat, s.init, s.finals])).toEqual([['!mouth-room', '⏳ Thinking…', []], ['!mouth-room', '✓', ['✓']]]);
+      expect(ear.streams).toEqual([]);
+      expect(ear.sent).toEqual([]);
+    });
+
+    // The same rule for every withheld mark: never a stuck ⏳.
+    const silence = { reply: { text: '…' }, how: { surface: false } };
+
+    it('silence at 12 min → the placeholder is edited to ✓ (lock)', async () => {
+      const { ear } = await withheld({ ...silence, minutes: 12 });
+      expect(ear.streams.map((s) => [s.deleted, s.finals])).toEqual([[false, ['✓']]]);
+      expect(ear.sent).toEqual([]);
+    });
+
+    it('REPRODUCE: silence at 14 min → a fresh ✓ quoting the trigger, no edit', async () => {
+      const { ear } = await withheld({ ...silence, minutes: 14 });
+      expect(ear.streams.map((s) => [s.init, s.finals])).toEqual([['⏳ Thinking…', []], ['✓', ['✓']]]);
+      expect(ear.streams[1].opts).toMatchObject({ replyTo: 'm1' });
+      expect(ear.sent).toEqual([]);
+    });
+
+    it('REPRODUCE: silence with a failed edit (throws or not accepted) → a fresh ✓', async () => {
+      for (const finish of [async () => { throw new Error('edit refused'); }, async function (t) { this.finals.push(t); }]) {
+        const { ear } = await withheld({ ...silence, finish });
+        expect(ear.streams.map((s) => s.init)).toEqual(['⏳ Thinking…', '✓']);
+        expect(ear.streams[1]).toMatchObject({ finals: ['✓'], opts: { replyTo: 'm1' } });
+      }
+    });
+
+    it('REPRODUCE: a verbose limb-only turn at 14 min → its commandMark goes fresh', async () => {
+      const { ear } = await withheld({ how: { surface: false, commands: ['react'], verbose: true }, minutes: 14 });
+      expect(ear.streams.map((s) => [s.deleted, s.init, s.finals])).toEqual([[false, '⏳ Thinking…', []], [false, '⚙️ processing command (/react)', ['⚙️ processing command (/react)']]]);
+    });
+  });
+
+  it('unchanged: a silence still settles on ✓, text + a limb still delivers the text, an unopened ambient turn posts nothing', async () => {
+    const bridge = fakeBridge();
+    const sender = createSender({ bridge });
+    await sender.open('!c', { being: 'e' }).finish({ text: '…' }, { surface: false });
+    await sender.open('!c', { being: 'e' }).finish({ text: 'Hola' }, { surface: true });   // prose + limb: the spine passes commands null
+    expect(bridge.streams.map((s) => [s.deleted, s.finals])).toEqual([[false, ['✓']], [false, ['Hola']]]);
+    await sender.open('!c', { being: 'e', ambient: true }).finish({ text: '' }, { surface: false, commands: ['react'] });
+    expect(bridge.streams).toHaveLength(2);
   });
 
   // VERBOSE OFF with something ALREADY READ: the narration stays, the ⏳ comes off, and NOTHING is
@@ -357,6 +476,7 @@ describe('sender — the message never shrinks (append-only living mirror)', () 
     await out.finish({ text: '' }, { surface: false, commands: ['react', 'reply'], verbose: false });
     expect(bridge.streams[0].finals).toEqual(['lo estoy mirando']);          // narration kept, no seam, no commandMark
     expect(bridge.streams[0].finals[0]).not.toContain('processing');
+    expect(bridge.streams[0].deleted).toBe(false);                           // read text is never deleted
   });
 
   // A turn WITH prose (surfaced, not limb-only) never reaches the commandMark path, so the verbose
@@ -538,6 +658,29 @@ describe('sender — routed-target drop falls back to the origin chat (never a s
     expect(calls).toHaveLength(1);                             // …but it was NOT silent
     expect(calls[0]).toMatchObject({ being: 'e', chatId: SUPER, origin: ORIGIN });
     expect(calls[0].reason).toMatch(/both refused the send/);
+  });
+
+  // …and with NO origin at all (operator 2026-10-19: the SI+ group's reply was dropped without a word
+  // — "why is the error not bubbling up?"): any reply the bridge refuses is reported, once, with the
+  // bridge's own reason.
+  it('REPRODUCE: a reply the bridge refuses (no origin) → onUndeliverable ONCE, naming what was lost and the bridge\'s reason', async () => {
+    const SIDE = 'aheLwZ0u6CpjePxSdbG9';
+    const bridge = { ...bothUnreachableBridge(SIDE), sendFailure: (chat) => (chat === SIDE ? 'POST → 404 Chat not found' : null) };
+    const calls = [];
+    const out = createSender({ bridge, bodyEmojiOf: () => '🐶', onUndeliverable: async (o) => calls.push(o) }).open(SIDE, { being: 'e' });
+    await out.finish({ text: 'sí, es cierto' });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ being: 'e', chatId: SIDE, what: 'reply' });
+    expect(calls[0].reason).toMatch(/404 Chat not found/);
+  });
+
+  it('a reply that lands reports nothing (regression lock)', async () => {
+    const bridge = bothUnreachableBridge();
+    const calls = [];
+    const out = createSender({ bridge, onUndeliverable: async (o) => calls.push(o) }).open('!ok', { being: 'e' });
+    await out.finish({ text: 'hola' });
+    expect(bridge.sent.map((s) => s.chat)).toEqual(['!ok']);
+    expect(calls).toEqual([]);
   });
 
   it('BOTH refuse but NO notify wired → no throw, behaviour is the pre-fix drop (byte-identical)', async () => {

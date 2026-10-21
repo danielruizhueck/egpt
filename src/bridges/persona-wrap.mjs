@@ -104,10 +104,7 @@ export function makeWrapPersona({ bridgeSignatureOpen = '', bridgeSignatureClose
     // quote-reply to this message names its author structurally (bridges/beeper.mjs
     // replyToBeing). `o.persona` is the being key the reply train already hands the stream
     // (src/spine/sender.mjs `tag`); a send with none keeps the node-only frame.
-    // `o.canary` (super-channel intro, 2026-10-13) — a SECOND structural frame after the node one,
-    // carrying the base chat's shared-account id so a co-account peer links the same side-group. Only
-    // the super intro sets it; every other send omits it → byte-identical. decodeNodeSignature reads
-    // the FIRST (node) frame, so this never disturbs node/being attribution.
+    // `o.canary` (a side group's opener): the group's ids (commands.postOpener), a second frame after the node one.
     return stripNodeSignature(wrapped) + encodeNodeSignature(nodeName, o.persona) + (o.canary ? encodeChatCanary(o.canary) : '');
   };
 }

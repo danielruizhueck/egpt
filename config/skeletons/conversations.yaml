@@ -44,6 +44,13 @@ contacts:
       # browser group: browsers.yaml uploads:
       #privileged_browser: true
 
+      # no reply here: every reply goes to a side group the primary makes (config-schema reply_in_side_group);
+      # true/yes/on → "SI+<title>", any other text → that title
+      #reply_in_side_group: on
+
+      # commands anyone here may run; replaces config.yaml public_commands, [] = none
+      #public_commands: [join, split, send, end]
+
       # one block per resident agent, keyed by its config.yaml agents: name.
       # EVERY field a being has lives HERE, flat (operator 2026-08-14: one block
       # per being - no separate spine-written/operator-override split any more).

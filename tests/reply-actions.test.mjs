@@ -567,6 +567,42 @@ describe('createReplyActions.execute — bridgeOf: per-being connection routing 
   });
 });
 
+// A LIMB THE BRIDGE REFUSES BUBBLES UP (operator 2026-10-19, live: "[actions] reply: → #34523 not
+// delivered" and nothing else, anywhere): ONE onUndeliverable per lost limb, with the bridge's reason.
+describe('createReplyActions.execute — a lost limb is reported once', () => {
+  const SIDE = 'aheLwZ0u6CpjePxSdbG9';
+  const EV_SIDE = { chatId: SIDE, surface: 'whatsapp' };
+  const refusing = () => fakeBridge({ send: () => null, sendMedia: () => false, sendFailure: () => 'POST → 404 Chat not found' });
+
+  it('REPRODUCE: /reply refused → onUndeliverable ONCE with the chat, the limb and the reason', async () => {
+    const calls = [];
+    const a = createReplyActions({ bridge: refusing(), peerMouth: MOUTH_HOLDS, onUndeliverable: async (o) => calls.push(o) });
+    const { ran } = await a.execute(a.parse('/reply #34523 eso es cierto', EV_SIDE).run, [], EV_SIDE, { being: 'e' });
+    expect(ran).toEqual([]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ being: 'e', chatId: SIDE, what: '/reply #34523' });
+    expect(calls[0].reason).toMatch(/404 Chat not found/);
+  });
+
+  it('/media refused → reported once too', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'egpt-limb-lost-'));
+    writeFileSync(join(dir, 'pic.png'), 'bytes');
+    const calls = [];
+    const a = createReplyActions({ bridge: refusing(), peerMouth: MOUTH_HOLDS, resolveConvDir: async () => dir, onUndeliverable: async (o) => calls.push(o) });
+    await a.execute(a.parse('/media pic.png', EV_SIDE).run, [], EV_SIDE, { being: 'e' });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ chatId: SIDE, what: '/media pic.png' });
+  });
+
+  it('a limb that lands reports nothing (regression lock)', async () => {
+    const calls = [];
+    const a = createReplyActions({ bridge: fakeBridge(), peerMouth: MOUTH_HOLDS, onUndeliverable: async (o) => calls.push(o) });
+    const { ran } = await a.execute(a.parse('/reply #9 hola', EV_SIDE).run, [], EV_SIDE, { being: 'e' });
+    expect(ran).toHaveLength(1);
+    expect(calls).toEqual([]);
+  });
+});
+
 // …AND THE CHAT IS PART OF THAT QUESTION (operator 2026-09-11, sharpened 2026-09-12; the /reply
 // limb was undeliverable on BOTH nodes from that day until 2026-09-14). `bridgeOf` takes the chat
 // since 2026-09-11 — boot's rawBridgeOf answers with the being's MOUTH when there is no chat to

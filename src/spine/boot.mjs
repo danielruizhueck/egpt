@@ -25,7 +25,8 @@ import { peerSpineFrom, createMouthReceiver, speakThroughPeer, startPeerStream, 
 // The cross-account chat key itself — minted in the bridge, beside the payloads it reads. The
 // LOCAL mouth below keys with the same primitive the peer link keys with; there is one definition
 // of "which of MY chats is that ONE real chat" and both transports ask it.
-import { crossAccountChatKey, crossAccountMsgKey, _msgTimestampMs, LISTENING_REACTION } from '../bridges/beeper.mjs';
+import { crossAccountChatKey, LISTENING_REACTION, _msgTimestampMs } from '../bridges/beeper.mjs';
+import { createBeeperUpdate } from '../tools/beeper-update.mjs';
 import { htmlToMarkdown } from '../html-to-markdown.mjs';
 import { mergeAudit } from './audit-merge.mjs';
 import { createWarmPool } from '../warm-sessions.mjs';
@@ -459,24 +460,16 @@ export function makePeerMouth({ peer, bridge, bridgeOf = null, owns = () => fals
   //
   // THE LOOKUP ITSELF is shared with the /reply limb's quote (2026-09-16, `quote` below): which of
   // the mouth's OWN messages a cross-account key names. One lookup, two things done with the id.
-  // ITS OWN ARRIVAL names the copy with no GET (the bridge's recentMessages). Not seen yet → the list,
-  // and meanwhile the copy itself if it lands: it can trail the ear's arrival by most of a second.
-  const ownCopy = async ({ bridge: on, chatId, connection }, { msgKey, timestamp = 0 } = {}) => {
+  // ITS OWN ARRIVAL names the copy, and nothing else does — no search (operator 2026-10-18): the
+  // bridge's in-memory record (noted before any gate), else the copy itself if it lands within
+  // COPY_WAIT_MS. Both through findMessageByKey, so one rule decides.
+  const ownCopy = async ({ bridge: on, chatId }, { msgKey, timestamp = 0 } = {}) => {
     const want = String(msgKey ?? '').trim();
     if (!want) return { ok: false, reason: 'no-key', detail: 'the message carries no cross-account key' };
     const seen = findMessageByKey(on?.recentMessages?.(chatId) ?? [], want, timestamp);
-    if (seen.ok) return seen;
-    if (!on?.listMessagesRaw) return { ok: false, reason: 'no-list', detail: `'${connection}' cannot list its messages` };
-    const arrived = Promise.resolve(on.awaitMessage?.(chatId, (m) => crossAccountMsgKey(m) === want && (!timestamp || _msgTimestampMs(m) === timestamp), COPY_WAIT_MS))
-      .then((m) => (m?.id != null ? { ok: true, msgId: String(m.id) } : null), () => null);
-    const listed = (async () => {
-      let messages = [];
-      try { messages = await on.listMessagesRaw(chatId); }
-      catch (e) { return { ok: false, reason: 'unavailable', detail: e?.message ?? String(e) }; }
-      const hit = findMessageByKey(messages, want, timestamp);
-      return hit.ok ? hit : ((await arrived) ?? hit);
-    })();
-    return Promise.race([listed, arrived.then((a) => a ?? listed)]);
+    if (seen.reason !== 'no-match' || !on?.awaitMessage) return seen;   // found, or twins no wait can tell apart
+    const m = await Promise.resolve(on.awaitMessage(chatId, (x) => findMessageByKey([x], want, timestamp).ok, COPY_WAIT_MS)).catch(() => null);
+    return m?.id != null ? { ok: true, msgId: String(m.id) } : { ...seen, detail: `${seen.detail}, nor did it arrive within ${COPY_WAIT_MS}ms` };
   };
   // `remove` takes a reaction back OFF the mouth's own copy, found the same way (the 🎧 listening
   // mark, 2026-09-16 — sender.mjs makeOutbound `react`).
@@ -592,13 +585,7 @@ export function makePeerMouth({ peer, bridge, bridgeOf = null, owns = () => fals
 // THE MISSING PIECE IS `ev`: a handler only ever has `send?.(ev.chatId, text)` — the chatId, not
 // the InboundEvent transcript.log needs (ev.surface, ev.chatName for the slug resolve). `run`
 // below wraps createCommands's own `run(ev)` to remember ev BY CHAT ID for exactly the span of
-// that call — one in-flight command per chat, the same assumption commands.mjs's own capture-sink
-// Map already relies on (its comment: "concurrent runs never cross") — so `send` can read it back.
-//
-// A MESH-CAPTURED command (mesh.mjs's runCaptured) never reaches this `send` at all: commands.mjs
-// diverts it into a private sink instead (the whole point — that reply rides home INSIDE an
-// envelope). So a relayed command is correctly excluded: it was never posted into a room, and the
-// operator ruling ("everything that is typed or received in a ROOM") only covers what was.
+// that call — one in-flight command per chat — so `send` can read it back.
 //
 // LABEL: 'system' — a command reply is the NODE speaking, not a persona (src/shell/app.mjs
 // already uses author 'system' for this identical class of message: spine-generated, not a
@@ -789,22 +776,13 @@ function shellHeaderGroupOf(agent, nodeName) {
 //                 `lobby → X` arrow — the shell's fixed home conversation is LOBBY_SLUG itself,
 //                 so with nothing joined the segment reads `room: lobby` (honest, not "→ nothing"),
 //                 and with a room joined it reads `room: <that room>`).
-//   defaultNode = raw `dispatch.default_node` (string|undefined/null; normalized in here, trim+lowercase).
-//                 Renders ` → <default_node>` right after the room segment's value, UNLESS it's
-//                 unset/empty OR equals nodeName itself (bare commands run locally either way —
-//                 no arrow implying a route that isn't happening). Kept as the ONLY arrow in the
-//                 string now that room-join no longer uses one, so `room: acim → do` reads
-//                 unambiguously as "cross-node default routing", not room-to-room navigation.
 // Groups render in agents-map insertion order (JS object order already preserves it); handles
 // render within a group in agent-declaration order. SHORT HANDLE = the shortest string in the
 // agent's `handles:` array, else its map key.
-export function computeShellHeader({ nodeName, agents, defaultNode, currentRoom } = {}) {
-  const normDefaultNode = String(defaultNode ?? '').trim().toLowerCase();
-  const normNodeName = String(nodeName ?? '').trim().toLowerCase();
-  const arrow = (normDefaultNode && normDefaultNode !== normNodeName) ? ` → ${normDefaultNode}` : '';
+export function computeShellHeader({ nodeName, agents, currentRoom } = {}) {
   const room = String(currentRoom ?? '').trim();
   const roomLabel = (room && room !== LOBBY_SLUG) ? room : LOBBY_SLUG;
-  const base = `🟢 room: ${roomLabel}${arrow} — ? for help · ctrl-d = send`;
+  const base = `🟢 room: ${roomLabel} — ? for help · ctrl-d = send`;
   const map = (agents && typeof agents === 'object' && !Array.isArray(agents)) ? agents : {};
   const groups = new Map();   // groupKey → [ '@handle', ... ], insertion order = first agent encountered
   for (const [key, a] of Object.entries(map)) {
@@ -1299,7 +1277,7 @@ export async function boot({
   const declaredConnections = (() => {
     const b = cfg.beeper;
     if (!b || typeof b !== 'object' || Array.isArray(b)) return [];
-    return Object.keys(b).filter((k) => b[k] && typeof b[k] === 'object');
+    return Object.keys(b).filter((k) => k !== 'auto_update' && b[k] && typeof b[k] === 'object');   // auto_update: Beeper's own updates, not a connection
   })();
   // THE NODE'S DEFAULT OUTBOUND CONNECTION — which connection an agent that names none of its own
   // SPEAKS on. THE CONNECTION NAMES CARRY THE MEANING NOW (operator 2026-09-10): *"we dropped the
@@ -2594,7 +2572,7 @@ export async function boot({
   // 2026-07-26. The wrap is a Proxy precisely so this port's `isConnected` GETTER stays live.
   // THE PERMANENT SHELL HEADER (operator 2026-07-27, computeShellHeader above): computed HERE,
   // the ONE place config is read for this feature — the editor never touches config.yaml.
-  const shellHeaderAt = (currentRoom) => computeShellHeader({ nodeName: node_name, agents: cfg.agents, defaultNode: cfg.dispatch?.default_node, currentRoom });
+  const shellHeaderAt = (currentRoom) => computeShellHeader({ nodeName: node_name, agents: cfg.agents, currentRoom });
   const shellHeader = shellHeaderAt();
   // The watchers, built before the router that consults them. Ports come from the agents block
   // and nowhere else, so a node declaring no unless_peer_alive builds none and probes nothing.
@@ -2793,7 +2771,14 @@ export async function boot({
   // the spot: /rewind is the way back FROM bad code, and waiting on a turn that code is writing
   // would defeat it.
   let restartCode = null;   // the code a pending restart drain leaves with
+  let beeperUpdate = null;  // /update beeper (created below, real node only)
   async function announceAndExit(code, { force = false } = {}) {
+    // A Beeper update in progress finishes first: its tool runs as this spine's child.
+    if ((code === 42 || code === 43) && beeperUpdate?.busy()) {
+      log.line?.(`[drain] ${KIND_OF[code]} waits for the Beeper update in progress`);
+      beeperUpdate.idle().then(() => announceAndExit(code, { force })).catch((e) => log.line?.(`[drain] ${e?.message ?? e}`));
+      return;
+    }
     if (code === 42 || code === 43) {
       restartCode = restartCode === 42 ? 42 : code;
       spine.drainForRestart(() => { goDown(restartCode).catch((e) => log.line?.(`[drain] ${e?.message ?? e}`)); }, {
@@ -2860,13 +2845,8 @@ export async function boot({
   // --- services (each DI-wired; none closes over another) ---
   const services = {
     identity: createIdentity({ now, timeZone: transcriptTimeZone }),
-    // chatRaw: the super-channel liveness read off the ear (earBridge, declared below — decide only runs once the spine exists).
-    // ensureSuperChannel (SI auto-create, 2026-10-13): a being about to reply in a super-enabled chat
-    // with no channel yet creates it HERE (commands.ensureSuperChannel, defined below — decide only runs
-    // once the spine exists), then the reply routes to it. The node-role gate + idempotency live inside.
-    // siphonReplyToAdmin (SI PART C): automatic OFF + no channel + a being about to reply → the reply
-    // is routed to admin_channel instead of the base chat (commands owns the resolve + rate-limited warning).
-    gating: createGating({ getConfig, loadState: _loadState, defaultKey, chatRaw: (id) => earBridge.chatRaw?.(id), ensureSuperChannel: (ev) => commands.ensureSuperChannel?.(ev), siphonReplyToAdmin: (ev) => commands.siphonReplyToAdmin?.(ev) }),
+    // sideGroupFor: a reply in a side_group.automatic chat goes to its SI+ group (commands, below; decide runs once the spine exists).
+    gating: createGating({ getConfig, loadState: _loadState, defaultKey, sideGroupFor: (ev, o) => commands.autoSideGroup?.(ev, o) }),
     // Router resolves an @token against the unified `agents:` block (operator 2026-07-02) —
     // the ONE registry, and since 2026-07-25 the ONLY source of off-node reach (a relay agent's
     // relay_channel). defaultBeing = defaultKey: the persona-route + the un-@mentioned
@@ -2914,9 +2894,9 @@ export async function boot({
       onLog: (m) => log.line?.(`[transcript] ${m}`) }),
     // peerMouth (operator 2026-09-05): THE reply path, so THE place the mouth decision is made —
     // null on a node with no peer_spine, and the sender is then byte-identical to before.
-    // onUndeliverable (operator 2026-10-12): a reply the mouth can place in NEITHER the routed room
-    // nor the origin is no longer dropped silently — it surfaces on log_to_group through the EXISTING
-    // audit poster (forward ref to logToGroup below, like currentRoomOf above: only fires at reply
+    // onUndeliverable (operator 2026-10-12; any lost reply since 2026-10-19): a reply that lands
+    // nowhere is no longer dropped silently — it surfaces on log_to_group through reportUndelivered,
+    // over the EXISTING audit poster (forward ref, like currentRoomOf above: only fires at reply
     // time). log_to_group unset ⇒ logToGroup is a no-op post and the daemon line (sender's onLog) is
     // all there is — no crash, no second channel.
     // publicOf / noticeAdmin (2026-10-15): a public being's lead sees only its reply; its errors go
@@ -2924,7 +2904,7 @@ export async function boot({
     sender: createSender({ bridge: shellAwareBridge, bridgeOf: shellAwareBridgeOf, bodyEmojiOf, labelOf, agentSignatureOpenOf, agentSignatureCloseOf, defaultKey, peerMouth,
       publicOf: isPublicAgent,
       noticeAdmin: ({ being, chatId, text }) => noticeToChannel({ configKey: 'admin_channel', text: `${being} in ${chatId}: ${text}`, what: 'public-error', tag: 'public' }),
-      onUndeliverable: async ({ being, chatId, origin, reason }) => { try { await logToGroup(`⚠ reply to ${chatId} (${being}) undeliverable: ${reason}`); } catch { /* best-effort: a failed notice never affects the reply */ } },
+      onUndeliverable: ({ being, chatId, what, reason }) => reportUndelivered({ what, chatId, being, why: reason }),
       onLog: mouthLog, now }),
     // The real cadence registry the spine's tick() drives. The heartbeat LOADER
     // (below) collects every declarative heartbeat and registers it here, so each
@@ -3043,9 +3023,9 @@ export async function boot({
   // affected by whether its audit landed. Wired into createCommands below; exposed on the app for
   // assertability, exactly like noticeToAdmin.
   //
-  // TWO-NODE CONVERGENCE (operator 2026-10-08, the follow-up): a few commands (/join, /split,
-  // /status <sibling>, /end in a one-node side-room) are NOT deduped by the default_node gate, so
-  // BOTH co-account nodes audit the same command EVENT and post TWO lines here. audit-merge.mjs
+  // TWO-NODE CONVERGENCE (operator 2026-10-08, the follow-up): when BOTH co-account nodes audit the
+  // same command EVENT they post TWO lines here (since 2026-10-19 a command runs on its being's
+  // node only, so this is rare). audit-merge.mjs
   // converges them onto ONE message keyed by ev.msgHash (the `key`, carried identically on both
   // nodes): the PRIMARY posts read-free with a marker; the SECONDARY staggers, reads THIS chat's
   // recent messages for that marker and EDITS the primary's line (appending its own segment) — or
@@ -3053,26 +3033,43 @@ export async function boot({
   // (listMessagesRaw, the one ownCopy/reactLocally read through) and editor (editMessage, the one the
   // streaming relay edits co-account copies with) are the SAME bridge the post lands on, routed in —
   // no second channel. Everything is best-effort: a resolve/read/edit miss degrades to a plain post.
+  // log_to_group's recent messages ({ id, text, ts }) and an editor, on the bridge the post lands on
+  // (outbound's bridge, resolveConfiguredChat), the read-back HTML mapped to markdown so a marker
+  // matches and an edit re-sends plain text. null when unset or unreadable. The audit merge and
+  // /update beeper read through it.
+  const logGroupIo = async () => {
+    const name = declaredChannel('log_to_group');
+    if (!name) return null;
+    const r = await resolveConfiguredChat(name);
+    const on = outbound(null, name).bridge;
+    if (!r.chatId || typeof on?.listMessagesRaw !== 'function' || typeof on?.editMessage !== 'function') return null;
+    return {
+      readRecent: async () => (await on.listMessagesRaw(r.chatId)).map((m) => ({ id: m?.id ?? null, text: htmlToMarkdown(m?.text) || '', ts: _msgTimestampMs(m) })),
+      edit: (id, full) => on.editMessage(r.chatId, id, full),
+    };
+  };
   const logToGroup = async (text, { key = null } = {}) => {
     if (!declaredChannel('log_to_group')) return false;   // OFF, silently — unchanged
     const post = (full) => noticeToChannel({ configKey: 'log_to_group', text: full, what: 'audit', tag: 'audit' });
     const role = getConfig()?.node_role;
-    // Only the SECONDARY reads + edits; the PRIMARY (and a single-node deployment) never touch the
-    // chat. Resolve the chat + its bridge the SAME way the post does (outbound's bridge, resolveConfiguredChat),
-    // mapping the read-back HTML to markdown so the marker matches and the edit re-sends plain text.
+    // Only the SECONDARY reads + edits; the PRIMARY (and a single-node deployment) never touch the chat.
     let readRecent = null, edit = null;
     if (String(role ?? '').trim().toLowerCase() === 'secondary') {
-      try {
-        const name = declaredChannel('log_to_group');
-        const r = await resolveConfiguredChat(name);
-        const on = outbound(null, name).bridge;
-        if (r.chatId && typeof on?.listMessagesRaw === 'function' && typeof on?.editMessage === 'function') {
-          readRecent = async () => (await on.listMessagesRaw(r.chatId)).map((m) => ({ id: m?.id ?? null, text: htmlToMarkdown(m?.text) || '' }));
-          edit = (id, full) => on.editMessage(r.chatId, id, full);
-        }
-      } catch { /* leave readRecent/edit null → mergeAudit degrades to a plain post */ }
+      try { ({ readRecent = null, edit = null } = (await logGroupIo()) ?? {}); }
+      catch { /* leave readRecent/edit null → mergeAudit degrades to a plain post */ }
     }
     return mergeAudit({ role, nodeLabel: getConfig()?.node_name ?? '?', text, key, post, readRecent, edit });
+  };
+  // A LOST OPENER / REPLY / LIMB (operator 2026-10-19: "why is the error not bubbling up?"): ONE line
+  // to log_to_group naming the chat (title and id), what was lost and why. Title and reason come from
+  // the connection holding the chat.
+  const reportUndelivered = async ({ what, chatId, being = null, why = null }) => {
+    const id = shortChatId(chatId);
+    const on = rawBridgeOf(being, id);
+    const title = on?.getChatName?.(id);
+    const reason = why ?? on?.sendFailure?.(id) ?? 'the bridge gave no reason';
+    try { return await logToGroup(`${getConfig()?.node_name ?? '?'} · ⚠ ${what}${being ? ` (${being})` : ''} not delivered to ${title && title !== id ? `"${title}" ` : ''}${id} — ${reason}`); }
+    catch { return false; }
   };
   const brain = createBrainPool({ pool, getConfig, contacts, loadState: _loadState, writeState: _writeState, brains, defaultKey, labelOf, afterTurn: afterEveryTurn, onAlert: alertOperator, noticeTo: noticeToAdmin, resolveConfig: configResolver.configFor, resolveScope: createIdentityScope({ resolveMembers: memberResolver, getConfig, onLog: (m) => log.line?.(`[scope] ${m}`) }), io, beingLink, onLog: (m) => log.line?.(`[brain] ${m}`) });
 
@@ -3122,9 +3119,7 @@ export async function boot({
   const turns = createTurns({ brain, bridge, bridgeOf: rawBridgeOf, peerMouth, log });
 
   // operator slash commands (Self DM / authorized) — lifecycle wired now; reuses
-  // the same exit codes the daemon respawns on. Constructed BEFORE the mesh: a
-  // node-addressed command can arrive as an envelope and is executed through THIS
-  // service on the far side (operator 2026-07-26 — egpt as a remote control).
+  // the same exit codes the daemon respawns on.
   // COMMAND REPLIES → transcript.md too (see wrapCommandsForTranscript above): the send below
   // is wrapped so every command reply is recorded under the 'system' label, node-qualified like
   // any other line, and `commands.run` is wrapped right after construction so `send` can find the
@@ -3166,13 +3161,48 @@ export async function boot({
     }
     return earBridge;
   };
+  // A side group is a room on the account that made it or answers for it — recorded as an arrival is
+  // (rememberArrival), since an automatic group's reply goes there with nothing arrived in it
+  // (2026-10-19: it went out on Rodz's account, addressed by the primary's room id).
+  const holds = (b, chatId) => rememberArrival(shortChatId(chatId), connectionOfBridge.get(b));
+  // A side group lives on the account that made it (commands.sideGroupPlan): read the ear first, then
+  // the mouth. A room neither account has is gone only when both say so.
+  const sideChatRaw = async (chatId) => {
+    const r = await earBridge.chatRaw(chatId);
+    const mouth = postBridgeFor('secondary');
+    if (r) holds(earBridge, chatId);
+    if (r || mouth === earBridge) return r;
+    const m = await mouth.chatRaw(chatId);
+    if (m) holds(mouth, chatId);
+    return m || (r === false && m === false ? false : null);
+  };
   // Every warm session's live background tasks, with the conversation each would wake in.
   const liveBackground = () => pool.stats().keys.flatMap((k) => pool.background(k).map((t) => ({ ...(brain.convOfKey(k) ?? { being: '?', chatId: k }), ...t })));
   // What this node is handling, in state/background.json (src/spine/background.mjs). Real-node only (tests: backgroundFile).
   const background = (ingest || backgroundFile) ? createBackgroundRegistry({ path: backgroundFile ?? join(EGPT_HOME, 'state', 'background.json'), node: node_name, liveAgents: liveBackground, now, onLog: (m) => log.line?.(`[background] ${m}`) }) : null;
   await background?.load();
+  // /update beeper + the 6-hourly Beeper check (src/tools/beeper-update.mjs). Real node only: it reads
+  // the local Beeper installs and the update feed. Drains like /restart; the spine stays up.
+  beeperUpdate = ingest ? createBeeperUpdate({
+    getConfig,
+    home: EGPT_HOME,
+    drain: (fn) => spine.drainForRestart(fn, { purpose: 'restarting Beeper for the update' }),
+    restartPending: () => restartCode != null,
+    beeperRestart: async (on) => {
+      for (const b of new Set(bridgeByEndpoint.values())) {
+        try { await b.setBeeperRestart?.(on); } catch (e) { log.line?.(`[beeper-update] a bridge refused the restart state (${on}): ${e?.message ?? e}`); }
+      }
+    },
+    logToGroup: (text) => logToGroup(text),
+    readLog: async () => (await logGroupIo())?.readRecent() ?? [],
+    editLog: async (id, text) => (await logGroupIo())?.edit(id, text) ?? false,
+    hint: () => commands.hintOf('update beeper'),   // this node's own handle: /e update beeper, /don update beeper
+    ownNames: () => ownNodeNamesOf(getConfig()),
+    onLog: (m) => log.line?.(`[beeper-update] ${m}`),
+  }) : null;
   const commands = createCommands({
     getConfig,
+    beeperUpdate,                                     // /update beeper
     floodBan,                                         // /unban + /bans — the SAME in-memory instance the bridges observe into
     background,                                       // the operator's bare /agents lists it
     send: commandTranscript.send,
@@ -3234,7 +3264,14 @@ export async function boot({
     // group create); chatTitle its display name.
     forkBridge: {
       editMessage:   (chatId, msgId, text)            => earBridge.editMessage(chatId, msgId, text),
-      createGroup:   (opts)                           => earBridge.createGroup(opts),
+      // `via`: the account that makes the group — the primary, which has every contact (2026-10-18).
+      createGroup:   async (opts, { via = null } = {}) => {
+        const on = postBridgeFor(via);
+        const created = await on.createGroup(opts);
+        const id = created?.chatID ?? created?.chatId;
+        if (id) holds(on, id);
+        return created;
+      },
       // /send's post_back_from (operator 2026-10-03): 'primary' posts via the operator's OWN account,
       // 'secondary' via the mouth. Resolve the NAMED connection to its already-dialled bridge (the
       // SAME bridgeByEndpoint/endpointFor map every other outbound uses), falling back to the ear
@@ -3243,34 +3280,35 @@ export async function boot({
       // `unsigned` (operator 2026-10-04, /send) threads straight into the SAME send as skipSignature:
       // the relay posts back AS THE OPERATOR with no node signature (no visible 🏰, no invisible tag),
       // while still flowing through .send so its sent id is tracked for echo-dedup like any other post.
-      postReply:     (chatId, text, replyToMessageID, { via = null, unsigned = false, canary = null } = {}) =>
-        postBridgeFor(via).send(chatId, text, { replyTo: replyToMessageID, skipSignature: unsigned, canary }),
-      archiveChat:   (chatId)                         => earBridge.archiveChat(chatId),
-      chatAccountId: async (chatId) => { try { return (await earBridge.chatRaw(chatId))?.accountID ?? null; } catch { return null; } },
-      chatRaw:       (chatId)                         => earBridge.chatRaw(chatId),   // the super-channel liveness check
-      chatOtherPartyId: (chatId) => earBridge.chatOtherPartyId(chatId),   // 1:1 counterparty → the super-channel invite
+      // 'secondary' is said through the one placement (sayOnce): the mouth in its OWN room for the chat
+      // (the stored mouth_chat, else routeLocally), else the connection holding it; not said → the
+      // primary. Never found by title. `canary`: a side group's opener names the group (persona-wrap).
+      postReply:     async (chatId, text, replyToMessageID, { via = null, unsigned = false, canary = null } = {}) => {
+        const opts = { replyTo: replyToMessageID, skipSignature: unsigned, canary };
+        if (via === 'secondary' && await sayOnce({ chatId, text, opts, what: '/send' })) return true;
+        return postBridgeFor(via === 'secondary' ? 'primary' : via).send(chatId, text, opts);
+      },
+      archiveChat:   (chatId, { via = null } = {})    => postBridgeFor(via).archiveChat(chatId),   // via: the connection /end arrived on
+      chatAccountId: async (chatId) => { try { return (await sideChatRaw(chatId))?.accountID ?? null; } catch { return null; } },
+      chatRaw:       (chatId)                         => sideChatRaw(chatId),   // the side-group liveness check
       chatTitle:     (chatId)                         => earBridge.getChatName(chatId),
-      listMessagesRaw: (chatId, opts)                 => earBridge.listMessagesRaw(chatId, opts),   // /send reads the replied-to message's live text
+      listMessagesRaw: (chatId, opts = {})            => postBridgeFor(opts.via).listMessagesRaw(chatId, opts),   // /send reads the replied-to message's live text
       // RODZ'S BEEPER USER ID (operator 2026-10-03) — the create needs `@whatsapp_lid-…`, not a
       // +phone (the API rejects it). Resolved from config.beeper.secondary.phone by scanning this
       // account's rosters (phoneNumber+id ride together on every participant).
       resolveUserIdByPhone: (phoneDigits, opts) => earBridge.resolveUserIdByPhone(phoneDigits, opts),
-      // THE SECONDARY'S OWN ROOM ID for the new side-group (operator 2026-10-03, the OPENER) — the
-      // group is created on the primary, but Beeper gives the SECONDARY (Rodz) its own room id for the
-      // same group, surfaced async, under the SAME title. Resolved on the SECONDARY bridge
-      // (postBridgeFor('secondary') — the SAME map /send's postReply routes through; single-account
-      // nodes collapse it to the ear bridge) by TITLE so the opener can be posted FROM RODZ.
-      resolveSecondaryChatIdByTitle: (title, opts) => postBridgeFor('secondary').resolveChatIdByTitle(title, opts),
-      // THE PRIMARY ACCOUNT'S OWN ROOM ID for a title (operator 2026-10-04, the TITLE-COLLISION check) —
-      // /join + /split probe it BEFORE creating the group: a group already titled this on the primary means
-      // a duplicate, and a duplicate title makes the opener's by-title lookup land in a STALE group, so the
-      // verb suffixes the title to keep it unique. Mirrors the secondary resolver, on postBridgeFor('primary')
-      // (the SAME map; single-account nodes collapse it to the ear bridge), scoped by accountID at the call.
-      resolvePrimaryChatIdByTitle: (title, opts) => postBridgeFor('primary').resolveChatIdByTitle(title, opts),
+      // Rodz's raw arrival in ANY chat that passes `test` — already arrived, else the next (bridge awaitMessage):
+      // its copy of a side group's opener names Rodz's own room for the group (commands.postOpener,
+      // linkSideGroup — on the other node it may beat the primary's copy). null with no mouth of its own.
+      awaitMouthMessage: (test, ms) => {
+        const mouth = postBridgeFor('secondary');
+        if (mouth === earBridge) return Promise.resolve(null);
+        const seen = (mouth.recentMessages?.(null) ?? []).find(test);
+        return seen ? Promise.resolve(seen) : (mouth.awaitMessage?.(null, test, ms) ?? Promise.resolve(null));
+      },
     },
     logToGroup,                                          // per-command audit → config.log_to_group (fail-closed, see above); the dispatch chokepoint emits ONE metadata-only line per command
-    noticeToAdmin,                                       // SI siphon (PART C): post one line to config.admin_channel (the EXISTING resolver+poster)
-    resolveAdminChatId: async () => { const r = await resolveAdminChat(); return r?.chatId ?? null; },   // SI siphon: admin_channel → chat id (reuses resolveAdminChat), null when unset/unresolvable
+    reportUndelivered,                                   // a side group's lost opener → one log_to_group line (above)
     requestLogin,                                        // /login <site> → the auto-login limb (src/spine/login.mjs); returns an outcome token, never a credential
     onChromeLog: (m) => log.line?.(`[chrome] ${m}`),    // group Chrome launches / refusals ("no browser for …")
     onLog: (m) => log.line?.(`[command] ${m}`),
@@ -3302,7 +3340,7 @@ export async function boot({
   // on this node's EAR, and neither of which exists on the mouth's account when the two are
   // different Beeper accounts. shellAwareBridgeOf, not rawBridgeOf, to match the `bridge` above:
   // a mesh reply into a shell-owned chat must still reach the console.
-  const mesh = createMeshService({ bridge: shellAwareBridge, bridgeOf: shellAwareBridgeOf, brain, commands, getConfig, bodyEmojiOf, labelOf, getSelfChatId: selfChatId, loadState: _loadState, turns, onLog: (m) => log.line?.(`[mesh] ${m}`) });
+  const mesh = createMeshService({ bridge: shellAwareBridge, bridgeOf: shellAwareBridgeOf, brain, getConfig, bodyEmojiOf, labelOf, getSelfChatId: selfChatId, loadState: _loadState, turns, onLog: (m) => log.line?.(`[mesh] ${m}`) });
   bridge.onEdit((e) => mesh.onEdit({ msgId: e.msgId, newText: e.newText }));
 
   // Conversation-E LIMBS (ROADMAP §3): a reply may carry own-line action commands
@@ -3329,7 +3367,7 @@ export async function boot({
   // outcome returns to the being through the background wake (spine.wakeOnBackground).
   const mail = createEmail({ getConfig, fetch: fetchFn, readTranscript: (ev) => readTranscript(ev.chatId, { chatName: ev.chatName, network: ev.surface }), now, log: (m) => log.line?.(`[email] ${m}`) });
   const bookLimb = createBookLimb({ getConfig, fetch: fetchFn, ses: mail.ses, missingMail: mail.missing, now, log: (m) => log.line?.(`[book] ${m}`) });
-  const actions = createReplyActions({ bridge, bridgeOf: rawBridgeOf, peerMouth, bodyEmojiOf, labelOf, resolveConvDir, askAdvice: (a) => advice.ask(a), limbs: { book: bookLimb.book, email: mail.email }, actionsOf: (being) => getConfig()?.agents?.[being]?.actions, wake: (r) => spineLate?.wakeOnBackground(r), defaultKey, onLog: (m) => log.line?.(`[actions] ${m}`) });
+  const actions = createReplyActions({ bridge, bridgeOf: rawBridgeOf, peerMouth, bodyEmojiOf, labelOf, resolveConvDir, askAdvice: (a) => advice.ask(a), limbs: { book: bookLimb.book, email: mail.email }, actionsOf: (being) => getConfig()?.agents?.[being]?.actions, wake: (r) => spineLate?.wakeOnBackground(r), defaultKey, onUndeliverable: ({ being, chatId, what, reason }) => reportUndelivered({ what, chatId, being, why: reason }), onLog: (m) => log.line?.(`[actions] ${m}`) });
 
   // Heartbeats are DECLARATIVE now (operator 2026-07-01): the loader collects
   // them from the node config.heartbeats block + every conversation/room entity's
@@ -3617,7 +3655,7 @@ export async function boot({
   });
   // backgroundWork: what a restart drain waits for. Held by the daemon, it survives a spine restart, so
   // there is nothing to wait for; spawned by this spine (no daemon host), it dies with it.
-  const spine = createSpine({ bridge, bridgeOf: rawBridgeOf, peerMouth, brain, turns, ...services, commands, mesh, actions, backgroundWork: () => (cliHost ? [] : liveBackground()), background, advice, guard, guardOverride, fromThisNode, say: sayOnce, logToGroup: (text) => logToGroup(`${getConfig()?.node_name ?? '?'} · ${text}`), stopSwitch, isSelfChat, isTransit: (ev) => isRelayChannelChat(getConfig(), ev), roomRelay, readTranscript, refreshConfig: heartbeatLoader.reload, applyConfig, configBootHash, readConfigHash, requestRestart: () => announceAndExit(43), radioRelay: radioRelay.relay, synthesize: vx.synthesize, voice: vx.voice, defaultBeing: defaultKey, labelOf, timeZone: transcriptTimeZone, clock: { now }, log, turnTimeoutMs, livenessEveryMs, tickMs: effectiveTickMs, setInterval: setIntervalFn, clearInterval: clearIntervalFn, probe: lagProbe, intakeCap: () => intakeCap(lagProbe.load?.()), stopPhrase: () => getConfig()?.stop_phrase });
+  const spine = createSpine({ bridge, bridgeOf: rawBridgeOf, peerMouth, brain, turns, ...services, commands, mesh, actions, backgroundWork: () => (cliHost ? [] : liveBackground()), background, beeperUpdate, advice, guard, guardOverride, fromThisNode, say: sayOnce, logToGroup: (text) => logToGroup(`${getConfig()?.node_name ?? '?'} · ${text}`), stopSwitch, isSelfChat, isTransit: (ev) => isRelayChannelChat(getConfig(), ev), roomRelay, readTranscript, refreshConfig: heartbeatLoader.reload, applyConfig, configBootHash, readConfigHash, requestRestart: () => announceAndExit(43), radioRelay: radioRelay.relay, synthesize: vx.synthesize, voice: vx.voice, defaultBeing: defaultKey, labelOf, timeZone: transcriptTimeZone, clock: { now }, log, turnTimeoutMs, livenessEveryMs, tickMs: effectiveTickMs, setInterval: setIntervalFn, clearInterval: clearIntervalFn, probe: lagProbe, intakeCap: () => intakeCap(lagProbe.load?.()), stopPhrase: () => getConfig()?.stop_phrase });
   // Bind the advice service's answer-routing dispatch now that the spine exists: an
   // operator answer in the advice channel re-enters the pipe as a turn in the origin chat.
   advice.useDispatch(spine.handleInbound);

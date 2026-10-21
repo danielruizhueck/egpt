@@ -51,7 +51,7 @@ export function agentRoutes(cfg) {
   for (const [name, agent] of Object.entries(cfg?.agents ?? {})) {
     if (!agent || typeof agent !== 'object' || name.startsWith('_')) continue;
     // The pin names a NETWORK the operator types (`surface: shell`); resolve it through THE
-    // network→surface map here, once, so routeToNode compares it against an ev.surface built
+    // network→surface map here, once, so a caller compares it against an ev.surface built
     // from the SAME map. router.mjs applies the identical resolution to the identical key.
     const surface = agent.surface != null ? surfaceOf(String(agent.surface).toLowerCase()) : null;
     for (const p of agentPaths(agent)) {

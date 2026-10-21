@@ -64,6 +64,8 @@ beeper:
   #   account: "other@example.com"
   #   token: "PASTE_YOUR_TOKEN_HERE"
   # use: main                     # OPTIONAL override of the default mouth - see above
+  # auto_update:                  # keeping Beeper itself current: auto | manual | none
+  #   windows: { method: manual } # the default: a log_to_group notice, install on /<handle> update beeper
 
 # --- This node's identity ----------------------------------------------------
 node_name: kg                     # REQUIRED - this node's name on the network, and the
@@ -81,20 +83,6 @@ user_name: "John"                  # the human here; shown as <user_name>@<surfa
 wake_up:
   enabled: true
   frequency_minutes: 30   # egpt wakes up from sleep to check around: heartbeats, pending interactions
-
-# --- Super channel (opt-in) ---------------------------------------------------
-# A per-conversation SIDE CHANNEL where the bot speaks so its replies stop
-# polluting the main chat. Like /join it is an ALIAS of the original conversation
-# (one shared thread/transcript, two chat surfaces), NOT a diverging /split copy.
-# Summoned by an inbound message EQUAL to one of `triggers` from ANY
-# participant - so a counterparty can read the reply there; close it with /end.
-# Off unless `triggers` has a phrase. Created only by the node_role: primary node (like /join).
-# NOTE: QUOTE mode - bare on/off are YAML booleans, not the auto-mode strings.
-# super_chats:
-#   triggers: [ "SI chat" ]     # exact whole-message phrases, any sender; none => SI off
-#   suffix: "-super"            # channel title = <this chat's title> + suffix
-#   mode: "on"                  # MUST be quoted ("on"/"off" are YAML booleans)
-#   opener: "🌟 Super channel of {chat} - same agents, same conversation. Reply /send to a message to copy it back; /end to close."
 
 # peer_nodes - node identities sharing THIS Beeper account (include self).
 # Nodes on DIFFERENT accounts appear as distinct room members and need no listing;
@@ -266,6 +254,8 @@ networks:
     allowed_users: [] # id of user allowed to issue commands in the chat_ids
   telegram: { chat_ids: [], allowed_users: [] }
   signal:   { chat_ids: [], allowed_users: [] }
+# commands anyone in a chat may run; a chat's own conversations.yaml list replaces it
+# public_commands: [join, split, send, end]
 
 # --- Dispatch: global E-routing knobs ----------------------------------------
 # E is a sibling, not a network, so these live OUTSIDE the transport blocks.
