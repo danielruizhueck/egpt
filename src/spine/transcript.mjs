@@ -90,7 +90,7 @@ export function createTranscript({
   // lands here too (operator 2026-08-07).
   // The (surface, chatId) a write lands on — synchronous, so each write takes its file's chain in call order.
   function whereOf(ev) {
-    const joinedRoom = currentRoomOf(ev.surface);
+    const joinedRoom = currentRoomOf(ev.surface, ev.chatId);
     // Surface 'room' is BOTH identity.SHELL_SURFACE (the shell's own transport) AND the literal
     // surface a caller uses to address a room DIRECTLY with an already-resolved chatId (e.g. the
     // room-relay tunnel's re-entry, which carries a wa-group's line into the room it joined as a

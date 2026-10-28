@@ -2888,7 +2888,7 @@ export async function boot({
     // here. Safe forward reference: this callback only ever fires later, on an actual write,
     // by which time `commands` is assigned (mirrors createSpine's own construction site further
     // down, which passes commands.currentRoomOf directly because by THAT point commands exists).
-    transcript: createTranscript({ contacts, persona: labelOf(defaultKey), defaultKey, labelOf, timeZone: transcriptTimeZone, io, currentRoomOf: (surface) => commands.currentRoomOf(surface),
+    transcript: createTranscript({ contacts, persona: labelOf(defaultKey), defaultKey, labelOf, timeZone: transcriptTimeZone, io, currentRoomOf: (surface, chatId) => commands.currentRoomOf(surface, chatId),
       // a stranger's new 1:1 is created with its stranger agent as the conversation's default
       seedOf: (ev) => { const b = strangerAgentFor(ev, getConfig()); return b ? { [b]: { default: true } } : null; },
       onLog: (m) => log.line?.(`[transcript] ${m}`) }),

@@ -665,14 +665,19 @@ export function createCommands({
   // only now: /rooms marks it "(current)", /rooms <slug> leave clears it. It NO LONGER gates
   // /members (bug fix 2026-07-23: /members operates on the CURRENT CONVERSATION's room, the
   // room the relay reads — see resolveConvRoom). Kept in-memory; a fresh boot starts with none.
-  const currentRoom = new Map();   // surface -> room slug
+  // Keyed per CHAT on every surface except the console (2026-10-28, Daniel «ok a todo»). A
+  // /rooms join typed in one WhatsApp group used to join the whole surface, so every WhatsApp
+  // chat wrote into that room (SEOYGEO con creativo, 24/10 → 25/10). The console is one seat,
+  // so its key stays the surface alone.
+  const roomKeyOf = (surface, chatId) => (surface === SHELL_SURFACE ? surface : `${surface}\u0000${chatId ?? ''}`);
+  const currentRoom = new Map();   // roomKeyOf(surface, chatId) -> { surface, chatId, slug }
   const surfaceOf = (ev) => ev?.surface ?? 'whatsapp';
-  const curRoomName = (ev) => currentRoom.get(surfaceOf(ev)) ?? null;
-  // The ONE reader onto the ONE currentRoom map, keyed by surface directly (not an ev) — so
-  // boot.mjs's shell-limb wiring can ask "is this surface currently in a named room?" before
+  const curRoomName = (ev) => currentRoom.get(roomKeyOf(surfaceOf(ev), ev.chatId))?.slug ?? null;
+  // The ONE reader onto the ONE currentRoom map, keyed by surface and chat (not an ev) — so
+  // boot.mjs's shell-limb wiring can ask "is this chat currently in a named room?" before
   // handing an inbound event to the shared dispatch, without a second current-room map. Still
   // written ONLY by roomJoin/roomLeave below.
-  const currentRoomOf = (surface) => currentRoom.get(surface) ?? null;
+  const currentRoomOf = (surface, chatId) => currentRoom.get(roomKeyOf(surface, chatId))?.slug ?? null;
 
   // A room-scoped command (/members, /activate, /radio join|leave|say, the r-quickreply) resolves
   // its Room here.
@@ -691,7 +696,7 @@ export function createCommands({
   // and the per-surface transcript FILE (radioQuickReply) resolve from ONE selector and can never
   // disagree about which conversation a command targets.
   const convScopeOf = (ev) => {
-    const joined = currentRoomOf(surfaceOf(ev));
+    const joined = currentRoomOf(surfaceOf(ev), ev.chatId);
     return { surface: joined ? 'room' : surfaceOf(ev), chatId: joined ?? ev.chatId };
   };
   const convRoomOf = (ev) => { const s = convScopeOf(ev); return resolveConvRoom(s.surface, s.chatId); };
@@ -1439,7 +1444,7 @@ export function createCommands({
       if (r.error) { await send?.(ev.chatId, `/agents: ${r.error}`); return; }
       surface = r.surface; jid = r.jid; where = `for ${r.name}`;
     } else {
-      const room = currentRoomOf(ev.surface);
+      const room = currentRoomOf(ev.surface, ev.chatId);
       if (room) {
         const r = resolveTarget(state, room, ev.surface);
         if (r.error) { await send?.(ev.chatId, `/agents: ${r.error}`); return; }
@@ -2308,14 +2313,14 @@ export function createCommands({
   // targets). In-memory for Phase 2; a room folder materializes when its first member is
   // added (setMember mkdir's it) or via /rooms create.
   async function roomJoin(ev, slug) {
-    currentRoom.set(surfaceOf(ev), slug);
+    currentRoom.set(roomKeyOf(surfaceOf(ev), ev.chatId), { surface: surfaceOf(ev), chatId: ev.chatId, slug });
     onRoomChange(surfaceOf(ev), slug);
     await send?.(ev.chatId, `joined '${slug}' — now current.`);
   }
 
   // /rooms <slug> leave — clear the current room for this surface iff it IS <slug>.
   async function roomLeave(ev, slug) {
-    if (curRoomName(ev) === slug) { currentRoom.delete(surfaceOf(ev)); onRoomChange(surfaceOf(ev), null); await send?.(ev.chatId, `left '${slug}' — no current room.`); return; }
+    if (curRoomName(ev) === slug) { currentRoom.delete(roomKeyOf(surfaceOf(ev), ev.chatId)); onRoomChange(surfaceOf(ev), null); await send?.(ev.chatId, `left '${slug}' — no current room.`); return; }
     await send?.(ev.chatId, `not in '${slug}' — current room is ${curRoomName(ev) ? `'${curRoomName(ev)}'` : 'none'}`);
   }
 
@@ -2339,7 +2344,7 @@ export function createCommands({
       }
     }
     await rm(room.baseDir(), { recursive: true, force: true });
-    for (const [surface, cur] of currentRoom) if (cur === slug) { currentRoom.delete(surface); onRoomChange(surface, null); }
+    for (const [key, cur] of currentRoom) if (cur.slug === slug) { currentRoom.delete(key); onRoomChange(cur.surface, null); }
     await send?.(ev.chatId, `room ${slug} deleted`);
   }
 

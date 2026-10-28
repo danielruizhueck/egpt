@@ -1091,3 +1091,33 @@ describe('/rooms <slug> members — named-room inspection (kept, separate from /
     expect((await (await resolveConvRoom(self.surface, self.chatId)).members()).map((m) => m.id)).toEqual(['chatgpt']);
   });
 });
+
+// /rooms join is per CHAT, not per surface (2026-10-28). A join typed in one WhatsApp group
+// used to make EVERY WhatsApp chat write into that room (SEOYGEO con creativo, 24/10 → 25/10).
+describe('/rooms join belongs to the chat that typed it, not to the whole WhatsApp surface', () => {
+  it('a room joined in one WhatsApp group does not capture another WhatsApp group', async () => {
+    const cdp = { listTabs: async () => threeTabs };
+    const { cmds, sent, resolveConvRoom } = harness({ cdp });
+    const groupA = { chatId: '!group-a', surface: 'whatsapp' };
+    const groupB = { chatId: '!group-b', surface: 'whatsapp' };
+    await cmds.run({ ...groupA, body: '/rooms join devwork' });
+    await cmds.run({ ...groupB, body: '/members add tab 1' });
+    expect(sent.at(-1).text).toMatch(/added 'chatgpt'/);
+
+    const nativeB = await resolveConvRoom('whatsapp', '!group-b');
+    expect((await nativeB.members()).find((m) => m.id === 'chatgpt')).toBeTruthy();
+    const joined = await resolveConvRoom('room', 'devwork');
+    expect((await joined.members()).find((m) => m.id === 'chatgpt')).toBeFalsy();
+  });
+
+  it('the group that typed /rooms join still lands its own commands in the joined room', async () => {
+    const cdp = { listTabs: async () => threeTabs };
+    const { cmds, sent, resolveConvRoom } = harness({ cdp });
+    const groupA = { chatId: '!group-a', surface: 'whatsapp' };
+    await cmds.run({ ...groupA, body: '/rooms join devwork' });
+    await cmds.run({ ...groupA, body: '/members add tab 1' });
+    expect(sent.at(-1).text).toMatch(/added 'chatgpt'/);
+    const joined = await resolveConvRoom('room', 'devwork');
+    expect((await joined.members()).find((m) => m.id === 'chatgpt')).toBeTruthy();
+  });
+});
