@@ -70,6 +70,21 @@ describe('dangerouslySkipPermissions:true — the actual bypass (operator 2026-0
   });
 });
 
+describe('chrome:true — Claude in Chrome (--chrome), full-access sessions only', () => {
+  it('adds --chrome on the full-access (dangerouslySkipPermissions) tier', () => {
+    expect(has(buildClaudeArgs({ dangerouslySkipPermissions: true, chrome: true, allowedTools: ['Read'] }), '--chrome')).toBe(true);
+  });
+  it('absent by default and for chrome:false', () => {
+    expect(has(buildClaudeArgs({ dangerouslySkipPermissions: true, allowedTools: ['Read'] }), '--chrome')).toBe(false);
+    expect(has(buildClaudeArgs({ dangerouslySkipPermissions: true, chrome: false }), '--chrome')).toBe(false);
+  });
+  it('NEVER on the restricted tiers (regular/confined, plain allow-list) even with chrome:true', () => {
+    expect(has(buildClaudeArgs({ chrome: true, confineToDirs: ['/room'], allowedTools: ['Read', 'Grep'] }), '--chrome')).toBe(false);
+    expect(has(buildClaudeArgs({ chrome: true, allowedTools: ['Read'] }), '--chrome')).toBe(false);
+    expect(has(buildClaudeArgs({ chrome: true, dangerouslySkipPermissions: true, confineToDirs: ['/room'], allowedTools: ['Read'] }), '--chrome')).toBe(true);   // bypass tier wins, as for the other flags
+  });
+});
+
 describe('sandbox (confineToDirs) — directory access control + settings isolation', () => {
   const a = buildClaudeArgs({
     allowedTools: ['Read', 'Grep', 'WebFetch', 'Bash'],

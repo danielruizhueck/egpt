@@ -400,6 +400,7 @@ function shapeDef(name, def, agent = {}, brainType = 'ccode') {
     // ABOVE this one (see resolveConv), it did not retire it — this carry IS the bottom tier, and
     // wren's live egpt-xhigh.yaml sets verbose_thinking here and in neither config.yaml tier.
     verbose_thinking: def?.verbose_thinking === true,
+    chrome: def?.chrome === true,   // Claude in Chrome (--chrome); read by baseOpts, honoured only on the full-access tier
   };
 }
 
@@ -1304,6 +1305,7 @@ export function createBrainPool({
         ...(narrowedTools ? { tools: [...new Set(narrowedTools.map(toolBase))] } : {}),
         ...(runModel ? { model: runModel } : {}),
         ...(runEffort ? { effort: runEffort } : {}),
+        ...(def.chrome === true ? { chrome: true } : {}),
         ...(appendSystemPrompt ? { appendSystemPrompt } : {}),
         // Resume the conversation's OWN thread, or null = fresh. NOT
         // default_brain.session_id — that would cross-wire every chat onto one

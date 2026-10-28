@@ -93,6 +93,14 @@ describe('conversations.yaml agents.<being>.configuration — one resolver, per 
     expect(pool.calls[1].brainOptions).toMatchObject({ model: 'sonnet', effort: 'high' });
   });
 
+  it('chrome: true travels like model/effort - per-chat inline configuration reaches brainOptions; absent by default', async () => {
+    const { brain, pool } = await harness({ beings: { [`whatsapp/${GROUP}`]: { egpt: { configuration: { type: 'ccode', model: 'opus', effort: 'high', chrome: true } } } } });
+    await brain.turn('egpt', groupEv);
+    await brain.turn('egpt', otherEv);
+    expect(pool.calls[0].brainOptions.chrome).toBe(true);
+    expect(pool.calls[1].brainOptions).not.toHaveProperty('chrome');
+  });
+
   it('an INLINE map works too — the same second form config.yaml takes', async () => {
     const { brain, pool } = await harness({ beings: { [`whatsapp/${GROUP}`]: { egpt: { configuration: { type: 'ccode', model: 'opus', effort: 'xhigh' } } } } });
     await brain.turn('egpt', groupEv);

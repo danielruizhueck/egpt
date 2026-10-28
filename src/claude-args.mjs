@@ -156,6 +156,8 @@ export function buildClaudeArgs(options = {}) {
     args.push('--dangerously-skip-permissions');
     args.push('--permission-mode', 'bypassPermissions');
   }
+  // Claude in Chrome: full-access (bypass) sessions only - never the regular/confined tiers.
+  if (options.chrome === true && options.dangerouslySkipPermissions === true) args.push('--chrome');
   if (Array.isArray(options.tools)) args.push('--tools', options.tools.join(','));
 
   // ── tool permission + confinement (mirror buildSdkOptions) ──
