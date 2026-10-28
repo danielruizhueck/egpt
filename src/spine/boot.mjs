@@ -9,7 +9,7 @@
 // end-to-end against fakes — the real services + real warm pool, fakes only at
 // the transport + process boundary (tests/spine-boot.test.mjs).
 import { readFile, writeFile, mkdir, unlink, readdir, rename, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, basename, extname, isAbsolute } from 'node:path';
 import { spawnSync, spawn } from 'node:child_process';
 
 import { createSpine } from './spine.mjs';
@@ -18,7 +18,11 @@ import { createLagProbe, intakeCap } from './lag-probe.mjs';
 import { EGPT_HOME } from '../egpt-home.mjs';
 import { createBeeperBridgePort } from '../bridges/beeper-port.mjs';
 import { createShellPort, shellPortFrom } from '../bridges/shell-port.mjs';
+import { startTelegramBridge, readTelegramToken, isTelegramChatId, topicGroupOf } from '../bridges/telegram.mjs';
+import { startHttpBridge, isHttpChatId, httpClientOf, renderTopicTitle } from '../bridges/http.mjs';
+import { AYDE_USERS_FILE } from '../bridges/http-ayde.mjs';
 import { shellTokenFrom } from '../shell/auth.mjs';
+import { readSecret, SHELL_TOKEN_FILE } from '../secrets.mjs';
 // THE MOUTH LINK (operator 2026-09-05): the peer spine holding the OTHER Beeper account, the
 // receiving half this node offers on its own console, and the speaking half the reply path uses.
 import { peerSpineFrom, createMouthReceiver, speakThroughPeer, startPeerStream, reactThroughPeer, findChatByKey, findChatByLastMessage, findMessageByKey } from '../shell/peer-mouth.mjs';
@@ -26,26 +30,29 @@ import { peerSpineFrom, createMouthReceiver, speakThroughPeer, startPeerStream, 
 // LOCAL mouth below keys with the same primitive the peer link keys with; there is one definition
 // of "which of MY chats is that ONE real chat" and both transports ask it.
 import { crossAccountChatKey, LISTENING_REACTION, _msgTimestampMs } from '../bridges/beeper.mjs';
-import { createBeeperUpdate } from '../tools/beeper-update.mjs';
+import { createBeeperUpdate, holdLine } from '../tools/beeper-update.mjs';
+import { createSandboxPinReleaser } from './sandbox-pins.mjs';
 import { htmlToMarkdown } from '../html-to-markdown.mjs';
 import { mergeAudit } from './audit-merge.mjs';
 import { createWarmPool } from '../warm-sessions.mjs';
 import { createBrainSession } from '../brain-session.mjs';
 import { createSandboxCliSession, spawnBoxedCommand } from '../sandbox-cli-session.mjs';
 import { connectCliHost } from '../cli-host.mjs';
+import { defaultIsAlive, heldExclusive } from '../daemon-singleton.mjs';
 import { raiseSelfToNormal } from '../process-priority.mjs';
-import { readConfigSync, configContentHashSync } from '../tools/config-io.mjs';
+import { readConfigSync, configContentHashSync, beeperBlockOf, spliceYamlKey, CONFIG_YAML_PATH } from '../tools/config-io.mjs';
 import { restartKeysChanged, changedKeys } from './config-swap.mjs';
+import { createClosedChats } from './closed-chats.mjs';
 import { reapPort } from '../tools/reap-port.mjs';
 // THE liveness question for a Beeper install, already written and already tested
 // (tests/beeper-whoami.test.mjs): GET /v1/accounts with a candidate's OWN token. Imported, never
 // re-implemented — a second probe here would be a second thing to get wrong about what a 401 means.
 import { probe as probeBeeperEndpoint } from '../tools/beeper-whoami.mjs';
-import { Room, CONVERSATIONS_ROOT, ROOMS_ROOT, AGENTS_ROOT, HEARTBEATS_DIR } from '../room-core.mjs';
+import { Room, CONVERSATIONS_ROOT, ROOMS_ROOT, AGENTS_ROOT, HEARTBEATS_DIR, CHAT_MEMBER_KINDS } from '../room-core.mjs';
 import { loadAdapterModule } from '../adapters/registry.mjs';
 import {
   CONV_YAML_PATH, readState as readConvState, writeState as writeConvState, slugDir, getContact, residentsOf, LOBBY_SLUG, fixedSlugFor,
-  aliasMouthInfo, setAliasMouthChat,
+  aliasMouthInfo, setAliasMouthChat, mutateState, moveChatId, isForkEntry,
 } from '../conversations-state.mjs';
 import { createStopGuard, STOP_FILE, stopFilePresent, writeStopFile, anyChannel, pauseNotice, normalizeLine } from '../stop-guard.mjs';
 import { createFloodBan } from '../flood-ban.mjs';
@@ -60,7 +67,7 @@ import { createGating } from './gating.mjs';
 // createRouter + THE wake vocabulary. wakeTokens is the ONE rule for "which @tokens address this
 // agent" (declared `handles:`, else the map key) — imported, not re-implemented, so the persona
 // wake set boot hands the ports and the router's own @token scan can never disagree again.
-import { createRouter, wakeTokens, voiceWakeTokens, fallbackWake, strangerAgentFor } from './router.mjs';
+import { createRouter, wakeTokens, voiceWakeTokens, fallbackWake, strangerAgentFor, addressableTokens, agentsInChat, STRANGER_SEED, configWarnings, isLocalAgent, ownersOf, isOwner } from './router.mjs';
 import { createTranscript } from './transcript.mjs';
 // createSender: the reply path. makeOutbound: the ONE answer to "which connection does this
 // outbound go out on" (sender.mjs's header), asked by makePeerMouth below rather than copied.
@@ -74,12 +81,15 @@ import { fanoutInbound } from './bridge-fanout.mjs';
 // relay_channel, so not a conversation at all) and whether a frame was committed by ANOTHER
 // node's spine. Both derive from the SAME agents block / node identity every other gate reads.
 import { fromOtherNode, isRelayChannelChat, ownNodeNamesOf } from './node-names.mjs';
-import { createIngest, lifecycleExit, lifecycleForce, isShellConnectMarker } from './ingest.mjs';
+import { createIngest, lifecycleExit, lifecycleForce, isShellConnectMarker, toLine, createIngestAsks, INGEST_ASK, answerOf } from './ingest.mjs';
+import { savedEntry, withMediaLines } from '../bridges/limb-intake.mjs';
+import { MIME_BY_EXT, mediaKind } from '../media-kind.mjs';
+import { reactionEmoji } from '../dispatch-line.mjs';
 import { createCommands, loginProfilePathOf } from './commands.mjs';
 import { createLoginLimb } from './login.mjs';
 import { readChromeCredential } from '../tools/chrome-creds.mjs';
 import { createBeingLink } from './being-link.mjs';
-import { createReplyActions } from './reply-actions.mjs';
+import { createReplyActions, confinedFile } from './reply-actions.mjs';
 import { createEmail } from './email.mjs';
 import { createBookLimb } from './book.mjs';
 import { createAdvice } from './advice.mjs';
@@ -110,10 +120,10 @@ import { createOutboxDrain } from '../room-outbox.mjs';
 import { createHeartbeats } from './heartbeats.mjs';
 import { createHeartbeatLoader, parseFrequency, resolveTimeZone } from './heartbeat-loader.mjs';
 import { createConfigResolver, parseEntityConfig, readHeartbeatFiles } from './config-resolver.mjs';
-import { seedSkeletons } from './seed.mjs';
+import { seedSkeletons, copyTreeIfMissing } from './seed.mjs';
 import { readRoomConfig, readRoomsFile, roomsFilePath, agentsFilePath } from '../rooms-file.mjs';
 import { RACY_MS } from '../stat-cache.mjs';
-import { isSilenceReply } from '../auto-mode.mjs';
+import { isSilenceReply, mentionStatus } from '../auto-mode.mjs';
 import { isBrainFailureResult } from '../brain-errors.mjs';
 
 // STRAY WHISPER-SERVER REAP (operator 2026-07-10): dropping `local` from a
@@ -165,6 +175,11 @@ export function shouldReapStrayWhisper(cfg) {
 // the profile) still carries the port of the orphan we must kill — else the worker
 // resident-server port (transcriptor.server.port, then DOLLY's audio_transcribe.server.port),
 // else the whisper-server default.
+// The shell / being-link token: config.yaml's shell.token, else $EGPT_HOME/secrets/shell.token (tokens live in a folder).
+export function shellTokenOf(cfg, home = EGPT_HOME) {
+  return shellTokenFrom(cfg) || (readSecret(home, SHELL_TOKEN_FILE).token ?? '');
+}
+
 export function whisperPortOf(cfg) {
   const profile = activeTxProfile(cfg);
   for (const [name, eng] of Object.entries(profile)) {
@@ -176,14 +191,6 @@ export function whisperPortOf(cfg) {
   return WHISPER_DEFAULT_PORT;
 }
 
-// Make a STREAMING sender shell-aware. createSender renders through its injected `bridge`
-// (`bridge.send` / `bridge.startStream`); handed the raw beeper bridge, a streamed @e /
-// brain-member reply on a shell-owned chat streamed to Beeper and never reached the editor
-// (the command `send` closure was the only shell-aware path — why /status showed in the shell
-// but a streamed reply did not). This facade delegates the methods createSender + the mesh
-// service call to shellPort for shell-owned chat ids and to the real bridge otherwise; every other bridge
-// method passes through unchanged (spread first). Pure so the routing is testable directly
-// (mirrors the other top-level boot helpers). The beeper path for non-shell chats is untouched.
 // Redirect a shell inbound event to its CURRENT joined room, if any — "entering a
 // room is like typing in another chat" (operator): once `/rooms join acim` sets the shell's
 // current room, a plain or `@e`-addressed message typed at the shell must dispatch as
@@ -201,7 +208,7 @@ export function whisperPortOf(cfg) {
 // the redirect also `claim`s it on shellPort (the SAME ownership signal `owns()` already
 // keys outbound routing on for the console seat), or the reply would be handed to the beeper
 // bridge instead of pushed back over this socket. Pure aside from that one registration call,
-// so the redirect decision itself is testable directly (mirrors makeShellAwareBridge below).
+// so the redirect decision itself is testable directly (mirrors makeLimbAwareBridge below).
 export function redirectShellToRoom(msg, { currentRoomOf, claim } = {}) {
   // Commands (anything slash-prefixed) are never part of the room fan-out — this feature is
   // "prose fan-out to the current room", not "commands run against the room". Without this
@@ -217,24 +224,36 @@ export function redirectShellToRoom(msg, { currentRoomOf, claim } = {}) {
   return { ...msg, from: { ...(msg?.from ?? {}), network: 'room', chatId: room } };
 }
 
-export function makeShellAwareBridge(bridge, shellPort) {
-  return {
-    ...bridge,
-    send: (c, t, o) => (shellPort.owns(c) ? shellPort.send(c, t, o) : bridge.send(c, t, o)),
-    startStream: (c, i, tag) => (shellPort.owns(c) ? shellPort.startStream(c, i, tag) : bridge.startStream(c, i, tag)),
-    // The mesh posts its origin placeholder ("🤔 thinking…") via postStatus, so a shell-origin
-    // relay (`@don` typed in the shell) must land that placeholder on the editor — not stream it
-    // to Beeper and drop it — the same reason send/startStream are wrapped, extended to the mesh
-    // return path (operator 2026-07-25). shellPort.postStatus returns null (no editable shell msg
-    // id), so the mesh's later edit/delete of the placeholder is a guarded no-op.
-    postStatus: (c, t) => (shellPort.owns(c) ? shellPort.postStatus(c, t) : bridge.postStatus(c, t)),
-  };
+// THE LIMB-AWARE FACADE. A chat a limb owns (`owns(chatId)`: the shell's seats, telegram's tg:
+// chats) is that limb's; Beeper is the default. Every chat-keyed bridge method below that some
+// limb implements goes to the first owning limb, else to the bridge; everything else is the
+// bridge's own (spread first). With the shell alone this is exactly the old shell-aware facade:
+// the shell has only send/startStream/postStatus (its postStatus returns null, so a mesh
+// placeholder edit there is a no-op). A new port method must be listed here or in the facade
+// test's not-chat-keyed list.
+export const LIMB_ROUTED_METHODS = [
+  'send', 'startStream', 'postStatus', 'editStatus', 'react', 'unreact', 'sendMedia',
+  'editOwn', 'editMessage', 'wasSentByUs', 'sendFailure', 'chatHasParticipant', 'getChatName',
+  'postVerbatim', 'startStreamVerbatim', 'chatRaw', 'listMessagesRaw', 'recentMessages', 'awaitMessage',
+  'archiveChat', 'resolveChatId', 'createGroup', 'setChatInfo',
+];
+export function makeLimbAwareBridge(bridge, ...limbs) {
+  if (!limbs.length) return bridge;
+  const routed = { ...bridge };
+  for (const m of LIMB_ROUTED_METHODS) {
+    if (!limbs.some((l) => typeof l?.[m] === 'function')) continue;
+    routed[m] = (c, ...rest) => {
+      const limb = limbs.find((l) => typeof l?.[m] === 'function' && l.owns?.(c));
+      return limb ? limb[m](c, ...rest) : bridge[m](c, ...rest);
+    };
+  }
+  return routed;
 }
 
 // ── WHICH MOUTH SAYS A REPLY (operator 2026-09-05, the peer-spine mouth link) ──────────────────
 // The SPEAKING half's two questions, in one object, handed to createSender — which is where the
 // decision is actually made (src/spine/sender.mjs header). Split out here for the same reason
-// makeShellAwareBridge and redirectShellToRoom are: it is the routing rule, it is pure but for
+// makeLimbAwareBridge and redirectShellToRoom are: it is the routing rule, it is pure but for
 // the injected bridge reads, and it is worth testing directly rather than through a whole boot.
 //
 // `route(chatId)` answers "should the PEER say this reply?" and, when it should, hands back the
@@ -624,7 +643,7 @@ export function chatIdForEntity(state, ns) {
   const slug = String(ns).slice(i + 1);
   if (!surface || !slug) return null;
   for (const [jid, entry] of Object.entries(state?.contacts?.[surface] ?? {})) {
-    if (!entry || entry.aliasOf || entry.slug !== slug) continue;
+    if (!entry || entry.aliasOf || isForkEntry(entry) || entry.slug !== slug) continue;   // a fork's folder is its parent's
     return { surface, chatId: jid };
   }
   if (fixedSlugFor(surface, slug) === slug) return { surface, chatId: slug };
@@ -911,20 +930,27 @@ export function createRadioNoteRelay({
 // room's own conversation lives on surface `room`, so a room turn has nothing it could match. That
 // is structural rather than a counter — without it, two rooms each listing the other's name would
 // re-enter into each other forever.
-export function createMemberResolver({ resolveConvRoom, readRooms = readRoomsFile } = {}) {
+//
+// Each entry is the inviting conversation's address { surface, chatId, chatName } plus the
+// `member` record that names this chat there (kind, title).
+export function createMemberResolver({ resolveConvRoom, readRooms = readRoomsFile, loadState = async () => null } = {}) {
   return async (surface, chatId) => {
     try {
       const tunnelRooms = [];
       if (surface !== SHELL_SURFACE) {
+        let state;
         for (const [ns, row] of Object.entries(await readRooms())) {
-          const listed = Array.isArray(row?.members) ? row.members : [];
-          if (!listed.some((m) => m && m.kind === 'wa-group' && String(m.id) === String(chatId))) continue;
-          // The row KEY is the room's ns — `<surface>/<slug>`, the same string Room.ns() emits —
-          // so the SLUG it names is the chatId the re-entry addresses the room by (a room is a
-          // contact on surface `room` whose chatId IS its name). A key with no surface prefix is
-          // not a room address; skip it.
-          const cut = String(ns).indexOf('/');
-          if (cut > 0) tunnelRooms.push(String(ns).slice(cut + 1));
+          const member = (Array.isArray(row?.members) ? row.members : []).find((m) => m && CHAT_MEMBER_KINDS.includes(m.kind) && String(m.id) === String(chatId));
+          if (!member) continue;
+          // The row KEY is the conversation's ns — `<surface>/<slug>`, the same string Room.ns()
+          // emits — resolved to its chat id the way every ns is (a room's chatId IS its name). A key
+          // that resolves to no conversation is not an address; skip it. Named by its slug where the
+          // slug is fixed (a room, a chatbox), else by its stored title (a re-entry never renames it).
+          state ??= (await loadState()) ?? {};
+          const to = chatIdForEntity(state, ns);
+          if (!to) continue;
+          const slug = String(ns).slice(String(ns).indexOf('/') + 1);
+          tunnelRooms.push({ ...to, chatName: fixedSlugFor(to.surface, to.chatId) ? slug : (state.contacts?.[to.surface]?.[to.chatId]?.pushedName || slug), member });
         }
       }
       const own = await resolveConvRoom(surface, chatId);
@@ -984,28 +1010,6 @@ export function stderrLine(s) { try { console.error(`${logStamp()} ${s}`); } cat
 
 const CONFIG_FILE = 'config/config.yaml';   // named in the fatal message so the operator knows where to fix it
 
-// The `agents:` block is the ONE registry (operator 2026-07-02, new-config-only): the
-// persona identity + local beings + mesh addressing all live here. It is REQUIRED, and
-// exactly ONE agent must carry `default: true` — that agent IS the persona (it answers
-// un-@mentioned messages and terminates relay chains that resolve to it). No agents block,
-// no default agent, or MORE THAN ONE default agent is a fatal misconfiguration, not a
-// silent fallback to a guessed default. Fail loudly so the operator fixes it — the
-// agent-identity refactor (operator 2026-07-10) removed the hardcoded e/egpt persona test:
-// the persona is `default: true`, its being-id is its MAP KEY, nothing about the key
-// string is magic anywhere below.
-function personaOf(cfg) {
-  const found = [];
-  for (const [name, a] of Object.entries(cfg.agents ?? {})) {
-    if (!a || typeof a !== 'object' || Array.isArray(a)) continue;
-    if (a.default === true) found.push({ name, agent: a });
-  }
-  if (found.length === 1) return found[0];
-  if (found.length === 0) {
-    throw new Error(`boot: no persona agent — config.agents must declare exactly one agent with \`default: true\` (${CONFIG_FILE}). See config/skeletons/config.yaml.`);
-  }
-  throw new Error(`boot: ${found.length} agents carry \`default: true\` (${found.map((f) => f.name).join(', ')}) — exactly one is allowed (${CONFIG_FILE}).`);
-}
-
 // The 👂 echo candidate set (see echoPlan in boot): peer_priority, else the legacy echo_priority,
 // else peer_nodes, else [self]; lowercased.
 const echoPeersOf = (cfg, nodeName) => (
@@ -1019,9 +1023,8 @@ const echoPeersOf = (cfg, nodeName) => (
 // before it is swapped in or restarted onto (step B): an invalid file never replaces a running one.
 export function assertConfig(cfg) {
   if (!cfg.agents || typeof cfg.agents !== 'object' || Array.isArray(cfg.agents)) {
-    throw new Error(`boot: config.agents must be a map declaring exactly one persona agent (\`default: true\`) — no agents block is a fatal misconfiguration (${CONFIG_FILE}). See config/skeletons/config.yaml.`);
+    throw new Error(`boot: config.agents must be a map of the node's agents — no agents block is a fatal misconfiguration (${CONFIG_FILE}). See config/skeletons/config.yaml.`);
   }
-  personaOf(cfg);
 
   // BOOT ASSERTION (operator 2026-09-13): access_level 'sandbox' FORCES the OS sandbox on
   // (brainpool.mjs resolveSandboxed, rung 1), so a `sandboxed: false` sitting beside it in the
@@ -1046,7 +1049,7 @@ export function assertConfig(cfg) {
   // is `node_name` TAG-ENCODED (src/node-signature.mjs) — so requiring the marker and requiring
   // the name are ONE requirement, not two. A separate `node_signature:` key could only ever hold
   // a redundant copy of node_name and a second chance to get it wrong; this is that ruling made
-  // executable. Same shape as the persona-agent throw above: a node that cannot say WHICH node it
+  // executable. Same shape as the agents-block throw above: a node that cannot say WHICH node it
   // is has no business posting to an account two spines share.
   // The VISIBLE bridge_signature_open/close stay optional and are NOT checked here — empty is a
   // legitimate configuration and must never block boot.
@@ -1070,6 +1073,7 @@ export async function boot({
   readConfig = readConfigSync,
   readConfigHash = configContentHashSync,   // () => config.yaml content hash, null while absent/malformed — the change detector's seam
   startBridge = null,                 // createBeeperBridgePort's `start` seam (null = real beeper)
+  startTelegram = null,               // the Telegram limb's `start` seam (null = real Bot API transport)
   makeSession = (opts) => (opts.sandboxed ? createSandboxCliSession(opts) : createBrainSession(opts)),   // engine-dispatching session factory (ccode remains default); sandboxed:true wraps the ccode session in setup/sandbox-logon-launcher.ps1's OS-level isolation
   loadState = null, writeState = null,// conv-state IO (null = real CONV_YAML_PATH)
   io = {},                            // fs seam for transcript + brainpool + contacts ({appendFile,mkdir,existsSync,rename}); real fs by default. Tests inject in-memory so they never touch the profile.
@@ -1105,6 +1109,8 @@ export async function boot({
   setTimeout: setTimeoutFn = globalThis.setTimeout,          // the KILL SWITCH warning's cap seam (below); injected so a test can drive the 3s timer instead of waiting for it
   fetch: fetchFn = (...a) => globalThis.fetch(...a),         // the /book calendar feed + SES seam; tests inject a fake so no request leaves
   cliHost = connectCliHost(),         // the daemon holding every claude session (src/cli-host.mjs); null = this spine spawns them
+  session1 = String(process.env.EGPT_SESSION1 ?? '').trim() === '1',   // this spine runs under the Session 1 daemon (setup/session1-daemon-launcher.vbs)
+  successorWaiting = () => heldExclusive(join(EGPT_HOME, 'state', 's1.claim')),   // the Session 1 daemon waits for this profile (src/daemon-runtime.mjs)
   backgroundFile = null,              // state/background.json's path when ingest is off (tests); ingest on → EGPT_HOME/state/background.json
   lagProbe: lagProbeIn = null,        // the lag probe (src/spine/lag-probe.mjs); a bench injects one to read the step timings
 } = {}) {
@@ -1218,11 +1224,7 @@ export async function boot({
   // Fatal on a bad config (assertConfig, above boot) — the same check a hot reload runs.
   assertConfig(cfg);
   const agents = () => cfg.agents ?? {};
-  const personaAgent = () => personaOf(cfg);
-  // The persona's being-id: the lowercased MAP KEY of the single default agent, resolved
-  // ONCE here and injected into the pure modules (router/gating/brainpool) that can't read
-  // config. Every persona check downstream compares against this, never against 'e'/'egpt'.
-  const defaultKey = personaAgent().name.toLowerCase();
+  for (const line of configWarnings(cfg)) log.line?.(`[boot] ${line}`);
   const node_name = String(cfg.node_name ?? '').trim();   // asserted non-empty: the structural node signature
 
   // A being's body_emoji + display label, resolved purely from the agents registry BY KEY
@@ -1270,12 +1272,14 @@ export async function boot({
     const a = agents()[String(being ?? '').toLowerCase()];
     return (a && typeof a === 'object' && a.agent_signature_close != null) ? a.agent_signature_close : (cfg.agent_signature_close ?? '');
   };
+  // Read once: limbs.beeper (or the pre-0049 top-level beeper:) is restart-only, so no swap moves it.
+  const beeperBlock = beeperBlockOf(cfg, { onDeprecated: (m) => log.line?.(`[bridge] ${m}`) });
   // Every CONNECTION declared under `beeper:`, in declaration order — the keys whose value is a
   // BLOCK, so the `use:` selector (a bare string) is never one of them. Same predicate
   // connectionBlock (below) uses to look one up, so any name this list yields is guaranteed to
   // resolve to a block there.
   const declaredConnections = (() => {
-    const b = cfg.beeper;
+    const b = beeperBlock;
     if (!b || typeof b !== 'object' || Array.isArray(b)) return [];
     return Object.keys(b).filter((k) => k !== 'auto_update' && b[k] && typeof b[k] === 'object');   // auto_update: Beeper's own updates, not a connection
   })();
@@ -1313,7 +1317,7 @@ export async function boot({
     return null;
   })();
   const defaultConnection = (() => {
-    const b = cfg.beeper;
+    const b = beeperBlock;
     if (!b || typeof b !== 'object' || Array.isArray(b)) return null;
     if (b.use != null) return b.use;
     return nameDerivedConnection;
@@ -1401,7 +1405,7 @@ export async function boot({
   // by construction the same group whose turn runs on room/acim's thread (operator 2026-08-31).
   // Hoisted here, above the brainpool, only because the brainpool is constructed first; the relay
   // further down takes this same value instead of building a second one.
-  const memberResolver = createMemberResolver({ resolveConvRoom });
+  const memberResolver = createMemberResolver({ resolveConvRoom, loadState: _loadState });
 
   // Voice/video transcription: the fallback CHAIN (remote node → local whisper-
   // server → cli), driven by config.transcription_service. One transcriber feeds
@@ -1421,6 +1425,7 @@ export async function boot({
   // the transcription pipeline's cli rung asks before loading a second model.
   let whisperWatch = null;
   if (ingest) {
+    tx.boot();   // an ECS whisper worker left awake gets its idle stop
     const wport = whisperPortOf(cfg);
     if (shouldReapStrayWhisper(cfg)) {
       const killed = reapPortFn(wport, (m) => log.line?.(`[whisper-reap] ${m}`), STRAY_WHISPER_REAP);
@@ -1465,59 +1470,47 @@ export async function boot({
   });
   if (ingest) synthesizerWorker.start();
 
-  // The persona wake-word set (operator 2026-07-09: SYMMETRIC nodes — each wakes on its OWN
-  // configured handles only, NOTHING is injected network-wide). ONE source of truth (the agents
-  // block, through the ONE rule — router.mjs wakeTokens): the persona agent's declared `handles:`,
-  // lowercased, or its map KEY when it declares none. So @e wakes only a node whose persona
-  // configures `e`; a node with handles [ed, egptd] wakes on @ed, NOT @e. (Reverted the 2026-07-08
-  // network-wide e/egpt injection — that overlap was self-inflicted and the whole suppression
-  // apparatus it needed is gone.)
-  //
-  // THE KEY IS NOT A WAKE TOKEN (operator 2026-07-26: "don must not wake or respond with 'egpt'").
-  // It stays the BEING-ID — defaultKey above, which keys warm sessions and the per-conversation
-  // entry[<being>] thread blocks — but it stopped being an address. The live bug: DOLLY's persona
-  // is KEYED `egpt` and DISPLAYS as "don" (handles [d, don]), so one `@egpt` in a group woke BOTH
-  // spines and the human got two replies, one stamped `egpt` and one stamped `don`.
+  // THE NODE'S WAKE SET (operator 2026-10-22/23: no default being) — every agent's tokens through
+  // the ONE rule (router.mjs wakeTokens / voiceWakeTokens / fallbackWake), handed to the limbs. It
+  // feeds only the limbs' own mention flag (atE: stats + the incoming log line) and the picker
+  // guard (an @handle stays an address, never a member mention). WHO takes a line is the router's.
+  // The map KEY is not a token when handles are declared (operator 2026-07-26, wakeTokens' header).
   const wakeWords = [];
-  // THE SPOKEN counterpart (operator 2026-08-09): voice_handles, the persona agent's own list —
-  // NO map-key fallback (voiceWakeTokens, router.mjs), so an unconfigured persona wakes on NO
-  // spoken alias. Gates a voice note's whisper transcript at the START of it, never `@` — the
-  // SAME rule as a bare @handle since 2026-09-09 (it used to match anywhere in the sentence,
-  // which is how `perro` woke E out of "tengo un perro grande").
-  const voiceWakeWords = [];
-  // THE BARE-REPLY GATE'S OWN LIST (operator 2026-09-01) — wakeWords ∪ the persona's OWN
-  // fallback_handle tokens (fallbackWake, router.mjs: the same fail-closed rule, so a
-  // half-written declaration contributes nothing here either).
-  //
-  // A DIFFERENT CONSUMER, deliberately. `wakeWords` above is the MENTION vocabulary: the bridge
-  // stamps atE from it BEFORE any membership guard exists to say otherwise, so widening it would
-  // make this node claim a mention that belongs to the peer account's agent — resolve()'s
-  // nobody-addressed fall-through would then hand that atE=true straight to the persona in exactly
-  // the chats the guard REJECTED, which is the two-spines-answer-one-mention bug the whole
-  // fallback vocabulary exists to prevent (router.mjs, "AND THIS IS WHY `wakeWords` IS LEFT
-  // ALONE"). The bare-reply gate (src/bridges/beeper.mjs) asks a NARROWER question — the WHOLE
-  // reply must be nothing but the token, and the answer is "read this message back", not "take a
-  // turn" — so it can safely see the wider list.
-  //
-  // THE LIVE GAP: once `e` moved from kg's `handles:` to its `fallback_handle:` (2026-08-31) it
-  // left wakeWords, and with it this gate — replying `e` to a voice note silently did nothing and
-  // only `ekg`/`egptkg` read a note back. A persona that declares no fallback hands the two lists
-  // identical, so this is a no-op everywhere else.
+  const voiceWakeWords = [];   // the spoken aliases (voice_handles), matched at the START of a transcript
+  // THE BARE-REPLY GATE'S LIST (operator 2026-10-23: the readback stays): a reply that is ONLY a
+  // LOCAL being's name — wake, fallback or voice token — to a voice note reads it back (👂) and
+  // wakes nobody (src/bridges/beeper.mjs). Anything more is a normal wake.
   const replyWakeWords = [];
-  // Filled IN PLACE, and refilled on a config swap: both limbs hold these three arrays.
+  const wakeSetsOf = (map) => {
+    const all = Object.entries(map).filter(([n, a]) => a && typeof a === 'object' && !n.startsWith('_'));
+    const local = all.filter(([n, a]) => isLocalAgent(n, a));
+    return {
+      wakeWords: [...new Set([...addressableTokens(map), ...all.flatMap(([, a]) => fallbackWake(a)?.handles ?? [])])],
+      voiceWakeWords: [...new Set(all.flatMap(([, a]) => voiceWakeTokens(a)))],
+      replyWakeWords: [...new Set(local.flatMap(([n, a]) => [...wakeTokens(n, a), ...(fallbackWake(a)?.handles ?? []), ...voiceWakeTokens(a)]))],
+    };
+  };
+  // Filled IN PLACE, and refilled on a config swap: both limbs hold these arrays.
   const fillWakeWords = () => {
-    const pa = personaAgent();
-    wakeWords.splice(0, Infinity, ...new Set(wakeTokens(pa.name, pa.agent)));
-    voiceWakeWords.splice(0, Infinity, ...new Set(voiceWakeTokens(pa.agent)));
-    replyWakeWords.splice(0, Infinity, ...new Set([...wakeWords, ...(fallbackWake(pa.agent)?.handles ?? [])]));
+    const s = wakeSetsOf(agents());
+    wakeWords.splice(0, Infinity, ...s.wakeWords);
+    voiceWakeWords.splice(0, Infinity, ...s.voiceWakeWords);
+    replyWakeWords.splice(0, Infinity, ...s.replyWakeWords);
   };
   fillWakeWords();
+  // ONE CHAT's sets, where its conversations.yaml entry overrides a being's handles (router.mjs
+  // agentsInChat); null = no override there, the node's sets above apply.
+  const wakeWordsIn = async (network, chatId) => {
+    const base = agents();
+    const here = agentsInChat(base, await _loadState(), surfaceOf(network), chatId);
+    return here === base ? null : wakeSetsOf(here);
+  };
   // THE BARE-HANDLE SWITCH (operator 2026-07-27: "this addressing without the '@' must be an
   // option, easy to turn on/off globally") — dispatch.address_without_at, DEFAULT true, so a node
   // that configures nothing keeps the live behaviour. Read ONCE here and handed by the SAME route
   // the wake list travels, to all THREE call sites of the ONE matcher: the beeper limb and the
   // shell limb (which pass it to mentionStatus beside `wakeWords`, below) and the router (which
-  // passes it to `addressed` beside the agents registry). One value, one rung — the persona gate
+  // passes it to `addressed` beside the agents registry). One value, one rung — the limbs
   // and the agent registry can never disagree about whether `d hola` is an address.
   const addressWithoutAt = cfg.dispatch?.address_without_at !== false;
   // 👂 ECHO AGE BOUND (operator 2026-07-09, Zohykar incident; renamed from transcribe_ack_max_age_ms):
@@ -1585,7 +1578,7 @@ export async function boot({
               : (cfg[surface] && typeof cfg[surface] === 'object') ? cfg[surface]
               : {};
     const chat_ids = Array.isArray(raw.chat_ids) ? raw.chat_ids : (raw.chat_id != null ? [raw.chat_id] : []);
-    const allowed_users = Array.isArray(raw.allowed_users) ? raw.allowed_users : [];
+    const allowed_users = ownersOf(cfg, surface);   // networks.<surface> ?? conversation_defaults
     return { ...raw, chat_ids, allowed_users };
   };
   // === THE SELF CHAT — ONE definition, three readers ===================================
@@ -1674,7 +1667,7 @@ export async function boot({
   // which install answers, so it sits on the connection beside `account`.
   const candidatesOf = (acct) => (Array.isArray(acct?.endpoints) && acct.endpoints.length ? acct.endpoints : null);
   const connectionBlock = (name) => {
-    const b = cfg.beeper;
+    const b = beeperBlock;
     return name && b && typeof b === 'object' && b[name] && typeof b[name] === 'object' ? b[name] : null;
   };
   // One candidate (or the connection block itself, which is the SAME shape minus `endpoints`)
@@ -1853,8 +1846,8 @@ export async function boot({
   // about how little that now is, or an operator reads it as "removing this moves my traffic to a
   // Desktop that has never seen these chats", which was true yesterday and is not true today.
   // Silent on a lone-connection node, which resolves to the same answer with the key or without it.
-  if (cfg.beeper?.use != null && nameDerivedConnection && nameDerivedConnection !== cfg.beeper.use) {
-    log.line?.(`[bridge] beeper.use names '${cfg.beeper.use}' — it selects this node's DEFAULT MOUTH and nothing else: ingest (${inboundConnections.map((n) => `'${n}'`).join(', ') || 'NOTHING'}) is decided without it, and so is any chat that mouth cannot reach. Remove it and the default mouth becomes '${nameDerivedConnection}', this node hears on exactly the same connection it hears on now, and every chat only ${inboundConnections.map((n) => `'${n}'`).join(' / ') || 'the ear'} can reach — the Self-DM included — is still answered there.`);
+  if (beeperBlock?.use != null && nameDerivedConnection && nameDerivedConnection !== beeperBlock.use) {
+    log.line?.(`[bridge] beeper.use names '${beeperBlock.use}' — it selects this node's DEFAULT MOUTH and nothing else: ingest (${inboundConnections.map((n) => `'${n}'`).join(', ') || 'NOTHING'}) is decided without it, and so is any chat that mouth cannot reach. Remove it and the default mouth becomes '${nameDerivedConnection}', this node hears on exactly the same connection it hears on now, and every chat only ${inboundConnections.map((n) => `'${n}'`).join(' / ') || 'the ear'} can reach — the Self-DM included — is still answered there.`);
   }
   // The per-agent half of the ear, and the ONLY thing the router's connection gate asks. An agent
   // does not CHOOSE its ear — the node does — but on a node holding SEVERAL ears the gate still
@@ -1895,6 +1888,23 @@ export async function boot({
   // and ECONNREFUSED are all the same answer here (not a match), which is why a non-Beeper
   // listener inside the range is not an error. Returns a base_url or null; it never throws, and
   // it never logs a token VALUE — length only, because a token in a log is a token in a paste.
+  // AN INSTALL THAT STAYS GONE IS SAID, not discovered as silence (a stopped Beeper service, or one
+  // that can no longer log on after a password change): ONE line to log_to_group once a connection
+  // has answered on no port for INSTALL_GONE_MS, and one when it answers again.
+  const INSTALL_GONE_MS = 5 * 60_000;
+  const installGone = new Map();   // connection → { since, said }
+  const noteInstall = (name, url) => {
+    const g = installGone.get(name);
+    const say = (text) => Promise.resolve(logToGroup(`${getConfig()?.node_name ?? '?'} · ${text}`)).catch(() => {});
+    if (url) {
+      if (g?.said) say(`✓ Beeper connection '${name}' answers again (${url})`);
+      installGone.delete(name);
+    } else if (!g) installGone.set(name, { since: now(), said: false });
+    else if (!g.said && now() - g.since >= INSTALL_GONE_MS) {
+      g.said = true;
+      say(`⚠ Beeper connection '${name}' has answered on no port for ${Math.round((now() - g.since) / 60_000)} min — no install answers its token (Beeper not running, a service that can no longer log on, or a revoked token)`);
+    }
+  };
   const discoverBaseUrl = async (name, token) => {
     const urls = DISCOVERY_PORTS.map((p) => `http://127.0.0.1:${p}`);
     const results = await Promise.all(urls.map(async (url) => {
@@ -1902,6 +1912,7 @@ export async function boot({
       catch (e) { return { url, r: { ok: false, status: 0, error: e?.message ?? String(e) } }; }
     }));
     const hits = results.filter(({ r }) => r?.ok);   // Promise.all preserves ORDER ⇒ hits[0] is the lowest port
+    noteInstall(name, hits[0]?.url ?? null);
     if (!hits.length) {
       log.line?.(`[bridge] connection '${name}': NO install on 127.0.0.1:${DISCOVERY_PORTS[0]}-${DISCOVERY_PORTS[DISCOVERY_PORTS.length - 1]} answers this connection's token (${String(token).length} chars) — the install it was minted on is not running, or the token was revoked. Falling back to the bridge default; every reconnect asks again.`);
       return null;
@@ -1922,9 +1933,9 @@ export async function boot({
   // named here, once, before the first bridge is built. It BOOTS anyway, for the same reason the
   // dead-endpoint fallback below does: refusing to start would take the node down over a config
   // the operator can fix while it is running.
-  if ((declaredConnections.length || cfg.beeper?.use != null) && !connectionBlock(defaultConnection)) {
-    log.line?.(cfg.beeper?.use != null
-      ? `[bridge] beeper.use names '${cfg.beeper.use}' but there is no '${cfg.beeper.use}:' block under beeper: — NO connection resolved, so this node has no outbound of its own; falling back to beeper_token / BEEPER_ACCESS_TOKEN, and the bridge is inert if neither is set`
+  if ((declaredConnections.length || beeperBlock?.use != null) && !connectionBlock(defaultConnection)) {
+    log.line?.(beeperBlock?.use != null
+      ? `[bridge] beeper.use names '${beeperBlock.use}' but there is no '${beeperBlock.use}:' block under beeper: — NO connection resolved, so this node has no outbound of its own; falling back to beeper_token / BEEPER_ACCESS_TOKEN, and the bridge is inert if neither is set`
       : `[bridge] beeper: declares ${declaredConnections.map((n) => `'${n}'`).join(', ')} but none is named 'secondary' or 'primary' and no 'use:' picks one — NO connection resolved, so this node has no outbound of its own; falling back to beeper_token / BEEPER_ACCESS_TOKEN, and the bridge is inert if neither is set`);
   }
 
@@ -2114,7 +2125,6 @@ export async function boot({
     transcribeCfg: tx.cliCfg,
     resolveTranscriptionService: tx.resolveTranscriptionService,// { enabled, postsBack } per chat
     postsBackDelayMs: tx.postsBackDelayMs,                      // how fast the 👂 transcript echoes back
-    personaEmoji: bodyEmojiOf(defaultKey),// 🐶 — the marker the bridge uses to suppress E's own re-ingested messages
     // Per-NODE infra WRAP layers (operator 2026-07-12): bridge_signature_open/close bracket persona
     // replies + 👂 echoes (which SPINE posted: REVE kg vs DOLLY do); transcription_open/close is the
     // 👂 echo's own inner frame. All default '' → nothing added (byte-identical to today). The port
@@ -2127,11 +2137,12 @@ export async function boot({
     plainOf: isPublicAgent,               // agents.<name>.public: that being's sends carry no stamp or visible layer
     transcriptionOpen: cfg.transcription_open ?? '',
     transcriptionClose: cfg.transcription_close ?? '',
-    wakeWords,                            // the persona agent's OWN name + handles only — nothing injected (operator 2026-07-09)
-    voiceWakeWords,                       // the persona agent's OWN voice_handles only — no map-key fallback, empty by default (operator 2026-08-09)
-    replyWakeWords,                       // …∪ the persona's fallback_handle tokens — the BARE-REPLY gate's vocabulary ONLY, never the mention path's (operator 2026-09-01; see the computation above)
-    synthesize: vx.synthesize,            // TTS for the bare-@wakeword-reply-to-TEXT mirror (operator 2026-08-10) — same fn createSpine gets below; null on a node with no voice_service (e.g. `do`), where the branch simply no-ops.
-    voice: vx.voice,                      // the persona's own voice name, paired with synthesize above.
+    wakeWords,                            // every agent's handles (+ fallback tokens): the limb's own mention flag + picker guard only — routing is the router's
+    voiceWakeWords,                       // every agent's voice_handles, matched at the start of a transcript (same use)
+    replyWakeWords,                       // every LOCAL being's wake + fallback + voice tokens — the BARE-REPLY readback gate's vocabulary ONLY (see the computation above)
+    wakeWordsIn,                          // (network, chatId) => that chat's three sets when it overrides a being's handles, else null
+    synthesize: vx.synthesize,            // TTS for the bare-name-reply-to-TEXT mirror (operator 2026-08-10); null on a node with no voice_service, where that branch no-ops.
+    voice: vx.voice,                      // the voice name, paired with synthesize above.
     addressWithoutAt,                     // dispatch.address_without_at (default true): may a BARE leading handle address, or is '@' required? Same value the shell limb + the router get.
     // WHO THIS NODE SPEAKS AS (operator 2026-09-16): what each being's OUTBOUND connection reports
     // for itself (selfIdentities, measured off /v1/accounts). A picker @-mention of one of those
@@ -2146,8 +2157,8 @@ export async function boot({
     echoPlan,                             // 👂 echo PLAN: (audioHash) => { rank, winner } — PER-NOTE HRW over the co-account peer set, keyed on the note's node-stable audio hash (operator 2026-07-24; revives HRW). rank 1 posts now; rank>1 arms a promotion at (rank-1)*echoTimeoutMs that re-checks coverage at fire; rank 0 (echo:false opt-out) never posts/promotes.
     echoTimeoutMs,                        // 👂 per-rank promotion step (ms); GENEROUS default so a SLOW rank-1 isn't mistaken for a DOWN one (double-👂 hazard).
     coverageThreshold,                    // 👂 word-token overlap fraction for the on-demand noteCovered query (operator 2026-07-12) — replaced the observed-set + arrival-lag/reconnect scaffold
+    readTranscript,                       // the ONE transcript reader (hoisted above) — the readback's voice-note reuse here, mode:accum in the spine
     echoMaxAgeMs,                         // 👂 only echoes a note within this age of its own timestamp (operator 2026-07-09)
-    readTranscript,                       // the ONE transcript reader (hoisted above) — voice-note reuse here, mode:accum in the spine
     resumedAt: () => spineLate?.resumedAt() ?? null,   // when this process last woke from a suspend — the backlog cutoff moves up to it (above)
     stateDir: join(EGPT_HOME, 'state'),   // beeper-seen.jsonl etc. → this profile's state
     // THE ONE EMIT BELOW THE PORT (the 👂 echo, src/bridges/beeper.mjs): the transcript ack is
@@ -2163,6 +2174,144 @@ export async function boot({
     earProbeTimeoutMs: parseFrequency(earCfg.timeout) ?? 45_000,
     onLog: (m) => log.line?.(`[bridge] ${m}`),
   };
+  // A chat that carries on under a new id (Telegram: a group turned supergroup): its conversation moves
+  // (moveChatId), and a closed_chats rule naming it is renamed in config.yaml (one key, the splice).
+  const moveChat = (surface, from, to) => mutateState(_writeState, async () => {
+    const state = await _loadState();
+    const next = moveChatId(state, surface, from, to);
+    if (next !== state) await _writeState(next);
+    // a turn still running on the old id files under the new one, never a fresh entry (unless both hold one)
+    if (next !== state || !state.contacts?.[surface]?.[from]) contacts.moved(surface, from, to);
+    log.line?.(`[conversations] ${surface} ${from} → ${to}: ${next !== state ? 'its conversation moved with it' : state.contacts?.[surface]?.[to] ? `${to} already has a conversation — nothing moved, merge by hand` : `no conversation for ${from} — nothing to move`}`);
+  }).then(async () => {
+    if (!Object.hasOwn(getConfig()?.closed_chats?.[surface] ?? {}, from)) return;
+    try {
+      await writeFile(CONFIG_YAML_PATH, spliceYamlKey(await readFile(CONFIG_YAML_PATH, 'utf8'), ['closed_chats', surface], { from, to }), 'utf8');
+      log.line?.(`[conversations] closed_chats.${surface}: ${from} renamed ${to} in config.yaml`);
+    } catch (e) { log.line?.(`[conversations] closed_chats.${surface} names ${from}, not renamed ${to} (${e?.message ?? e}) — edit config.yaml`); }
+  });
+  // THE TELEGRAM LIMB (limbs.telegram.<connection>: { account }): one bot, owner of every tg: chat.
+  // Its token is a file, $EGPT_HOME/secrets/telegram-<connection>.token, never config. Same port
+  // adapter as Beeper (the transport is injected), same send guard. Absent ⇒ null: nothing changes.
+  const telegramPort = await (async () => {
+    const block = cfg.limbs?.telegram;
+    const names = block && typeof block === 'object' && !Array.isArray(block) ? Object.keys(block).filter((k) => block[k] && typeof block[k] === 'object') : [];
+    if (!names.length) return null;
+    const tlog = (m) => log.line?.(`[telegram] ${m}`);
+    const connection = names[0];
+    if (names.length > 1) tlog(`limbs.telegram declares ${names.join(', ')} — one bot per node for now, using '${connection}'`);
+    const t = readTelegramToken(EGPT_HOME, connection);
+    if (!t.token) { tlog(`limbs.telegram.${connection} is declared but ${t.path} is ${t.problem} — not wired. Write it with: node setup/telegram-token.mjs ${connection}`); return null; }
+    if (t.warn) tlog(`${t.path}: ${t.warn}`);
+    // The node-level options every limb takes (media, transcription, 👂, readback); the 🎧 rides
+    // the one placement, as a Beeper connection's does (`outbound`, built below, read at call time).
+    const port = await createBeeperBridgePort({
+      ...sharedBridgeOpts,
+      telegramToken: t.token, connection,
+      // No invisible frame on Telegram: a quoted being is read off the stamp the sender wrote.
+      personaStamps: () => Object.keys(agents()).map((being) => ({ being, bodyEmoji: bodyEmojiOf(being), label: labelOf(being) })),
+      outboundFor: (chatId) => outbound(null, chatId),
+      onChatMoved: (from, to) => moveChat('telegram', from, to),
+      onLog: tlog,
+    }, { start: startTelegram ?? startTelegramBridge });
+    // beingAccount: the bot is the being's own account, never the operator's, so it may react (sender.mjs makeOutbound).
+    return sendGuard.wrap({ ...port, owns: isTelegramChatId, beingAccount: true });
+  })();
+  // THE CHATBOX LIMB (limbs.http: bind, port, path, clients): a website's visitors, one conversation
+  // per session (src/bridges/http.mjs). Same port adapter and send guard. Absent ⇒ null.
+  const httpPort = await (async () => {
+    const block = cfg.limbs?.http;
+    if (!block || typeof block !== 'object' || Array.isArray(block)) return null;
+    const hlog = (m) => log.line?.(`[http] ${m}`);
+    if (!Number.isInteger(block.port)) { hlog('limbs.http has no port — not wired'); return null; }
+    const chatboxKeyFile = (client) => `chatbox-${client}.key`;
+    if (block.ayde?.on === true || block.ayde?.on === 'on') {
+      const u = readSecret(EGPT_HOME, AYDE_USERS_FILE);
+      if (!u.token) hlog(`limbs.http.ayde is on but ${u.path} is ${u.problem} — /ayde answers 404 (node setup/ayde-user.mjs add <user> <level>)`);
+      else if (u.warn) hlog(`${u.path}: ${u.warn}`);
+    }
+    for (const [name, c] of Object.entries(block.clients ?? {})) {
+      const being = String(c?.being ?? '');
+      if (!isLocalAgent(being, agents()[being])) hlog(`limbs.http.clients.${name}.being '${being}' is not a local agent here — its visitors reach nobody`);
+      if (c?.team_group != null && !telegramPort) hlog(`limbs.http.clients.${name}.team_group is set but this node has no Telegram limb — no team topics`);
+      if (['optional', 'required'].includes(c?.identity)) {
+        const k = readSecret(EGPT_HOME, chatboxKeyFile(name));
+        if (!k.token) hlog(`limbs.http.clients.${name}.identity is ${c.identity} but ${k.path} is ${k.problem} — signed visitors are refused`);
+        else if (k.warn) hlog(`${k.path}: ${k.warn}`);
+      }
+    }
+    // With a `team_group`, the conversation's topic there, a chat member of it (room-relay.mjs). Made in
+    // the background when none is seated: from a session's first line, and from a later line until one
+    // is, not within TOPIC_COOLDOWN_MS of a failed try. One attempt at a time per chat. Lines said before
+    // it is seated reach it as a recap.
+    const TOPIC_COOLDOWN_MS = 2 * 60_000;
+    const seating = new Map(), failedAt = new Map();
+    const seatTeamTopic = (client, chatId, { isNew, recap, identity }) => {
+      const c = block.clients?.[client] ?? {};
+      if (c.team_group == null || !telegramPort || seating.has(chatId)) return;
+      if (now() - (failedAt.get(chatId) ?? -Infinity) < TOPIC_COOLDOWN_MS) return;
+      const fail = (why) => { failedAt.set(chatId, now()); hlog(`${chatId}: no team topic — ${why}`); };
+      seating.set(chatId, (async () => {
+        const slug = fixedSlugFor('http', chatId);
+        const room = Room.forChat('http', slug);
+        if ((await room.members()).some((m) => m.kind === 'tg-group')) return;
+        if (!isNew) hlog(`${chatId}: no team topic yet — trying again`);
+        const title = renderTopicTitle(c.topic_title, { ...identity, title: c.title || client, sid: slug.slice(client.length + 1, client.length + 7) });
+        const made = await telegramPort.createGroup(`tg:${c.team_group}`, { title });
+        if (!made?.success) return fail(made?.reason ?? 'the Telegram limb made none');
+        failedAt.delete(chatId);
+        // The topic records the team and tunnels it in; its being never answers there (mute): it answers the visitor.
+        await contacts.resolve('telegram', made.chatID, { chatName: title, seed: { agents: { [c.being]: { mode: 'mute' } } } });
+        await room.setMember({ kind: 'tg-group', id: made.chatID, state: 'active', replies: true, title: c.team_name || c.title || client });
+        hlog(`${chatId}: team topic "${title}" is ${made.chatID}`);
+        const said = recap({ header: !isNew });   // a new session's topic just starts; a late one says what came before
+        if (said) await sayOnce({ chatId: made.chatID, text: said, what: 'chatbox recap' });
+      })().catch((e) => fail(e?.message ?? e)).finally(() => seating.delete(chatId)));
+    };
+    // A new session's conversation folder starts with its verified user (usuario.json, usuario.md: the
+    // drawer's start, never the token) and a copy of its client's `seed` folder (relative: under EGPT_HOME).
+    // The line never waits on Telegram.
+    const beforeLine = async ({ client, chatId, isNew, recap, identity }) => {
+      const c = block.clients?.[client] ?? {};
+      if (isNew && identity) {
+        const dir = slugDir('http', fixedSlugFor('http', chatId));
+        await mkdir(dir, { recursive: true });
+        await writeFile(join(dir, 'usuario.json'), `${JSON.stringify({ ...identity, verified_at: new Date(now()).toISOString() }, null, 2)}\n`, 'utf8');
+        const parts = [`${identity.short_name} (${identity.username})`.trim(), identity.user_type && `tipo ${identity.user_type}`, `colegio ${identity.abrin}`, identity.user_id && `id ${identity.user_id}`];
+        await writeFile(join(dir, 'usuario.md'), `Usuario verificado por el sitio: ${parts.filter(Boolean).join(', ')}.\n`, 'utf8');
+        hlog(`${chatId}: its user is on the desk (usuario.json)`);
+      }
+      if (isNew && c.seed) {
+        const from = isAbsolute(String(c.seed)) ? String(c.seed) : join(EGPT_HOME, String(c.seed));
+        const n = copyTreeIfMissing(from, slugDir('http', fixedSlugFor('http', chatId)));
+        hlog(`${chatId}: its desk is seeded from ${from} (${n} files)`);
+      }
+      seatTeamTopic(client, chatId, { isNew, recap, identity });
+    };
+    // A visitor's "end conversation": a fresh thread in the same conversation (/agents rethread's
+    // own path), and the `ended` line to its chat members seated for replies (the team topic).
+    const onEnd = async ({ chatId, ended }) => {
+      const slug = fixedSlugFor('http', chatId);
+      const beings = await commands.endConversation({ surface: 'http', chatId, chatName: slug });
+      hlog(`${chatId}: ended by the visitor — ${beings.length ? `${beings.join(', ')} rethreaded` : 'no being had a thread'}`);
+      for (const m of await Room.forChat('http', slug).members()) {
+        if (m.replies === true && CHAT_MEMBER_KINDS.includes(m.kind)) await sayOnce({ chatId: m.id, text: ended, what: 'chatbox end' });
+      }
+    };
+    const port = await createBeeperBridgePort({
+      ...sharedBridgeOpts,
+      bind: block.bind, port: block.port, path: block.path, clients: block.clients, trustProxy: block.trust_proxy === true, now,
+      identityKey: (client) => readSecret(EGPT_HOME, chatboxKeyFile(client)).token,
+      ayde: block.ayde, aydeRoot: EGPT_HOME,
+      aydeUsers: () => readSecret(EGPT_HOME, AYDE_USERS_FILE).token,
+      aydeRegistry: _loadState,
+      beforeLine,
+      onEnd,
+      onLog: hlog,
+    }, { start: startHttpBridge });
+    return sendGuard.wrap({ ...port, owns: isHttpChatId });
+  })();
+  const limbPorts = [telegramPort, httpPort].filter(Boolean);
   // Bridge instances, keyed by ENDPOINT — the (base_url, token) pair, not the token alone
   // (operator 2026-09-02). The token was a sufficient key only while every connection reached
   // the SAME Beeper Desktop; two Desktops on one node are two different addresses, and keying
@@ -2345,7 +2494,8 @@ export async function boot({
       // cannot be half of a double answer — being silent wherever the ear is present is the whole
       // of what it is.
       if (owned) inboundOwned.add(key);
-      bridgeByEndpoint.set(key, owned ? port : conditional ? earWhereTheEarIsAbsent(port, name) : outboundOnly(port));
+      // A tg:/http: chat asked of any Beeper connection is its limb's (no limb ⇒ the port itself).
+      bridgeByEndpoint.set(key, makeLimbAwareBridge(owned ? port : conditional ? earWhereTheEarIsAbsent(port, name) : outboundOnly(port), ...limbPorts));
     }
     return bridgeByEndpoint.get(key);
   };
@@ -2353,7 +2503,6 @@ export async function boot({
   // and every connection an agent SPEAKS on. On a node where no agent names a `use:` and the ear
   // is the mouth (every single-account node, and kg while it still carries `use: primary`) all of
   // these resolve to the SAME endpoint, so this constructs exactly one bridge, exactly as before.
-  // defaultKey is always among agents() (personaAgent(), above, guarantees it).
   // …and remember WHICH CONNECTION each bridge was dialled for (operator 2026-09-08). The bridge
   // map is keyed by ENDPOINT (base_url + TOKEN) precisely so two connection names pointing at one
   // Desktop collapse to one instance — which also means the endpoint key cannot serve as the
@@ -2365,17 +2514,20 @@ export async function boot({
   // arrival with the EAR's name rather than an outbound alias that happens to share the endpoint.
   // This loop is also the whole reason a declared `primary` no agent speaks on is now DIALLED —
   // before the split, an unspoken-on connection was never opened and therefore never heard.
-  for (const name of inboundConnections) {
+  // NO BEEPER AT ALL (no limbs.beeper connection, no legacy token) but a Telegram or chatbox limb: the
+  // limbs are this node's bridge and no Beeper bridge is built. Every other node builds what it always did.
+  const beeperless = !!limbPorts.length && !declaredConnections.length && !tokenFor(null);
+  for (const name of beeperless ? [] : inboundConnections) {
     const b = await bridgeForEndpoint(endpointFor(name), { ear: true, name });
     if (!connectionOfBridge.has(b)) connectionOfBridge.set(b, name);
   }
-  // …then the MOUTHS. Each adds a bridge only if its endpoint is not already open.
-  for (const being of Object.keys(agents())) {
-    const name = outboundOf(being);
+  // …then the MOUTHS — every agent's, and the node's own default mouth (node-level sends ride it
+  // even when no agent does). Each adds a bridge only if its endpoint is not already open.
+  for (const name of beeperless ? [] : new Set([...Object.keys(agents()).map((being) => outboundOf(being)), defaultConnection])) {
     const b = await bridgeForEndpoint(endpointFor(name), { ear: false, name });
     if (!connectionOfBridge.has(b)) connectionOfBridge.set(b, name);
   }
-  const defaultBridge = bridgeByEndpoint.get(endpointKey(endpointFor(outboundOf(defaultKey))));   // the default/persona connection's bridge — this node's DEFAULT MOUTH, and what outboundConnectionFor(null, …) resolves to whenever that mouth can reach the chat
+  const defaultBridge = beeperless ? makeLimbAwareBridge(limbPorts[0], ...limbPorts.slice(1)) : bridgeByEndpoint.get(endpointKey(endpointFor(defaultConnection)));   // this node's DEFAULT MOUTH (the connection, not any being's), and what outboundConnectionFor(null, …) resolves to whenever that mouth can reach the chat
   // INBOUND ON EVERY CONNECTION (operator 2026-09-02), closing the gap the multi-connection work
   // left open: outbound has been per-connection since 2026-08-30, but the spine registered
   // onMessage/onEdit/onMedia on the DEFAULT bridge alone, so a message arriving on any other
@@ -2389,7 +2541,9 @@ export async function boot({
   // …and WHICH CONNECTION HEARD WHICH CHAT is read off that same stamp (rememberArrival, above),
   // so a reply the peer mouth cannot place goes back out the ear it came in on. Only where there
   // is a choice: with one connection the facade IS the bridge and nothing wraps it.
-  const fanned = fanoutInbound(defaultBridge, [...bridgeByEndpoint.values()], connectionOfBridge);
+  // A limb (Telegram, the chatbox) is an ear like any connection: its arrivals take the same intake
+  // (spine enqueue). Unnamed in connectionOfBridge, so they carry no connection stamp.
+  const fanned = fanoutInbound(defaultBridge, [...bridgeByEndpoint.values(), ...limbPorts], connectionOfBridge);
   const bridge = bridgeByEndpoint.size > 1 ? remembering(fanned) : fanned;
   // ── WHICH CONNECTION AN OUTBOUND INTO *THIS CHAT* RIDES (operator 2026-09-11) ─────────────
   // *"self doesn't have mouth. if mouth is available always use mouth."* ONE rule for every
@@ -2555,7 +2709,12 @@ export async function boot({
   // node-wide outbound ceiling the echo (echoGate, above) and every port send already go
   // through; a note reaching the station counts as an outbound message, never a second budget.
   const radioRelay = createRadioNoteRelay({ resolveConvRoom, getConfig, gate: sendGuard.gate, onLog: (m) => log.line?.(`[radio] ${m}`) });
-  const onMediaSaved = (m) => { radioRelay.noteMedia(m); return media.save(m); };   // a resumed voice note's audio too (background resume)
+  // A topic's first file is saved where its first line runs (commands.forkTopic).
+  const onMediaSaved = async (m) => {   // a resumed voice note's audio too (background resume)
+    radioRelay.noteMedia(m);
+    try { await commands.forkTopic({ surface: surfaceOf(m?.network), chatId: m?.chatID, chatName: m?.chatName }); } catch { /* commands not built yet */ }
+    return media.save(m);
+  };
   bridge.onMedia(onMediaSaved);
 
   // The operator-console LIMB (plans/2607191835-SHELL-LIMB-S1-PLAN.md Phase 1, direction
@@ -2630,10 +2789,12 @@ export async function boot({
     port: shellPortFrom(cfg),
     startBrowser: (conversation) => commands.startBrowser(conversation),
     chromeClientFor: (conversation) => commands.chromeClientFor(conversation),
+    conversationOf: async (who) => commands.browserConversationOf(who.surface, chatIdForEntity(await _loadState(), `${who.surface}/${who.slug}`)?.chatId ?? who.slug),
     // browser login → the SAME auto-login limb /login calls (requestLogin, defined below); read at
     // call time, like startBrowser above, since no being can dial before boot finishes.
     requestLogin: (site, o) => requestLogin(site, o),
     resolveConfig: configResolver.configFor,   // privileged_browser, per conversation
+    nativeWebSocket: cfg.shell?.being_native_websocket !== false,
     onLog: (m) => log.line?.(`[being] ${m}`),
   });
 
@@ -2648,7 +2809,7 @@ export async function boot({
     // all: an unauthenticated 127.0.0.1:23375 is dialable by any local account (the sandboxed
     // CLI accounts included) and a frame from it would be dispatched as the AUTHORIZED operator
     // — `/upgrade` and all (src/shell/auth.mjs). Fail closed, never auto-generate.
-    token: shellTokenFrom(cfg),
+    token: shellTokenOf(cfg),
     // The console PORT (config `shell.port`), read here for the same reason the token is:
     // the limb never reads config. Absent ⇒ shell-port's SHELL_WS_PORT (23475 since 2026-09-11,
     // when 23375 turned out to sit inside the range Beeper takes its next free port from).
@@ -2685,7 +2846,7 @@ export async function boot({
   // The read is one load per routed reply; the write only when a cold alias just got its first id
   // (setAliasMouthChat returns the same state otherwise, so writeState is skipped).
   const peerMouth = makePeerMouth({
-    peer: peerSpine, bridge, bridgeOf: rawBridgeOf, owns: (c) => shellPort.owns(c),
+    peer: peerSpine, bridge, bridgeOf: rawBridgeOf, owns: (c) => shellPort.owns(c) || limbPorts.some((l) => l.owns(c)),
     localMouth: localMouthAvailable ? localMouthFor : null,
     mouthRoomFor: async (chatId) => aliasMouthInfo(await _loadState(), chatId),
     rememberMouthRoom: async (chatId, mouthChatId) => {
@@ -2696,7 +2857,8 @@ export async function boot({
     onLog: mouthLog,
   });
 
-  // Shell-aware bridge facade (makeShellAwareBridge, top of file): the STREAMING senders
+  // Shell-aware bridge facade (makeLimbAwareBridge with the shell, top of file; the tg: routing is
+  // already inside each bridge, from bridgeForEndpoint): the STREAMING senders
   // (E's persona sender + the brain-member relay sender) render through their injected
   // `bridge`, which was the raw beeper bridge — so a streamed @e / @member reply on a
   // shell-owned chat streamed to Beeper and never reached the editor. Handed as `bridge` to
@@ -2704,9 +2866,9 @@ export async function boot({
   // ONE facade per distinct bridge (operator 2026-08-30): a being on ANY connection must still
   // redirect to a shell-owned chat, not just the default one. shellAwareBridge (the default
   // connection's facade — the same object mesh/memberSender rode before this change) is this
-  // map's defaultKey entry; shellAwareBridgeOf mirrors rawBridgeOf's per-being lookup.
-  const shellAwareBridgeByEndpoint = new Map([...bridgeByEndpoint].map(([key, b]) => [key, makeShellAwareBridge(b, shellPort)]));
-  const shellAwareBridge = shellAwareBridgeByEndpoint.get(endpointKey(endpointFor(outboundOf(defaultKey))));
+  // map's default-mouth entry; shellAwareBridgeOf mirrors rawBridgeOf's per-being lookup.
+  const shellAwareBridgeByEndpoint = new Map([...bridgeByEndpoint].map(([key, b]) => [key, makeLimbAwareBridge(b, shellPort)]));
+  const shellAwareBridge = beeperless ? makeLimbAwareBridge(defaultBridge, shellPort) : shellAwareBridgeByEndpoint.get(endpointKey(endpointFor(defaultConnection)));
   // …and it asks the SAME question rawBridgeOf does (outboundConnectionFor, operator 2026-09-11):
   // the reply path asks this one, so this is the resolver that actually puts a locally placed
   // reply back out the connection the chat lives on. The STOP confirmation (stopSwitch.pull, far
@@ -2737,7 +2899,7 @@ export async function boot({
   // --- lifecycle announce: "restarting…" to Self before exit, "back up! <commit>"
   //     on the next boot. The bounce is otherwise invisible to the operator. ---
   const sidecar = join(EGPT_HOME, 'state', 'restart-announce.json');
-  const KIND_OF = { 43: '/restart', 42: '/upgrade', 44: '/rewind' };
+  const KIND_OF = { 43: '/restart', 42: '/upgrade', 44: '/rewind', 45: '/standdown' };
   const gitOut = (args) => { try { return spawnSync('git', args, { cwd: process.cwd() }).stdout?.toString().trim() || ''; } catch { return ''; } };
   const shortSha = () => gitOut(['rev-parse', '--short', 'HEAD']) || '?';
   // The going-down half, unchanged: the sidecar the NEXT boot reads back, the capped "↻ …" line,
@@ -2764,30 +2926,49 @@ export async function boot({
   // 43/42 WAIT (operator 2026-09-28, verbatim: "yes, restart should wait for turns in
   // progress" — after a deploy killed being Ken's live turn on kg): the spine's restart drain
   // (spine.mjs drainForRestart) keeps SERVING while it waits, calls back at the first moment no
-  // turn is in flight — at once when none is — or at its cap, and goDown then runs unchanged. What it publishes while waiting goes to state/draining.json
+  // turn is in flight — at once when none is; `force` skips the wait — and goDown then runs unchanged. What it publishes while waiting goes to state/draining.json
   // for setup/upgrade.ps1. A second /restart or /upgrade during the drain starts no second one, but
   // an /upgrade arriving during a /restart's drain makes it leave as the /upgrade (42 outranks 43):
   // otherwise the pull that deploy is waiting for would silently never happen. 44 still leaves on
   // the spot: /rewind is the way back FROM bad code, and waiting on a turn that code is writing
   // would defeat it.
+  //
+  // 45 (/standdown, operator 2026-10-22) drains the same way, and only while the Session 1 daemon
+  // waits for this profile (state/s1.claim): turns in flight finish (force: not even those),
+  // background work is never waited for — it ends with this daemon's sessions. 42 outranks 45 (the
+  // pull must still happen; the daemon holds off after it), 45 outranks 43.
   let restartCode = null;   // the code a pending restart drain leaves with
   let beeperUpdate = null;  // /update beeper (created below, real node only)
+  const OUTRANKS = { 42: 3, 45: 2, 43: 1 };
   async function announceAndExit(code, { force = false } = {}) {
+    if (code === 45 && session1) { log.line?.('[standdown] this spine runs in Session 1 — nothing to hand over to; ignored'); return; }
+    if (code === 45 && !successorWaiting()) { log.line?.('[standdown] no Session 1 daemon waits for this profile (state/s1.claim is free) — ignored'); return; }
     // A Beeper update in progress finishes first: its tool runs as this spine's child.
-    if ((code === 42 || code === 43) && beeperUpdate?.busy()) {
-      log.line?.(`[drain] ${KIND_OF[code]} waits for the Beeper update in progress`);
+    if (OUTRANKS[code] && beeperUpdate?.busy()) {
+      log.line?.(`[drain] ${KIND_OF[code]} waits for the Beeper update or handover in progress`);
       beeperUpdate.idle().then(() => announceAndExit(code, { force })).catch((e) => log.line?.(`[drain] ${e?.message ?? e}`));
       return;
     }
-    if (code === 42 || code === 43) {
-      restartCode = restartCode === 42 ? 42 : code;
-      spine.drainForRestart(() => { goDown(restartCode).catch((e) => log.line?.(`[drain] ${e?.message ?? e}`)); }, {
+    if (code === 45 && force) { await leave(45); return; }
+    if (OUTRANKS[code]) {
+      restartCode = OUTRANKS[code] > (OUTRANKS[restartCode] ?? 0) ? code : restartCode;
+      spine.drainForRestart(() => { leave(restartCode).catch((e) => log.line?.(`[drain] ${e?.message ?? e}`)); }, {
         // temp → rename, the ingest box's own rule for its writers: upgrade.ps1 never reads half a file.
         onWait: async (rec) => { await writeFile(`${drainingFile}.tmp`, JSON.stringify(rec), 'utf8'); await rename(`${drainingFile}.tmp`, drainingFile); },
-        force,   // /restart force: skip the wait for background work
+        force,                         // /restart force: wait for nothing
+        background: code !== 45,       // /standdown: background work is not waited for
       });
       return;
     }
+    await goDown(code);
+  }
+  // Leaving while Session 1 waits: the Session 0 daemon holds off and ends every session it holds, so
+  // each being whose background work ends says so first (capped, like the going-down line). A
+  // /standdown whose successor let go while it drained stays.
+  async function leave(code) {
+    const handingOver = !session1 && successorWaiting();
+    if (code === 45 && !handingOver) { restartCode = null; log.line?.('[standdown] Session 1 let go of the profile while this spine drained — staying'); return; }
+    if (handingOver) await Promise.race([spine.noteStoppedBackground(), new Promise((r) => { setTimeout(r, 5_000).unref?.(); })]);
     await goDown(code);
   }
 
@@ -2839,18 +3020,30 @@ export async function boot({
       if (!conv) { log.line?.(`[warm] ${key}: background task finished, but no conversation ran on that key — nobody to wake`); return; }
       return spineLate?.wakeOnBackground({ ...conv, ...info });
     },
+    keepWarm: (key) => brain.keepsWarm(key),
     onLog: (m) => log.line?.(`[warm] ${m}`),
   });
 
+  // A stranger's new 1:1 is created with its stranger agent as the conversation's owner, on: the
+  // ONE seed, read by the transcript (which writes it) and the router and gate (a line earlier).
+  // A chatbox session's is its client's being, which any visitor may wake there (allowed_users), and
+  // no public commands (commands read it, a line earlier too). With a team topic it is `mention`: the
+  // visitor's every line addresses it (http.mjs replyToBeing), the team's only when they name it.
+  const strangerSeedOf = (ev) => {
+    const client = ev?.surface === 'http' ? getConfig()?.limbs?.http?.clients?.[httpClientOf(ev.chatId)] : null;
+    const chatbox = client?.being;
+    if (chatbox) return { agents: { [chatbox]: { ...STRANGER_SEED, ...(client.team_group != null ? { mode: 'mention' } : {}), allowed_users: ['*'] } }, public_commands: [] };
+    const b = strangerAgentFor(ev, getConfig()); return b ? { agents: { [b]: { ...STRANGER_SEED } } } : null;
+  };
   // --- services (each DI-wired; none closes over another) ---
   const services = {
-    identity: createIdentity({ now, timeZone: transcriptTimeZone }),
+    identity: createIdentity({ now, timeZone: transcriptTimeZone, loadState: _loadState }),
     // sideGroupFor: a reply in a side_group.automatic chat goes to its SI+ group (commands, below; decide runs once the spine exists).
-    gating: createGating({ getConfig, loadState: _loadState, defaultKey, sideGroupFor: (ev, o) => commands.autoSideGroup?.(ev, o) }),
+    gating: createGating({ getConfig, loadState: _loadState, seedOf: strangerSeedOf, sideGroupFor: (ev, o) => commands.autoSideGroup?.(ev, o) }),
     // Router resolves an @token against the unified `agents:` block (operator 2026-07-02) —
     // the ONE registry, and since 2026-07-25 the ONLY source of off-node reach (a relay agent's
-    // relay_channel). defaultBeing = defaultKey: the persona-route + the un-@mentioned
-    // fall-through both yield the persona's KEY (operator 2026-07-10 — no hardcoded 'e'/'egpt').
+    // relay_channel). No default being (operator 2026-10-22/23): a line goes to every named being
+    // and every being on/auto in that chat.
     // loadState (operator 2026-08-15, allowed_users): the SAME conversations-state reader
     // gating.mjs's createGating takes (`_loadState`, declared above) — resolve()'s per-
     // conversation allowed_users override reads through it, one state load per resolve() call.
@@ -2869,7 +3062,7 @@ export async function boot({
     // several agents naming one peer share a single probe, and empty on a node that declares
     // none — in which case isPeerAlive is never consulted and resolution is unchanged.
     router: createRouter({
-      getAgents: () => cfg.agents ?? {}, getConfig, defaultBeing: defaultKey, addressWithoutAt, loadState: _loadState,
+      getAgents: () => cfg.agents ?? {}, getConfig, addressWithoutAt, loadState: _loadState,
       isPresent: (identity, ev) => bridge.chatHasParticipant?.(ev?.chatId, identity) ?? null,
       // true | false | null(unknown). A port with no watcher returns null rather than a
       // guess, and the router reads anything but a definite false as "stay silent".
@@ -2880,6 +3073,7 @@ export async function boot({
       // deliberately NOT the output half: an agent's `use:` moves its mouth and must never move
       // what it can hear, which is the entire point of the split.
       inboundOf,
+      seedOf: strangerSeedOf,
       onLog: (m) => log.line?.(`[router] ${m}`),
     }),
     // currentRoomOf: a lazy thunk, not `commands.currentRoomOf` directly — `commands` (below)
@@ -2888,9 +3082,8 @@ export async function boot({
     // here. Safe forward reference: this callback only ever fires later, on an actual write,
     // by which time `commands` is assigned (mirrors createSpine's own construction site further
     // down, which passes commands.currentRoomOf directly because by THAT point commands exists).
-    transcript: createTranscript({ contacts, persona: labelOf(defaultKey), defaultKey, labelOf, timeZone: transcriptTimeZone, io, currentRoomOf: (surface, chatId) => commands.currentRoomOf(surface, chatId),
-      // a stranger's new 1:1 is created with its stranger agent as the conversation's default
-      seedOf: (ev) => { const b = strangerAgentFor(ev, getConfig()); return b ? { [b]: { default: true } } : null; },
+    transcript: createTranscript({ contacts, labelOf, timeZone: transcriptTimeZone, io, currentRoomOf: (surface, chatId) => commands.currentRoomOf(surface, chatId),
+      seedOf: strangerSeedOf,
       onLog: (m) => log.line?.(`[transcript] ${m}`) }),
     // peerMouth (operator 2026-09-05): THE reply path, so THE place the mouth decision is made —
     // null on a node with no peer_spine, and the sender is then byte-identical to before.
@@ -2901,7 +3094,7 @@ export async function boot({
     // all there is — no crash, no second channel.
     // publicOf / noticeAdmin (2026-10-15): a public being's lead sees only its reply; its errors go
     // to admin_channel through noticeToChannel (forward ref, like logToGroup: fires at reply time).
-    sender: createSender({ bridge: shellAwareBridge, bridgeOf: shellAwareBridgeOf, bodyEmojiOf, labelOf, agentSignatureOpenOf, agentSignatureCloseOf, defaultKey, peerMouth,
+    sender: createSender({ bridge: shellAwareBridge, bridgeOf: shellAwareBridgeOf, bodyEmojiOf, labelOf, agentSignatureOpenOf, agentSignatureCloseOf, peerMouth,
       publicOf: isPublicAgent,
       noticeAdmin: ({ being, chatId, text }) => noticeToChannel({ configKey: 'admin_channel', text: `${being} in ${chatId}: ${text}`, what: 'public-error', tag: 'public' }),
       onUndeliverable: ({ being, chatId, what, reason }) => reportUndelivered({ what, chatId, being, why: reason }),
@@ -3071,7 +3264,7 @@ export async function boot({
     try { return await logToGroup(`${getConfig()?.node_name ?? '?'} · ⚠ ${what}${being ? ` (${being})` : ''} not delivered to ${title && title !== id ? `"${title}" ` : ''}${id} — ${reason}`); }
     catch { return false; }
   };
-  const brain = createBrainPool({ pool, getConfig, contacts, loadState: _loadState, writeState: _writeState, brains, defaultKey, labelOf, afterTurn: afterEveryTurn, onAlert: alertOperator, noticeTo: noticeToAdmin, resolveConfig: configResolver.configFor, resolveScope: createIdentityScope({ resolveMembers: memberResolver, getConfig, onLog: (m) => log.line?.(`[scope] ${m}`) }), io, beingLink, onLog: (m) => log.line?.(`[brain] ${m}`) });
+  const brain = createBrainPool({ pool, getConfig, contacts, loadState: _loadState, writeState: _writeState, brains, labelOf, afterTurn: afterEveryTurn, onAlert: alertOperator, noticeTo: noticeToAdmin, resolveConfig: configResolver.configFor, resolveScope: createIdentityScope({ resolveMembers: memberResolver, getConfig, onLog: (m) => log.line?.(`[scope] ${m}`) }), io, beingLink, onLog: (m) => log.line?.(`[brain] ${m}`) });
 
   // ── THE AUTO-LOGIN LIMB (plan plans/2610082200-EGPT-LOGIN-PLAN.md, approach (2)) ──────────────
   // Driven over the SAME CDP driver (src/tools/cdp.mjs) /chrome, /tabs, the web-brains and bus.mjs
@@ -3149,9 +3342,9 @@ export async function boot({
   // question -- there is no chatId yet to ask reachability about, and no config declaration to
   // lean on. `bridge` is the fan-out facade and delegates both reads to the DEFAULT MOUTH, which
   // on kg (ear 'primary', mouth 'secondary') resolved names in dolly.egpt's chat list and wrote
-  // an id the group's own arrivals -- which come in on the EAR -- can never match. inboundOf is
-  // the ear resolver this file already has; `?? bridge` keeps a node with no ear exactly as it was.
-  const earBridge = bridgeByEndpoint.get(endpointKey(endpointFor(inboundOf(defaultKey)))) ?? bridge;
+  // an id the group's own arrivals -- which come in on the EAR -- can never match. The ear is
+  // inboundConnections[0] (decided by connection, never by a being); `?? bridge` keeps a node with no ear exactly as it was.
+  const earBridge = bridgeByEndpoint.get(endpointKey(endpointFor(inboundConnections[0] ?? null))) ?? bridge;
   // /send's posting account (forkBridge.postReply's `via`): resolve a connection NAME to its
   // already-dialled bridge, or the ear bridge when unset/unresolvable (today's path, and the single-
   // account collapse). endpointFor is total (never endpoint-less), so the try/catch is belt-and-braces.
@@ -3183,7 +3376,7 @@ export async function boot({
   await background?.load();
   // /update beeper + the 6-hourly Beeper check (src/tools/beeper-update.mjs). Real node only: it reads
   // the local Beeper installs and the update feed. Drains like /restart; the spine stays up.
-  beeperUpdate = ingest ? createBeeperUpdate({
+  beeperUpdate = (ingest && !beeperless) ? createBeeperUpdate({
     getConfig,
     home: EGPT_HOME,
     drain: (fn) => spine.drainForRestart(fn, { purpose: 'restarting Beeper for the update' }),
@@ -3202,6 +3395,7 @@ export async function boot({
   }) : null;
   const commands = createCommands({
     getConfig,
+    seedOf: strangerSeedOf,                           // a new chat's public_commands, before its entry exists
     beeperUpdate,                                     // /update beeper
     floodBan,                                         // /unban + /bans — the SAME in-memory instance the bridges observe into
     background,                                       // the operator's bare /agents lists it
@@ -3225,7 +3419,6 @@ export async function boot({
     // (operator 2026-08-31, after a one-letter group-name typo cost four attempts).
     listChats: earBridge.listChats ? ((opts) => earBridge.listChats(opts)) : null,
     brains,                                           // /agents' status + access_level resolve a being's agent type through the registry
-    defaultKey,                                       // the persona being-id (its map key) — /agents + /status key their per-conversation reads/writes/evictions off this, never 'e' (operator 2026-07-10)
     // THE BRAIN'S OWN TWO SEAMS, the SAME instance createTurns takes above — so /agents writes
     // and evicts WHERE THE BEING ACTUALLY LIVES. scopeOf answers the address (an invited
     // wa-group resolves to the room it joined); evict drops the warm entry by looking up the
@@ -3265,9 +3458,10 @@ export async function boot({
     forkBridge: {
       editMessage:   (chatId, msgId, text)            => earBridge.editMessage(chatId, msgId, text),
       // `via`: the account that makes the group — the primary, which has every contact (2026-10-18).
-      createGroup:   async (opts, { via = null } = {}) => {
+      // `origin`: the chat it is made from; a Telegram chat's room is a topic in it (its limb's).
+      createGroup:   async (opts, { via = null, origin = null } = {}) => {
         const on = postBridgeFor(via);
-        const created = await on.createGroup(opts);
+        const created = await on.createGroup(origin, opts);
         const id = created?.chatID ?? created?.chatId;
         if (id) holds(on, id);
         return created;
@@ -3292,6 +3486,8 @@ export async function boot({
       chatAccountId: async (chatId) => { try { return (await sideChatRaw(chatId))?.accountID ?? null; } catch { return null; } },
       chatRaw:       (chatId)                         => sideChatRaw(chatId),   // the side-group liveness check
       chatTitle:     (chatId)                         => earBridge.getChatName(chatId),
+      roomsInside:   (chatId)                         => !!telegramPort?.owns(chatId),   // a topic: everyone in the chat is in it
+      topicParentOf: (chatId)                         => (telegramPort ? topicGroupOf(chatId) : null),
       listMessagesRaw: (chatId, opts = {})            => postBridgeFor(opts.via).listMessagesRaw(chatId, opts),   // /send reads the replied-to message's live text
       // RODZ'S BEEPER USER ID (operator 2026-10-03) — the create needs `@whatsapp_lid-…`, not a
       // +phone (the API rejects it). Resolved from config.beeper.secondary.phone by scanning this
@@ -3367,7 +3563,20 @@ export async function boot({
   // outcome returns to the being through the background wake (spine.wakeOnBackground).
   const mail = createEmail({ getConfig, fetch: fetchFn, readTranscript: (ev) => readTranscript(ev.chatId, { chatName: ev.chatName, network: ev.surface }), now, log: (m) => log.line?.(`[email] ${m}`) });
   const bookLimb = createBookLimb({ getConfig, fetch: fetchFn, ses: mail.ses, missingMail: mail.missing, now, log: (m) => log.line?.(`[book] ${m}`) });
-  const actions = createReplyActions({ bridge, bridgeOf: rawBridgeOf, peerMouth, bodyEmojiOf, labelOf, resolveConvDir, askAdvice: (a) => advice.ask(a), limbs: { book: bookLimb.book, email: mail.email }, actionsOf: (being) => getConfig()?.agents?.[being]?.actions, wake: (r) => spineLate?.wakeOnBackground(r), defaultKey, onUndeliverable: ({ being, chatId, what, reason }) => reportUndelivered({ what, chatId, being, why: reason }), onLog: (m) => log.line?.(`[actions] ${m}`) });
+  // /group (2026-10-26): ev.chatId's own photo/title/description, on the bridge that holds the chat. The
+  // photo passes the /media containment check; a bridge without setChatInfo (Beeper) answers null.
+  const groupLimb = async (a, ev, being) => {
+    let info = { [a.what]: a.value };
+    if (a.what === 'photo') {
+      const f = confinedFile(await resolveConvDir(ev), a.value);
+      if (!f.ok) return { outcome: 'failed', detail: f.reason };
+      info = { photo: f.path };
+    }
+    const r = await rawBridgeOf(being, ev.chatId).setChatInfo?.(ev.chatId, info);
+    if (r == null) return { outcome: 'not-supported', detail: `this chat's bridge cannot change a group's ${a.what} (Telegram groups only)` };
+    return r.ok ? { outcome: 'set' } : { outcome: 'failed', detail: r.reason };
+  };
+  const actions = createReplyActions({ bridge, bridgeOf: rawBridgeOf, peerMouth, bodyEmojiOf, labelOf, resolveConvDir, askAdvice: (a) => advice.ask(a), limbs: { book: bookLimb.book, email: mail.email, group: groupLimb }, actionsOf: (being) => getConfig()?.agents?.[being]?.actions, wake: (r) => spineLate?.wakeOnBackground(r), onUndeliverable: ({ being, chatId, what, reason }) => reportUndelivered({ what, chatId, being, why: reason }), onLog: (m) => log.line?.(`[actions] ${m}`) });
 
   // Heartbeats are DECLARATIVE now (operator 2026-07-01): the loader collects
   // them from the node config.heartbeats block + every conversation/room entity's
@@ -3424,7 +3633,7 @@ export async function boot({
   const dispatchHeartbeatTurn = async ({ being, ns, prompt, beingWritten, silent }) => {
     const target = chatIdForEntity(await _loadState(), ns);
     if (!target) throw new Error(`no conversation for ${ns} — not registered in conversations.yaml`);
-    const ev = { surface: target.surface, chatId: target.chatId };
+    const ev = await services.identity.spineEvent(target.surface, target.chatId);
     // beingWritten: the beat came from <entity>/heartbeats/ — brainpool.turn refuses it for an 'all' being or one that would run unboxed
     const res = await brain.turn(being, { ...ev, line: prompt, body: prompt, beingWritten, cause: 'heartbeat' });
     const text = String(res?.text ?? '').trim();
@@ -3458,7 +3667,7 @@ export async function boot({
     }
     const target = chatIdForEntity(await _loadState(), ns);
     if (!target) throw new Error(`no conversation for ${ns} — not registered in conversations.yaml`);
-    await heartbeatSay({ being: null, ns, ev: { surface: target.surface, chatId: target.chatId }, text, tag: {}, recordAs: 'system', what: 'post' });
+    await heartbeatSay({ being: null, ns, ev: await services.identity.spineEvent(target.surface, target.chatId), text, tag: {}, recordAs: 'system', what: 'post' });
   };
 
   // WHAT BOTH SAY THROUGH: ONE send via THE outbound resolver's `say` (sayOnce, above — every line
@@ -3483,20 +3692,33 @@ export async function boot({
   // this account holds. Ears first, as connectionOfBridge is ordered. Only where there is a choice:
   // one connection holds everything this node can say. Nobody holds it → the record is left alone
   // and the log says so, loudly; the send then fails as it would have.
+  // `what`: the log prefix — '[heartbeat] <beat>' or '[closed]' (a closed chat's message, said before anything arrives).
+  const placeChat = async (chatId, what) => {
+    if (connectionOfBridge.size < 2) return;
+    if (!chatId || shellPort.owns(chatId) || connectionHolding(chatId)) return;
+    for (const [b, connection] of connectionOfBridge) {
+      let raw = null;
+      try { raw = await b.chatRaw?.(chatId); } catch { /* unreadable on this connection — ask the next */ }
+      if (!raw) continue;
+      rememberArrival(chatId, connection);
+      log.line?.(`${what}: ${chatId} is a chat on '${connection}' — recorded, so its sends start there`);
+      return;
+    }
+    log.line?.(`${what}: NO CONNECTION HOLDS ${chatId} — asked ${[...connectionOfBridge.values()].map((c) => `'${c}'`).join(', ')}; its sends will fail until the chat is reachable`);
+  };
   const placeHeartbeatChat = async ({ ns, name }) => {
     if (connectionOfBridge.size < 2) return;
     const target = chatIdForEntity(await _loadState(), ns);
-    if (!target || shellPort.owns(target.chatId) || connectionHolding(target.chatId)) return;
-    for (const [b, connection] of connectionOfBridge) {
-      let raw = null;
-      try { raw = await b.chatRaw?.(target.chatId); } catch { /* unreadable on this connection — ask the next */ }
-      if (!raw) continue;
-      rememberArrival(target.chatId, connection);
-      log.line?.(`[heartbeat] ${name}: ${target.chatId} is a chat on '${connection}' — recorded, so the beat's sends start there`);
-      return;
-    }
-    log.line?.(`[heartbeat] ${name}: NO CONNECTION HOLDS ${target.chatId} (${ns}) — asked ${[...connectionOfBridge.values()].map((c) => `'${c}'`).join(', ')}; its sends will fail until the chat is reachable`);
+    if (target) await placeChat(target.chatId, `[heartbeat] ${name}`);
   };
+
+  // closed_chats: the notice at boot and on every live swap, the reminder from spine classify.
+  const closedChats = createClosedChats({
+    getConfig, loadState: _loadState, writeState: _writeState, now,
+    say: async (chatId, text) => { await placeChat(chatId, '[closed]'); return sayOnce({ chatId, text, opts: { systemLine: true }, what: 'closed' }); },
+    onLog: (m) => log.line?.(`[closed] ${m}`),
+  });
+  const announceClosed = () => Promise.resolve().then(closedChats.announce).catch((e) => log.line?.(`[closed] notice failed: ${e?.message ?? e}`));
 
   // A BEING'S OWN COMMAND BEAT RUNS IN ITS BOX — see createHeartbeatBoxRunner. brainpool answers
   // "boxed?" with the same resolution a turn's OS session is picked by.
@@ -3599,7 +3821,7 @@ export async function boot({
   // …and peerMouth, like the persona sender's (operator 2026-09-16, "every output of the spine comes
   // through the mouth"): without it a member's reply in a chat the mouth is in still came from the
   // operator's own account while E's reply beside it came from the mouth.
-  const memberSender = createSender({ bridge: shellAwareBridge, bridgeOf: shellAwareBridgeOf, bodyEmojiOf: () => '🤖', labelOf: (id) => id, defaultKey, peerMouth, onLog: mouthLog });
+  const memberSender = createSender({ bridge: shellAwareBridge, bridgeOf: shellAwareBridgeOf, bodyEmojiOf: () => '🤖', labelOf: (id) => id, peerMouth, onLog: mouthLog });
   const _adapterMods = new Map();
   const roomRelay = createRoomRelay({
     resolveMembers: memberResolver,
@@ -3611,7 +3833,8 @@ export async function boot({
     // A member's tab lives in its ROOM's browser-group Chrome (the one resolver); refused → no browser.
     streamFromTab: async (o, ev) => { const { client } = await commands.chatChromeOf(ev?.surface, ev?.chatId); if (!client) throw new Error('no browser for this room'); return client.streamFromTab(o); },
     activateTarget: async (id, ev) => (await commands.chatChromeOf(ev?.surface, ev?.chatId)).client?.activateTarget(id),
-    openStream: (memberId, chatId, opts = {}) => memberSender.open(chatId, { being: memberId, replyTo: opts.replyTo ?? null }),
+    openStream: (memberId, chatId, opts = {}) => (opts.asBeing ? services.sender : memberSender).open(chatId, { being: memberId, replyTo: opts.replyTo ?? null }),
+    showsMembers: (chatId) => !!httpPort?.owns(chatId),   // a chatbox's widget shows its team's lines
     // NO logRoomTranscript SEAM ANY MORE (operator 2026-08-31, a net deletion): a wa-group message
     // is RE-ENTERED into the room it tunnels into now, so the room's own ingestion writes its ONE
     // transcript record at the same chokepoint every other message goes through — and wakes the
@@ -3624,16 +3847,13 @@ export async function boot({
   // agent's relay_channel is TRANSIT (no record, no chat dispatch — the messages live in Beeper),
   // and a frame carrying ANOTHER node's signature wakes nobody here. Own-node frames are
   // untouched: the room relay's tunnel carries this node's own fromNode across deliberately.
-  // The per-turn backstop (DEFECT 2), operator-tunable via config turn_timeout_ms
-  // (config/config-schema.mjs): absent -> 600000 (today's 10-min wedge guard, the spine
-  // factory's own default); -1 or any value <= 0 flows through to runTurnWithTimeout's
-  // `!(turnTimeoutMs > 0)` disable so a turn runs uncapped.
-  const turnTimeoutMs = Number.isFinite(cfg.turn_timeout_ms) ? cfg.turn_timeout_ms : 600_000;
+  // Per-turn timeout, opt-in (config turn_timeout_ms): absent/≤0 = none (operator 2026-10-26).
+  const turnTimeoutMs = Number.isFinite(cfg.turn_timeout_ms) ? cfg.turn_timeout_ms : 0;
   // CONFIG WITHOUT RESTART (step B, 2026-10-16): the spine hands a changed config.yaml here (its tick,
   // and every message arrival). Same reader, same assertions as boot. Only restart-only keys
   // (config-swap.mjs RESTART_KEYS) leave the running config in place for the drained /restart,
   // gated by the NEW file's auto_restart_on_config_change; anything else is swapped in now, and what
-  // boot built from it is rebuilt: the persona's wake words, the shell header, the heartbeat set.
+  // boot built from it is rebuilt: the node's wake words, the shell header, the heartbeat set.
   const applyConfig = () => {
     const next = readConfig() ?? {};
     try { assertConfig(next); } catch (e) { return { error: e?.message ?? String(e) }; }
@@ -3644,6 +3864,7 @@ export async function boot({
     fillWakeWords();
     shellPort.setHeader(shellHeaderAt(commands.currentRoomOf(SHELL_SURFACE)));
     Promise.resolve(heartbeatLoader.reload()).catch((e) => log.line?.(`[config] heartbeat reload after the swap: ${e?.message ?? e}`));
+    announceClosed();
     return { changed };
   };
   // THE LAG PROBE (src/spine/lag-probe.mjs): the loop's delay + the queues, to log_to_group while it lags.
@@ -3655,7 +3876,13 @@ export async function boot({
   });
   // backgroundWork: what a restart drain waits for. Held by the daemon, it survives a spine restart, so
   // there is nothing to wait for; spawned by this spine (no daemon host), it dies with it.
-  const spine = createSpine({ bridge, bridgeOf: rawBridgeOf, peerMouth, brain, turns, ...services, commands, mesh, actions, backgroundWork: () => (cliHost ? [] : liveBackground()), background, beeperUpdate, advice, guard, guardOverride, fromThisNode, say: sayOnce, logToGroup: (text) => logToGroup(`${getConfig()?.node_name ?? '?'} · ${text}`), stopSwitch, isSelfChat, isTransit: (ev) => isRelayChannelChat(getConfig(), ev), roomRelay, readTranscript, refreshConfig: heartbeatLoader.reload, applyConfig, configBootHash, readConfigHash, requestRestart: () => announceAndExit(43), radioRelay: radioRelay.relay, synthesize: vx.synthesize, voice: vx.voice, defaultBeing: defaultKey, labelOf, timeZone: transcriptTimeZone, clock: { now }, log, turnTimeoutMs, livenessEveryMs, tickMs: effectiveTickMs, setInterval: setIntervalFn, clearInterval: clearIntervalFn, probe: lagProbe, intakeCap: () => intakeCap(lagProbe.load?.()), stopPhrase: () => getConfig()?.stop_phrase });
+  // allBackground: all of it, whoever holds it — what a /standdown ends (the daemon ends its sessions).
+  // The ingest box's open questions (ingest.auto false), kept across restarts (ingestTo, below).
+  const ingestAsks = createIngestAsks({ path: join(EGPT_HOME, 'state', 'ingest-asks.json'), io, onLog: (m) => log.line?.(`[ingest] ${m}`) });
+  await ingestAsks.load();
+  // Pins whose conversations.yaml sandbox_pin is gone are released on the tick (src/spine/sandbox-pins.mjs). Real node only.
+  const sandboxPins = ingest ? createSandboxPinReleaser({ loadState: _loadState, evictWarm: (being, ev) => brain.evict(being, ev), onLog: (m) => log.line?.(`[sandbox-pins] ${m}`) }) : null;
+  const spine = createSpine({ bridge, bridgeOf: rawBridgeOf, peerMouth, brain, turns, ...services, commands, mesh, actions, backgroundWork: () => (cliHost ? [] : liveBackground()), allBackground: liveBackground, background, beeperUpdate, sandboxPins, advice, ingestAsk: { isAnswer: (ev) => ingestAnswerOf(ev) != null, answer: answerIngest }, guard, guardOverride, fromThisNode, say: sayOnce, logToGroup: (text) => logToGroup(`${getConfig()?.node_name ?? '?'} · ${text}`), stopSwitch, isSelfChat, isTransit: (ev) => isRelayChannelChat(getConfig(), ev), remindClosed: closedChats.remind, roomRelay, readTranscript, refreshConfig: heartbeatLoader.reload, applyConfig, configBootHash, readConfigHash, requestRestart: () => announceAndExit(43), radioRelay: radioRelay.relay, synthesize: vx.synthesize, voice: vx.voice, labelOf, timeZone: transcriptTimeZone, clock: { now }, log, turnTimeoutMs, livenessEveryMs, tickMs: effectiveTickMs, setInterval: setIntervalFn, clearInterval: clearIntervalFn, probe: lagProbe, intakeCap: () => intakeCap(lagProbe.load?.()), stopPhrase: () => getConfig()?.stop_phrase });
   // Bind the advice service's answer-routing dispatch now that the spine exists: an
   // operator answer in the advice channel re-enters the pipe as a turn in the origin chat.
   advice.useDispatch(spine.handleInbound);
@@ -3673,6 +3900,7 @@ export async function boot({
   spine.start();
   lagProbe.start();
   spine.tick();   // fire the first beat immediately so alive.txt exists at once
+  announceClosed();
 
   // After adoption (a resumed note's turn must not open a key adoption is about to fill): reconcile the list,
   // then end each voice note the last spine left pending as a live one would (src/spine/background.mjs).
@@ -3699,11 +3927,12 @@ export async function boot({
   if (cliHost) (async () => {
     for (const h of await cliHost.list()) {
       const m = h.meta ?? {};
-      const [being, , surface, ...slug] = String(h.key ?? '').split(':');
+      const [being, , surface, slug] = String(h.key ?? '').split(':');   // a fork's key adds :<fork>
       if (!m.opened || pool.has(h.key)) { log.line?.(`[cli-host] ending held ${h.key} pid ${h.pid} — ${m.opened ? 'the key is already open' : 'nothing to adopt it with'}`); cliHost.kill(h.hid); continue; }
+      if (!defaultIsAlive(h.pid)) { log.line?.(`[cli-host] dropping held ${h.key} pid ${h.pid} — its process is gone`); cliHost.kill(h.hid); continue; }
       try {
         const a = await cliHost.adopt(h.hid);
-        const link = m.link && beingLink.forBeing({ being, surface, slug: slug.join(':'), boxed: m.opened.sandboxed === true });
+        const link = m.link && beingLink.forBeing({ being, surface, slug, boxed: m.opened.sandboxed === true });
         brain.adoptKey(h.key, m.conv);
         pool.adopt(h.key, { brainOptions: { ...m.opened, sessionId: a.sessionId ?? m.sessionId ?? null, adopt: a, ...(link ? { beingLink: { mint: () => link.mint(m.link) } } : {}) }, klass: m.klass, idleTtlMs: m.idleTtlMs, opened: m.opened });
         log.line?.(`[cli-host] adopted ${h.key} pid ${a.pid}${a.background?.length ? ` (${a.background.length} background task(s))` : ''}${a.orphan ? ' — a turn still running' : ''}`);
@@ -3770,38 +3999,132 @@ export async function boot({
   // line already lands — through the same one placement.
   if (ingest) Promise.resolve().then(() => outboxDrain.atBoot({ chatId: selfChatId() })).catch((e) => log.line?.(`[outbox] boot sweep: ${e?.message ?? e}`));
 
+  // `/to <chatId>` (2026-10-26): the text enters that chat as the owner's line, through the limbs'
+  // own entry. Only a chat conversations.yaml already holds — the box never creates one.
+  // ingest.show posts it there first; ingest.auto false holds it until an owner answers the post.
+  const ingestSurface = (state, chatId) => Object.keys(state?.contacts ?? {}).find((s) => state.contacts[s]?.[chatId]);
+  const ingestNetwork = (surface) => (surface === SHELL_SURFACE ? 'shell' : surface);
+  async function ingestTo({ chatId, text, files = [] }) {
+    const state = await _loadState();
+    const surface = ingestSurface(state, chatId);
+    if (!surface || !(text || files.length)) { log.line?.(`[ingest] /to ${chatId} ignored: ${surface ? 'no text' : 'no conversation with that id'}`); return; }
+    await placeChat(chatId, '[ingest]');   // nothing may have arrived in it since boot
+    const saved = [], lost = [];
+    for (const [i, p] of files.entries()) {
+      const ext = extname(p).slice(1).toLowerCase();
+      const kind = mediaKind(MIME_BY_EXT[ext], ext);
+      // saved where a limb saves an inbound attachment (media.save), announced the way it announces one
+      const r = await media.save({ chatID: chatId, chatName: state.contacts[surface][chatId].pushedName ?? null, network: ingestNetwork(surface), senderName: cfg.user_name ?? null, ts: now(), msgId: `ingest${i + 1}`, kind, mime: MIME_BY_EXT[ext] ?? null, fileName: basename(p), localPath: p });
+      if (r) saved.push(savedEntry(r, { kind, localPath: p, fileName: basename(p) }));
+      else { lost.push(p); log.line?.(`[ingest] /to ${chatId}: /file ${p} not attached — missing or unreadable`); }
+    }
+    const body = withMediaLines(text, saved);
+    const show = cfg.ingest?.show !== false;
+    const auto = cfg.ingest?.auto === true;
+    const ask = auto ? null : (String(cfg.ingest?.ask ?? '').trim() || INGEST_ASK);
+    const who = `📥 ${cfg.user_name ?? 'owner'} (ingest)`;
+    const ids = [];
+    if (show) for (const m of saved) ids.push(await ingestPost(chatId, (on, room) => on.sendMedia?.(room, m.savedPath, { caption: who })));
+    const head = [show && `${who}: ${text}`.trim(), ...lost.map((p) => `⚠️ /file ${p}: missing or unreadable`)].filter(Boolean).join('\n');
+    if (show || ask) ids.push(await ingestPost(chatId, (on, room) => on.send?.(room, [head, ask].filter(Boolean).join('\n\n'), { systemLine: true })));
+    if (auto) { await dispatchIngest(chatId, body); return; }
+    const posted = ids.filter((id) => id != null).map(String);
+    if (!posted.length) { log.line?.(`[ingest] /to ${chatId}: the question has no posted message an owner can answer — not dispatched`); return; }
+    await ingestAsks.add({ chatId, ids: posted, body });
+    log.line?.(`[ingest] /to ${chatId}: asked (#${posted.join(' #')}) — waiting for an owner's yes / no`);
+  }
+  // One post through the one placement. Its id as the chat's own connection holds it, since that is
+  // the copy an owner replies to: a local mouth's post is found there by its cross-account key.
+  async function ingestPost(chatId, act) {
+    const out = outbound(null, chatId);
+    let id = null;
+    await out.say(async (on, room) => {
+      const r = await act(on, room);
+      if (!r || r.blocked) return false;
+      id = (await r.confirmedId) ?? null;
+      if (id != null && on !== out.bridge) {
+        const hit = await peerMouth?.quote?.({ bridge: out.bridge, chatId }, await out.keyOf(id, 'ingest', { bridge: on, chatId: room })());
+        if (!hit?.ok) log.line?.(`[ingest] /to ${chatId}: post #${id} not found on the chat's own connection (${hit?.reason ?? 'no answer'}) — an answer to it cannot be matched`);
+        id = hit?.ok ? hit.msgId : null;
+      }
+      return true;
+    }, { what: 'ingest' });
+    return id;
+  }
+  async function dispatchIngest(chatId, body) {
+    const state = await _loadState();
+    const surface = ingestSurface(state, chatId);
+    if (!surface) { log.line?.(`[ingest] /to ${chatId} ignored: no conversation with that id`); return; }
+    const st = mentionStatus(body, wakeWords, { addressWithoutAt });
+    // not awaited, as the shell limb: the turn must not hold the box (a /restart behind it)
+    spine.handleInbound({ body, from: {
+      chatId, chatName: state.contacts[surface][chatId].pushedName ?? null,
+      network: ingestNetwork(surface),
+      userId: ownersOf(cfg, surface)[0] ?? null, senderName: cfg.user_name ?? null,
+      authorized: true, via: 'ingest', msgKey: null, atEStart: st.atEStart, atEAnywhere: st.atEAnywhere,
+    } }).catch((e) => log.line?.(`[ingest] /to ${chatId}: ${e?.message ?? e}`));
+  }
+  // An owner's yes / no to an open question: a reply to one of its posts, or a reaction on one.
+  function ingestAnswerOf(ev) {
+    const ask = ingestAsks.find(ev.chatId, ev.kind === 'reaction' ? ev.msgId : ev.kind === 'text' ? ev.replyToId : null);
+    const yes = ask && isOwner(ev, cfg) ? answerOf(ev.kind === 'reaction' ? reactionEmoji(ev.body) : ev.body) : null;
+    return yes == null ? null : { ask, yes };
+  }
+  async function answerIngest(ev) {
+    const a = ingestAnswerOf(ev);
+    if (!a) return;
+    await ingestAsks.take(a.ask);
+    const { chatId } = a.ask;
+    log.line?.(`[ingest] /to ${chatId}: ${a.yes ? 'dispatched' : 'dropped'} by ${ev.senderName ?? ev.senderId ?? '?'}`);
+    try { await sayOnce({ chatId, text: a.yes ? '✅ dispatched' : '🚫 dropped', opts: { systemLine: true }, what: 'ingest' }); }
+    catch (e) { log.line?.(`[ingest] /to ${chatId}: ${e?.message ?? e}`); }
+    if (a.yes) await dispatchIngest(chatId, a.ask.body);
+  }
+
   // Command ingest: drop /restart, /upgrade or /rewind <ref> into
   // EGPT_HOME/state/ingest (operator 2026-07-03: the ingest box lives under state/ now).
+  const ingestLine = async (line) => {
+    // The shell editor's self-announce — poke the shell-port limb. Normally a no-op (the
+    // limb has held the console port since boot); it matters when the BIND failed and the
+    // limb is backing off, where this makes it re-listen NOW so the editor has something
+    // to dial. Not a lifecycle command.
+    if (isShellConnectMarker(line)) { shellPort.poke(); return; }
+    const to = toLine(line);
+    if (to) { await ingestTo(to); return; }
+    const hold = holdLine(line);   // Beeper handover (setup/beeper-window.ps1)
+    if (hold != null) {
+      const ok = await beeperUpdate?.hold(hold);
+      log.line?.(`[ingest] ${line} -> ${ok ? (hold ? 'held' : 'released') : 'refused'}`);
+      return;
+    }
+    const code = lifecycleExit(line, {
+      writeRewindTarget: (ref) => writeFile(join(EGPT_HOME, 'rewind-target.txt'), ref, 'utf8'),
+    });
+    if (code != null) { log.line?.(`[ingest] ${line} -> exit ${code}`); await announceAndExit(code, { force: lifecycleForce(line) }); }
+    else log.line?.(`[ingest] ignored: ${JSON.stringify(line)}`);
+  };
   let ingestWatcher = null;
   if (ingest) {
     ingestWatcher = createIngest({
       dir: join(EGPT_HOME, 'state', 'ingest'),
       io,
       onLog: (m) => log.line?.(`[ingest] ${m}`),
-      handle: async (line) => {
-        // The shell editor's self-announce — poke the shell-port limb. Normally a no-op (the
-        // limb has held the console port since boot); it matters when the BIND failed and the
-        // limb is backing off, where this makes it re-listen NOW so the editor has something
-        // to dial. Not a lifecycle command.
-        if (isShellConnectMarker(line)) { shellPort.poke(); return; }
-        const code = lifecycleExit(line, {
-          writeRewindTarget: (ref) => writeFile(join(EGPT_HOME, 'rewind-target.txt'), ref, 'utf8'),
-        });
-        if (code != null) { log.line?.(`[ingest] ${line} -> exit ${code}`); await announceAndExit(code, { force: lifecycleForce(line) }); }
-        else log.line?.(`[ingest] ignored: ${JSON.stringify(line)}`);
-      },
+      handle: ingestLine,
     });
     await ingestWatcher.start();
   }
 
   return {
     spine, bridge, shellPort, pool, peerNodes,           // shellPort: the second LIMB — exposed so its regulation is assertable, like bridge's
+    telegramPort,                                        // null unless limbs.telegram is wired
+    httpPort,                                            // null unless limbs.http is wired
     get cfg() { return cfg; },                           // the LIVE config (swapped by applyConfig)
     peerMouth,                                           // null on a node with no peer_spine — exposed for the same reason: "absent means absent" is assertable
     noticeToAdmin,                                       // the admin-channel notice compaction says — exposed so it is assertable without a cooling timer
     logToGroup,                                          // the per-command audit sink (config.log_to_group) — exposed for the same reason: the generalized resolve+post is assertable without running the whole dispatch
     requestLogin,                                        // the spine's being-facing auto-login entry ("egpt can request to log in") — exposed so its outcome is assertable without a live Chrome
     dispatchHeartbeatPost, dispatchHeartbeatTurn,        // the heartbeat send paths — exposed so silent-vs-own-chat routing is assertable (like noticeToAdmin), no spine tick needed
+    ingestLine,                                          // the ingest box's handler — exposed so a dropped file is assertable without the watcher
 
     stop: () => {
       // No alive-timer teardown: the beat is a heartbeat now, riding the spine's

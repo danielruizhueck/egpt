@@ -80,10 +80,14 @@ function svc({ node, aliases = [], agents = {}, meshCfg = {}, brain, timers, log
     ...(loadState ? { loadState } : {}),   // allowed_users per-conversation override (operator 2026-08-15) — default: no-op
     onLog: (m) => logs?.push(m),
   });
+  // An envelope here is posted by the peer node on this account (isSender): an owner of this node.
+  const handle = mesh.handle;
+  mesh.handle = (ev, ...rest) => handle({ isSender: true, ...ev }, ...rest);
   return { bridge, mesh, cfg };
 }
 
 describe('mesh service — outbound (origin relays through a relay agent)', () => {
+  // contract 16.1
   it('(a) posts a 🤔 placeholder + an encoded request envelope to the relay_channel, with the return-address', async () => {
     const { bridge, mesh } = svc({ node: 'kg' });
     const ev = { surface: 'whatsapp', chatId: 'CHAT', chatName: 'HFM', senderName: 'An', body: '@don do X' };
@@ -204,6 +208,7 @@ describe('mesh service — multipath outbound (a list agent fans out one envelop
 });
 
 describe('mesh service — responder (a request arrives at the owning node)', () => {
+  // contract 16.1
   it('(b) runs the target local being (brain.turn) and edit-streams the reply as an envelope (re/post_id/done), mirrored', async () => {
     const brain = fakeBrain({ reply: 'aquí', partials: ['aq', 'aquí'] });
     const { bridge, mesh } = svc({ node: 'do', agents: { don: { configuration: 'sonnet-high', name: 'don' } }, brain });
@@ -338,7 +343,7 @@ describe('mesh service — a relayed reply is stamped with the being\'s NAME, ne
     // the string the stamp must not carry.
     const req = encodeMesh({ by: 'An', body: '@egpt hola', from: 'HFM', from_node: 'kg', to: 'egpt.do', post_id: 'p1' });
 
-    await mesh.handle({ surface: 'whatsapp', chatId: 'RELAY', msgId: 'm1', body: req });
+    await mesh.handle({ surface: 'whatsapp', chatId: 'RELAY', msgId: 'm1', body: req, isSender: true });
     await flush();
 
     expect(brain.calls).toHaveLength(1);
@@ -455,7 +460,7 @@ describe('mesh service — the RESPONDER answers in the ORIGIN conversation, not
     delete bridge.resolveChatId;
     const mesh = createMeshService({ bridge, brain, getConfig: () => ({ node_name: 'do', agents: persona }), bodyEmojiOf });
 
-    await mesh.handle({ surface: 'whatsapp', chatId: CHANNEL, msgId: 'm1', body: req('Radio WnL', '@e hola', 'p1') });
+    await mesh.handle({ surface: 'whatsapp', chatId: CHANNEL, msgId: 'm1', body: req('Radio WnL', '@e hola', 'p1'), isSender: true });
     await flush();
 
     expect(brain.calls[0].ev.chatId).toBe(CHANNEL);
@@ -901,6 +906,7 @@ describe('mesh service — an unresolved relay channel falls back to Self', () =
 });
 
 describe('mesh service — origin-wait timeout', () => {
+  // contract 16.4
   it('(f) surfaces "<target> did not answer" into the origin chat when no reply arrives', async () => {
     const timers = fakeTimers();
     const { bridge, mesh } = svc({ node: 'kg', meshCfg: { timeout_ms: 30000 }, timers });
@@ -923,6 +929,7 @@ describe('mesh service — origin-wait timeout', () => {
 //    the per-relay `origin.waitKey` (set by relay.mjs from its own synthetic post_id), armed AFTER
 //    relayOut resolves so the key is populated. ──
 describe('mesh service — shell-origin (postStatus resolves null) concurrent relays get independent timeouts', () => {
+  // contract 16.4
   it('two concurrent forwards from the SAME chat each get their OWN timer AND their OWN reply home', async () => {
     const timers = fakeTimers();
     const { bridge, mesh } = svc({ node: 'kg', meshCfg: { timeout_ms: 60000 }, timers });
@@ -1116,11 +1123,16 @@ describe('mesh service — allowed_users gate (operator 2026-08-15)', () => {
     expect(brain.calls[0].being).toBe('wren');
   });
 
-  it('REGRESSION: a being with allowed_users set at NEITHER tier is reachable by any mesh requester', async () => {
+  it('a being with allowed_users set at NEITHER tier answers only the node owners over the mesh (operator 2026-10-26)', async () => {
     const brain = fakeBrain({ reply: 'ok' });
     const { bridge, mesh } = svc({ node: 'do', agents: { don: { configuration: 'sonnet-high', name: 'don' } }, brain });
     const req = encodeMesh({ by: 'Stranger', body: '@don hi', from: 'HFM', from_node: 'kg', to: 'don.do', post_id: 'p1' });
-    await mesh.handle({ surface: 'whatsapp', chatId: 'RELAY', msgId: 'm1', body: req, senderId: 'nobody-in-particular' });
+    await mesh.handle({ surface: 'whatsapp', chatId: 'RELAY', msgId: 'm1', body: req, senderId: 'nobody-in-particular', isSender: false });
+    await flush();
+    expect(brain.calls).toHaveLength(0);
+    expect(bridge.sent.map((s) => parseMesh(s.text)?.body).join(' ')).toContain('not authorized to reach don.do');
+    const req2 = encodeMesh({ by: 'An', body: '@don hola', from: 'HFM', from_node: 'kg', to: 'don.do', post_id: 'p2' });
+    await mesh.handle({ surface: 'whatsapp', chatId: 'RELAY', msgId: 'm2', body: req2, senderId: 'nobody-in-particular' });
     await flush();
     expect(brain.calls).toHaveLength(1);
   });

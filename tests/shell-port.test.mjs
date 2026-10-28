@@ -199,27 +199,28 @@ describe('shell-port limb', () => {
       ws.fire('message', Buffer.from(text));
       return captured;
     }
+    const EW = ['e', 'egpt'];
 
     it('a bare-text "@e hi" frame → atEStart AND atEAnywhere true', () => {
-      const from = fromFor('@e hi');
+      const from = fromFor('@e hi', EW);
       expect(from.atEStart).toBe(true);
       expect(from.atEAnywhere).toBe(true);
     });
 
     it('"@e" mid-message → atEAnywhere true, atEStart false', () => {
-      const from = fromFor('hey @e look');
+      const from = fromFor('hey @e look', EW);
       expect(from.atEAnywhere).toBe(true);
       expect(from.atEStart).toBe(false);
     });
 
     it('no wake word → both false (E stays gated out, as before — but now CORRECTLY, not by omission)', () => {
-      const from = fromFor('hello');
+      const from = fromFor('hello', EW);
       expect(from.atEAnywhere).toBe(false);
       expect(from.atEStart).toBe(false);
     });
 
     it('an @e inside a code fence does NOT wake — mentionStatus strips code, and it flows through the limb', () => {
-      const from = fromFor('```\n@e in a fence\n```');
+      const from = fromFor('```\n@e in a fence\n```', EW);
       expect(from.atEAnywhere).toBe(false);
       expect(from.atEStart).toBe(false);
     });
@@ -313,12 +314,13 @@ describe('shell-port limb', () => {
       expect(committed[0].text).toBe('🐶 egpt: done');
     });
 
-    it('delete() clears the live line with a streaming:false delete frame — commits nothing', () => {
+    it('a stream has no delete: a withheld reply settles on its committed final, never a delete frame (operator 2026-10-27)', () => {
       const { port, sock } = connected();
-      port.startStream('main', '⏳', { bodyEmoji: '🐶', label: 'egpt' }).delete();
-      const del = frames(sock).find((f) => f.delete);
-      expect(del).toBeTruthy();
-      expect(del.streaming).toBe(false);
+      const stream = port.startStream('main', '⏳', { bodyEmoji: '🐶', label: 'egpt' });
+      expect(stream.delete).toBeUndefined();
+      stream.finish('✓');
+      expect(frames(sock).some((f) => 'delete' in f)).toBe(false);
+      expect(frames(sock).filter((f) => f.streaming === false).map((f) => f.text)).toEqual(['🐶 egpt: ✓']);
     });
 
     it('fail() surfaces an error line over the socket — NOT swallowed', () => {

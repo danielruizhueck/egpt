@@ -1,34 +1,62 @@
-# register-s0-identity-task.ps1 - run the Session 0 identity reconciler on a timer, as SYSTEM.
+# register-s0-identity-task.ps1 - run setup\s0-identity-reconcile.ps1 every few minutes and at boot:
+# it starts a shared-profile Beeper service once Session 1 lets go of the profile (a logoff, a
+# window that quit with no launcher watching), and the egpt-daemon service when it is Stopped and
+# Automatic with no STOP file. setup\share-beeper-primary-profile.ps1 and install-nssm-service.ps1
+# register it. Logon needs no trigger: setup\beeper-window.ps1 and the egpt-daemon task own that moment.
 #
-# The reconciler (setup/s0-identity-reconcile.ps1) is a single idempotent pass. This is what makes
-# it happen: at boot, at any logon, and every N minutes thereafter.
+# AS THE DESKTOP USER, S4U: it runs whether or not that user is logged on, and no password is
+# stored. NEVER SYSTEM: the script lives in a folder the user can write, so SYSTEM running it would
+# hand that folder SYSTEM's rights. The user already may query and start the Beeper services
+# (grant-beeper-service-control.ps1) and egpt-daemon (install-nssm-service.ps1), and owns the
+# profile, the claim and the lockfile.
 #
-# ALL THREE TRIGGERS, on purpose. Boot and logon make it RESPOND quickly to the two moments that
-# actually change the answer; the repeating timer is what makes it CORRECT rather than merely
-# reactive - a missed event, a crash mid-flip or a session that ended without a logon event all
-# heal on the next tick instead of leaving Session 0 wrong until someone notices.
-#
-# AS SYSTEM, because it starts and stops services and must run with nobody logged in - which is
-# precisely the state it exists to maintain.
-#
-#   .\setup\register-s0-identity-task.ps1                 register (or replace) the task
-#   .\setup\register-s0-identity-task.ps1 -IntervalMin 5  a different cadence
-#   .\setup\register-s0-identity-task.ps1 -Remove         unregister
-#
-# DO NOT REGISTER THIS UNTIL THE SECONDARY INSTALL IS LOGGED IN. The reconciler's safety gate refuses
-# to hand Session 0 to an install that cannot answer, so it will not take the node off the air -
-# but until the gate opens it will also stop a egpt-beeper-secondary you are in the middle of logging in to.
+#   .\setup\register-s0-identity-task.ps1 -LogPath <file>   register (or replace) the task
+#   .\setup\register-s0-identity-task.ps1 -UserId reve\an   as that user (default: whoever runs this)
+#   .\setup\register-s0-identity-task.ps1 -IntervalMin 5    a different cadence
+#   .\setup\register-s0-identity-task.ps1 -EgptHome <dir>   the profile whose STOP file it honours
+#   .\setup\register-s0-identity-task.ps1 -Remove           unregister
 #
 # ASCII ONLY (PowerShell 5.1 reads a BOM-less UTF-8 script as ANSI).
 [CmdletBinding()]
 param(
   [string] $TaskName    = 'egpt-s0-identity',
   [string] $ScriptPath  = (Join-Path $PSScriptRoot 's0-identity-reconcile.ps1'),
+  [string] $ServiceName = 'egpt-beeper-primary',
+  [string] $LogPath     = '',
+  [string] $EgptHome    = '',
+  [string] $UserId      = [Security.Principal.WindowsIdentity]::GetCurrent().Name,
   [int]    $IntervalMin = 2,
   [switch] $Remove,
-  [switch] $Pause
+  [switch] $Pause,
+  [switch] $LoadFunctionsOnly
 )
 $ErrorActionPreference = 'Stop'
+
+# Who the task runs as. In-memory only (tests read it).
+function Get-S0IdentityTaskPrincipal([string] $UserId) {
+  if ($UserId -match '(^|\\)SYSTEM$|^NT AUTHORITY\\') { throw "the reconciler task never runs as $UserId (its script is in a user-writable folder)" }
+  return New-ScheduledTaskPrincipal -UserId $UserId -LogonType S4U -RunLevel Limited
+}
+
+# When it runs. In-memory only (tests read it). The time trigger starts the repetition NOW and keeps
+# it across reboots; a repetition hung off AtStartup alone waits for the next boot (reve 2026-10-22:
+# registered, never ran, no next run time). AtStartup stays for the pass right at boot.
+# No -RepetitionDuration: empty means indefinitely; [TimeSpan]::MaxValue is refused (P99999999DT23H59M59S).
+function Get-S0IdentityTaskTriggers([int] $IntervalMin, [datetime] $At = (Get-Date)) {
+  return @(
+    (New-ScheduledTaskTrigger -Once -At $At -RepetitionInterval (New-TimeSpan -Minutes $IntervalMin)),
+    (New-ScheduledTaskTrigger -AtStartup))
+}
+
+# The reconciler's command line. In-memory only (tests read it). No -EgptHome: the reconciler's default.
+function Get-S0IdentityTaskArgument([string] $ScriptPath, [string] $ServiceName, [string] $LogPath, [string] $EgptHome) {
+  $arg = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$ScriptPath`" -ServiceName $ServiceName"
+  if ($LogPath) { $arg += " -LogPath `"$LogPath`"" }
+  if ($EgptHome) { $arg += " -EgptHome `"$EgptHome`"" }
+  return $arg
+}
+
+if ($LoadFunctionsOnly) { return }
 
 $id = [Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -53,26 +81,18 @@ if ($Remove) { Write-Host "[s0-identity] done (removed)"; if ($Pause) { Read-Hos
 
 if (-not (Test-Path $ScriptPath)) { throw "reconciler not found: $ScriptPath" }
 
-$action = New-ScheduledTaskAction -Execute 'powershell.exe' `
-  -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$ScriptPath`""
-
-# A repetition that never ends, hung off a boot trigger, plus a logon trigger for responsiveness.
-$atBoot  = New-ScheduledTaskTrigger -AtStartup
-$atBoot.Repetition = (New-ScheduledTaskTrigger -Once -At (Get-Date) `
-  -RepetitionInterval (New-TimeSpan -Minutes $IntervalMin) `
-  -RepetitionDuration ([TimeSpan]::MaxValue)).Repetition
-$atLogon = New-ScheduledTaskTrigger -AtLogOn
+$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument (Get-S0IdentityTaskArgument $ScriptPath $ServiceName $LogPath $EgptHome)
 
 # RunOnlyIfNetworkAvailable is deliberately OFF: this is a local question about local services and
 # must be answered on a machine with no network at all.
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
   -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
 
-Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger @($atBoot, $atLogon) `
-  -Settings $settings -User 'SYSTEM' -RunLevel Highest `
-  -Description 'Keeps the Session 0 Beeper on the right identity: the primary account when nobody is logged in, the secondary once the operator GUI is up.' `
+Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger (Get-S0IdentityTaskTriggers $IntervalMin) `
+  -Settings $settings -Principal (Get-S0IdentityTaskPrincipal $UserId) `
+  -Description "Starts $ServiceName when Session 1 is not using its Beeper profile (shared with the operator's window), and egpt-daemon when it is Stopped and Automatic with no STOP file. Never stops either." `
   -ErrorAction Stop | Out-Null
 
-Write-Host "[s0-identity] registered $TaskName - at boot, at logon, every $IntervalMin min, as SYSTEM"
-Write-Host "[s0-identity] log: C:\Users\an\.egpt\config\logs\s0-identity.log"
+Write-Host "[s0-identity] registered $TaskName - every $IntervalMin min from now on, and at boot, as $UserId (S4U), for $ServiceName and egpt-daemon"
+if ($LogPath) { Write-Host "[s0-identity] log: $LogPath" }
 if ($Pause) { Write-Host ''; Read-Host 'Press Enter to close' | Out-Null }

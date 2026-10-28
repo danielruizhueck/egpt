@@ -15,17 +15,20 @@
 // slow/failing worker start never stalls the spine's tick + alive heartbeat. start() is
 // itself awaitable so callers (tests) can observe the resolved wiring deterministically.
 
-import { join } from 'node:path';
+import { posix, win32 } from 'node:path';
 import { startSynthesizerServer as realStartSynthesizerServer, SYNTHESIZER_DEFAULT_PORT } from '../tools/synthesizer.mjs';
 import { listenRetrying } from './bind-retry.mjs';
+import { readSecret, SYNTH_TOKEN_FILE } from '../secrets.mjs';
+import { EGPT_HOME } from '../egpt-home.mjs';
 
 // ── config resolution (mirrors transcriptor-worker.mjs's resolveToken shape — pure +
 //    exported so the fallback ladder is test-locked). `synthesizer:` is the WORKER-role
 //    block (mirrors `transcriptor:`); `voice_service:` is the CLIENT/rung-resolved block
 //    (mirrors `transcription_service:`) — a node running both roles may collapse the
 //    token onto either, so both are read, worker's own block first. ──────────────────
-export function resolveToken(cfg) {
-  return cfg?.synthesizer?.server?.token ?? cfg?.voice_service?.server?.token ?? null;
+// …then the file $EGPT_HOME/secrets/synthesizer.token: a config value still wins.
+export function resolveToken(cfg, { home = EGPT_HOME } = {}) {
+  return cfg?.synthesizer?.server?.token ?? cfg?.voice_service?.server?.token ?? readSecret(home, SYNTH_TOKEN_FILE).token;
 }
 
 // ffmpeg binary path. Deliberately NOT coupled to transcription.cli.ffmpeg_command in
@@ -44,6 +47,7 @@ export function createSynthesizerWorker({
   setTimeout: setTimeoutFn = globalThis.setTimeout,       // the bind retry's timer seams
   clearTimeout: clearTimeoutFn = globalThis.clearTimeout,
   onLog = () => {},
+  platform = process.platform,
 } = {}) {
   let server = null, closed = false;
   const stopping = new AbortController();   // stop() ends a pending bind retry (src/spine/bind-retry.mjs)
@@ -64,11 +68,12 @@ export function createSynthesizerWorker({
 
     const keyB64 = resolveToken(cfg);
     if (!keyB64) {
-      onLog('!! synthesizer enabled but voice token unset — refusing to start an unauthenticated server. Set synthesizer.server.token (same value as the main spine) in config.yaml.');
+      onLog('!! synthesizer enabled but voice token unset — refusing to start an unauthenticated server. Set synthesizer.server.token (same value as the main spine) in config.yaml, or write it to $EGPT_HOME/secrets/synthesizer.token.');
       return;
     }
 
-    const pythonPath = join(radioPiper, 'venv', 'Scripts', 'python.exe');
+    const { join } = platform === 'win32' ? win32 : posix;
+    const pythonPath = platform === 'win32' ? join(radioPiper, 'venv', 'Scripts', 'python.exe') : join(radioPiper, 'venv', 'bin', 'python');
     const voicesDir = join(radioPiper, 'voices');
     const ffmpegCommand = resolveFfmpegCommand(cfg);
     const bind = scfg.bind || '127.0.0.1';   // default 127.0.0.1 — set synthesizer.bind to the LAN ip to expose

@@ -62,6 +62,8 @@
 //                                     also --add-dir'd so READS still work.
 //   tools (a type's list narrowing its level, brainpool) → --tools "<a,b,c>": unlisted tools
 //                                     do not exist, in every tier above (2026-10-15)
+//   strictMcpConfig (unless false)  → --strict-mcp-config: no MCP server from any config, the
+//                                     claude.ai connectors included — every being (2026-10-26)
 //   model   → --model ;  effort → --effort ;  sessionId → --resume ;
 //   appendSystemPrompt → --append-system-prompt
 //
@@ -159,6 +161,7 @@ export function buildClaudeArgs(options = {}) {
   // Claude in Chrome: full-access (bypass) sessions only - never the regular/confined tiers.
   if (options.chrome === true && options.dangerouslySkipPermissions === true) args.push('--chrome');
   if (Array.isArray(options.tools)) args.push('--tools', options.tools.join(','));
+  if (options.strictMcpConfig !== false) args.push('--strict-mcp-config');
 
   // ── tool permission + confinement (mirror buildSdkOptions) ──
   //

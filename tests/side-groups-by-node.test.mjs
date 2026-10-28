@@ -1,5 +1,5 @@
 // side-groups-by-node.test.mjs — which node makes a side group (operator 2026-10-19). The node that
-// runs the command (the handle's) makes /join and /split; the node whose being is about to reply makes
+// runs the command (the handle's) makes /split; the node whose being is about to reply makes
 // the automatic group; the other node links it from the opener, and linking an automatic group also
 // switches reply_in_side_group on for its own origin entry. Both nodes making one at once is defined:
 // two groups, each node maps both, each keeps replying in its own. Two real nodes: kg (E: e) and do
@@ -55,7 +55,7 @@ function streamingBridge() {
 // reply mode here.
 function node(name, { entry = {}, mode = 'mention' } = {}) {
   const { role, being, handles } = NODES[name];
-  const agents = { [being]: { default: true, handles } };
+  const agents = { [being]: { handles, conversation_defaults: { allowed_users: ['*'] } } };   // the group's members reach it
   const config = {
     beeper: { primary: { phone: AN }, secondary: { phone: RODZ } },
     node_name: name, node_role: role, group_title: '{group}-{name}', agents, dispatch: { auto_default_mode: mode },
@@ -71,7 +71,6 @@ function node(name, { entry = {}, mode = 'mention' } = {}) {
     send: async () => {},
     loadState: async () => st,
     writeState: async (s) => { st = s; calls.writes.push(s); },
-    defaultKey: being,
     forkBridge: {
       editMessage: async () => true,
       createGroup: async (opts, o = {}) => { calls.create.push({ title: opts.title, via: o.via ?? null }); return { success: true, chatID: `!${name}-side${++made}:beeper.local` }; },
@@ -93,12 +92,12 @@ function node(name, { entry = {}, mode = 'mention' } = {}) {
     bridge,
     brain: { async turn(b, ev) { calls.brain.push({ being: b, chatId: ev.chatId }); return { text: 'ok' }; } },
     identity: createIdentity({ now: () => 1000 }),
-    router: createRouter({ getAgents: () => agents, defaultBeing: being }),
-    gating: createGating({ getConfig: () => config, loadState: async () => st, defaultKey: being, sideGroupFor: (ev, o) => cmds.autoSideGroup(ev, o) }),
-    commands: cmds, sender: createSender({ bridge, defaultKey: being }), transcript: { async log() {} }, heartbeats: { runDue() {} },
+    router: createRouter({ getAgents: () => agents, getConfig: () => config }),
+    gating: createGating({ getConfig: () => config, loadState: async () => st, sideGroupFor: (ev, o) => cmds.autoSideGroup(ev, o) }),
+    commands: cmds, sender: createSender({ bridge }), transcript: { async log() {} }, heartbeats: { runDue() {} },
     mesh: { isEnvelope: () => false, async handle() {} },
     fromThisNode: (ev) => ev?.fromNode != null && String(ev.fromNode).toLowerCase() === name,
-    isSelfChat: () => false, clock: { now: () => 1000 }, defaultBeing: being, turnTimeoutMs: 0,
+    isSelfChat: () => false, clock: { now: () => 1000 }, turnTimeoutMs: 0,
   });
   const say = (body, over = {}) => {
     const { atEStart, atEAnywhere } = mentionStatus(body, handles);
@@ -117,12 +116,12 @@ const operator = { userId: AN_ID, senderName: 'An', isSender: true, authorized: 
 
 beforeEach(() => { rmSync(HOME, { recursive: true, force: true }); });
 
-describe('/join and /split: the handle\'s node creates', () => {
-  it('/don join hi: dolly (node_role secondary) makes SI+PALMA-hi on its primary account; kg makes nothing', async () => {
+describe('/split: the handle\'s node creates', () => {
+  it('/don split hi: dolly (node_role secondary) makes SI+PALMA-hi on its primary account; kg makes nothing', async () => {
     const kg = node('kg'), dolly = node('do');
-    for (const n of [kg, dolly]) await n.say('/don join hi', operator);
+    for (const n of [kg, dolly]) await n.say('/don split hi', operator);
     expect(dolly.calls.create).toEqual([{ title: `SI+${TITLE}-hi`, via: 'primary' }]);
-    expect(dolly.contacts()[shortChatId('!do-side1:beeper.local')]).toMatchObject({ aliasOf: ORIGIN, join_name: 'hi' });
+    expect(dolly.contacts()[shortChatId('!do-side1:beeper.local')]).toMatchObject({ parent_chat: ORIGIN });
     expect(kg.calls.create).toEqual([]);
   });
 
@@ -133,11 +132,11 @@ describe('/join and /split: the handle\'s node creates', () => {
     expect(kg.calls.create).toEqual([]);
   });
 
-  it('kg links dolly\'s /join group from its opener (both directions)', async () => {
+  it('kg links a /join room dolly made before the retirement from its opener (kind join) as an alias', async () => {
     const kg = node('kg'), dolly = node('do');
-    for (const n of [kg, dolly]) await n.say('/don join hi', operator);
-    await deliverOpener(dolly, kg);
-    expect(kg.contacts()[shortChatId('!do-side1:beeper.local')]).toMatchObject({ aliasOf: ORIGIN });
+    const side = shortChatId('!do-side1:beeper.local');
+    await deliverOpener(dolly, kg, { chatId: side, text: `🔗 Side-room of ${TITLE}`, canary: { group: side, origin: ORIGIN, kind: 'join', transcript: `SI+${TITLE}-hi` } });
+    expect(kg.contacts()[side]).toMatchObject({ aliasOf: ORIGIN, transcript: `SI+${TITLE}-hi` });
     expect(kg.contacts()[ORIGIN].reply_in_side_group).toBeUndefined();   // only an automatic group switches it on
   });
 });

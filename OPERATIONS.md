@@ -17,19 +17,22 @@ heartbeat and shell port. No "kg2": both reve profiles declare `node_name: kg`.
 
 reve's `172.25.64.1` / `172.19.160.1` are Hyper-V/WSL switches — never deploy there.
 
-**Each node has ONE runner: the Session 1 scheduled task `egpt-daemon`** (`node
-egpt-daemon.mjs` → `egpt-spine.mjs`, started at logon by
-`setup/register-session1-daemon-task.ps1`). Stopping it, this node goes silent. The
-Session 0 NSSM service of the same name is **retired** (2026-10-17: stopped and
-Disabled on both nodes; remove it with `setup\uninstall-nssm-service.cmd`, name
-`egpt-daemon`). `/standdown` and the S0↔S1 handover are gone with it.
-`node setup\verify-install.mjs` checks both.
+**Each node has two runners, one at a time (GENOME 6, 2026-10-22).** The NSSM service
+`egpt-daemon` (`node egpt-daemon.mjs` → `egpt-spine.mjs`, Automatic, as the desktop user,
+installed at the console by `setup\install-nssm-service.cmd`) runs the node in Session 0
+while nobody is logged on. At logon the Session 1 task `egpt-daemon`
+(`setup/register-session1-daemon-task.ps1`) takes it over: its daemon claims
+`state\s1.claim` and drops `/standdown` into the ingest box; the Session 0 spine finishes its
+turns in flight, ends its background work (one line in each chat that had some) and leaves
+with 45; the service's daemon holds off. At logoff Windows ends Session 1 and the service
+takes the node back within seconds. `node setup\verify-install.mjs` checks both.
 
-**After a reboot nothing runs until the operator logs on** — the task's only trigger is
-logon. `egpt-wake-duty` (also an interactive task, so also only while logged on) wakes a
-sleeping machine every 30 min and, if the daemon died, revives it through
-`setup\start-egpt.ps1` — never past a `STOP` file. It cannot start a node nobody is
-logged on to.
+**After a reboot the service runs the node before anyone logs on.** The `egpt-s0-identity`
+task (S4U, as you, every 2 min and at boot) starts `egpt-daemon` if it is Stopped and
+Automatic with no `STOP` file, as it does the shared primary Beeper. `egpt-wake-duty` (an
+interactive task, so only while logged on) wakes a sleeping machine every 30 min and revives
+a runner through `setup\start-egpt.ps1` — never past a `STOP` file. While Session 0 runs the
+node there is no browser: a browser request says it is available once someone logs on.
 
 `Get-Service *egpt*` lists **two Beeper Desktops** (and the disabled service):
 
@@ -53,8 +56,31 @@ powershell -File setup\rename-beeper-s0-service.ps1 -From egpt-primary   -To egp
 powershell -File setup\rename-beeper-s0-service.ps1 -From egpt-secondary -To egpt-beeper-secondary
 ```
 
-`setup\s0-identity-reconcile.ps1` finds these by **start mode**, not by name, so it
-keeps working across the rename either way.
+**One profile for the operator's own account (optional, reve).**
+`setup\share-beeper-primary-profile.cmd` (once, elevated, `-DryRun` / `-Revert`; `-Resume`
+finishes one that stopped after its service step) points
+`egpt-beeper-primary` at the operator's own Beeper window profile, after a full backup beside it:
+one device, one token, no `primary_gui`. Then the window runs that profile while Beeper is open
+and the service runs it otherwise, never both:
+
+- `setup\beeper-window.cmd` (the logon Run value and the "Beeper (eGPT)" shortcut) claims the
+  profile, stops the service, opens Beeper once the service's Beeper has let go, and starts the
+  service again when Beeper exits (tray Quit; a hidden window still counts as open). Open Beeper
+  through it, not through Beeper's own shortcut.
+- The service's NSSM Start/Pre hook (`setup\s0-identity-reconcile.ps1 -PreStart`) refuses to start
+  it while Session 1 claims or runs the profile; the `egpt-s0-identity` task (as you, S4U, never SYSTEM; boot + every
+  2 min) starts it after a logoff. Nothing ever kills Beeper.
+- While the profile changes hands the spine's bridges hold (`/beeper-hold on|off` in the ingest
+  box, capped at 3 min), the same state `/update beeper` uses.
+
+**Beeper services as the desktop user (optional, any node).** `setup\beeper-services-run-as-user.cmd`
+(elevated, `-DryRun` / `-Revert`, `-ServiceName`) logs services on as you instead of LocalSystem:
+password asked in a dialog and checked first (never stored), `SeServiceLogonRight` granted (and
+removed on `-Revert` only if it added it), the profile backed up beside itself, then per service
+hold → stop → switch → start → wait for its token → release; one that does not answer goes back to
+LocalSystem. It refuses a service with no `--user-data-dir` (the primary until the one-profile
+conversion). If a later password change stops a service logging on (error 1069), the spine says
+so in log_to_group after 5 min on no port — through a connection that still works.
 
 ## Deploying
 
@@ -86,17 +112,19 @@ shell (the node's own console) still take the bare line.
 
 **A deploy waits for turns in progress (since 2026-09-28).** `/upgrade` and `/restart`
 no longer exit on the spot: the spine keeps answering and exits the moment no turn is
-running, or after **30 minutes** regardless (logged loudly). While it waits it writes
+running, with no cap (since 2026-10-26; every 30 min the logging group is told, and
+`/restart force` / `/upgrade force` leave without waiting). While it waits it writes
 `state/draining.json`, and `upgrade.ps1` prints who it is waiting for every ~30 s
 instead of counting down. `/rewind`, `STOP` and the daemon's wedge-restart stay immediate.
 
 A change to the **supervisor itself** (`daemon-runtime`, entry point, appPath) needs
 a daemon restart, since an `/upgrade` respawns through the already-running
 supervisor: after the `/upgrade` lands, `setup\stop-egpt.cmd` then
-`setup\start-egpt.cmd` in the node's logged-on session — that pair IS the restart; there
-is no separate restart script. `setup/deploy.ps1` does it in one go: fast-forwards prod,
-then runs the same stop and start (no elevation; not from a being's shell — the stop kills
-the daemon's tree; a node with a `STOP` file is left stopped).
+`setup\start-egpt.cmd` — that pair IS the restart, of both runners (the task only while
+someone is logged on; the service either way); there is no separate restart script.
+`setup/deploy.ps1` does it in one go: fast-forwards prod, then runs the same stop and start
+(no elevation; not from a being's shell — the stop kills the daemon's tree; a node with a
+`STOP` file is left stopped).
 
 ### The Session 1 daemon holds the browsers
 
@@ -112,19 +140,21 @@ restarts every group Chrome; `--restore-last-session` reopens their tabs.
 
 **Restarting the Session 1 daemon** (needed once after an `/upgrade` that changes daemon code):
 in the node's logged-on session, as the operator (no elevation; the task is the operator's),
-`setup\stop-egpt.cmd` then `setup\start-egpt.cmd`. Stop writes `STOP`, stops the task and
-`taskkill /T /F`s the daemon tree (`Stop-ScheduledTask` alone does not); start removes `STOP` and
-starts the task. A daemon refuses to start while a live spine still holds the profile
-(`state/spine.pid` + a fresh `alive.txt`) and says which pid. A turn in progress is cut.
+`setup\stop-egpt.cmd` then `setup\start-egpt.cmd`. Stop writes `STOP`, stops the service, stops
+the task and `taskkill /T /F`s the daemon tree (`Stop-ScheduledTask` alone does not); start
+removes `STOP`, starts the task, waits for its daemon to hold `state\s1.claim`, then starts the
+service (which holds off). A daemon never spawns beside a live spine (`state/spine.pid` + a fresh
+`alive.txt`): it waits and says which pid. A turn in progress is cut.
 Done when `<profile>/config/logs/session1-daemon.log` shows a fresh
 `egpt-daemon up` with no `no chrome-host` line after it, and `/<handle> chrome` logs
 `launched "brain" Chrome … held by the daemon`. At start the new daemon kills any
 `--remote-debugging-pipe` Chrome left on a profile under `<profile>/chrome/profiles` (an orphan
 of the old spine); nothing else.
 
-### The Session 1 daemon holds the claude sessions
+### The daemon holds the claude sessions
 
-Since 2026-10-16 (`feat/cli-host`) the same daemon also spawns and holds every being's `claude`
+Since 2026-10-16 (`feat/cli-host`) the same daemon (since 2026-10-22 the Session 0 one too)
+also spawns and holds every being's `claude`
 (a boxed being's launcher too, so its lease stays) and its stdio (`src/cli-host.mjs`). `/upgrade`,
 `/restart`, a config restart, a spine crash or a wedge-restart leave each session and its
 background agents running; the new spine adopts them (`[cli-host] adopted <key> pid …` in its
@@ -134,8 +164,10 @@ no longer for background work. A config change reaches a live session as a contr
 effort, verbose_thinking); anything else reopens it by resume, never while its background work runs.
 
 Still ended, resumed by thread id on the next turn: a daemon restart or reboot (the daemon's
-children die with it, measured) and `/rewind`. A spine with no daemon (run by hand) spawns its
-own, and its restarts still wait for background work.
+children die with it, measured), `/rewind`, and a handover between the sessions (at logon after
+the Session 0 spine's turns finish, each chat with background work told once; at logoff with
+the session). A spine with no daemon (run by hand) spawns its own, and its restarts still wait
+for background work.
 
 A daemon restart (section above) ends today's sessions, their background agents and the Chromes
 once: pick a moment with no background work (a chat that has some shows the being's status
@@ -246,5 +278,5 @@ invisible to the sandboxed store, so the first turn after the move fails to resu
 and the spine starts the being FRESH. Since 2026-09-14 that raises an operator
 alert instead of passing silently.
 
-Every token — shell, transcription, Beeper — lives in `config.yaml` and nowhere
-else. Never copy one into a doc, a commit, or a chat.
+Every token — shell, transcription, Beeper (under `limbs.beeper` since migration 0049) —
+lives in `config.yaml` and nowhere else. Never copy one into a doc, a commit, or a chat.

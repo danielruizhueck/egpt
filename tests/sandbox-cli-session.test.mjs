@@ -8,10 +8,10 @@
 // whole job is to proxy that protocol through untouched.
 import { describe, it, expect, afterAll } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { createSandboxCliSession, resolveSandboxGitBash, spawnBoxedCommand, GIT_BASH_CANDIDATES } from '../src/sandbox-cli-session.mjs';
+import { createSandboxCliSession, resolveSandboxGitBash, spawnBoxedCommand, GIT_BASH_CANDIDATES, BOX_LAUNCHER } from '../src/sandbox-cli-session.mjs';
 
 // Hoisted to module scope 2026-09-06: a sandboxed CCODE session now REFUSES to be created
 // without the operator's subscription credential (see the last describe in this file), so every
@@ -39,6 +39,9 @@ const THREAD_STORE = join(STORE, THREAD);
 const BASH = join(STORE, 'bash.exe');
 writeFileSync(BASH, '');
 const BASH_CANDIDATES = [BASH];
+// A stand-in for the Linux box launcher (/usr/local/sbin/egpt-box), so a linux session can be built here.
+const BOX = join(STORE, 'egpt-box');
+writeFileSync(BOX, '');
 // A candidate whose path ENDS in system32\bash.exe — the WSL launcher's shape. Real enough to
 // exist, so the exclusion below is tested against a file that existsSync really does find.
 const SYS32_BASH = join(STORE, 'System32', 'bash.exe');
@@ -237,45 +240,40 @@ describe('sandbox-cli-session — wraps warm-cli-session with the OS-isolation l
     s.close();
   });
 
-  // ── PLATFORM DISPATCH (operator An 2026-10-15/10-17, the POSIX box). Every test above pins
-  //    `platform: 'win32'`: they lock the WINDOWS path, which stays byte-identical, and pinning it
-  //    is what lets them keep doing that on any runner. The box now has TWO enforcers — win32
-  //    (logon launcher) and darwin (sandbox-exec) — so this factory admits exactly those two and
-  //    throws loudly for any OTHER platform (linux included: it is a later PR), BEFORE the inner
-  //    session exists and so before any spawn (never the bare ENOENT an unguarded spawn used to
-  //    leak). The darwin dispatch itself — the box dir, the Seatbelt profile — is locked in
-  //    tests/posix-box.test.mjs (unit) and its darwin-only live tests. ──
-  for (const platform of ['linux', 'freebsd', 'aix', 'sunos']) {
-    it(`an explicit sandboxed:true on ${platform} (no box there) throws, naming the enforcers and the fix, WITHOUT spawning`, () => {
+  // ── PLATFORM GUARD (operator 2026-09-04). Every test above pins `platform: 'win32'`: they lock
+  //    the WINDOWS path, which must stay byte-identical, and pinning it is what lets them keep
+  //    doing that on a POSIX runner. The seam still DEFAULTS to the real process.platform (last
+  //    test below).
+  //
+  //    A DEFAULT may be platform-aware — brainpool.mjs's `sandboxed` fallback is (unset at both
+  //    tiers = true on win32, false elsewhere). AN EXPLICIT REQUEST MAY NOT BE: reaching this
+  //    factory at all means some tier said `sandboxed: true`, so on a non-Windows node it must
+  //    fail LOUDLY and BEFORE the spawn — never run the being unsandboxed behind a config key
+  //    that claims otherwise, and never leak the bare ENOENT naming a shell binary that an
+  //    unguarded spawn used to produce. ──
+  for (const [platform, why, extra] of [['darwin', 'Windows- and Linux-only', {}], ['linux', 'is not installed', { boxLauncher: join(STORE, 'no-such-egpt-box') }]]) {
+    it(`REPRODUCE-FIRST: an explicit sandboxed:true on ${platform} with no box throws, naming the feature and the fix, WITHOUT spawning`, () => {
       const f = fakeLauncherSpawn();
       let err = null;
-      try { createSandboxCliSession({ spawn: f.spawn, cwd: process.cwd(), platform, sandboxOauthToken: TOKEN, jsonlStoreRoot: STORE }); } catch (e) { err = e; }
-      expect(err, `a sandboxed session was created on ${platform}, which has no box`).toBeTruthy();
-      expect(err.message).toContain(platform);                   // why it cannot run here
-      expect(err.message).toMatch(/win32.*darwin/);              // the two that CAN
-      expect(err.message).toContain('access_level');             // THE FIX, named in the message
-      expect(f.spawnCount()).toBe(0);                            // nothing was spawned
+      try { createSandboxCliSession({ spawn: f.spawn, cwd: process.cwd(), platform, ...extra }); } catch (e) { err = e; }
+      expect(err, `a sandboxed session was created on ${platform}, which has no launcher to run`).toBeTruthy();
+      expect(err.message).toContain('sandboxed: true');    // the feature, named by its config key
+      expect(err.message).toContain(platform);             // ...and why it cannot run here
+      expect(err.message).toContain(why);
+      expect(err.message).toContain('access_level: regular');   // THE FIX, named in the message itself
+      expect(f.spawnCount()).toBe(0);                      // and no ENOENT is possible: nothing was spawned
     });
   }
-
-  it('darwin does NOT throw at the platform guard — it builds a box session, lazily (no spawn at create)', () => {
-    const f = fakeLauncherSpawn();
-    const s = createSandboxCliSession({ spawn: f.spawn, cwd: process.cwd(), platform: 'darwin', sandboxOauthToken: TOKEN, jsonlStoreRoot: STORE });
-    expect(f.spawnCount(), 'darwin spawned at create time — the box must be lazy like win32').toBe(0);
-    s.close();
-  });
 
   it('the platform seam DEFAULTS to the real process.platform (injection is for tests, not a requirement)', () => {
     const f = fakeLauncherSpawn();
     const make = () => createSandboxCliSession({ spawn: f.spawn, cwd: process.cwd(), sandboxOauthToken: TOKEN, jsonlStoreRoot: STORE });
-    // win32 and darwin both build a box session lazily; any other platform throws. This runner is
-    // one of the two (the operator's node is darwin, reve is win32), or else a "no box" platform.
-    if (process.platform === 'win32' || process.platform === 'darwin') {
-      const s = make();                 // created exactly as before...
-      expect(f.spawnCount()).toBe(0);   // ...and still lazy — the box is built on the first turn()
+    if (process.platform === 'win32') {
+      const s = make();                 // the operator's own node: created exactly as before...
+      expect(f.spawnCount()).toBe(0);   // ...and still lazy — the launcher spawns on the first turn()
       s.close();
-    } else {
-      expect(make).toThrow(/win32.*darwin/);
+    } else if (process.platform !== 'linux' || !existsSync(BOX_LAUNCHER)) {
+      expect(make).toThrow(/Windows- and Linux-only|is not installed/);
       expect(f.spawnCount()).toBe(0);
     }
   });
@@ -730,6 +728,38 @@ describe('sandbox-cli-session — the launcher argument contract (one argv eleme
     }
   });
 
+  // ── THE PIN (operator 2026-10-27, conversations.yaml sandbox_pin). brainpool.mjs hands
+  //    { key, writable, readOnly }; the launcher leases only the pinned account and keeps the standing
+  //    ACEs (setup/sandbox-account.ps1, PINNED ACCOUNTS). Same contract: the key is one scalar like
+  //    -TargetFolder, each path list one JSON-array element. ──
+  it('a pinned turn hands the launcher -PinKey and its standing paths, apart from the per-turn shares', async () => {
+    const args = await argvFor({
+      sandboxSharePaths: ['C:\\turn'],
+      sandboxPin: { key: 'egpt:whatsapp:89xiq', writable: [' C:\\w '], readOnly: ['C:/Users/an/Documents', 'C:\\w', '', 7] },
+    });
+    expect(args[args.indexOf('-PinKey') + 1]).toBe('egpt:whatsapp:89xiq');
+    expect(jsonArgOf(args, '-PinSharePath')).toEqual(['C:\\w']);
+    expect(jsonArgOf(args, '-PinSharePathReadOnly')).toEqual(['C:/Users/an/Documents']);
+    expect(jsonArgOf(args, '-SharePath')).toEqual(['C:\\turn', THREAD_STORE]);
+    expect(args.indexOf('-PinKey')).toBeLessThan(args.indexOf('-InnerBin'));
+    expect(args[args.length - 2]).toBe('-InnerArgs');
+  });
+
+  it('a pin with no standing paths is -PinKey alone', async () => {
+    const args = await argvFor({ sandboxPin: { key: 'egpt:whatsapp:89xiq', writable: [], readOnly: [] } });
+    expect(args).toContain('-PinKey');
+    expect(args).not.toContain('-PinSharePath');
+    expect(args).not.toContain('-PinSharePathReadOnly');
+  });
+
+  it('REGRESSION LOCK: an unpinned turn (or a pin with no key) gets no -Pin* flag - the argv is byte-identical', async () => {
+    const plain = await argvFor();
+    for (const f of ['-PinKey', '-PinSharePath', '-PinSharePathReadOnly']) expect(plain).not.toContain(f);
+    for (const junk of [undefined, null, {}, { key: '' }, { key: 42, readOnly: ['C:/x'] }]) {
+      expect(await argvFor({ sandboxPin: junk }), `sandboxPin=${JSON.stringify(junk)} changed the argv`).toEqual(plain);
+    }
+  });
+
   it("engine: 'codex' and 'pi' route through the SAME sandboxSpawn, so both get -SharePath and -InnerArgs in the same shape", () => {
     for (const engine of ['codex', 'pi']) {
       const calls = [];
@@ -806,9 +836,7 @@ describe('sandbox-cli-session — a missing or rejected sandbox_oauth_token tell
   it('the guard runs AFTER the engine and platform guards, so those keep their own diagnosis', () => {
     const f = fakeLauncherSpawn();
     expect(() => createSandboxCliSession({ spawn: f.spawn, cwd: process.cwd(), platform: 'win32', engine: 'llama' })).toThrow(/engine=llama/);
-    // A platform with no box (not win32/darwin — linux is a later PR) is refused by the platform
-    // guard, ahead of this credential guard — so it keeps its own diagnosis, not the "no token" one.
-    expect(() => createSandboxCliSession({ spawn: f.spawn, cwd: process.cwd(), platform: 'freebsd' })).toThrow(/win32.*darwin/);
+    expect(() => createSandboxCliSession({ spawn: f.spawn, cwd: process.cwd(), platform: 'darwin' })).toThrow(/Windows- and Linux-only/);
     expect(f.spawnCount()).toBe(0);
   });
 
@@ -1060,11 +1088,10 @@ describe('sandbox-cli-session — spawnBoxedCommand: a being\'s heartbeat comman
     expect(innerArgvOf(run('"'.repeat(n + 1)).args)).toEqual(['heartbeats/primo.command.sh']);
   });
 
-  it('REFUSED, before any spawn, on a platform with no box and (on win32) with no POSIX bash to run it', () => {
+  it('REFUSED, before any spawn, where there is no box and with no POSIX bash to run it', () => {
     const f = fakeLauncherSpawn();
-    // A platform with no box (not win32/darwin — linux is a later PR) is refused outright. (darwin
-    // DOES run a boxed command — that path is covered in tests/posix-box.test.mjs.)
-    expect(() => spawnBoxedCommand({ targetFolder: ROOM, command: 'date', commandFile: 'x.sh', spawn: f.spawn, platform: 'freebsd', gitBashCandidates: BASH_CANDIDATES })).toThrow(/runs in its box, and the OS box runs on win32\/darwin only.*platform=freebsd/);
+    expect(() => spawnBoxedCommand({ targetFolder: ROOM, command: 'date', commandFile: 'x.sh', spawn: f.spawn, platform: 'darwin', gitBashCandidates: BASH_CANDIDATES })).toThrow(/runs in its box, and the box is Windows- and Linux-only.*platform=darwin/);
+    expect(() => spawnBoxedCommand({ targetFolder: ROOM, command: 'date', commandFile: 'x.sh', spawn: f.spawn, platform: 'linux', boxLauncher: join(STORE, 'no-such-egpt-box') })).toThrow(/runs in its box, and the Linux box launcher .* is not installed/);
     expect(() => spawnBoxedCommand({ targetFolder: ROOM, command: 'date', commandFile: 'x.sh', spawn: f.spawn, platform: 'win32', gitBashCandidates: [join(STORE, 'no-such-bash.exe')] })).toThrow(/no POSIX bash for the box/);
     expect(f.spawnCount()).toBe(0);
   });
@@ -1076,5 +1103,78 @@ describe('sandbox-cli-session — spawnBoxedCommand: a being\'s heartbeat comman
     spawnBoxedCommand({ targetFolder: ROOM, command: 'date', commandFile: 'x.sh', spawn: f.spawn, platform: 'win32', gitBashCandidates: BASH_CANDIDATES, onLog: (l) => logs.push(l) });
     await new Promise((r) => setImmediate(r));
     expect(logs).toEqual([LAUNCH]);
+  });
+});
+
+// ── THE LINUX BOX (EDW 2026-10-24): the same launcher parameters, behind `sudo -n <egpt-box>`
+//    instead of `powershell.exe … -File <ps1>`; no Windows-only env. Windows stays byte-identical. ──
+describe('sandbox-cli-session — the Linux box: same parameters through sudo -n docker/egpt-box', () => {
+  async function turnArgv(platform, extra = {}) {
+    const f = fakeLauncherSpawn();
+    const s = createSandboxCliSession({ spawn: f.spawn, cwd: process.cwd(), platform, boxLauncher: BOX, sandboxOauthToken: TOKEN, jsonlStoreRoot: STORE, sessionId: THREAD, gitBashCandidates: BASH_CANDIDATES, ...extra });
+    await s.turn('hi');
+    s.close();
+    expect(f.spawnCount()).toBe(1);
+    return f.calls[0];
+  }
+  const LINK = { mint: () => ({ env: ['EGPT_SPINE_PORT=1', 'EGPT_BEING_TOKEN=s', 'EGPT_ASK_SPINE=/a', 'EGPT_CDP=file:///c'], revoke: () => {} }) };
+  const EXTRA = { sandboxSharePaths: ['/w'], sandboxSharePathsReadOnly: ['/r'], sandboxReadMounts: [{ name: 'repos', path: '/srv/repos' }], beingLink: LINK };
+
+  it('REPRODUCE-FIRST: a linux turn spawns `sudo -n <launcher>` with the Windows parameters, minus the git-bash pair', async () => {
+    const linux = await turnArgv('linux', EXTRA);
+    const win = await turnArgv('win32', EXTRA);
+    expect(linux.bin).toBe('sudo');
+    expect(linux.args.slice(0, 2)).toEqual(['-n', BOX]);
+    expect(win.bin).toBe('powershell.exe');
+    expect(win.args.slice(0, 5)).toEqual(['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', expect.stringMatching(/sandbox-logon-launcher\.ps1$/)]);
+    const params = (args, n) => args.slice(n).map((a, i, all) => (all[i - 1] === '-SetEnv'
+      ? JSON.stringify(JSON.parse(a).filter((e) => !/^(CLAUDE_CODE_GIT_BASH_PATH|MSYS2_PATH_TYPE)=/.test(e))) : a));
+    expect(linux.args.slice(2)).toEqual(params(win.args, 5));
+    expect(jsonArgOf(linux.args, '-SetEnv').map((e) => e.split('=')[0])).toEqual(
+      ['CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CONFIG_DIR', 'EGPT_SPINE_PORT', 'EGPT_BEING_TOKEN', 'EGPT_ASK_SPINE', 'EGPT_CDP']);
+    expect(jsonArgOf(linux.args, '-SharePath')).toEqual(['/w', THREAD_STORE]);
+    expect(jsonArgOf(linux.args, '-SharePathReadOnly')).toEqual(['/r']);
+    expect(jsonArgOf(linux.args, '-ReadMounts')).toEqual(['repos=/srv/repos']);
+    expect(linux.opts).toMatchObject({ cwd: process.cwd() });
+  });
+
+  it('a sandbox_pin is Windows-only: the linux box is handed no -Pin* flag, and the turn log says so', async () => {
+    const logs = [];
+    const PIN = { sandboxPin: { key: 'egpt:whatsapp:89xiq', writable: [], readOnly: ['/srv/docs'] }, onLog: (l) => logs.push(String(l)) };
+    const { args } = await turnArgv('linux', PIN);
+    expect(args.some((a) => a.startsWith('-Pin'))).toBe(false);
+    expect(args).toEqual((await turnArgv('linux')).args);
+    expect(logs.some((l) => /sandbox_pin is Windows-only/.test(l))).toBe(true);
+  });
+
+  it('win32 regression lock: the exact argv shape is unchanged', async () => {
+    const { bin, args } = await turnArgv('win32');
+    expect(bin).toBe('powershell.exe');
+    expect(args.slice(0, 7)).toEqual(['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', expect.stringMatching(/[\\/]setup[\\/]sandbox-logon-launcher\.ps1$/), '-TargetFolder', process.cwd()]);
+    expect(args.filter((a) => a.startsWith('-') && !a.startsWith('--') && !a.startsWith('-['))).toEqual(
+      ['-NoProfile', '-ExecutionPolicy', '-File', '-TargetFolder', '-SharePath', '-SetEnv', '-InnerBin', '-InnerArgs']);
+    expect(jsonArgOf(args, '-SetEnv')).toEqual([`CLAUDE_CODE_OAUTH_TOKEN=${TOKEN}`, `CLAUDE_CONFIG_DIR=${THREAD_STORE}`, `CLAUDE_CODE_GIT_BASH_PATH=${BASH}`, 'MSYS2_PATH_TYPE=inherit']);
+  });
+
+  it('a linux heartbeat command runs /bin/bash through the same launcher, with no git-bash env', () => {
+    const ROOM = join(STORE, 'room-linux');
+    mkdirSync(ROOM, { recursive: true });
+    const f = fakeLauncherSpawn();
+    spawnBoxedCommand({ targetFolder: ROOM, command: 'date', commandFile: 'x.sh', readMounts: [{ name: 'repos', path: '/srv/repos' }], sandboxOauthToken: TOKEN, spawn: f.spawn, platform: 'linux', boxLauncher: BOX, gitBashCandidates: BASH_CANDIDATES });
+    const { bin, args, opts } = f.calls[0];
+    expect(bin).toBe('sudo');
+    expect(args.slice(0, 4)).toEqual(['-n', BOX, '-TargetFolder', ROOM]);
+    expect(args[args.indexOf('-InnerBin') + 1]).toBe('/bin/bash');
+    expect(innerArgvOf(args)).toEqual(['-c', 'date']);
+    expect(jsonArgOf(args, '-SetEnv')).toEqual([`CLAUDE_CODE_OAUTH_TOKEN=${TOKEN}`]);
+    expect(jsonArgOf(args, '-ReadMounts')).toEqual(['repos=/srv/repos']);
+    expect(opts).toMatchObject({ cwd: ROOM });
+  });
+
+  it('BOX_LAUNCHER is the path docker/Dockerfile installs and the sudoers line names', () => {
+    const root = join(dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..');
+    expect(BOX_LAUNCHER).toBe('/usr/local/sbin/egpt-box');
+    expect(readFileSync(join(root, 'docker', 'Dockerfile'), 'utf8')).toContain(`COPY --chmod=755 docker/egpt-box ${BOX_LAUNCHER}`);
+    expect(readFileSync(join(root, 'docker', 'sudoers-egpt-box'), 'utf8')).toContain(`egpt ALL=(root) NOPASSWD: ${BOX_LAUNCHER}`);
   });
 });

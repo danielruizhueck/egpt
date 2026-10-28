@@ -15,20 +15,44 @@ API**. You operate it from your **Self-DM** on any surface.
 
 A slash command typed in an authorized chat is intercepted by the node itself,
 not answered by the persona. Authorization = the surface's own `chat_id`
-(Self-DM), an entry in that surface's `allowed_users`, or the account owner.
+(Self-DM), an owner (the node's `conversation_defaults.allowed_users`, or
+`networks.<surface>.allowed_users` where that surface sets one), or the account owner.
+
+The same owners are whom a being answers by default: a being with no
+`allowed_users` (in the chat's entry or its `agents.<name>.conversation_defaults`)
+wakes only for them. A list holds ids or `'*'`: `['*']` is anyone, `[]` is
+nobody, ids are exactly those senders; the nearest list wins (2026-10-26).
 
 A command names the being that runs it (since 2026-10-19): `/<handle> <command>`,
-e.g. `/e restart`, `/don agents`, `/e join viaje`. The node that hosts that being
+e.g. `/e restart`, `/don agents`, `/e split viaje`. The node that hosts that being
 runs it; every other node records the line and does nothing. A bare `/restart`
 in a chat is ordinary text. `/<handle> <anything else>` (`/e hola`) is ordinary
 text too, and addresses nobody. The editor shell (the node's own console) and the ingest box
 still take the bare command. An `/<handle> agents` verb with no target acts on
-that being (`/e agents compact`).
+that being (`/e agents compact`). A chat whose conversations.yaml entry sets
+`agents.<being>.handles: [ekg]` addresses that being there by those names only,
+commands included (`[]` = by none).
 
 Anyone else in a chat runs only the commands `public_commands` names: the root
-key in config.yaml (default `[join, split, send, end]`), or the chat's own
+key in config.yaml (default `[split, send, end]`), or the chat's own
 conversations.yaml entry, which replaces it (`[]` = none). A listed `agents`
 opens only the bare list; its verbs stay authorized-only.
+
+`/join` is retired (2026-10-25): `/<handle> join` answers with `/<handle> split`,
+which makes a fork (same agents and files, its own thread; the main chat can read
+its transcript). The fork lives in the chat's own folder, logs to its own
+`transcript-<title>.md` there, and keeps each being's chat settings
+(`allowed_users`, `mode`, `access_level`, …); `/agents reset` is refused in a
+fork (use `rethread`). Side rooms `/join` made before keep working with `/send` and
+`/end`; a `join:` block in config.yaml is ignored.
+
+On Telegram, `/split` makes a **topic** in the group instead of a new group (a
+bot cannot make groups), and the answer is the topic's link. The group needs
+Topics turned on and the bot as an admin with "Manage topics"; without them the
+command says so. A topic is its own chat, `tg:<chat>/<thread>`; General is the
+chat itself. `/send` in a topic copies to General; `/end` closes the topic.
+Turning Topics on makes a basic group a supergroup with a new id; the
+conversation (folder, threads, settings, a `closed_chats` rule) follows it.
 
 ```text
 /<handle> status                               compact node health (fenced yaml):
@@ -71,13 +95,16 @@ opens only the bare list; its verbs stay authorized-only.
                                                reseed pristine — next message
                                                starts fresh
 /<handle> agents[=<slug>] auto <mode> <handle>|all  set a being's reply mode
-/<handle> agents[=<slug>] access_level <regular|all|sandbox> <handle>|all
+/<handle> agents[=<slug>] access_level <regular|all|sandbox|reader> <handle>|all
                                                point a being at a confinement
                                                tier: this node's regular
-                                               default, the unconfined one, or
-                                               the OS-sandboxed one (see below)
-/<handle> restart                              bounce the node (daemon respawns
-                                               the current checkout)
+                                               default, the unconfined one,
+                                               the OS-sandboxed one, or the
+                                               read-only desk (see below)
+/<handle> restart [force]                      bounce the node (daemon respawns
+                                               the current checkout); waits for
+                                               turns and background work in
+                                               flight, no cap; `force` skips it
 /<handle> upgrade                              git pull + npm install + rebuild,
                                                then respawn
 /<handle> rewind <ref>                         git checkout <ref>, reinstall,
@@ -87,6 +114,11 @@ opens only the bare list; its verbs stay authorized-only.
                                                restarts Beeper (eGPT stays up),
                                                one result line in log_to_group;
                                                else the one-line Beeper state
+/<handle> browser refresh [group] [url]        close this chat's (or [group]'s)
+                                               browser and open a normal Chrome
+                                               window on its profile, to sign in
+                                               or pass a check yourself (see
+                                               below)
 ```
 
 **Reply modes** (`/agents … auto <mode>`): `on` (receive every burst, reply per
@@ -118,10 +150,20 @@ very next turn — no `/restart` needed.
 being at `config/permissions/sandbox.md`, which is `all.md`'s grant byte for
 byte, but the spine forces `sandboxed: true` for that level, so the being only
 ever runs inside the OS sandbox — the kernel holds the boundary instead of the
-CLI's own flags, and no config rung can unbox it. `regular`, `all` and
-`sandbox` are the whole set (`ACCESS_LEVELS`, src/spine/permission-levels.mjs);
-the command's usage line is built from it, so it can never name fewer than
-exist.
+CLI's own flags, and no config rung can unbox it.
+
+`/agents <handle>|all access_level reader` is the fourth, for public chatbox
+beings: Read, Glob and Grep inside the being's own conversation folder and
+nothing else (`config/permissions/reader.md`). It runs unboxed (the box would
+drop the CLI gate and mount `src/` and the global read paths), sends its tools
+as `--tools` with `--strict-mcp-config`, and ignores every `allowed_paths`
+grant — the type's, the node's and the conversation's. Its kickoff feed is its
+identity plus `10-actions` and `40-rules` only; `30-pointers` is neither fed
+nor kept in its `directives/`, and it gets no config card and no browser.
+
+`regular`, `all`, `sandbox` and `reader` are the whole set (`ACCESS_LEVELS`,
+src/spine/permission-levels.mjs); the command's usage line is built from it,
+so it can never name fewer than exist.
 
 ### The three lifecycle verbs
 
@@ -216,6 +258,68 @@ to a temp name then rename for atomicity (the sweep skips dotfiles + `*.tmp`).
 This is how `/restart` / `/upgrade` / `/rewind <ref>` work when you can't reach a
 chat.
 
+`/to <chatId>` on the first line types the rest of the file into that chat as
+you (the node's owner), as if you had sent it there:
+
+```
+/to tg:-1004408163350/55
+/file C:\Users\an\Desktop\factura.pdf
+ed, pick up the invoice thread above
+```
+
+The chat id is its conversations.yaml key (a Telegram topic, a WhatsApp chat id,
+a room). Each `/file <path>` line (zero or more) attaches that file: it is copied
+into the chat's `media/` and reaches the being as an inbound attachment does
+(`(document factura.pdf) [saved: media/…]`). A missing path is logged and named
+in the chat post; the text still goes through.
+
+What the chat sees, and when the line is dispatched (`ingest:` in config.yaml):
+
+- `show` (default `true`): the line is posted in the chat,
+  `📥 An (ingest): ed, pick up…`, with its files.
+- `auto` (default `false`): the post also asks `ask` (default `received message,
+  dispatch? reply yes / no`) and nothing reaches a being until an owner answers:
+  reply to the post (or react on it) with yes / si / sí / y / ok / 👍 to dispatch,
+  no / n / 👎 to drop. A one-line outcome is posted and logged; the answer itself
+  wakes nobody. Anyone else's reply is ordinary chat. Open questions survive a
+  restart (`state/ingest-asks.json`) and never expire. `auto: true` dispatches at
+  once. `show: false` + `auto: false` posts only the question; `show: false` +
+  `auto: true` posts nothing.
+
+Once dispatched the line takes the normal path: addressing and the chat's mode
+decide who answers, the answer goes to that chat, and the transcript records the
+line with `.ingest` as its entry point (`An@[EduWeb].ingest (14:05): ed, …`). An
+id with no conversations.yaml entry, or a file with no text and no files, is
+logged and ignored. The box sits under `~/.egpt`, so only the node's owner can
+write it; a sandboxed being cannot.
+
+### `/<handle> browser refresh [group] [url]` — sign in yourself
+
+Some sites refuse eGPT's browser because it is automated: Google says "This
+browser or app may not be secure", and some captchas loop. Pass them yourself in
+a normal Chrome window on the same profile. eGPT's browser then reuses the
+session.
+
+`/<handle> browser refresh [group] [url]` (owners only) closes eGPT's browser for
+this chat's group and opens a normal Chrome window on that group's profile at
+`url` (default `about:blank`; a bare host means `https://`). If the first word
+names a group this node knows (`brain`, `shared`, a `browsers.yaml` group, or a
+folder under the profiles root; any case), that group is used instead and the
+next word is the url: `/e browser refresh brain accounts.google.com`. A word with
+a dot, a slash or a scheme is always the url. An unknown word gets the usage and
+the known group names. The window opens on the desktop of the node that runs the
+being. On a container node, open its VNC (`:6080`) to see it. Sign in or pass the
+check, then close the window. Until that window's Chrome exits, eGPT does not
+open the browser again, and a being that asks for it is told the browser is held
+for sign-in. When it exits, the chat you typed the command in gets one line:
+"browser <group> is back — signed-in session will be used". eGPT uses no stealth
+and solves no captchas. You pass the check yourself.
+
+On the machine itself, or with the node down: `setup\chrome-signin.cmd [profile]
+[url]` (default `brain`, Google sign-in). It closes the Chrome processes on that
+profile, opens the same normal window, and prints the steps. It does not keep
+eGPT off the profile, so prefer the command while the node runs.
+
 ---
 
 ## 2. Config (`~/.egpt/config/config.yaml`)
@@ -230,11 +334,14 @@ default; commented blocks are optional overrides.
 | `user_name` | Your handle, shown in cross-surface mirroring as `<user_name>@<surface>`. |
 | `emojis` | Author tags for mirroring: `user` / `egpt` / `persona` / `human`. |
 | `agents` | **Required.** The unified registry: persona, local beings, and mesh relays. Each agent = `{ configuration, personality?, handles, relay_channel? }`. `configuration` names an agent-type file (`config/agents/<type>.yaml`), an inline map, or the literal `relay`. `personality` names `config/agents/identities/<name>.md` and sits BESIDE `configuration` — a being composes a shared brain def with its own identity, no per-being type file needed; it outranks a `personality:` written inside the def, and absent both it is `egpt`. A node without an `agents` block or a persona entry (handles include `e`/`egpt`) refuses to boot. |
-| `whatsapp` / `telegram` / `signal` | Per-surface auth: `{ chat_id, allowed_users }` (empty = deny). Ids are per-surface namespaces. `whatsapp` also carries the transport config (`networks: []` = the firehose). |
+| `conversation_defaults` | `allowed_users`: the node's owners, ids of any network mixed. They may command the node, and a being with no list of its own answers only them. Unset or `[]` = nobody (the account owner always passes). |
+| `whatsapp` / `telegram` / `signal` | Per-surface auth: `{ chat_id, allowed_users }`. A surface's `allowed_users`, when set, replaces the node's `conversation_defaults.allowed_users` there (empty = deny). Ids are per-surface namespaces. `whatsapp` also carries the transport config (`networks: []` = the firehose). |
 | `default_time_zone` | Interprets timezone-less heartbeat `when:` times (IANA name or an alias like `ET`/`PT`). |
 | `warm` | Warm-session policy: `max` (how many chats stay resident) + `idle_ttl_by_class.conversation` (quiet-time before eviction; default 15m, `-1` = never evict, `0` = always). A chat overrides its own TTL in its folder's `config.yaml`. |
 | `loop_guard` | Both loop limits. `inbound: { turns, window }`: `turns` (6) non-human turns within `window` (2) minutes, or the same line repeated, pauses that chat until `resume`; -1 = off. `outbound`: over `messages` per `window_ms` node-wide STOPS the node. Per chat, any of three rules pauses THAT chat until `resume`: `chat_similar_count` (5) near-identical sends in `chat_similar_window_ms` (2 s); `chat_burst_count` (10) sends in `chat_burst_window_ms` (2 s); `chat_messages` (5) in each of two consecutive `chat_window_ms` (3 s). ≤0 = that rule off. |
+| `closed_chats` | `<surface>: { <chat id>: { message? } }`, ids as in conversations.yaml: no being answers there (mode `off`, applies live). `message` is posted there once (again when it changes) and to a line that names a being, at most once a day. Remove the chat to reopen it. |
 | `stop_phrase` | Kill phrase (default `EGPT STOP`): the whole message, from an allowed user, in any chat → the node writes `EGPT_HOME/STOP` and stops. `""` = off. |
+| `turn_timeout_ms` | Opt-in per-turn timeout (ms): a turn running longer fails and its session is evicted. 0/absent = no limit (default). |
 | `compaction` | After a quiet `cooling_ms`, if the warm session grew past `ratio` of the context window, native-`/compact` it in place (transcript.md keeps the full record). A compact that SUCCEEDS then arms the identity re-feed, exactly as `/agents refresh` does, so the being gets its identity back on its next turn — `/compact` rewrites the context, and the kickoff feed can be summarised out of it. A compact that fails arms nothing. |
 | `heartbeats` | Declarative timers — see §3. |
 | `transcription_service` | Voice-note transcription — see §4. |
@@ -246,6 +353,120 @@ Agent types are resolved across layers, most-specific winning: `src/brains`
 `agents.egpt.configuration` at whichever type conversations run on — every
 conversation resolves it FRESH every turn, so a repoint reaches all of them on
 their very next turn (there is no per-conversation freeze).
+
+### Templates
+
+These text keys take `{word}` variables. Only the words listed are filled in;
+any other `{word}` stays as written, so a typo shows. The list is `TEMPLATES` in
+`src/tools/template.mjs`; a test keeps it in step with the code. Unset, a room
+with a link (a Telegram topic) answers `/split` with its link.
+
+| Key | Variables | Example |
+|---|---|---|
+| `group_title` | `{group}` the original chat's name, `{name}` the name typed after split (none: 5 random letters) | `{group}-{name}` → `SI+Familia-viaje` |
+| `split.placeholder` | `{link}` the link that opens the fork (a Telegram topic; empty on WhatsApp) | `open it: {link}` → `open it: https://t.me/c/1234/77` |
+| `split.opener` | `{group}` the original chat's name, `{handle}` the handle the command was typed to | `Fork of {group}` → `Fork of Familia` |
+| `send.origin_template` | `{group}` the side group's name | `↪ from {group}: ` → `↪ from SI+Familia-viaje: ` |
+| `compaction.handoff_prompt`, `compaction.welcome` | `{agent}` the being's handle, `{YYMMDD-HHMM}` the local time of the warning | `handoffs/{agent}.{YYMMDD-HHMM}.md` → `handoffs/e.261021-2030.md` |
+| `compaction_warn_notice` | `{agent}` the being's handle, `{percent}` how full the conversation is, `{path}` the handoff file | `{agent} at {percent}%` → `e at 18%` |
+| `heartbeats.<name>.post` | `{stdout}` the command's output, trimmed | `the prime is {stdout}` → `the prime is 1637` |
+
+### `/ayde` — the EduWeb team's browser (staff access)
+
+With `limbs.http.ayde: { on: true }`, the chatbox limb also serves a read-only
+browser of the node's `EGPT_HOME` to the EduWeb team, at:
+
+```text
+https://eduweb.com.ve/ayde/
+```
+
+The browser asks for a user and a password (HTTP Basic). Each user has a level;
+each level reads everything the lower ones read:
+
+| Level | Reads |
+|---|---|
+| `team` | the scope's conversations (below), except any path with a segment starting with `.` (`.secrets/`, `.credentials/`, `.ssh/`, dotfiles), which it never sees |
+| `devs` | the scope's conversations, hidden entries included (`.credentials/`, the being's scoped temporary DB login, too), but a conversation's `.secrets/` (token-level secrets) |
+| `admin` | the same as `devs`; the two differ only in `public_max_level` |
+| `root` | everything under `EGPT_HOME`, as it is: every conversation, `config/`, `state/`, `secrets/`, `chrome/` and conversations' `.secrets/` |
+
+The page is one list of the scope's conversations, in sections:
+
+- one per chatbox client, titled by the client's `label` (e.g. `label: "Marketer — website"`
+  under `limbs.http.clients.<client>`), else its `title`, in the config's order;
+- **Team groups (Telegram)**: the scope's groups and topics, by their name;
+- **Other**: any other chat in the scope.
+
+Inside each section, rows sit under **Today** and **Previous**, newest first. A
+signed visitor shows as name, username, school and user type; an anonymous one as
+**Visitor** with the first line they wrote. Chat ids and folder names are in the
+tooltip. The search box above filters every section by name, username, school,
+first line or group. Click a row to open its folder. Root also gets **Everything
+else**: the whole `EGPT_HOME` tree. Nobody below root can list `conversations/`
+itself. The scope is `limbs.http.ayde.scope`, a list of chat ids:
+
+```yaml
+limbs:
+  http:
+    ayde:
+      on: true
+      scope: ["tg:-1004408163350", "tg:-1004473260995", "tg:-1004311994096", "http:eduweb-", "http:demoiev-"]
+```
+
+Each entry is one of:
+
+| Entry | Covers |
+|---|---|
+| `tg:<group>` | the Telegram group and every topic in it (`tg:<group>/<n>`); a `/split` fork lives in its parent's folder, so it comes with it |
+| ending in `-` | every chat id that starts with it: `http:eduweb-` is every chatbox session of the `eduweb` client |
+| any other chat id | that chat only, e.g. one topic `tg:<group>/<n>` |
+
+The folders come from `config/conversations.yaml` by chat id, on each request,
+never by folder name: a renamed folder keeps its access. With no `scope` (the
+default), nobody below root sees a conversation, and boot logs that the scope
+is empty.
+
+A path above your level, or outside the scope, answers 401 in that level's
+realm (`ayde devs`, `ayde root`), so the browser asks for a higher login. The
+page shows such paths greyed. Each folder, file and download opened is logged,
+and inside a conversation also appended to its `admin-access.log`. Nobody can
+change or delete anything; a future delete of core files (`config/`, `state/`,
+`secrets/`) will be root's only.
+
+**Log out** (beside your name; `/ayde/logout`) answers 401 with no challenge and
+runs a small script that overwrites each cached login with a reserved `logout`
+user (granted nothing), so the next visit asks again. It works in Firefox and
+Chrome. If a browser still holds the login, the page says so ("Still signed in —
+close all windows"). `logout` cannot be a real ayde user.
+
+Add, re-level or remove a user on the node, with the node's `EGPT_HOME`; on
+Windows, `setup/ayde-user.cmd` does the same:
+
+```text
+node setup/ayde-user.mjs add <user> <team|devs|admin|root>   # asks the password twice; again: new password + level
+node setup/ayde-user.mjs set-level <user> <level>
+node setup/ayde-user.mjs remove <user>
+node setup/ayde-user.mjs list                                # user + level only
+printf '%s' "$PASSWORD" | node setup/ayde-user.mjs add <user> <level>   # scripted
+```
+
+The script writes `secrets/ayde.users`, never `config.yaml`. It never prints a
+password or a hash. The limb reads the file on each request, so a change needs no
+restart.
+
+After 10 failed logins within 15 minutes, that address gets 429 for 15 minutes.
+Behind a proxy, set `limbs.http.trust_proxy: true`; otherwise every login counts
+against the proxy's address.
+
+From the internet (a request through the proxy, which adds `X-Forwarded-For`),
+only users up to `limbs.http.ayde.public_max_level` get in: `team` by default;
+set `devs`, `admin` or `root` to open more. A higher user's right login there
+answers 403 "The <level> level opens only from the internal network." — sign in
+from the internal network instead. It is logged, and it is not a failed login.
+
+**HTTPS only:** Basic sends the password with every request. The site's proxy
+must be HTTPS, and the hop from the proxy to the node must stay private
+(EduWeb: Portales-new → `edw.egpt.internal:8095`, beside `/chat/`).
 
 ---
 
@@ -297,6 +518,18 @@ differs machine-to-machine). Engine `type`s:
 - `whisper-server-remote` — POST to another node's GPU worker (`endpoint` +
   shared HMAC `token`; a dead server just costs a fallback).
 - `whisper-server-local` — a resident whisper.cpp server (lazy-spawned).
+- `whisper-server-ecs` — a whisper.cpp server in an AWS ECS service that sleeps
+  at desired count 0 (`cluster`, `service`, `region`, `port`). A note sets it to 1
+  and waits up to `wake_timeout_ms` (default 240000) for a running task whose
+  server answers, then decodes there; notes arriving meanwhile share that wake.
+  After `idle_stop_ms` (default 1200000) with no note in flight it goes back to 0;
+  at boot an awake service gets the same idle stop. A timeout or AWS error falls
+  through to the next engine; for `cooldown_ms` (default 600000) after that, a
+  note makes one quick check (is a task already up and answering?) and never
+  waits or wakes. `credentials` names `secrets/<name>` (line 1 key id,
+  line 2 secret; needs ecs:UpdateService/DescribeServices on the service and
+  ecs:ListTasks/DescribeTasks in the cluster). Its `language` wins over the cli's.
+  Optional: `poll_ms` (5000), `connect_timeout_ms` (3000), `timeout_ms` (decode, 120000).
 - `whisper-cli` — per-note binary; the always-available floor.
 
 A change of *winning* engine posts one `⚠️`/`✅` to the operator Self-DM
@@ -312,7 +545,7 @@ A change of *winning* engine posts one `⚠️`/`✅` to the operator Self-DM
   each tick); the daemon's deadman respawns a wedged spine. The spine pid lives
   in `state/spine.pid` (singleton guard).
 - **Install sanity check:** `node setup/verify-install.mjs [egptHome]`
-  (read-only) probes the live node — the Session 1 task and the retired service,
+  (read-only) probes the live node — the Session 1 task and the Session 0 service,
   profile shape, liveness, `claude` on PATH.
 - **Two nodes on one Beeper double-answer every `@e`** — only run one spine
   against a given Beeper Desktop login.

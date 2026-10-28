@@ -60,19 +60,23 @@ default `~/.egpt`).
    ```
 
    Then edit `~/.egpt/config/config.yaml`: paste your `beeper_token`, set
-   `user_name`, and add each surface's `chat_id` + `allowed_users` (empty =
-   deny; your own account-owner messages are always authorized). Every key is
+   `user_name`, add each surface's `chat_id`, and put your ids in the top-level
+   `conversation_defaults.allowed_users` (empty = nobody; your own account-owner
+   messages are always authorized): beings answer only those owners by default. Every key is
    documented inline and registered in [`config/config-schema.mjs`](config/config-schema.mjs).
    The `agents:` block is required — the shipped default makes `egpt` the persona
    (the warm Claude Code CLI, using your `claude` login; no API key for the core
    flow). Skeletons seed the rest of the profile (agent types, identities,
    heartbeats, room template) copy-if-missing on first boot.
 
-3. **Install the runner.** On Windows, register the Session 1 logon task
+3. **Install the runners.** On Windows, register the Session 1 logon task
    `egpt-daemon`: `powershell -ExecutionPolicy Bypass -File setup\register-session1-daemon-task.ps1`,
-   then start it with `setup\start-egpt.cmd` (`setup\stop-egpt.cmd` stops it). It
-   triggers at logon: after a reboot nothing runs until you log on.
-   macOS/Linux: `./setup/install-service.sh` (launchd / systemd user service). The
+   and, at the console, the Session 0 service of the same name: `setup\install-nssm-service.cmd`
+   (it asks your password, checked and never stored). The service runs the node while nobody
+   is logged on; the task takes it over at logon, with the browsers. `setup\start-egpt.cmd`
+   starts both, `setup\stop-egpt.cmd` stops both.
+   macOS/Linux: run `node egpt-daemon.mjs` from the checkout under your own supervisor
+   (the container in `docker/` does this from its entrypoint). The
    daemon keeps the node running and respawns it on the lifecycle exit codes below.
 
 4. **Verify the install:**
@@ -81,8 +85,9 @@ default `~/.egpt`).
    node setup/verify-install.mjs
    ```
 
-   Read-only. Checks the live node — the Session 1 task (and that the retired
-   `egpt-daemon` service is absent or Disabled), profile shape, liveness
+   Read-only. Checks the live node — the Session 1 task and the `egpt-daemon` service
+   (Automatic, as you, AppExit 0 = Exit, yours to stop and start), or off Windows a live
+   daemon (`state/daemon-*.pid` with a fresh beat), profile shape, liveness
    (`state/spine.pid` + `state/alive.txt`), `claude` on PATH. Exit 0 = all good.
 
 ## Operating the node

@@ -3,7 +3,7 @@
 // (fresh thread → first turn wrapped with the feed; resumed thread → raw).
 // Against a fake warm pool + in-memory conv-state. No claude, no spawn.
 import { describe, it, expect, vi } from 'vitest';
-import { createBrainPool, parseWarmBlock, resolveBeingDef, resolveDefaultBrainDef, resolveSandboxed, globalReadPathsOf } from '../src/spine/brainpool.mjs';
+import { createBrainPool, parseWarmBlock, resolveBeingDef, resolveDefaultBrainDef, resolveSandboxed, globalReadPathsOf, sandboxOauthTokenOf } from '../src/spine/brainpool.mjs';
 import { createWarmPool } from '../src/warm-sessions.mjs';
 import { createPiCliSession } from '../src/pi-cli-session.mjs';
 import { EventEmitter } from 'node:events';
@@ -169,6 +169,20 @@ describe('brainpool.turn', () => {
     expect(brain.convOfKey(pool.calls[0].key)).toEqual({ being: 'e', surface: 'whatsapp', chatId: '!room:beeper.com' });
   });
 
+  // warm.keep (operator 2026-10-22): the pool asks per key, so the answer is read live from the
+  // resolver, for the same conversation dir the turn's own warm.idle_ttl is read for.
+  it('keepsWarm(key) reads warm.keep for that key\'s conversation, live', async () => {
+    const asked = [];
+    let doc = {};
+    const { brain, pool } = harness([{ text: 'hi', sessionId: 'sid-1' }], { resolveConfig: (dir) => { asked.push(dir); return doc; } });
+    await brain.turn('e', ev);
+    const turnDirs = asked.splice(0);
+    expect(brain.keepsWarm(pool.calls[0].key)).toBe(false);
+    doc = { warm: { keep: true } };
+    expect(brain.keepsWarm(pool.calls[0].key)).toBe(true);
+    expect([...new Set(asked)]).toEqual([...new Set(turnDirs)]);
+  });
+
   it('stop(being, ev) interrupts EXACTLY that key through the pool; a conversation that never ran stops nothing', async () => {
     const { brain, pool } = harness([{ text: 'hi', sessionId: 'sid-1' }]);
     const interrupted = [];
@@ -191,6 +205,7 @@ describe('brainpool.turn', () => {
   // --- brain registry: resolved FRESH every turn (phase 1, operator 2026-08-14 — no more
   //     per-conversation freeze). The def is never written back into the registry any more;
   //     these lock what the RUN itself carries. ---
+  // contract 12.2
   it('resolves the default brain from the registry, keys the warm entry by its engine', async () => {
     const brains = { resolve: () => ({ name: 'default', type: 'codex', model: 'gpt-5.4-mini', allowed_tools: 'all' }) };
     const { brain, pool } = harness([{ text: 'ok', sessionId: 's' }], { brains });
@@ -199,6 +214,7 @@ describe('brainpool.turn', () => {
     expect(pool.calls[0].brainOptions).toMatchObject({ model: 'gpt-5.4-mini', allowedTools: DEFAULT_ALLOWED_TOOLS });
   });
 
+  // contract 12.3
   it('DETERMINISM: a def with model:null/effort omitted runs on the deterministic fallback, never null (operator 2026-07-02)', async () => {
     const brains = { resolve: () => ({ name: 'default', type: 'ccode', model: null, allowed_tools: 'all' }) };
     const { brain, pool } = harness([{ text: 'ok', sessionId: 's' }], { brains });
@@ -746,6 +762,7 @@ describe('brainpool.turn', () => {
   // The value comes from the RESOLVED config now (src/spine/config-resolver.mjs configFor,
   // injected as resolveConfig) — node config.yaml < the conversations.yaml entry < the
   // conversation's own folder — not from brainpool opening the folder file itself.
+  // contract 10.2
   it('passes the resolved warm idle_ttl override to pool.run (normal + overflow retry)', async () => {
     const { brain, pool } = harness([
       () => Promise.reject(new Error('claude: error_during_execution\n  Prompt is too long')),
@@ -766,6 +783,7 @@ describe('brainpool.turn', () => {
 });
 
 describe('brainpool.turn — local sibling beings (agents registry)', () => {
+  // contract 12.2
   it('a LOCAL agent\'s type file (agents block) is resolved through the registry — no readonly instancing', async () => {
     const brains = { resolve: (name) => name === 'sonnet-high' ? ({ name: 'sonnet-high', type: 'ccode', model: 'sonnet', effort: 'high', allowed_tools: 'Read,Bash' }) : null };
     const config = { agents: { 'don-local': { configuration: 'sonnet-high', name: 'Don' } } };
@@ -782,6 +800,16 @@ describe('brainpool.turn — local sibling beings (agents registry)', () => {
     expect(pool.calls[0].message.endsWith(ev.line)).toBe(true);           // its own line LAST
     const entry = getState().contacts.whatsapp['!room:beeper.com'];
     expect(entry['don-local']?.readonly).toBeUndefined();   // def lives in config → not instanced
+  });
+
+  // contract 12.2
+  it('there is no default_brain: config.default_brain neither overrides nor fills the type file', async () => {
+    const brains = { resolve: (name) => (name === 'bare' ? { name: 'bare', type: 'ccode' } : null) };
+    const config = { default_brain: { type: 'codex', model: 'opus', effort: 'low' }, agents: { e: { configuration: 'bare' } } };
+    const { brain, pool } = harness([{ text: 'ok', sessionId: 's' }], { brains, config });
+    await brain.turn('e', ev);
+    expect(pool.calls[0].key).toMatch(/^e:ccode:/);
+    expect(pool.calls[0].brainOptions).toMatchObject({ model: 'sonnet', effort: 'high' });
   });
 
   it('records the local agent thread in a NESTED block (E flat untouched) and RESUMES it next turn', async () => {
@@ -859,6 +887,7 @@ describe('brainpool.turn — confine-by-default (allowed_tools list) + allowed_p
   // getting. The BOXED shape of the same cases — where the cwd root is deliberately absent — is
   // asserted in its own describe below; before that describe existed these read process.platform
   // and silently asserted whichever shape the machine running them happened to produce.
+  // contract 11.1
   it('a LIST allowed_tools def → brainOptions carry confineToDirs [the conversation dir]; buildClaudeArgs sandboxes it', async () => {
     const brains = { resolve: () => ({ name: 'egpt', type: 'ccode', model: 'sonnet', effort: 'high', allowed_tools: ['Read', 'Grep', 'WebFetch'] }) };
     const { brain, pool } = harness([{ text: 'ok', sessionId: 's' }], { brains, platform: 'linux' });
@@ -877,6 +906,7 @@ describe('brainpool.turn — confine-by-default (allowed_tools list) + allowed_p
     expect(allow).not.toContain('Read');                       // file tool stays path-confined
   });
 
+  // contract 11.2
   it('allowed_paths: null grant → --add-dir (full access); tool list w/o write tools → deny rules (read-only), end-to-end', async () => {
     const brains = { resolve: () => ({
       name: 'egpt', type: 'ccode', allowed_tools: ['Read', 'Edit'],
@@ -917,6 +947,7 @@ describe('brainpool.turn — confine-by-default (allowed_tools list) + allowed_p
     expect(logs.join('\n')).toMatch(/per-path tool granularity beyond read-only isn't native/);
   });
 
+  // contract 11.2
   it("'all' def is REJECTED → coerced to the explicit list, CONFINED, no bypass (operator 2026-07-03)", async () => {
     const brains = { resolve: () => ({ name: 'egpt', type: 'ccode', allowed_tools: 'all' }) };
     const { brain, pool } = harness([{ text: 'ok', sessionId: 's' }], { brains, platform: 'linux' });
@@ -1549,20 +1580,15 @@ describe('brainpool.turn — accessLevel override (operator 2026-08-14, was /e a
   });
 });
 
-// ── STRUCTURAL SAFETY GATE (operator 2026-08-16; refined 2026-08-20). Checked at the very top
-//    of turn() — BEFORE any being-def resolution, so a refusal grants NOTHING, not even the
-//    type file's own baseline allowed_tools:
-//      accessLevel:'all' (unconfined) must never be paired with an empty/unset allowed_users
-//      (unrestricted reachability) — the escape hatch is the literal "*" wildcard entry
-//      (allowedUsersPermits' twin in conversations-state.mjs recognizes the same literal for
-//      router.mjs/mesh.mjs's sender-match).
+// ── ACCESS LEVEL vs allowed_users. The 'all'-with-no-list refusal (2026-08-16) is GONE
+//    (operator 2026-10-26): no list now means the owners only (router.mjs mayWake), not anyone.
 //    The former rule 1 here ("accessLevel must resolve to 'all' or 'regular' at either tier, or
 //    the being does not run at all") is GONE (operator 2026-08-20): resolveConv's own fallback
 //    now resolves an unset accessLevel to the explicit 'regular' instead of null, so an unset
 //    being now runs CONFINED rather than refusing — see the REPRODUCE-FIRST test just below,
 //    which proves this on CURRENT code (it used to throw; the 2026-08-16 gate test asserted
 //    exactly that — see git history / this file's diff for the before/after). ──
-describe('brainpool.turn — STRUCTURAL SAFETY GATE (operator 2026-08-16, refined 2026-08-20)', () => {
+describe('brainpool.turn — access_level vs allowed_users', () => {
   it("REPRODUCE-FIRST (before/after, operator 2026-08-20): accessLevel null at BOTH tiers used to refuse the turn (2026-08-16 gate) — now resolves to 'regular' and runs CONFINED, before any allowed_users concern even applies", async () => {
     const brains = { resolve: () => ({ name: 'egpt', type: 'ccode', model: 'sonnet', effort: 'high', allowed_tools: 'all' }) };
     const { brain, pool } = harness([{ text: 'ok', sessionId: 's' }], {
@@ -1575,13 +1601,15 @@ describe('brainpool.turn — STRUCTURAL SAFETY GATE (operator 2026-08-16, refine
     expectConfined(pool.calls[0].brainOptions);
   });
 
-  it("accessLevel 'all' with NO allowed_users at either tier → refuses", async () => {
+  it("accessLevel 'all' with NO allowed_users at either tier → runs (who wakes it is mayWake's: the owners)", async () => {
     const brains = { resolve: () => ({ name: 'egpt', type: 'ccode', model: 'sonnet', effort: 'high', allowed_tools: 'all' }) };
     const { brain, pool } = harness([{ text: 'ok', sessionId: 's' }], {
       brains, skipAccessLevelDefault: true, seedAgents: { e: { access_level: 'all' } },
+      loadPermission: (level) => (level === 'all' ? { dangerouslySkipPermissions: true, allowedTools: ['Bash'] } : null),
     });
-    await expect(brain.turn('e', ev)).rejects.toThrow(/allowed_users/);
-    expect(pool.calls).toHaveLength(0);
+    expect((await brain.turn('e', ev)).text).toBe('ok');
+    expect(pool.calls).toHaveLength(1);
+    expect(pool.calls[0].brainOptions.dangerouslySkipPermissions).toBe(true);
   });
 
   it("accessLevel 'all' with allowed_users: ['*'] → the explicit wildcard escape hatch, proceeds normally", async () => {
@@ -1829,7 +1857,7 @@ describe("permission-levels — the 'sandbox' level (operator 2026-09-05)", () =
   //    lives HERE now, once; every other site is downstream of it, so these pin the list
   //    itself (order included — it is what the user-facing usage text is built from). ──
   it('ACCESS_LEVELS is THE list — frozen, in human order (confined → unconfined → boxed), and every name in it resolves to a real permissions file', () => {
-    expect(ACCESS_LEVELS).toEqual(['regular', 'all', 'sandbox']);
+    expect(ACCESS_LEVELS).toEqual(['regular', 'all', 'sandbox', 'reader']);   // reader (2026-10-26) appended: the usage line keeps its old order
     expect(Object.isFrozen(ACCESS_LEVELS)).toBe(true);
     for (const level of ACCESS_LEVELS) {
       expect(isAccessLevel(level)).toBe(true);
@@ -1898,14 +1926,6 @@ describe("brainpool.turn — access_level 'sandbox' (operator 2026-09-05)", () =
   });
 
   // ── REGRESSION LOCKS. The third tier is additive: neither existing tier moves. ──
-  it("REGRESSION: 'all' with no allowed_users STILL throws — the sandbox exemption must never widen to 'all'", async () => {
-    const { brain, pool } = harness([{ text: 'ok', sessionId: 's' }], {
-      brains, skipAccessLevelDefault: true, seedAgents: { e: { access_level: 'all' } },
-    });
-    await expect(brain.turn('e', ev)).rejects.toThrow(/allowed_users/);
-    expect(pool.calls).toHaveLength(0);
-  });
-
   it("REGRESSION: 'regular' still resolves its OWN confined tool list, never the sandbox grant", async () => {
     const { brain, pool } = harness([{ text: 'ok', sessionId: 's' }], {
       brains, seedAgents: { e: { access_level: 'regular' } }, loadPermission: loadPermissionLevel, platform: 'win32',
@@ -2383,6 +2403,7 @@ describe('brainpool.turn — dangerously_skip_permissions:true escalation hole i
     }
   });
 
+  // contract 11.1
   it('a conv-local brains/<name>.yaml attempting dangerously_skip_permissions:true does NOT unconfine a sibling turn', async () => {
     const tmpBase = mkdtempSync(join(tmpdir(), 'egpt-brains-e2e-'));
     const builtinDir = join(tmpBase, 'builtin');
@@ -2826,7 +2847,14 @@ describe('brainpool.turn — sandbox_oauth_token reaches brainOptions ONLY for a
 //    provisioner's through setup/global-read-paths.mjs. An invalid entry is skipped with one line
 //    naming it; unset or empty is nothing at all. ──
 describe('globalReadPathsOf — the one reading of config.yaml global_read_paths', () => {
-  const read = (value) => { const logs = []; return { mounts: globalReadPathsOf(value, (l) => logs.push(l)), logs }; };
+  const read = (value, platform = 'win32') => { const logs = []; return { mounts: globalReadPathsOf(value, (l) => logs.push(l), platform), logs }; };
+
+  it('on linux an absolute path is a POSIX one (the EDW box mounts it at its own path)', () => {
+    const { mounts, logs } = read([{ repos: '/srv/repos' }, { win: 'C:/Users/an' }, { rel: 'src' }], 'linux');
+    expect(mounts).toEqual([{ name: 'repos', path: '/srv/repos' }]);
+    expect(logs).toHaveLength(2);
+    for (const l of logs) expect(l).toMatch(/not an absolute path/);
+  });
 
   it('a good entry, in either path form, comes back as { name, path } in config order', () => {
     const { mounts, logs } = read([{ repos: 'C:/Users/an/src/siran' }, { notes: '/c/Users/an/Documents/notes' }]);
@@ -2912,6 +2940,52 @@ describe('brainpool.turn — global_read_paths reaches brainOptions ONLY for a s
     const { brain } = harness([{ text: 'ok', sessionId: 's' }], { config: { ...defaults(true), global_read_paths: [{ egpt: 'C:/x' }] }, platform: 'win32', onLog: (l) => logs.push(String(l)) });
     await brain.turn('e', ev);
     expect(logs.some((l) => /global_read_paths entry 1 .*skipped .*reserved/.test(l))).toBe(true);
+  });
+});
+
+// ── sandbox_pin (operator 2026-10-27: "this E should be tied only to this sandbox account,
+//    sticky"). conversations.yaml agents.<being>.sandbox_pin, a map in the allowed_paths shape, hands
+//    THAT being in THAT conversation its pin: the key the launcher leases by (primary chat id, as
+//    src/spine/sandbox-pins.mjs's releaser reads it) and the standing paths through the one walk. ──
+describe('brainpool.turn — sandbox_pin: the pinned being-in-conversation is handed its pin, nobody else is', () => {
+  const defaults = (sandboxed) => ({ agents: {
+    e: { conversation_defaults: { access_level: 'regular', sandboxed } },
+    don: { conversation_defaults: { access_level: 'regular', sandboxed } },
+  } });
+  const PIN = { 'C:/Users/an/Documents': { allowed_tools: ['Read', 'Glob', 'Grep'] }, 'C:/work': null };
+
+  it('the pinned conversation\'s turn carries { key, writable, readOnly }', async () => {
+    const { brain, pool } = harness([{ text: 'ok', sessionId: 's' }], { config: defaults(true), platform: 'win32', seedAgents: { e: { sandbox_pin: PIN } } });
+    await brain.turn('e', ev);
+    expect(pool.calls[0].brainOptions.sandboxPin).toEqual({ key: `e:whatsapp:${ev.chatId}`, writable: ['C:/work'], readOnly: ['C:/Users/an/Documents'] });
+  });
+
+  it('sandbox_pin: {} pins the account with no standing paths', async () => {
+    const { brain, pool } = harness([{ text: 'ok', sessionId: 's' }], { config: defaults(true), platform: 'win32', seedAgents: { e: { sandbox_pin: {} } } });
+    await brain.turn('e', ev);
+    expect(pool.calls[0].brainOptions.sandboxPin).toEqual({ key: `e:whatsapp:${ev.chatId}`, writable: [], readOnly: [] });
+  });
+
+  it('another being in the same chat, and the same being in another chat, get no pin', async () => {
+    const { brain, pool } = harness([{ text: 'ok', sessionId: 's' }], { config: defaults(true), platform: 'win32', seedAgents: { e: { sandbox_pin: PIN }, don: {} } });
+    await brain.turn('don', ev);
+    await brain.turn('e', { ...ev, chatId: '!other:beeper.com', chatName: 'OTHER' });
+    expect(pool.calls).toHaveLength(2);
+    for (const c of pool.calls) expect(c.brainOptions).not.toHaveProperty('sandboxPin');
+  });
+
+  it('REGRESSION LOCK: no sandbox_pin (or one that is not a map) → no sandboxPin at all', async () => {
+    for (const sandbox_pin of [undefined, null, true, ['C:/x']]) {
+      const { brain, pool } = harness([{ text: 'ok', sessionId: 's' }], { config: defaults(true), platform: 'win32', seedAgents: { e: { sandbox_pin } } });
+      await brain.turn('e', ev);
+      expect(pool.calls[0].brainOptions, `sandbox_pin=${JSON.stringify(sandbox_pin)} was forwarded`).not.toHaveProperty('sandboxPin');
+    }
+  });
+
+  it('an unboxed turn gets no pin: it runs as the operator, on no pool account', async () => {
+    const { brain, pool } = harness([{ text: 'ok', sessionId: 's' }], { config: defaults(false), platform: 'win32', seedAgents: { e: { sandbox_pin: PIN } } });
+    await brain.turn('e', ev);
+    expect(pool.calls[0].brainOptions).not.toHaveProperty('sandboxPin');
   });
 });
 
@@ -3188,7 +3262,7 @@ describe('configuration: inline map vs. type-file name (both forms, one resolver
   it('resolveDefaultBrainDef: the persona\'s INLINE map resolves the same way (an object is truthy — it does not fall through to the shipped egpt type)', () => {
     const brains = createBrains({ builtinDir: '/nonexistent-builtin', agentsDir: '/nonexistent-agents' });
     const config = { agents: { egpt: { configuration: { ...inline }, name: 'E', default: true } } };
-    expect(resolveDefaultBrainDef({ getConfig: () => config, brains }))
+    expect(resolveDefaultBrainDef({ getConfig: () => config, brains, being: 'egpt' }))
       .toMatchObject({ type: 'ccode', model: 'haiku', effort: 'low', verbose_thinking: true, personality: 'egpt' });
   });
 
@@ -3294,7 +3368,7 @@ describe('personality: at the AGENT level in config.yaml, beside configuration:'
   it('the persona preview (/status, resolveDefaultBrainDef) reads the SAME ladder', () => {
     const brains = { resolve: vi.fn(() => ({ name: 'haiku-default', type: 'ccode', model: 'haiku' })) };
     const config = { agents: { egpt: { configuration: 'haiku-default', personality: 'don', default: true } } };
-    expect(resolveDefaultBrainDef({ getConfig: () => config, brains }).personality).toBe('don');
+    expect(resolveDefaultBrainDef({ getConfig: () => config, brains, being: 'egpt' }).personality).toBe('don');
   });
 
   // END TO END: what actually reaches loadFeed (the identity feed) and seedLayers on a kickoff.
@@ -3401,5 +3475,20 @@ describe('brainpool.turn: the compaction notice hook', () => {
     const { brain } = harness([{ text: 'ok', sessionId: 'sid-n' }], { afterTurn: (x) => seen.push(x) });
     await brain.turn('e', ev);
     expect(seen[0].noticeCompacted).toBeNull();
+  });
+});
+
+// ── Tokens live in a folder (operator 2026-10-23): a boxed being's Claude credential comes from
+//    config.yaml's sandbox_oauth_token where set (kg/do unchanged), else $EGPT_HOME/secrets/claude-oauth.token. ──
+describe('sandboxOauthTokenOf — config value, else the secrets file', () => {
+  const home = mkdtempSync(join(tmpdir(), 'egpt-oauth-home-'));
+  it('config wins; no config reads secrets/claude-oauth.token (trimmed); neither is blank', () => {
+    expect(sandboxOauthTokenOf({}, home)).toBe('');
+    mkdirSync(join(home, 'secrets'), { recursive: true });
+    writeFileSync(join(home, 'secrets', 'claude-oauth.token'), '  sk-ant-oat01-from-file  \n', { mode: 0o600 });
+    expect(sandboxOauthTokenOf({}, home)).toBe('sk-ant-oat01-from-file');
+    expect(sandboxOauthTokenOf({ sandbox_oauth_token: '   ' }, home)).toBe('sk-ant-oat01-from-file');
+    expect(sandboxOauthTokenOf({ sandbox_oauth_token: ' sk-ant-oat01-from-config ' }, home)).toBe('sk-ant-oat01-from-config');
+    rmSync(home, { recursive: true, force: true });
   });
 });

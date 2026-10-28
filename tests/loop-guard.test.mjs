@@ -48,8 +48,6 @@ function fakePort(clock) {
     async sendMedia(chat, filePath) { posts.push({ at: clock.now(), kind: 'sendMedia', chat, filePath }); return true; },
     editStatus(chat, msgId, text) { posts.push({ at: clock.now(), kind: 'editStatus', chat, text }); return true; },
     editOwn(chat, msgId, text) { posts.push({ at: clock.now(), kind: 'editOwn', chat, text }); return true; },
-    deleteStatus(chat, msgId) { posts.push({ at: clock.now(), kind: 'deleteStatus', chat }); return true; },
-    deleteOwn(chat, msgId) { posts.push({ at: clock.now(), kind: 'deleteOwn', chat }); return true; },
     react(chat, msgId, emoji) { posts.push({ at: clock.now(), kind: 'react', chat, emoji }); return true; },
     startStream(chat, init) {
       const h = { delivered: false, lastError: null, frames: [] };
@@ -196,16 +194,12 @@ describe('loop guard — the outbound ceiling', () => {
     expect(port.posts).toHaveLength(4);
   });
 
-  it('6. reactions and deletes are NEITHER a message nor an edit', async () => {
+  it('6. reactions are NEITHER a message nor an edit', async () => {
     const { trips, port, sendGuard, bridge } = withTrips({ messages: 1, edits: 1 });
 
-    // No text, so no counter: a reaction is not a line in a chat, a delete removes one.
-    for (let i = 0; i < 50; i++) {
-      bridge.react('!room', 'id', '👍');
-      bridge.deleteStatus('!room', 'id');
-      bridge.deleteOwn('!room', 'id');
-    }
-    expect(port.posts).toHaveLength(150);
+    // No text, so no counter: a reaction is not a line in a chat. (There are no deletes: operator 2026-10-27.)
+    for (let i = 0; i < 50; i++) bridge.react('!room', 'id', '👍');
+    expect(port.posts).toHaveLength(50);
     expect(sendGuard.stats()).toMatchObject({ messages: 0, edits: 0, tripped: null });
     expect(trips).toEqual([]);
   });
@@ -258,7 +252,7 @@ describe('loop guard — the outbound ceiling', () => {
   });
 
   it('8. survives the shell-aware facade — the path the 2026-07-25 flood actually took', async () => {
-    // createSender / the mesh service render through makeShellAwareBridge, which SPREADS the
+    // createSender / the mesh service render through makeLimbAwareBridge, which SPREADS the
     // bridge. A spread over a Proxy must still pick up the gated methods, or the ceiling would
     // be bypassed on exactly the path a persona reply and a mesh envelope take.
     const clock = fakeClock();
@@ -268,7 +262,7 @@ describe('loop guard — the outbound ceiling', () => {
     const shellOwned = new Set(['main']);
     const shell = { owns: (c) => shellOwned.has(c), send: async () => true, startStream: () => ({}), postStatus: async () => null };
     const wrapped = sendGuard.wrap(beeper);
-    const facade = makeShellAwareBridge(wrapped, sendGuard.wrap(shell));
+    const facade = makeLimbAwareBridge(wrapped, sendGuard.wrap(shell));
 
     await Promise.all(Array.from({ length: 9 }, (_, i) => facade.send('!room', `flood ${i}`)));
     expect(beeper.posts).toHaveLength(3);
@@ -389,10 +383,10 @@ process.env.EGPT_HOME = tmpHome;
 const STOP_PATH = join(tmpHome, 'STOP');
 const STATE_JSON = join(tmpHome, 'state', 'loop-guard.json');
 
-// Both come from the same dynamic import — makeShellAwareBridge is used by test 8 above, and a
+// Both come from the same dynamic import — makeLimbAwareBridge is used by test 8 above, and a
 // top-level beforeAll runs before every test in the file whatever the declaration order.
-let boot, makeShellAwareBridge;
-beforeAll(async () => { ({ boot, makeShellAwareBridge } = await import('../src/spine/boot.mjs')); });
+let boot, makeLimbAwareBridge;
+beforeAll(async () => { ({ boot, makeLimbAwareBridge } = await import('../src/spine/boot.mjs')); });
 afterAll(async () => {
   delete process.env.EGPT_HOME;
   try { await fs.rm(tmpHome, { recursive: true, force: true }); } catch {}

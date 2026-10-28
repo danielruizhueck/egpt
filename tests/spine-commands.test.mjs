@@ -93,9 +93,16 @@ describe('commands.isCommand', () => {
     const { cmds } = harness({ config: { ...AGENTS,  telegram: { chat_id: '!tg-self' } } });
     expect(await cmds.isCommand(typed(cmds, { body: '/e restart', chatId: '!tg-group', surface: 'telegram' }))).toBe(false);
   });
+  // contract 7.1
   it('the whatsapp Self chat_id does NOT authorize the same id on the telegram surface (namespace)', async () => {
     const { cmds } = harness({ config: { ...AGENTS,  whatsapp: { chat_id: '!self' } } });
     expect(await cmds.isCommand(typed(cmds, { body: '/e restart', chatId: '!self', surface: 'telegram' }))).toBe(false);
+  });
+  // contract 7.2
+  it('a chat titled like Self and a sender named like the operator authorize nothing — ids only', async () => {
+    const { cmds } = harness({ config: { ...AGENTS,  whatsapp: { chat_id: '!self', user_name: 'An' } } });
+    expect(await cmds.isCommand(typed(cmds, { body: '/e restart', chatId: '!group', chatName: '!self', senderId: 'mallory', senderName: 'An' }))).toBe(false);
+    expect(await cmds.isCommand(typed(cmds, { body: '/e restart', chatId: '!group', chatName: 'Self', senderId: 'mallory', senderName: 'An' }))).toBe(false);
   });
   it('does NOT treat plain text (or @e) as a command', async () => {
     const { cmds } = harness();
@@ -1389,7 +1396,7 @@ describe('/agents access_level all|regular <handle>|all — points access_level 
       await cmds.run({ chatId: '1234@s.whatsapp.net', surface: 'whatsapp', body });
       // The refusal NAMES EVERY LEVEL, because it is built from ACCESS_LEVELS. It used to say
       // all|regular, which hid the third tier from the one person guaranteed to be reading it.
-      expect(sent[0].text).toBe('usage: /e agents access_level regular|all|sandbox [<handle>|force all]');
+      expect(sent[0].text).toBe('usage: /e agents access_level regular|all|sandbox|reader [<handle>|force all]');
       expect(sent[0].text).not.toMatch(/recognized/);
     }
   });
@@ -1430,8 +1437,18 @@ describe('/agents access_level all|regular <handle>|all — points access_level 
     expect(sent[0].text).not.toMatch(/^usage:/);
   });
 
+  // REPRODUCE-FIRST (2026-10-26, chatboxes): the fourth tier, reachable through the same validator.
+  it("/agents access_level reader e sets accessLevel: 'reader' through the same validator and eviction", async () => {
+    const state = seedAccessState('whatsapp', '1234@s.whatsapp.net', { pushedName: 'diego', slugHint: 'diego' });
+    const { cmds, sent, evicts, getState } = harness({ state });
+    await cmds.run({ chatId: '1234@s.whatsapp.net', surface: 'whatsapp', body: '/agents access_level reader e' });
+    expect(getBeing(getState(), 'whatsapp', '1234@s.whatsapp.net', 'e').accessLevel).toBe('reader');
+    expect(evicts).toHaveLength(1);
+    expect(sent[0].text).toMatch(/e access here → reader \(Read, Glob and Grep in its own folder only\)/);
+  });
+
   it('AGENTS_USAGE names EVERY level — the usage line is built from ACCESS_LEVELS, so a fourth tier can never leave it stale', async () => {
-    expect(AGENTS_USAGE).toMatch(/access_level <regular\|all\|sandbox>/);
+    expect(AGENTS_USAGE).toMatch(/access_level <regular\|all\|sandbox\|reader>/);
     const state = seedAccessState('whatsapp', '1234@s.whatsapp.net', { pushedName: 'diego', slugHint: 'diego' });
     const { cmds, sent } = harness({ state });
     await cmds.run({ chatId: '1234@s.whatsapp.net', surface: 'whatsapp', body: '/agents', authorized: true });   // the operator's; anyone else's bare /agents is the public list
@@ -1811,14 +1828,14 @@ describe('loop intercept', () => {
     let cb = null;
     const brain = { calls: [], async turn(b, e) { this.calls.push(e); return { text: 'x' }; } };
     const exits = [];
-    const cmds = createCommands({ getConfig: () => ({ whatsapp: { chat_id: '!self' } }), send: async () => {}, exit: (c) => exits.push(c) });
+    const cmds = createCommands({ getConfig: () => ({ ...AGENTS, whatsapp: { chat_id: '!self' } }), send: async () => {}, exit: (c) => exits.push(c) });
     const transcript = { entries: [], log(ev) { this.entries.push(ev); } };
     const spine = createSpine({
       bridge: { onMessage(fn) { cb = fn; }, send() {}, stop() {} },
       brain, commands: cmds,
       identity: { build: (m) => ({ ...m }) },
       router: { resolve: () => 'e' },
-      gating: { decide: async () => ({ mode: 'on', receives: true, mayReply: true, sendToEgpt: 'mode' }), surfaces: () => true },
+      gating: { decide: async () => ({ mode: 'on', receives: true, mayReply: true }), surfaces: () => true },
       sender: { open: () => ({ update() {}, async finish() {} }) },
       transcript, heartbeats: { runDue() {} },
     });
@@ -2179,14 +2196,12 @@ describe('/agents <handle>|all — bare status view, usage, and /e/egpt retireme
     expect(sent[1].text).toMatch(/allowed_tools: \[Read, Write, Bash\]/);
   });
 
-  it('/agents force all (bare) returns ONE fenced-yaml block per resident being, defaultKey first', async () => {
+  it('/agents force all (bare) returns ONE fenced-yaml block per resident being, in residence order (no default being first)', async () => {
     let state = ensureContact(emptyState(), 'whatsapp', '!room', { pushedName: 'fam', slugHint: 'fam' }).state;
-    // inserted wren BEFORE e, to prove the ordering is defaultKey-first by RULE, not by
-    // accident of insertion order
     state = patchContact(state, 'whatsapp', '!room', { agents: { wren: { mode: 'mention' }, e: { mode: 'on' } } });
     const { cmds, sent } = harness({ state });
     await cmds.run({ chatId: '!room', surface: 'whatsapp', body: '/agents force all' });
-    expect(sent[0].text).toMatch(/being: e[\s\S]*\n---\n[\s\S]*being: wren/);
+    expect(sent[0].text).toMatch(/being: wren[\s\S]*\n---\n[\s\S]*being: e\n/);
   });
 
   // A node with no residents here says nothing (operator 2026-10-11) — never an empty fenced block.
@@ -2596,7 +2611,7 @@ describe('/rooms <slug> — a nonexistent room says so, never a fabricated roste
 // tests/rooms-members.test.mjs; here we lock only the recognition + non-leak.)
 describe('/rooms /members /activate — dispatch recognition', () => {
   const self = { chatId: '!self', surface: 'whatsapp' };
-  const cfg = { whatsapp: { chat_id: '!self' } };
+  const cfg = { ...AGENTS, whatsapp: { chat_id: '!self' } };
 
   it('are recognized from the Self DM, refused from a random chat', async () => {
     const { cmds } = harness({ config: cfg });
@@ -2706,7 +2721,7 @@ describe('/tabs /open /tab /close', () => {
 // the unwired-command catch-all — the exact failure this locks against.
 describe('/help', () => {
   const self = { chatId: '!self', surface: 'whatsapp' };
-  const cfg = { whatsapp: { chat_id: '!self' } };
+  const cfg = { ...AGENTS, whatsapp: { chat_id: '!self' } };
 
   it('replies with real help text, not the unwired catch-all', async () => {
     const { cmds, sent } = harness({ config: cfg });
@@ -2844,13 +2859,13 @@ describe('/help "wired" marker matches src/spine/commands.mjs + src/shell/comman
   }
 
   const spineTokens = tokensDispatchedIn(SPINE_SRC);
-  // Lifecycle (/restart, /upgrade, /rewind) dispatches through an IMPORTED function
+  // Lifecycle (/restart, /upgrade, /rewind, /standdown) dispatches through an IMPORTED function
   // (lifecycleExit, src/spine/ingest.mjs), not an inline regex in commands.mjs — verified
   // by requiring BOTH the call site here AND the literal token comparisons there.
   if (
     SPINE_SRC.includes('lifecycleExit(line') &&
-    INGEST_SRC.includes("'/restart'") && INGEST_SRC.includes("'/upgrade'") && INGEST_SRC.includes("'/rewind'")
-  ) { spineTokens.add('restart'); spineTokens.add('upgrade'); spineTokens.add('rewind'); }
+    INGEST_SRC.includes("'/restart'") && INGEST_SRC.includes("'/upgrade'") && INGEST_SRC.includes("'/rewind'") && INGEST_SRC.includes("'/standdown'")
+  ) { spineTokens.add('restart'); spineTokens.add('upgrade'); spineTokens.add('rewind'); spineTokens.add('standdown'); }
 
   it('every entry marked wired:true has a real dispatch in commands.mjs (or ingest.mjs lifecycle)', () => {
     const offenders = [];

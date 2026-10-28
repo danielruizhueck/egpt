@@ -4,7 +4,7 @@
 // LIVE echo (the Phase 2 verify gate) is tests-manual/phase2-echo.mjs.
 import { describe, it, expect } from 'vitest';
 import { createBeeperBridgePort } from '../src/bridges/beeper-port.mjs';
-import { hasNodeSignature } from '../src/node-signature.mjs';
+import { hasNodeSignature, encodeNodeSignature } from '../src/node-signature.mjs';
 import { encodeMesh, parseMesh } from '../src/mesh/relay.mjs';
 
 // A fake real-bridge that captures the host callbacks it was constructed with,
@@ -97,16 +97,16 @@ describe('beeper-port adapter', () => {
     expect(h.finals).toEqual(['🐶 egpt: Aquí estoy bien']);
   });
 
-  it('exposes NO delete limb — a being never removes a message; the stream forwards the bridge\'s own delete', async () => {
-    // operator 2026-08-24: no delete limb. 2026-10-19: a limb-only turn's ⏳ placeholder is deleted by
-    // the BRIDGE (src/spine/sender.mjs), through the stream's own delete.
+  it('exposes NO delete — not as a limb, not on a status, not on a stream: nothing is ever deleted', async () => {
+    // operator 2026-08-24: no delete limb. 2026-10-27 (An, #780): "nadie borra nunca nada, ningún bot,
+    // ni el spine" — a limb-only turn's ⏳ placeholder is EDITED (src/spine/sender.mjs), never deleted.
     const { start, spy } = fakeStart();
     const port = await createBeeperBridgePort({}, { start });
     expect(port.deleteOwn).toBeUndefined();
+    expect(port.deleteStatus).toBeUndefined();
     const s2 = port.startStream('!room', '⏳', { persona: 'e', bodyEmoji: '🐶', label: 'egpt' });
+    expect(s2.delete).toBeUndefined();
     expect(spy.streams[0].deleted).toBe(false);
-    s2.delete();
-    expect(spy.streams[0].deleted).toBe(true);
   });
 
   // The 🎧 listening mark comes back off (2026-09-16): react and its removal both reach the real bridge.
@@ -121,15 +121,14 @@ describe('beeper-port adapter', () => {
     expect(calls).toEqual([['add', '!room', '7004', '🎧'], ['remove', '!room', '7004', '🎧']]);
   });
 
-  it('A status: postStatus posts + returns id; editStatus edits; deleteStatus deletes', async () => {
+  it('A status: postStatus posts + returns id; editStatus edits; it is never deleted', async () => {
     const { start, spy } = fakeStart();
     const port = await createBeeperBridgePort({}, { start });
     const id = await port.postStatus('!room', '📨 Sending to E...');
     await port.editStatus('!room', id, '📨 Sending to E... ✅');
-    await port.deleteStatus('!room', id);
     expect(spy.statusPosts).toContainEqual({ text: '📨 Sending to E...', chatId: '!room' });
     expect(spy.statusEdits).toContainEqual({ chatId: '!room', msgId: id, text: '📨 Sending to E... ✅' });
-    expect(spy.statusDeletes).toContainEqual({ chatId: '!room', msgId: id });
+    expect(spy.statusDeletes).toEqual([]);
   });
 
   it('ENFORCES body_emoji on a one-shot send too', async () => {
@@ -458,17 +457,23 @@ describe('beeper-port adapter — layered signatures (bridge + agent wrap)', () 
     const calls = [];
     const port = await createBeeperBridgePort({ bridgeSignatureOpen: '🌉', bridgeSignatureClose: '💸' }, { start: async () => ({
       editMessage: async (...a) => { calls.push(['edit', ...a]); return true; },
-      createGroup: async (opts) => { calls.push(['create', opts]); return { success: true, chatID: '!new:beeper.com' }; },
+      createGroup: async (...a) => { calls.push(['create', ...a]); return { success: true, chatID: '!new:beeper.com' }; },
       archiveChat: async (...a) => { calls.push(['archive', ...a]); return true; },
+      setChatInfo: async (...a) => { calls.push(['info', ...a]); return { ok: true }; },
       getChatName: (id) => (id === '!room' ? 'Proyecto X' : null),
       resolveUserIdByPhone: async (digits, opts) => { calls.push(['resolve', digits, opts]); return '@whatsapp_lid-99:beeper.local'; },
       isAlive: () => true, stop() {},
     }) });
     expect(typeof port.editMessage).toBe('function');     // the method the live node was missing
     expect(await port.editMessage('!room', 'm1', '🤖↔️🤔 ...')).toBe(true);
-    const created = await port.createGroup({ accountID: 'wa', participantIDs: ['@whatsapp_lid-99:beeper.local'], type: 'group', title: 'T' });
+    const opts = { accountID: 'wa', participantIDs: ['@whatsapp_lid-99:beeper.local'], type: 'group', title: 'T' };
+    const created = await port.createGroup('!room', opts);   // made from !room
     expect(created).toEqual({ success: true, chatID: '!new:beeper.com' });
+    expect(calls).toContainEqual(['create', opts, { chatId: '!room' }]);
     expect(await port.archiveChat('!room')).toBe(true);
+    // /group (2026-10-26): a chat's title is not speech — RAW, no persona wrap
+    expect(await port.setChatInfo('!room', { title: 'T' })).toEqual({ ok: true });
+    expect(calls).toContainEqual(['info', '!room', { title: 'T' }]);
     expect(port.getChatName('!room')).toBe('Proyecto X');
     // the create's participant is resolved from a phone → the person's Beeper user id
     expect(await port.resolveUserIdByPhone('13472576794', { accountID: 'wa' })).toBe('@whatsapp_lid-99:beeper.local');
@@ -480,8 +485,9 @@ describe('beeper-port adapter — layered signatures (bridge + agent wrap)', () 
   it('editMessage / createGroup / archiveChat / getChatName / resolveUserIdByPhone answer false/null on a transport without them', async () => {
     const port = await createBeeperBridgePort({}, { start: async () => ({ async send() { return { ok: true }; }, isAlive: () => true, stop() {} }) });
     expect(await port.editMessage('!room', 'm1', 'x')).toBe(false);
-    expect(await port.createGroup({})).toBe(null);
+    expect(await port.createGroup('!room', {})).toBe(null);
     expect(await port.archiveChat('!room')).toBe(false);
+    expect(await port.setChatInfo('!room', { title: 'T' })).toBe(null);
     expect(port.getChatName('!room')).toBe(null);
     expect(await port.resolveUserIdByPhone('1347', {})).toBe(null);
   });
@@ -508,5 +514,25 @@ describe('beeper-port adapter — layered signatures (bridge + agent wrap)', () 
     expect(spy.captured.bridgeSignatureClose).toBe('💸');
     expect(spy.captured.transcriptionOpen).toBe('T_open');    // reaches beeper.mjs for the 👂 echo wrap
     expect(spy.captured.transcriptionClose).toBe('T_close');
+  });
+
+  // Telegram's limb declares visibleOnly (2026-10-24); a Beeper transport does not, so kg/do keep
+  // the invisible structural frame on every outbound, byte for byte.
+  it('REGRESSION LOCK: a transport without visibleOnly (Beeper) keeps the invisible frame on every outbound', async () => {
+    const { start, spy } = fakeStart();
+    const port = await createBeeperBridgePort({ bridgeSignatureOpen: '🌉', bridgeSignatureClose: '💸', nodeName: 'kg' }, { start });
+    const e = { persona: 'egpt', bodyEmoji: '🐶', label: 'E' };
+    const frame = encodeNodeSignature('kg', 'egpt');
+    await port.send('!room', 'hola', e);
+    const s = port.startStream('!room', '⏳ Thinking…', e);
+    s.update('ho');
+    s.finish('hola');
+    await port.postStatus('!room', 'st');
+    expect(spy.sent[0].text).toBe(`🌉 🐶 E: hola 💸${frame}`);
+    expect(spy.streams[0].init).toBe(`🌉 🐶 E: ⏳ Thinking… 💸${frame}`);
+    expect(spy.streams[0].updates).toEqual([`🌉 🐶 E: ho 💸${frame}`]);
+    expect(spy.streams[0].finals).toEqual([`🌉 🐶 E: hola 💸${frame}`]);
+    expect(spy.statusPosts[0].text).toBe(`🌉 st 💸${encodeNodeSignature('kg')}`);
+    expect(port.renderFrame(e, 'x')).toBe(`🌉 🐶 E: x 💸${frame}`);
   });
 });

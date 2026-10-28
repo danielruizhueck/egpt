@@ -212,7 +212,7 @@ function fakeTransport() {
     const spy = { connection: NAME_OF[token] ?? token, token, opts, onIncoming: opts.onIncoming, sent: [], streams: [], edits: [], reactions: [], unreactions: [] };
     built.push(spy);
     return {
-      async send(text, o) { spy.sent.push({ text, chatId: o?.chatId }); return { ok: true }; },
+      async send(text, o) { spy.sent.push({ text, chatId: o?.chatId }); return spy.onSend?.(text, o) ?? { ok: true }; },   // `onSend` (off by default): a case's own send result
       async editMessage(chatId, msgId, text) { spy.edits.push({ chatId, msgId, text }); return true; },
       startStreamMessage(init, o) {
         const h = { delivered: false, finals: [], chatId: o?.chatId, update() {}, async finish(t) { this.finals.push(t); this.delivered = true; } };
@@ -285,7 +285,7 @@ const KG = () => ({
     secondary: { account: 'dolly.egpt@example.com', token: SECONDARY },
   },
   agents: {
-    egpt: { configuration: 'egpt', default: true, handles: ['e'], name: 'E' },
+    egpt: { configuration: 'egpt', handles: ['e'], name: 'E' },
   },
 });
 
@@ -297,11 +297,8 @@ const KG_WITH_PEER = () => {
   return c;
 };
 
-// The same node with a SECOND, NON-DEFAULT agent. It exists to reach the router's connection
-// gate, which the persona never does: an unaddressed message falls through to the default being
-// with the bridge's own atE (router.mjs, "Nobody addressed"), so a gate that DROPPED the persona's
-// hit produces a reply anyway. Only a hit for another agent can show whether the gate let it
-// through. `k` is not in the bridge's wake words for this arrival — atE stays false, exactly as it
+// The same node with a SECOND agent, to reach the router's connection gate with a hit that is not
+// E's. `k` is not in the bridge's wake words for this arrival — atE stays false, exactly as it
 // is live for a token the bridge does not know (multi-connection-wake's deliver models the same).
 const KG_WITH_K = () => {
   const c = KG();
@@ -320,7 +317,7 @@ const KG_WITH_GUI = () => ({
     primary_gui: { account: 'anrodz42@example.com', token: GUI },
   },
   agents: {
-    egpt: { configuration: 'egpt', default: true, handles: ['e'], name: 'E', use: 'primary_gui' },
+    egpt: { configuration: 'egpt', handles: ['e'], name: 'E', use: 'primary_gui' },
   },
 });
 
@@ -329,7 +326,7 @@ const SINGLE = () => ({
   node_name: 'kg',
   user_name: 'An',
   beeper: { primary: { account: 'anrodz42@example.com', token: PRIMARY } },
-  agents: { egpt: { configuration: 'egpt', default: true, handles: ['e'], name: 'E' } },
+  agents: { egpt: { configuration: 'egpt', handles: ['e'], name: 'E' } },
 });
 
 async function bootWith(config, { state: seedState, ...extra } = {}) {
@@ -381,6 +378,7 @@ describe('a locally placed reply goes out on the connection the message ARRIVED 
   // THE REPRODUCTION. Two connections, the being's own output resolving to `secondary`, the
   // message heard on `primary`, and no peer mouth at all. Before the fix the reply left on
   // `secondary` carrying a chatId only `primary` has ever seen.
+  // contract 4.1
   it('THE SELF-DM: heard on primary, answered on primary — never on the being\'s own `secondary`', async () => {
     const { app, byConnection, replies } = await bootWith(KG());
 
@@ -1184,7 +1182,7 @@ describe('the retired super_chats block reroutes nothing and places no SI-state 
   const SI = (shape = KG, block) => { const c = shape(); if (block) c.super_chats = block; return c; };
   const SI_CHAN = '!both-super';
   const seed = (base = BOTH_AS_PRIMARY) => {
-    const st = ensureContact(emptyState(), 'whatsapp', base, { pushedName: 'base' }).state;
+    const st = ensureContact(emptyState(), 'whatsapp', base, { pushedName: 'base', seed: { agents: { egpt: { mode: 'on' } } } }).state;
     return aliasContact(st, 'whatsapp', SI_CHAN, getContact(st, 'whatsapp', base).jid, { transcript: 'x', super: true });
   };
   const hola = (spy) => spy.onIncoming('hola', {
@@ -1238,5 +1236,36 @@ describe('/send through the mouth: Rodz\'s own room for the original, found by i
     expect(byConnection.primary.sent.filter((m) => m.chatId === BOTH_AS_PRIMARY)).toEqual([]);
     delete LISTED[SIDE_ROOM];
     app.stop();
+  });
+});
+
+describe('the ingest box\'s question in a chat both accounts are in (ingest.auto false)', () => {
+  const AT = '2026-09-11T14:06:00.000Z';
+  const known = () => ({ ...emptyState(), contacts: { whatsapp: { [BOTH_AS_PRIMARY]: { slug: 'both', pushedName: 'both' } } } });
+
+  it('NO arrival since boot: the MOUTH asks in its own room, and the owner\'s "sí" on the ear\'s copy dispatches it', async () => {
+    const { app, byConnection, io } = await bootWith(KG(), { state: known() });
+    // the mouth's post, and the same message as the ear hears it (another id, same body, same second)
+    byConnection.secondary.onSend = (text) => {
+      LISTED[BOTH_AS_SECONDARY].push({ id: 'mouth-ask', text, timestamp: AT });
+      LISTED[BOTH_AS_PRIMARY].push({ id: 'ear-ask', text, timestamp: AT });
+      return { ok: true, confirmedId: 'mouth-ask' };
+    };
+    const handled = vi.spyOn(app.spine, 'handleInbound');
+    try {
+      await app.ingestLine(`/to ${BOTH_AS_PRIMARY}\ne, resume the thread`);
+      expect(byConnection.secondary.sent.map((m) => m.chatId)).toEqual([BOTH_AS_SECONDARY]);
+      expect(byConnection.secondary.sent[0].text).toContain('📥 An (ingest): e, resume the thread');
+      expect(byConnection.primary.sent).toEqual([]);
+      expect(JSON.parse(io.files.get(join(_PRIVATE_HOME, 'state', 'ingest-asks.json')))[0].ids).toEqual(['ear-ask']);
+
+      await byConnection.primary.onIncoming('sí', { chatId: BOTH_AS_PRIMARY, chatName: 'both', network: 'whatsapp', userId: AN, senderName: 'An', isSender: true, authorized: true, msgKey: 'ear-si', replyToId: 'ear-ask' });
+      const sent = await waitFor(() => handled.mock.calls.find(([m]) => m.from?.via === 'ingest'));
+      expect(sent?.[0]).toMatchObject({ body: 'e, resume the thread', from: { chatId: BOTH_AS_PRIMARY, via: 'ingest' } });
+    } finally {
+      LISTED[BOTH_AS_SECONDARY] = LISTED[BOTH_AS_SECONDARY].filter((m) => m.id !== 'mouth-ask');
+      LISTED[BOTH_AS_PRIMARY] = LISTED[BOTH_AS_PRIMARY].filter((m) => m.id !== 'ear-ask');
+      app.stop();
+    }
   });
 });

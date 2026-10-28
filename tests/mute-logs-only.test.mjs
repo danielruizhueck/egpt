@@ -19,7 +19,7 @@ const msg = (body, extra = {}) => ({
 
 function build({ eMode = 'mute', wrenMode, dispatch = {}, state = null } = {}) {
   const agents = {
-    egpt: { configuration: 'egpt', handles: ['e', 'egpt'], default: true, mode: eMode, conversation_defaults: { allowed_users: [OP] } },
+    egpt: { configuration: 'egpt', handles: ['e', 'egpt'], mode: eMode, conversation_defaults: { allowed_users: [OP] } },
     wren: { configuration: 'egpt', handles: ['wren'], ...(wrenMode ? { mode: wrenMode } : {}) },
   };
   let cb = null;
@@ -30,9 +30,9 @@ function build({ eMode = 'mute', wrenMode, dispatch = {}, state = null } = {}) {
   const loadState = state ? async () => state : null;
   const config = { agents, dispatch };
   const spine = createSpine({
-    bridge, brain, sender, transcript, defaultBeing: 'egpt',
-    router: createRouter({ getAgents: () => agents, getConfig: () => config, defaultBeing: 'egpt', loadState }),
-    gating: createGating({ getConfig: () => config, loadState, defaultKey: 'egpt' }),
+    bridge, brain, sender, transcript,
+    router: createRouter({ getAgents: () => agents, getConfig: () => config, loadState }),
+    gating: createGating({ getConfig: () => config, loadState }),
     identity: { build: (m) => ({ ...m, line: m.body }) },
     heartbeats: { runDue() {} }, readTranscript: async () => '', clock: { now: () => 1 },
   });
@@ -42,6 +42,7 @@ function build({ eMode = 'mute', wrenMode, dispatch = {}, state = null } = {}) {
 }
 
 describe('mute — recorded, never a turn', () => {
+  // contract 5.1
   it('REPRODUCTION: send_to_egpt always used to run a turn on every muted line — an allowed user\'s handle call runs none now', async () => {
     const { bridge, brain, inbound } = build({ dispatch: { send_to_egpt: 'always' } });
     await bridge.emit(msg('e hola'));
@@ -92,7 +93,7 @@ describe('mute — recorded, never a turn', () => {
 
 describe('off — unchanged: not recorded, no turn', () => {
   it('nothing is recorded and nothing runs, even a handle call', async () => {
-    const { bridge, brain, inbound } = build({ eMode: 'off', dispatch: { send_to_egpt: 'always' } });
+    const { bridge, brain, inbound } = build({ eMode: 'off', wrenMode: 'off' });
     await bridge.emit(msg('@e hola'));
     await bridge.emit(msg('(voice note)', { voiceLine: 'arrival' }));
     expect(brain.calls).toEqual([]);

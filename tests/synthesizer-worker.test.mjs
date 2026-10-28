@@ -3,6 +3,9 @@
 // enabled/RADIO_PIPER/token gates, and teardown — all against a FAKE startSynthesizerServer
 // seam, so no real port is bound.
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import {
   createSynthesizerWorker, resolveToken, resolveFfmpegCommand,
 } from '../src/spine/synthesizer-worker.mjs';
@@ -30,6 +33,18 @@ describe('synthesizer worker — config resolution', () => {
     expect(resolveToken({ synthesizer: { server: { token: 'S' } }, voice_service: { server: { token: 'V' } } })).toBe('S');
     expect(resolveToken({ voice_service: { server: { token: 'V' } } })).toBe('V');
     expect(resolveToken({})).toBeNull();
+  });
+
+  it('resolveToken: with no token in config, $EGPT_HOME/secrets/synthesizer.token (trimmed); a config value still wins', () => {
+    const home = mkdtempSync(join(tmpdir(), 'egpt-synth-secret-'));
+    try {
+      expect(resolveToken({}, { home })).toBeNull();
+      mkdirSync(join(home, 'secrets'));
+      writeFileSync(join(home, 'secrets', 'synthesizer.token'), 'RklMRQ==\n');
+      expect(resolveToken({}, { home })).toBe('RklMRQ==');
+      expect(resolveToken({ synthesizer: { server: { token: 'S' } } }, { home })).toBe('S');
+      expect(resolveToken({ voice_service: { server: { token: 'V' } } }, { home })).toBe('V');
+    } finally { rmSync(home, { recursive: true, force: true }); }
   });
 
   it('resolveFfmpegCommand: synthesizer.ffmpeg_command → "ffmpeg" default (NOT coupled to transcription.cli)', () => {
@@ -75,6 +90,7 @@ describe('synthesizer worker — start wiring', () => {
     const f = fakes();
     const w = createSynthesizerWorker({
       getConfig: () => ({ synthesizer: { enabled: true, bind: '0.0.0.0', port: 23391, server: { token: 'BUSKEY' } } }),
+      platform: 'win32',
       ...f,
     });
     await w.start();
@@ -85,6 +101,18 @@ describe('synthesizer worker — start wiring', () => {
       voicesDir: 'C:\\radio\\piper\\voices',
       ffmpegCommand: 'ffmpeg',
     });
+  });
+
+  it('POSIX venv layout: venv/bin/python off Windows', async () => {
+    process.env.RADIO_PIPER = '/opt/piper';
+    const f = fakes();
+    const w = createSynthesizerWorker({
+      getConfig: () => ({ synthesizer: { enabled: true, server: { token: 'K' } } }),
+      platform: 'linux',
+      ...f,
+    });
+    await w.start();
+    expect(f.calls.server[0]).toMatchObject({ pythonPath: '/opt/piper/venv/bin/python', voicesDir: '/opt/piper/voices' });
   });
 
   it('defaults bind/port when unset', async () => {

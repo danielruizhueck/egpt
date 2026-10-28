@@ -10,11 +10,14 @@ import { openSync, closeSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn as nodeSpawn, execFile } from 'node:child_process';
 import { EGPT_HOME } from '../egpt-home.mjs';
+import { beeperBlockOf } from './config-io.mjs';
 
 export const AUTO_UPDATE_METHODS = ['auto', 'manual', 'none'];
 export const CHECK_EVERY_MS = 6 * 3_600_000;
 export const PEER_WINDOW_MS = 20 * 60_000;    // a peer's "restarting for update…" line older than this is stale
 const TOOL_CAP_MS = 20 * 60_000;              // longest the bridges hold for the tool
+export const CLOSE_TRY_SEC = 30;              // the open app: WM_CLOSE, then this long for it to quit
+export const CLOSE_WAIT_SEC = 570;            // it only hid: this much longer for the operator's tray Quit
 const OS_OF = { win32: 'windows', linux: 'linux', darwin: 'mac' };
 const DEFAULT_METHOD = { windows: 'manual' };
 const PORTS = Array.from({ length: 10 }, (_, i) => 23373 + i);   // boot's DISCOVERY_PORTS
@@ -24,7 +27,7 @@ const UNINSTALL_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Unins
 // { os, method, note }: the method this node runs; note = the one boot log line when it differs from what is configured.
 export function autoUpdateMethod(cfg, platform = process.platform) {
   const os = OS_OF[platform] ?? platform;
-  const raw = cfg?.beeper?.auto_update?.[os]?.method;
+  const raw = beeperBlockOf(cfg)?.auto_update?.[os]?.method;
   const method = raw == null ? (DEFAULT_METHOD[os] ?? 'none') : String(raw).trim().toLowerCase();
   if (!AUTO_UPDATE_METHODS.includes(method)) return { os, method: 'none', note: `beeper.auto_update.${os}.method "${raw}" is not auto | manual | none — treated as none` };
   if (os !== 'windows' && method !== 'none') return { os, method: 'none', note: `beeper.auto_update.${os}.method is ${method}: Beeper updates are not implemented on ${os} yet — treated as none` };
@@ -40,6 +43,12 @@ export function cmpVersion(a, b) {
   return 0;
 }
 const newer = (a, b) => !!a && !!b && cmpVersion(a, b) > 0;
+
+// Ingest line → hold on (true) / off (false) / not a hold (null).
+export function holdLine(line) {
+  const cmd = String(line ?? '').trim();
+  return cmd === '/beeper-hold on' ? true : cmd === '/beeper-hold off' ? false : null;
+}
 
 // d = { installed, pending: { version, adminRequired } | null, running: [{ name, port, version }], latest: { version } | null }
 export function stateOf(d) {
@@ -78,7 +87,7 @@ export async function readPending({ localAppData = process.env.LOCALAPPDATA, rea
 
 // Every Beeper answering /v1/info, named by the connection whose token it answers; tokened connections with no port too.
 export async function readRunning(cfg, { fetchImpl = fetch } = {}) {
-  const conns = Object.entries(cfg?.beeper ?? {}).filter(([k, v]) => k !== 'auto_update' && v && typeof v === 'object' && v.token).map(([name, v]) => ({ name, token: v.token }));
+  const conns = Object.entries(beeperBlockOf(cfg) ?? {}).filter(([k, v]) => k !== 'auto_update' && v && typeof v === 'object' && v.token).map(([name, v]) => ({ name, token: v.token }));
   const live = (await Promise.all(PORTS.map(async (port) => ({ port, version: (await getJson(fetchImpl, `http://127.0.0.1:${port}/v1/info`)).json?.app?.version ?? null })))).filter((p) => p.version);
   const owner = new Map();
   await Promise.all(conns.flatMap((c) => live.map(async (p) => {
@@ -133,6 +142,7 @@ export function refusalText(r) {
 }
 
 export const startLine = (node, from, to, marker) => `🔄 ${node} · Beeper ${from} → ${to} · restarting for update… ${marker}`;
+export const quitLine = (node, from, to) => `⏳ ${node} · Beeper ${from} → ${to}: quit Beeper from the tray (Quit) and the update continues; nothing is stopped until then`;
 
 // The ONE line that replaces the start line: "🔄 kg · Beeper a → b · restarted in 72 s · primary ✓ · secondary ✓".
 export function resultLine(node, { from, to, result: r = {} }) {
@@ -177,13 +187,15 @@ export function runToolDry({ repoRoot, home = EGPT_HOME, restartOnly = false, sp
 
 // The real run, as a child writing to config/logs/beeper-update.log (a file, so nothing it prints
 // depends on this process); resolves with its JSON line once it exits.
-export function runTool({ repoRoot, home = EGPT_HOME, restartOnly = false, spawn = nodeSpawn, readFileImpl = readFile, capMs = TOOL_CAP_MS } = {}) {
+// closeAppOnly: only close the open app and wait waitSec for it to quit → { quit: true } or the close-app refusal.
+export function runTool({ repoRoot, home = EGPT_HOME, restartOnly = false, closeAppOnly = false, waitSec = CLOSE_TRY_SEC, relaunchApp = false, spawn = nodeSpawn, readFileImpl = readFile, capMs = TOOL_CAP_MS } = {}) {
   const logPath = join(home, 'config', 'logs', 'beeper-update.log');
   mkdirSync(join(home, 'config', 'logs'), { recursive: true });
   const fd = openSync(logPath, 'w');
+  const extra = closeAppOnly ? ['-CloseAppOnly', '-WaitSec', String(waitSec)] : [...(restartOnly ? ['-RestartOnly'] : []), ...(relaunchApp ? ['-RelaunchApp'] : [])];
   return new Promise((resolve) => {
     let child;
-    try { child = spawn('powershell.exe', toolArgv(repoRoot, home, restartOnly ? ['-RestartOnly'] : []), { stdio: ['ignore', fd, fd], windowsHide: true }); }
+    try { child = spawn('powershell.exe', toolArgv(repoRoot, home, extra), { stdio: ['ignore', fd, fd], windowsHide: true }); }
     catch (e) { resolve({ ok: false, step: 'tool', error: e?.message ?? String(e) }); return; }
     finally { closeSync(fd); }
     const timer = setTimeout(() => resolve({ ok: false, step: 'tool', error: `no result after ${capMs / 60_000} min — see ${logPath}` }), capMs);
@@ -216,6 +228,7 @@ export function createBeeperUpdate({
   ownNames = () => new Set(),         // this node's own names (node_name ∪ node_alias), lowercased
   now = Date.now,
   everyMs = CHECK_EVERY_MS,
+  holdCapMs = 3 * 60_000,             // longest a handover hold lasts
   io = { readFile, writeFile, mkdir, rename },
   onLog = () => {},
 } = {}) {
@@ -224,7 +237,9 @@ export function createBeeperUpdate({
   const updateCmd = join(repoRoot, 'src', 'tools', 'beeper-update.cmd');
   const statePath = join(home, 'state', 'beeper-update.json');
   let st = null, ticking = false, lastCheck = null, noted = false;
-  let busy = null;   // { done: Promise, release } from the accepted /update beeper until its line is posted
+  let busy = null;   // { kind: 'update' | 'hold', done: Promise, release }: an accepted /update beeper until its line is posted, or a handover hold
+  let holdTimer = null;
+  const busyText = () => `${node()} · ${busy?.kind === 'hold' ? 'a Beeper handover is under way' : 'a Beeper update is already under way'}`;
 
   const load = async () => {
     if (!st) { try { st = JSON.parse(String(await io.readFile(statePath, 'utf8'))); } catch { st = {}; } }
@@ -245,8 +260,21 @@ export function createBeeperUpdate({
     return logToGroup(text);
   };
 
-  // Once the drain finds nothing in flight: peer check, the start line, the restart, the result.
-  async function apply({ from, to, restartOnly }) {
+  // The open app quits first, with every bridge still serving: WM_CLOSE; if it only hid, ONE line
+  // asking for the tray Quit, then a longer wait. → null once it has quit, else the result to report.
+  async function closeApp({ from, to }) {
+    try {
+      let r = await run({ closeAppOnly: true, waitSec: CLOSE_TRY_SEC });
+      if (r?.quit !== true && r?.step === 'close-app') {
+        await say(quitLine(node(), from, to));
+        r = await run({ closeAppOnly: true, waitSec: CLOSE_WAIT_SEC });
+      }
+      return r?.quit === true ? null : r;
+    } catch (e) { return { ok: false, step: 'tool', error: e?.message ?? String(e) }; }
+  }
+
+  // Once the drain finds nothing in flight: peer check, the start line, the app, the restart, the result.
+  async function apply({ from, to, restartOnly, appOpen = false }) {
     try {
       let peer = null;
       try { peer = peerUpdating(await readLog(), { own: ownNames(), nowMs: now() }); } catch (e) { onLog(`peer check: ${e?.message ?? e}`); }
@@ -256,10 +284,12 @@ export function createBeeperUpdate({
       }
       const marker = `⟦bu-${node()}-${now().toString(36)}⟧`;
       await say(startLine(node(), from, to, marker));
-      let result;
-      try { await beeperRestart(true); result = await run({ restartOnly }); }
-      catch (e) { result = { ok: false, step: 'tool', error: e?.message ?? String(e) }; }
-      finally { await beeperRestart(false); }
+      let result = appOpen ? await closeApp({ from, to }) : null;
+      if (!result) {
+        try { await beeperRestart(true); result = await run({ restartOnly, relaunchApp: appOpen }); }
+        catch (e) { result = { ok: false, step: 'tool', error: e?.message ?? String(e) }; }
+        finally { await beeperRestart(false); }
+      }
       const line = resultLine(node(), { from, to, result });
       onLog(line);
       await replaceLine(marker, line);
@@ -271,7 +301,7 @@ export function createBeeperUpdate({
   async function start() {
     const m = autoUpdateMethod(cfg(), platform);
     if (m.os !== 'windows') return { started: false, text: `${node()} · Beeper updates are not implemented on ${m.os} yet` };
-    if (busy) return { started: false, text: `${node()} · a Beeper update is already under way` };
+    if (busy) return { started: false, text: busyText() };
     if (restartPending()) return { started: false, text: `${node()} · a restart is pending — send ${hint()} after it` };
     const d = await detectFn(cfg());
     const state = stateOf(d);
@@ -282,11 +312,33 @@ export function createBeeperUpdate({
     const plan = await dryRun({ restartOnly });
     if (!plan?.ok) return { started: false, text: `${node()} · Beeper ${to} not installed: ${refusalText(plan)}` };
     if (typeof drain !== 'function') return { started: false, text: `${node()} · Beeper ${to}: no drain on this node — run ${updateCmd}` };
-    if (busy) return { started: false, text: `${node()} · a Beeper update is already under way` };
+    if (busy) return { started: false, text: busyText() };
     let release;
-    busy = { done: new Promise((r) => { release = r; }), release };
-    drain(() => { apply({ from, to, restartOnly }); });
+    busy = { kind: 'update', done: new Promise((r) => { release = r; }), release };
+    drain(() => { apply({ from, to, restartOnly, appOpen: !!plan.closeApp }); });
     return { started: true, text: `⏳ ${node()} · Beeper ${from} → ${to}: restarting Beeper for the update once turns finish (about a minute, ${plan.flow} flow); the result goes to log_to_group` };
+  }
+
+  // Beeper handover (setup/beeper-window.ps1 via ingest): the update's restart state, sharing its busy.
+  async function hold(on) {
+    if (!on) {
+      if (busy?.kind !== 'hold') return false;
+      clearTimeout(holdTimer);
+      holdTimer = null;
+      try { await beeperRestart(false); }
+      finally { const b = busy; busy = null; b.release(); }
+      return true;
+    }
+    if (busy) { onLog(`hold refused: ${busy.kind === 'hold' ? 'already held' : 'an update is under way'}`); return false; }
+    let release;
+    busy = { kind: 'hold', done: new Promise((r) => { release = r; }), release };
+    try { await beeperRestart(true); }
+    catch (e) { onLog(`hold: ${e?.message ?? e}`); await hold(false); return false; }
+    holdTimer = setTimeout(() => {
+      onLog(`hold released by its ${holdCapMs / 1000} s cap`);
+      hold(false).catch((e) => onLog(`hold cap: ${e?.message ?? e}`));
+    }, holdCapMs);
+    return true;
   }
 
   // At boot, every 6 h: ONE notice per newly downloaded version; auto installs it.
@@ -320,7 +372,7 @@ export function createBeeperUpdate({
   }
 
   return {
-    tick, check,
+    tick, check, hold,
     update: async () => (await start()).text,
     busy: () => !!busy,
     idle: () => busy?.done ?? Promise.resolve(),

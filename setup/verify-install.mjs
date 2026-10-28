@@ -2,10 +2,11 @@
 // verify-install.mjs — GUARD 2: check the LIVE machine's egpt node install for the
 // drift a vitest can never see. Read-only: it PROBES, it never fixes.
 //
-// It checks the node's one runner - the Session 1 task (setup/register-session1-daemon-task.ps1)
-// registered for this profile, at logon, Interactive, logging under config/logs - and that the
-// retired Session 0 service of the same name is absent or Disabled. Then the profile shape (no
-// stale old-layout residue), the spine pid/alive-beat, and that `claude` resolves.
+// It checks the node's two runners - the Session 1 task (setup/register-session1-daemon-task.ps1)
+// registered for this profile, at logon, Interactive, logging under config/logs; and the Session 0
+// service of the same name (setup/install-nssm-service.ps1): Automatic, as the user, AppExit 0 =
+// Exit, the user's start/stop ACE. Off Windows, the daemon itself (daemonChecks). Then the profile
+// shape (no stale old-layout residue), the spine pid/alive-beat, and that `claude` resolves.
 //
 // Usage:  node setup/verify-install.mjs [egptHome]      (default $EGPT_HOME, else ~/.egpt)
 //
@@ -14,9 +15,11 @@ import { spawnSync } from 'node:child_process';
 import { statSync, readFileSync, existsSync } from 'node:fs';
 import { join, basename, dirname } from 'node:path';
 import { homedir } from 'node:os';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 import * as YAML from 'yaml';
 import { runPowerShell } from './migrate.mjs';
+import { configWarnings } from '../src/spine/router.mjs';
+import { liveDaemonPid } from '../src/daemon-singleton.mjs';
 
 // ── pure helpers (unit-tested; no live probes) ─────────────────────────────
 
@@ -39,6 +42,13 @@ export function isUnderDir(child, parent) {
   return c === d || c.startsWith(d + '/');
 }
 
+// Boot's agents rule (src/spine/router.mjs configWarnings, logged at boot): there is no default
+// agent — `default:` is ignored — and an on/auto mode set for a being or the node applies in every chat.
+export function agentsCheck(cfg) {
+  const warns = configWarnings(cfg);
+  return warns.length ? warns.map((w) => ['warn', `config: ${w}`]) : [['ok', `config: parses, ${Object.keys(cfg?.agents ?? {}).length} agents`]];
+}
+
 export function expectedLogsDir(egptHome) { return join(egptHome, 'config', 'logs'); }
 
 // The RETIRED old-layout paths — flagged if any is present in the new profile.
@@ -51,7 +61,7 @@ export function staleResiduePaths(egptHome) {
   ];
 }
 
-// ~/.egpt -> egpt-daemon, as the registrar derives it. The retired service shares the name.
+// ~/.egpt -> egpt-daemon, as the registrar derives it. The Session 0 service shares the name.
 export function daemonTaskName(egptHome) {
   const base = basename(String(egptHome ?? '').replace(/[\\/]+$/, '')).replace(/^\./, '');
   return base ? `${base}-daemon` : null;
@@ -77,13 +87,37 @@ export function taskChecks(task, { name, egptHome, exists = existsSync }) {
   return out;
 }
 
-// The retired Session 0 service: absent, or Disabled and not running.
-export function retiredServiceCheck(service, name) {
-  if (!service) return { level: 'ok', msg: `retired: no ${name} service` };
-  if (service.startType === 'Disabled' && service.status !== 'Running') {
-    return { level: 'ok', msg: `retired: ${name} service is ${service.status} and Disabled (setup\\uninstall-nssm-service.cmd removes it)` };
+// '.\an' / 'REVE\an' name the same local account as 'reve\an'; 'LocalSystem' names none.
+export function sameAccount(account, user) {
+  const split = (s) => { const m = String(s ?? '').match(/^(.*)\\([^\\]+)$/); return m ? { d: m[1].toLowerCase(), u: m[2].toLowerCase() } : null; };
+  const a = split(account), b = split(user);
+  return !!(a && b && a.u === b.u && (a.d === '.' || a.d === b.d));
+}
+
+// The Session 0 runner, as probeRunner reports it: { status, startType, account, exit0, userAce, user }
+// (Win32_Service State/StartMode/StartName; Parameters\AppExit value 0; whether sc.exe sdshow gives
+// `user` start and stop, by beeper-desktop.ps1's Test-BeeperServiceAce).
+export function serviceChecks(service, name) {
+  const fix = 'setup\\install-nssm-service.cmd, at the console';
+  if (!service) return [{ level: 'fail', msg: `S0 runner: no ${name} service - nothing runs this node while nobody is logged on (${fix})` }];
+  const out = [];
+  const bad = (msg) => out.push({ level: 'fail', msg: `S0 runner: service ${name} ${msg} (${fix})` });
+  if (!/^auto(matic)?$/i.test(service.startType ?? '')) bad(`is ${service.startType}, not Automatic - nothing starts it at boot`);
+  if (!sameAccount(service.account, service.user)) bad(`logs on as ${service.account || '?'}, not ${service.user} - it must run as the desktop user, never LocalSystem`);
+  if (service.exit0 !== 'Exit') bad(`has AppExit 0 = ${service.exit0 || '(none)'}, not Exit - NSSM would restart it behind a STOP file`);
+  if (!service.userAce) bad(`gives ${service.user} no start/stop right - stop-egpt and start-egpt cannot drive it unelevated`);
+  if (!out.length) out.push({ level: 'ok', msg: `S0 runner: service ${name} ${service.status}, Automatic, as ${service.account}, AppExit 0 = Exit, ${service.user} may stop and start it` });
+  return out;
+}
+
+// Off Windows the runner is the daemon itself: state/daemon-<s0|s1>.pid contents, judged by the
+// daemon's own singleton rule (a live pid and a fresh alive.txt).
+export function daemonChecks(pidFiles, beatAgeMs, isProcessAlive) {
+  for (const key of ['s1', 's0']) {
+    const pid = liveDaemonPid({ pidFileContent: pidFiles[key], beatAgeMs }, { isProcessAlive });
+    if (pid) return [{ level: 'ok', msg: `runner: egpt daemon pid ${pid} (${key}) alive, alive.txt fresh` }];
   }
-  return { level: 'fail', msg: `retired: ${name} service is ${service.status} / ${service.startType} - a session 0 spine beside the task; Stop and Disable it, or setup\\uninstall-nssm-service.cmd` };
+  return [{ level: 'fail', msg: 'runner: no live egpt daemon (state/daemon-s0.pid or daemon-s1.pid with a fresh alive.txt) - nothing runs this node' }];
 }
 
 // Beat-age → status. Alive beats every 60s; generous thresholds so a slow tick
@@ -104,14 +138,24 @@ export function overallExit(levels) {
 
 // ── live probes (not unit-tested) ──────────────────────────────────────────
 
-// The task and the service named `name`, read-only. Unelevated is enough for both.
+const BEEPER_DESKTOP = join(dirname(fileURLToPath(import.meta.url)), 'beeper-desktop.ps1');
+
+// The task and the service named `name`, read-only. Unelevated is enough for both (the service's
+// SDDL grants interactive users read control, so sc.exe sdshow answers).
 function probeRunner(name) {
-  const q = `'${name.replace(/'/g, "''")}'`;
-  return JSON.parse(runPowerShell(`$out = @{}
-$t = Get-ScheduledTask -TaskName ${q} -TaskPath '\\' -ErrorAction SilentlyContinue
+  const q = (s) => `'${String(s).replace(/'/g, "''")}'`;
+  return JSON.parse(runPowerShell(`. ${q(BEEPER_DESKTOP)}
+$name = ${q(name)}
+$out = @{}
+$t = Get-ScheduledTask -TaskName $name -TaskPath '\\' -ErrorAction SilentlyContinue
 if ($t) { $out.task = @{ state = "$($t.State)"; logonType = "$($t.Principal.LogonType)"; triggers = @($t.Triggers | ForEach-Object { $_.CimClass.CimClassName }); actions = @($t.Actions | ForEach-Object { @{ execute = "$($_.Execute)"; arguments = "$($_.Arguments)" } }) } }
-$s = Get-Service -Name ${q} -ErrorAction SilentlyContinue
-if ($s) { $out.service = @{ status = "$($s.Status)"; startType = "$($s.StartType)" } }
+$w = Get-CimInstance Win32_Service -Filter "Name='$name'"
+if ($w) {
+  $me = [Security.Principal.WindowsIdentity]::GetCurrent()
+  $exit = Get-Item "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\$name\\Parameters\\AppExit" -ErrorAction SilentlyContinue
+  $sddl = ((& sc.exe sdshow $name) -join '').Trim()
+  $out.service = @{ status = "$($w.State)"; startType = "$($w.StartMode)"; account = "$($w.StartName)"; exit0 = $(if ($exit) { "$($exit.GetValue('0'))" } else { '' }); userAce = [bool](Test-BeeperServiceAce $sddl $me.User.Value); user = $me.Name }
+}
 ConvertTo-Json -Depth 5 -Compress -InputObject $out
 `));
 }
@@ -145,16 +189,17 @@ export function runChecks({ egptHome, out = console.log } = {}) {
   out(`egpt install verify — task '${name}', profile '${egptHome}'`);
   out('');
 
-  // (1) the runner: the Session 1 task, and the retired Session 0 service.
-  if (process.platform !== 'win32') add('warn', 'runner: not Windows - no Session 1 task to check (setup/install-service.sh)');
-  else if (!name) add('fail', `runner: cannot derive a task name from ${egptHome}`);
+  // (1) the runners: the Session 1 task and the Session 0 service.
+  if (process.platform !== 'win32') {
+    const pidFile = (key) => { try { return readFileSync(join(egptHome, 'state', `daemon-${key}.pid`), 'utf8'); } catch { return ''; } };
+    const beatAgeMs = Date.now() - mtimeMs(join(egptHome, 'state', 'alive.txt'));
+    for (const r of daemonChecks({ s0: pidFile('s0'), s1: pidFile('s1') }, beatAgeMs, pidAlive)) add(r.level, r.msg);
+  } else if (!name) add('fail', `runner: cannot derive a task name from ${egptHome}`);
   else {
     let facts = null;
     try { facts = probeRunner(name); } catch (e) { add('warn', `runner: cannot read Task Scheduler / the SCM - ${e.message}`); }
     if (facts) {
-      for (const r of taskChecks(facts.task, { name, egptHome })) add(r.level, r.msg);
-      const r = retiredServiceCheck(facts.service, name);
-      add(r.level, r.msg);
+      for (const r of [...taskChecks(facts.task, { name, egptHome }), ...serviceChecks(facts.service, name)]) add(r.level, r.msg);
     }
   }
 
@@ -166,13 +211,7 @@ export function runChecks({ egptHome, out = console.log } = {}) {
     try { cfg = YAML.parse(readFileSync(cfgPath, 'utf8')); } catch (e) { perr = e; }
     if (perr) add('fail', `config: ${cfgPath} FAILED to parse — ${perr.message}`);
     else if (!cfg?.agents || typeof cfg.agents !== 'object' || Array.isArray(cfg.agents)) add('fail', 'config: no agents block (fatal boot)');
-    else {
-      const hasPersona = Object.entries(cfg.agents).some(([name, a]) =>
-        a && typeof a === 'object' && !Array.isArray(a) &&
-        [name, ...(Array.isArray(a.handles) ? a.handles : [])].map((h) => String(h).toLowerCase()).some((h) => h === 'e' || h === 'egpt'));
-      if (hasPersona) add('ok', 'config: parses, agents block has a persona entry');
-      else add('fail', 'config: agents block has NO persona entry (name/handles incl. e/egpt) — fatal boot');
-    }
+    else for (const r of agentsCheck(cfg)) add(...r);
   }
   for (const [label, p] of [
     ['config/conversations.yaml', join(egptHome, 'config', 'conversations.yaml')],

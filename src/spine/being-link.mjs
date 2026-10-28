@@ -37,7 +37,7 @@ import { homedir } from 'node:os';
 import { join, dirname, basename, relative, isAbsolute, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { authMac, macMatches } from '../shell/auth.mjs';
-import { SPINE_PORT_ENV, BEING_TOKEN_ENV, ASK_SPINE_ENV, CDP_MODULE_ENV } from '../shell/being.mjs';
+import { SPINE_PORT_ENV, BEING_TOKEN_ENV, ASK_SPINE_ENV, CDP_MODULE_ENV, NATIVE_WS_ENV } from '../shell/being.mjs';
 import { chromeConversationOf } from './chrome-pool.mjs';
 import { readBrowserGroups, browserUploadsOn } from '../rooms-file.mjs';
 import { slugDir } from '../conversations-state.mjs';
@@ -137,23 +137,21 @@ const quoted = (v) => JSON.stringify(String(v ?? '').slice(0, 40));
  * @param {(c: object) => Promise<object>} [opts.chromeClientFor] commands.chromeClientFor — the conversation's group CDP client ({ client: { channel() } })
  * @param {(site: string, o: { conversation: object, client: object }) => Promise<string>} [opts.requestLogin] boot's EXISTING auto-login limb, the SAME one /login calls (boot.requestLogin → src/spine/login.mjs). Reads Chrome's own saved credential for the group's profile, types it, returns an OUTCOME TOKEN only — never the credential.
  * @param {() => Promise<object>} [opts.readGroups] config/browsers.yaml's groups (default rooms-file.readBrowserGroups, read fresh per ask)
+ * @param {(who: object) => Promise<object>} [opts.conversationOf] the being's chat → its browser group (boot: commands.browserConversationOf); default resolves the slug alone against readGroups
  * @param {(convDir: string) => object} [opts.resolveConfig] the conversation's resolved config (config-resolver configFor): privileged_browser
  * @param {(group: string) => boolean} [opts.uploadsOn] browsers.yaml uploads: for that group (default rooms-file.browserUploadsOn, read fresh per upload)
  * @param {string} [opts.uploadStage]              where checked upload copies go; the being cannot write here
  * @param {string} [opts.clientPath]               the client script handed in ASK_SPINE_ENV (default askSpineClientPath()); being-cdp.mjs sits beside it
+ * @param {boolean} [opts.nativeWebSocket]        config shell.being_native_websocket; false mints NATIVE_WS_ENV=0 (the client dials with ws)
  * @param {(m: string) => void} [opts.onLog]       the AUDIT line, one per request
  * @param {typeof nodeRandomBytes} [opts.randomBytes]
  */
-export function createBeingLink({ port, startBrowser, chromeClientFor = null, requestLogin = null, readGroups = readBrowserGroups, resolveConfig = () => ({}), uploadsOn = browserUploadsOn, uploadStage = join(EGPT_HOME, 'state', 'uploads'), clientPath = askSpineClientPath(), onLog = () => {}, randomBytes = nodeRandomBytes } = {}) {
+export function createBeingLink({ port, startBrowser, chromeClientFor = null, requestLogin = null, readGroups = readBrowserGroups, conversationOf = async (who) => chromeConversationOf({ slug: who.slug }, await readGroups()), resolveConfig = () => ({}), uploadsOn = browserUploadsOn, uploadStage = join(EGPT_HOME, 'state', 'uploads'), clientPath = askSpineClientPath(), nativeWebSocket = true, onLog = () => {}, randomBytes = nodeRandomBytes } = {}) {
   const live = new Map();       // secret -> { being, surface, slug, boxed }
   const tunnels = new Map();    // who -> its open CDP tunnels, closed when its secret is revoked
   const muxes = new WeakMap();  // a group's CDP channel -> its mux
   const cdpModule = pathToFileURL(join(dirname(clientPath), 'being-cdp.mjs')).href;
 
-  // THE BEING'S CONVERSATION, resolved at every ask: the slug it was minted for → its browser group
-  // (config/browsers.yaml, read fresh). conversation_path's basename IS the slug (conversations-state
-  // ensureContact), so { slug } is the whole entry chromeConversationOf reads.
-  const conversationOf = async (who) => chromeConversationOf({ slug: who.slug }, await readGroups());
   const noBrowser = (c) => ({ ok: false, reason: 'no-browser', detail: c.why || 'this chat has no browser group' });
 
   async function openCdp(who, sink, tag) {
@@ -215,7 +213,7 @@ export function createBeingLink({ port, startBrowser, chromeClientFor = null, re
     return {
       // NAME=VALUE entries for the launcher's ONE -SetEnv element (boxed) or the spawn env (unboxed).
       // The VALUES are never logged: the launcher logs names only, and nothing here logs at all.
-      env: [`${SPINE_PORT_ENV}=${port}`, `${BEING_TOKEN_ENV}=${secret}`, `${ASK_SPINE_ENV}=${clientPath}`, `${CDP_MODULE_ENV}=${cdpModule}`],
+      env: [`${SPINE_PORT_ENV}=${port}`, `${BEING_TOKEN_ENV}=${secret}`, `${ASK_SPINE_ENV}=${clientPath}`, `${CDP_MODULE_ENV}=${cdpModule}`, ...(nativeWebSocket ? [] : [`${NATIVE_WS_ENV}=0`])],
       secret,
       revoke() {
         live.delete(secret);

@@ -10,7 +10,7 @@
 // with a short note.
 import { lifecycleExit, lifecycleForce } from './ingest.mjs';
 import { isAutoMode, AUTO_MODES, DEFAULT_AUTO_MODE } from '../auto-mode.mjs';
-import { patchBeing, patchContact, deleteBeing, getContact, getBeing, ensureContact, recordThread, findThreadJsonl, aliasContact, dropContact, aliasTargetOf, residentsOf, defaultBeingOf, allowedUsersPermits, setAliasMouthChat, slugDir, statsPath, conversationPathOf, seedIdentityLayers, skeletonIdentityFiles, slugSuffix, rollTranscript, fixedSlugFor, mutateState, DETERMINISTIC_MODEL, DETERMINISTIC_EFFORT, DEFAULT_ALLOWED_TOOLS, LOBBY_SLUG } from '../conversations-state.mjs';
+import { patchBeing, patchContact, deleteBeing, getContact, getBeing, recordThread, forkContact, forkKeyOf, stampThreadId, aliasContact, dropContact, aliasTargetOf, residentsOf, defaultBeingOf, setAliasMouthChat, slugDir, statsPath, conversationPathOf, seedIdentityLayers, skeletonIdentityFiles, slugSuffix, rollTranscript, fixedSlugFor, mutateState, DETERMINISTIC_MODEL, DETERMINISTIC_EFFORT, DEFAULT_ALLOWED_TOOLS, LOBBY_SLUG } from '../conversations-state.mjs';
 import { stripFrontMatter } from '../transcript-meta.mjs';
 // WHERE A SANDBOXED BEING'S CLI STORE LIVES — the ONE formula, taken from the module that
 // CREATES it (src/sandbox-cli-session.mjs) rather than rebuilt here, so the two verbs that retire
@@ -23,13 +23,13 @@ import { loadPermissionLevel, ACCESS_LEVELS, isAccessLevel } from './permission-
 // over a single already-extracted token is the house single-token lookup (src/spine/mesh.mjs's
 // findAgentByToken, src/spine/heartbeat-loader.mjs's `agent:`); `addressableTokens` LISTS the
 // valid handles in the not-hosted log line. See agentsCmd's HANDLE → KEY block.
-import { addressed, addressableTokens, fallbackWake, isKnownSender, wakeTokens, voiceWakeTokens } from './router.mjs';
+import { addressed, addressableTokens, agentsInChat, fallbackWake, isKnownSender, mayWake, wakeTokens, voiceWakeTokens } from './router.mjs';
 import { superChannelAlive, resolveMode } from './gating.mjs';
 import { stat as fsStat, readFile as fsReadFile, writeFile as fsWriteFile, mkdir as fsMkdir, readdir as fsReaddir, rm as fsRm, rename as fsRename } from 'node:fs/promises';
 import { readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { randomUUID, randomInt } from 'node:crypto';
-import { join, basename, dirname } from 'node:path';
+import { join, basename, dirname, sep } from 'node:path';
 import * as YAML from 'yaml';
 import { EGPT_HOME } from '../egpt-home.mjs';
 import { shortChatId } from '../bridges/chat-id.mjs';
@@ -45,14 +45,15 @@ import { SHELL_SURFACE, surfaceOf as surfaceOfNetwork } from './identity.mjs';
 import { sanitizeName, sanitizeSlug } from '../sanitize.mjs';
 import { loadAdapters as defaultLoadAdapters, matchAdapter } from '../adapters/registry.mjs';
 import { agentPaths } from '../mesh/relay.mjs';
-import { compactionTargets, dueForCompaction, windowForModel, compactionPolicy, compactionOverrideOf } from '../tools/compact-being.mjs';
+import { compactionTargets, dueForCompaction, windowForModel, compactionPolicy, compactionOverrideOf, findSessionFile } from '../tools/compact-being.mjs';
+import { fill } from '../tools/template.mjs';
 import { compactionRatio } from './compaction.mjs';
 import { NODE_FILE, REGISTRY_FILE, parseEntityConfig } from './config-resolver.mjs';
-import { CONFIG_YAML_PATH, writeConfigKey } from '../tools/config-io.mjs';
+import { CONFIG_YAML_PATH, writeConfigKey, beeperBlockOf } from '../tools/config-io.mjs';
 import { isRestartKey } from './config-swap.mjs';
 import { resolveConfigKey } from '../../config/config-schema.mjs';
 import { createCdpClient, createChannelTransport } from '../tools/cdp.mjs';
-import { resolveBrainProfile, chromePipeArgs, stampGroupProfile, profileHolder as defaultProfileHolder } from '../tools/chrome-launcher.mjs';
+import { resolveBrainProfile, chromePipeArgs, chromePlainArgs, stampGroupProfile, profileHolder as defaultProfileHolder } from '../tools/chrome-launcher.mjs';
 import { connectChromeHost } from '../chrome-host.mjs';
 import { admitLaunch, estimateChromeBytes, BRAIN_GROUP, SHARED_GROUP, isSafeGroupName, chromeConversationOf } from './chrome-pool.mjs';
 import { freemem } from 'node:os';
@@ -167,6 +168,17 @@ const CCODE = 'ccode';
 // How many of Chrome's tabs /chrome lists before it collapses the rest into a
 // "+N more" — this report lands in a chat window, not a terminal.
 const CHROME_TAB_LIMIT = 5;
+// A sign-in window's page: http(s) or about:, a bare host as https. Never a Chrome switch.
+const signinUrlOf = (raw) => {
+  try { const u = new URL(/^[a-z][a-z0-9+.-]*:/i.test(raw) ? raw : `https://${raw}`); return /^(https?|about):$/.test(u.protocol) ? u.href : null; }
+  catch { return null; }
+};
+// A dot, a slash or a scheme: a url, never a group name.
+const urlShaped = (s) => /[./]|^[a-z][a-z0-9+.-]*:/i.test(s);
+function defaultProfileFolders() {
+  try { return readdirSync(dirname(CHROME_BRAIN_PROFILE), { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name); }
+  catch { return []; }
+}
 const trunc = (s, n) => { const t = String(s ?? '').replace(/\s+/g, ' ').trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
 
 // Compact uptime: "2h13m" / "13m05s" / "42s". Whole seconds; drops the finest
@@ -254,7 +266,7 @@ const quoteLeadingCommand = (text) => String(text ?? '').replace(/^\/([a-z0-9_-]
 
 // The commands anyone in a chat may run (operator 2026-10-19): config.yaml public_commands, or the
 // chat's own conversations.yaml list, which replaces it. Everything else is the node's allowed users'.
-const PUBLIC_COMMANDS_DEFAULT = ['join', 'split', 'send', 'end'];
+const PUBLIC_COMMANDS_DEFAULT = ['split', 'send', 'end'];
 // Bare /agents: a non-operator gets agentsPublic where public_commands lists agents.
 const AGENTS_BARE_CMD = /^\/agents\s*$/i;
 // The public list's words for a reply mode; 'off' has none (that being is not listed).
@@ -378,34 +390,25 @@ export function normalizeAgentsArgs(args) {
 export const PLURAL_OF = { agent: 'agents', room: 'rooms', member: 'members' };
 export const SINGULAR_CMD = /^\/(agent|room|member)(?:=\S+)?(?:\s+[\s\S]*)?$/i;
 
-// ── /join + /split + /send + /end (operator 2026-10-03) ─────────────────────────────────────────
-// A "fork" was always TWO things; they are split into two commands.
-//   /join  — SUPERPOSITION. Spin a private side-group (operator + Rodz) whose chatId is ALIASED to
-//            this chat's on-disk conversation (conversations-state aliasOf), so the being keeps
-//            writing its ONE thread and the group is just a second surface. No thread copy, no new
-//            folder — two chats, one conversation. This is a VIEW, not a branch.
-//   /split — REAL FORK. Spin a side-group backed by a NEW conversation (its own folder/entry, NOT an
-//            alias) whose resident beings' threads are COPIED from the original so it DIVERGES.
+// ── /split + /send + /end (operator 2026-10-03) ─────────────────────────────────────────────────
+//   /split — REAL FORK. Spin a side-group with its own entry and thread in the ORIGINAL's folder (its
+//            own transcript-<key>.md); each resident being's thread is COPIED so it DIVERGES.
 //   /send  — relay a chosen (replied-to) message back to the ORIGINAL chat. Repeatable; works in a
-//            /join group (alias target) OR a /split group (its recorded parent_chat).
-//   /end   — archive the group (both kinds) and drop its mapping.
-// The user-facing TEXTS live in config (operator: "all goes in config.yaml") — config.join.placeholder
-// / config.split.placeholder (what the /join | /split message is edited into) and config.group_title
-// (the new group's name, a {group}+{name} template). These are the small built-in FALLBACKS so a
-// command never edits to an empty string or makes an untitled group when a key is unset; the real
-// text is set in config.yaml on each node. Exported so tests assert the fallback without
-// re-hardcoding the strings.
-// config.join.placeholder is a template ({name} {title} {group} {by}); config.join.exists answers a
-// /join whose name is already a live side-room the sender is not in (operator 2026-10-16).
-export const JOIN_PLACEHOLDER_DEFAULT = '🔗 joined group {name}. You can join too: send /{handle} join {name}';
-export const JOIN_EXISTS_DEFAULT = '🔗 group {name} already exists. Ask {by} to add you.';
-// config.join.limit: the answer when config.join.member_cap (live side-rooms per non-operator per
-// chat; -1/unset = unlimited) is reached. {name} lists that member's rooms.
-export const JOIN_LIMIT_DEFAULT = '🔗 you already have group {name} here.';
+//            /split group (its recorded parent_chat) and in an alias side room (the automatic group,
+//            a /join room made before 2026-10-25).
+//   /end   — archive the group and drop its mapping.
+// /join (the shared-thread alias) is retired (operator 2026-10-25): it only answers with /split.
+// The user-facing TEXTS live in config (operator: "all goes in config.yaml") — config.split.placeholder
+// (what the /split message is edited into) and config.group_title (the new group's name, a
+// {group}+{name} template). These are the small built-in FALLBACKS so a command never edits to an
+// empty string or makes an untitled group when a key is unset; the real text is set in config.yaml on
+// each node. Exported so tests assert the fallback without re-hardcoding the strings.
 export const SPLIT_PLACEHOLDER_DEFAULT = '🍴🤖 ...';
+// A room with a link (a Telegram topic) is opened, not joined: the answer to /split is the link.
+export const SPLIT_LINK_DEFAULT = '🍴 the fork is here: {link}';
 export const GROUP_TITLE_DEFAULT = '{group}-{name}';
-// Every side group's title starts with it: "SI+<group>-<name>" (/join, /split), "SI+<group>" (automatic,
-// unless reply_in_side_group names the title).
+// Every side group's title starts with it: "SI+<group>-<name>" (/split), "SI+<group>" (automatic,
+// unless reply_in_side_group names the title). config.group_title_prefix replaces it; "" = none.
 export const SIDE_GROUP_PREFIX = 'SI+';
 // /send's posting account when config.send.post_back_from is unset or invalid: the operator's OWN
 // account (primary) — /send relays as the operator, who typed it (operator 2026-10-04). The config
@@ -414,40 +417,34 @@ export const SEND_POST_BACK_FROM_DEFAULT = 'primary';
 // config.send.origin (auto | always | never) and config.send.origin_template ({group} = side group title).
 export const SEND_ORIGIN_DEFAULT = 'auto';
 export const SEND_ORIGIN_TEMPLATE_DEFAULT = '↪ from {group}:\n';
-// config.join.opener / config.split.opener (a {group}=parent-chat-title, {handle} template) — the one message
+// config.split.opener (a {group}=parent-chat-title, {handle} template) — the one message
 // posted into the freshly-created side-group by the primary so the otherwise-empty group SURFACES in Beeper
 // (Beeper hides a chat with no messages — verified live). These are the small built-in fallbacks when
 // the key is unset; the real text is set in config.yaml. Exported so tests assert the fallback.
-export const JOIN_OPENER_DEFAULT = '🔗 Side-room of {group} — same agents, same conversation. Reply /{handle} send to a message to copy it back to the original chat; /{handle} end to close.';
 export const SPLIT_OPENER_DEFAULT = '🍴 Fork of {group} — a diverging copy: same agents, its own thread from here. Reply /{handle} send to a message to copy it back to the original chat; /{handle} end to close.';
 // The automatic group's opener: /end is off there (operator 2026-10-18 ~21:00).
 export const AUTO_OPENER = '🔗 Side-room of {group} — same agents, same conversation. Reply /{handle} send to a message to copy it back to the original chat.';
 // How long Rodz's copy of the opener may take to arrive: the new group reaches its account asynchronously.
 const OPENER_COPY_MS = 5000;
 
-// claude's projects/<dir> naming rule — the FORWARD of conversations-state.reverseSanitizeCwd: a cwd
-// becomes a project-dir by replacing \ / : . _ with '-'. /split copies the forked jsonl into the dir
-// matching the SPLIT conversation's cwd so a cwd-scoped `--resume` finds it under the split's box store.
-const sanitizeCwdDir = (p) => String(p).replace(/[\\/:._]/g, '-');
-
 // THE SPLIT COPY IS A TRANSFORM, not a byte copy (coordinator 2026-10-01, verified against a real
 // boxed session file; resurrected from the pre-alias fork, commit 86daf94). Every claude-code jsonl
 // record carries `sessionId: "<the filename id>"`, and user records carry `cwd: "<that conversation's
 // folder>"`. A raw copy to `<newThreadId>.jsonl` would leave every record disclaiming its own id and
 // pointing at the ORIGINAL folder, so `--resume <newThreadId>` loads a session that denies it is that
-// session — the "silently blank fork". So rewrite, per line, `sessionId` → the new thread id and `cwd`
-// → the SPLIT conversation's own folder, on every record that has each field; leave every other field
+// session — the "silently blank fork". So rewrite, per line, `sessionId` → the new thread id and, when
+// given, `cwd` (a fork in its parent's folder keeps it), on every record that has each field; leave every other field
 // (uuid/parentUuid/message/timestamp/type) untouched. A line that does not parse as JSON passes through
 // VERBATIM (never dropped). Exported so the rewrite is unit-testable with no fs; the caller does the
 // read/write through the injectable io seam.
-export function rewriteForkSessionJsonl(raw, { sessionId, cwd }) {
+export function rewriteForkSessionJsonl(raw, { sessionId, cwd = null }) {
   return String(raw).split('\n').map((line) => {
     if (!line) return line;                 // blank line (incl. the trailing one) stays blank
     let rec;
     try { rec = JSON.parse(line); } catch { return line; }   // non-JSON → verbatim
     if (rec && typeof rec === 'object' && !Array.isArray(rec)) {
       if ('sessionId' in rec) rec.sessionId = sessionId;
-      if ('cwd' in rec) rec.cwd = cwd;
+      if (cwd != null && 'cwd' in rec) rec.cwd = cwd;   // a fork in its parent's folder keeps the cwd
     }
     return JSON.stringify(rec);
   }).join('\n');
@@ -470,7 +467,8 @@ function phoneDigitsOf(v) {
 // exclusion => null => the caller STOPS rather than create a group with a wrong/missing member.
 // Pure + exported so the rule is unit-tested, and so boot can swap it.
 export function resolveSecondaryParticipantId(config, selfIds = []) {
-  const phones = [...new Set([config?.beeper?.primary?.phone, config?.beeper?.secondary?.phone].map(phoneDigitsOf).filter(Boolean))];
+  const b = beeperBlockOf(config);
+  const phones = [...new Set([b?.primary?.phone, b?.secondary?.phone].map(phoneDigitsOf).filter(Boolean))];
   if (phones.length < 2) return null;
   const selfSet = new Set((Array.isArray(selfIds) ? selfIds : []).map(phoneDigitsOf).filter(Boolean));
   const others = phones.filter((d) => !selfSet.has(d));
@@ -485,9 +483,9 @@ export function createCommands({
   send: rawSend,                         // (chatId, text) -> deliver a plain system reply
   exit = (code) => process.exit(code),
   writeRewindTarget,
+  seedOf = () => null,                   // (ev) → what a chat with no entry yet will be created with (boot: the one seed)
   loadState = null, writeState = null,   // conv-state IO — lets /agents mode persist a mode
   brains = null,                         // the brain registry (createBrains) — /agents' status + access_level, and /status's own preview, resolve a being's live def through it (brainpool.mjs's resolveBeingDef / resolveDefaultBrainDef)
-  defaultKey = 'e',                      // the persona being-id (its map key), injected by boot from the single `default:true` agent — the persona's per-conversation mode/state reads+writes and its warm-key prefix all key off this, never a hardcoded 'e' (operator 2026-07-10)
   // ── THE BRAIN'S OWN TWO SEAMS (brainpool.mjs `scopeOf` / `evict`) ─────────────────────────
   // Injected from boot as the SAME brain instance createTurns takes, so a command can never
   // resolve a being's address — or its warm entry — differently from the turn that will run it.
@@ -556,6 +554,7 @@ export function createCommands({
   // side, so the mover and the writer can never disagree about the path. Nothing in production
   // overrides it. Only /agents rethread + /agents reset read it, through moveCliStore.
   jsonlStoreRoot = null,
+  claudeProjectsRoot = null,   // ~/.claude/projects, injectable for tests (/split's copy of an unboxed thread)
   // Clock seam — real timers by default; tests inject a fake clock.
   now = () => Date.now(),
   // Group-Chrome pool seams — a FAKE host + injected memory in tests, never a real spawn or a real
@@ -564,11 +563,14 @@ export function createCommands({
   // feed the pure admission (chrome-pool.mjs); onChromeLog reports launches / evictions / deaths /
   // refusals. Boot injects onChromeLog only (real host + probes).
   chromeHost = connectChromeHost(),
+  // Run by the Session 0 daemon: no desktop, so no browser until someone logs in (operator 2026-10-22).
+  inSession0 = process.env.EGPT_SUPERVISED === '1' && String(process.env.EGPT_SESSION1 ?? '').trim() !== '1',
   profileHolder = defaultProfileHolder,
   freeMem = () => freemem(),
   rssOf = defaultRssOf,
   onChromeLog = () => {},
   browserGroups = readBrowserGroups,     // config/browsers.yaml's groups, read fresh (rooms-file.readBrowserGroups)
+  profileFolders = defaultProfileFolders,   // the folder names under the profiles root
   browserColors = readBrowserColors,     // its optional colors: map, read at each launch
   commandAliasesPath = join(EGPT_HOME, 'config', 'commands_alias.yaml'),   // alias → command line (aliased, below)
   // git probe for /status (short sha + subject). Mirrors boot's gitOut so it's
@@ -616,13 +618,13 @@ export function createCommands({
   // message's line in transcript.md. Defaults: no backlog, UTC.
   backlogOf = () => [],
   timeZone = null,
-  // ── /join + /split + /send + /end seams (operator 2026-10-03) ────────────────────────────
-  // /join aliases a new side-group to this chat's conversation; /split backs the group with a NEW
-  // conversation diverged from this one; /send relays a chosen message back to the original chat;
+  // ── /split + /send + /end seams (operator 2026-10-03) ─────────────────────────────────────
+  // /split backs a new side-group with a NEW conversation diverged from this one (the automatic group
+  // aliases one to it); /send relays a chosen message back to the original chat;
   // /end archives the group. forkBridge groups the beeper facade methods the verbs need — all off
   // the SAME bridge the chat lives on (boot wires them off the ear's PORT, which forwards each of
   // these to the raw beeper bridge where they are defined; resolveChatId/listChats already come off
-  // it). editMessage edits the operator's /join|/split message in place (raw, no persona — a marker,
+  // it). editMessage edits the operator's /split message in place (raw, no persona — a marker,
   // not E speaking). postReply posts text into a chat; its 4th arg `{ via }` names the posting
   // account ('primary' = the operator's own, 'secondary' = the mouth — config.send.post_back_from),
   // which boot resolves to the matching connection's bridge. chatAccountId/chatTitle resolve the
@@ -630,11 +632,13 @@ export function createCommands({
   // standalone/test createCommands never touches a real bridge.
   forkBridge = {
     editMessage:   async () => false,   // (chatId, msgId, text) -> bool
-    createGroup:   async () => null,    // ({accountID, participantIDs, type, title, messageText}) -> { success, chatID } | null
+    createGroup:   async () => null,    // ({accountID, participantIDs, type, title, messageText}, { via, origin }) -> { success, chatID, link? } | { success: false, reason } | null
     postReply:     async () => false,   // (chatId, text, replyToMessageID, { via }) -> truthy on success
     archiveChat:   async () => false,   // (chatId) -> bool
     chatAccountId: async () => null,    // (chatId) -> the accountID the chat lives on
     chatTitle:     async () => null,    // (chatId) -> the chat's display title
+    roomsInside:   () => false,         // (chatId) -> a side room made here is inside it (a Telegram topic): nobody to invite
+    topicParentOf: () => null,          // (chatId) -> a Telegram topic's General chat id | null
     chatRaw:       async () => null,    // (chatId) -> the GET /v1/chats/{id} payload (roster) | null when gone
     resolveUserIdByPhone: async () => null,   // (phoneDigits, { accountID }) -> "@whatsapp_lid-…:beeper.local" | null
     awaitMouthMessage: async () => null,   // (test, ms) -> the next raw message Rodz's account receives, in any chat, passing test | null
@@ -718,7 +722,7 @@ export function createCommands({
   // only answers on ITS OWN machine's local API, so acting on a sibling's token is future
   // work, not v1. An entry missing `account` is skipped + logged by name; never crashes.
   const beeperAccounts = (() => {
-    const raw = cfg().beeper;
+    const raw = beeperBlockOf(cfg());
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
     const out = {};
     for (const [name, entry] of Object.entries(raw)) {
@@ -759,14 +763,20 @@ export function createCommands({
   // no command, except on the console (SHELL_SURFACE: node-local, nobody else hears it). The handle
   // resolves as /agents' argument does (the router's own lookup), local beings only.
   const isRelayAgent = (a) => !!a?.relay_channel || Array.isArray(a?.paths) || String(a?.configuration ?? '').toLowerCase() === 'relay';
-  function beingOfHandle(handle) {
-    const agents = cfg().agents ?? {};
+  // `agents`: the registry as this chat sees it (router.agentsIn — per-chat handles); absent = node-wide.
+  function beingOfHandle(handle, agents = cfg().agents ?? {}) {
     const hit = addressed(handle, agents, { addressWithoutAt: true })[0];
-    if (hit) return hit.token === handle && !isRelayAgent(hit.agent) ? hit.name : null;
-    const personaListed = Object.keys(agents).some((k) => k.toLowerCase() === String(defaultKey).toLowerCase());
-    return !personaListed && handle === String(defaultKey).toLowerCase() ? defaultKey : null;   // the persona is real even with no agents: map
+    return hit && hit.token === handle && !isRelayAgent(hit.agent) ? hit.name : null;
   }
-  function commandOf(ev) {
+  // The being a conversation-level view describes, now there is no default agent (operator
+  // 2026-10-22): the conversation's owner, else its first resident here, else this node's first
+  // local agent. null = this node runs no local being.
+  function subjectOf(entry) {
+    const agents = cfg().agents ?? {};
+    const local = Object.keys(agents).filter((k) => !k.startsWith('_') && agents[k] && typeof agents[k] === 'object' && !isRelayAgent(agents[k]));
+    return defaultBeingOf(entry) ?? residentsOf(entry).find((b) => local.includes(b)) ?? local[0] ?? null;
+  }
+  function commandOf(ev, agents) {
     let body = String(ev?.body ?? '').trim();
     let alias = null;
     if (!body.startsWith('/')) {
@@ -777,12 +787,12 @@ export function createCommands({
     const p = parseBeingCommand(body);
     if (!p) return null;
     const tag = alias ? { alias } : {};
-    const being = beingOfHandle(p.handle);
+    const being = beingOfHandle(p.handle, agents ?? undefined);
     if (!being) return { ...ev, commandElsewhere: p.handle, ...tag };
     return { ...ev, body: p.rest ? `${p.cmd} ${p.rest}` : p.cmd, commandBeing: being, commandHandle: p.handle, ...tag };
   }
   // The handle a reply tells a person to type: the one they typed, else the persona's first.
-  const handleOf = (ev) => ev?.commandHandle ?? wakeTokens(defaultKey, cfg().agents?.[defaultKey])[0] ?? defaultKey;
+  const handleOf = (ev) => { if (ev?.commandHandle) return ev.commandHandle; const k = subjectOf(null); return k ? (wakeTokens(k, cfg().agents?.[k])[0] ?? k) : '<handle>'; };
   const hintOf = (cmd, ev = null) => `/${handleOf(ev)} ${cmd}`;
 
   // rs — the RADIO quick reply (operator 2026-08-08): a single top-level string of its own,
@@ -822,9 +832,11 @@ export function createCommands({
     // A public agents is its bare list (agentsPublic); every /agents verb stays the allowed users'.
     return (await publicCommandsOf(ev)).includes(word) && (word !== 'agents' || AGENTS_BARE_CMD.test(body));
   }
-  // The chat's own conversations.yaml list, else config.yaml's, else the default; words without '/'.
+  // The chat's own conversations.yaml list (a chat with no entry yet: its seed's), else config.yaml's,
+  // else the default; words without '/'.
   async function publicCommandsOf(ev) {
-    const own = loadState ? (await loadState()).contacts?.[surfaceOf(ev)]?.[ev.chatId]?.public_commands : undefined;
+    const entry = loadState ? (await loadState()).contacts?.[surfaceOf(ev)]?.[ev.chatId] : undefined;
+    const own = entry ? entry.public_commands : seedOf(ev)?.public_commands;
     const global = cfg().public_commands;
     const list = Array.isArray(own) ? own : Array.isArray(global) ? global : PUBLIC_COMMANDS_DEFAULT;
     return list.map((w) => String(w).trim().replace(/^\//, '').toLowerCase());
@@ -985,6 +997,11 @@ export function createCommands({
     const loginMatch = /^\/login\s+(\S+)\s*$/i.exec(line);
     if (loginMatch) { await send?.(ev.chatId, await loginCmd(ev, loginMatch[1])); return; }
 
+    // /browser refresh [group] [url] — this chat's (or a named group's) browser profile in a plain Chrome window, for a human
+    // sign-in or check (browserRefresh). Pre-catch-all.
+    const browserMatch = /^\/browser\b[ \t]*(.*)$/i.exec(line);
+    if (browserMatch) { await send?.(ev.chatId, await browserCmd(ev, browserMatch[1].trim())); return; }
+
     // /rooms — bare: list the saved rooms. Otherwise `/rooms <verb> [<room>]`, routed to the
     // same room() the singular /rooms used to reach. /rooms itself is retired (operator
     // 2026-08-29: "keep only '/agents', '/rooms'") and now answers the plural question below.
@@ -1066,17 +1083,20 @@ export function createCommands({
       return;
     }
 
-    // /join — type /<handle> join [<name>] to spin a private side-group that is a VIEW (alias) of this
-    // chat's conversation (one shared thread, two chats); /split — /<handle> split [<name>] spins a
-    // side-group backed by a NEW, DIVERGING conversation (its beings' threads are copied); /send —
-    // reply /send to a message in either group to relay it back to the original chat; /end — reply
-    // /end in either group to archive it and drop its mapping (operator 2026-10-03). They sit
-    // pre-catch-all like the rest. Public by default (PUBLIC_COMMANDS_DEFAULT); /join and
-    // /split refuse a member outside a group, /send and /end act only in a side group (operator
+    // /split — /<handle> split [<name>] spins a side-group backed by a NEW, DIVERGING conversation (its
+    // beings' threads are copied); /send — reply /send to a message in a side group to relay it back to
+    // the original chat; /end — reply /end there to archive it and drop its mapping (operator
+    // 2026-10-03). They sit pre-catch-all like the rest. Public by default (PUBLIC_COMMANDS_DEFAULT);
+    // /split refuses a member outside a group, /send and /end act only in a side group (operator
     // 2026-10-18); /send and /end stand down silently where this node holds no alias or parent.
+    // /join is retired (operator 2026-10-25: "/split gives the context and folder with all previous
+    // files … main-thread can read transcript"): it answers with /split and makes nothing.
     // Written as `<name>Match = /^\/word…` so the /help drift guard (tests/spine-commands.test.mjs) sees them.
-    const joinMatch = /^\/join\b[\s\S]*$/i.exec(line);
-    if (joinMatch) { return await joinGroup(ev); }   // returns an outcome for the audit on its member paths
+    const joinMatch = /^\/join\b[ \t]*(.*)$/i.exec(line);
+    if (joinMatch) {
+      await send?.(ev.chatId, `/join is retired — ${hintOf('split', ev)}${joinMatch[1].trim() ? ` ${joinMatch[1].trim()}` : ''} makes a fork: same agents and files, its own thread.`);
+      return 'retired — pointed to /split';
+    }
     const splitMatch = /^\/split\b[\s\S]*$/i.exec(line);
     if (splitMatch) { await splitGroup(ev); return; }
     const sendMatch = /^\/send\b[\s\S]*$/i.exec(line);
@@ -1102,9 +1122,11 @@ export function createCommands({
   // ── GROUP CHROME POOL (plans/2610091931 rev 2026-10-11) ──────────────────────────────────────
   // One pipe-driven chrome.exe per browser-group profile dir, brain included; no Chrome listens on
   // a port. brain and shared serve many chats: never evicted, and brain is never memory-gated.
+  // Short memory evicts an idle group Chrome, else launches anyway: never denied (operator 2026-10-24).
   // The daemon holds each Chrome (chromeHost); every decision is here, and ships with /upgrade.
   const _groups = new Map();     // profileDir → { group, channel, client, pid, lastUsedAt, busy }
   const _ensuring = new Map();   // profileDir → in-flight launch (per-profile single-flight)
+  const _signin = new Map();     // profileDir → { group, pid, chatId }: a plain Chrome holds it (/browser refresh)
   const chromeAlive = (e) => !!e && !e.channel.closed;
   const evictable = (e) => !e.busy && chromeAlive(e) && e.group !== BRAIN_GROUP && e.group !== SHARED_GROUP;
   const launchEstimateBytes = () => (Number(cfg()?.chrome?.launch_estimate_mb) || CHROME_LAUNCH_ESTIMATE_MB) * MB;
@@ -1135,33 +1157,42 @@ export function createCommands({
     if (!chromeHost) return;
     chromeHost.onExit(({ group, pid, code, signal }) => {
       for (const [dir, e] of _groups) if (e.pid === pid) _groups.delete(dir);
+      for (const [dir, h] of _signin) if (h.pid === pid) signinDone(dir, h);
       onChromeLog(`"${group}" Chrome (pid ${pid}) exited (${signal ? `signal ${signal}` : `code ${code}`}) — nothing restarted; it relaunches on next need`);
     });
     try {
       for (const g of await chromeHost.list()) {
+        if (g.plain) { _signin.set(g.profileDir, { group: g.group, pid: g.pid, chatId: null }); onChromeLog(`"${g.group}" held for sign-in: plain Chrome pid ${g.pid}, held by the daemon`); continue; }
         track(g.group, g.profileDir, g);
         onChromeLog(`re-attached "${g.group}" Chrome ${g.profileDir} (pid ${g.pid}), held by the daemon`);
       }
     } catch (e) { onChromeLog(`could not list the daemon's Chromes — ${e?.message ?? e}`); }
   })();
-  const NO_CHROME_HOST = 'this spine has no daemon chrome-host (run by hand, or not the Session 1 daemon) — it launches no browser';
+  const NO_CHROME_HOST = inSession0
+    ? 'no browser while nobody is logged in to this machine — browser work is available once someone logs in'
+    : 'this spine has no daemon chrome-host (run by hand, or not the Session 1 daemon) — it launches no browser';
 
   // THE ONE LAUNCH PATH — /chrome, a being's `browser start` / `browser cdp`, /tabs…, /members,
   // /login, the relay, a browser beat. No conversation → brain. Registry keyed by profile dir; a live
   // profile is never relaunched; single-flight per profile. `launch: false` only reports a live one.
   // FAIL CLOSED: a refused chat, a non-brain group on the brain's dir, or a profile another Chrome
   // already holds → no browser + one log line. Never throws.
-  // Resolves { group, profileDir, client, pid, launched, running, declined?, why? }.
+  // Resolves { group, profileDir, client, pid, launched, running, why? }.
   function ensureChrome(conversation, opts) { return _reattached.then(() => ensureGroupChrome(conversation, opts)); }
+  // A conversation's group and profile dir; no usable profile → profileDir null + why, logged.
+  function groupProfileOf(conversation) {
+    const group = conversation ? conversation.group : BRAIN_GROUP;
+    const profileDir = chromeProfileOf(cfg(), conversation);
+    if (profileDir && (group === BRAIN_GROUP || profileDir !== chromeProfileOf(cfg()))) return { group, profileDir };
+    const why = conversation?.why || `browser group "${group}" ${profileDir ? 'is the brain profile dir' : 'is unusable'}`;
+    onChromeLog(`no browser for "${conversation?.name ?? ''}": ${why}`);
+    return { group, profileDir: null, why };
+  }
   function ensureGroupChrome(conversation, { launch = true } = {}) {
     conversation ??= { key: '', name: '', group: BRAIN_GROUP };
-    const { group } = conversation;
-    const profileDir = chromeProfileOf(cfg(), conversation);
-    if (!profileDir || (group !== BRAIN_GROUP && profileDir === chromeProfileOf(cfg()))) {
-      const why = conversation.why || `browser group "${group}" ${profileDir ? 'is the brain profile dir' : 'is unusable'}`;
-      onChromeLog(`no browser for "${conversation.name ?? ''}": ${why}`);
-      return Promise.resolve({ group, profileDir: null, client: null, launched: false, running: false, why });
-    }
+    const { group, profileDir, why } = groupProfileOf(conversation);
+    if (!profileDir) return Promise.resolve({ group, profileDir: null, client: null, launched: false, running: false, why });
+    if (_signin.has(profileDir)) return Promise.resolve({ group, profileDir, client: null, launched: false, running: false, why: `the "${group}" browser is held for sign-in: the operator is using it in a normal Chrome window; it is back when they close that window` });
     const live = _groups.get(profileDir);
     if (chromeAlive(live)) { live.lastUsedAt = now(); return Promise.resolve({ group, profileDir, client: live.client, pid: live.pid, launched: false, running: true }); }
     if (!launch) return Promise.resolve({ group, profileDir, client: null, launched: false, running: false, why: `the "${group}" browser is not running` });
@@ -1186,8 +1217,8 @@ export function createCommands({
           const d = admitLaunch({ availableBytes: freeMem(), estimateBytes, marginBytes, canEvict: [..._groups.values()].some(evictable) });
           if (d.action === 'launch') break;
           if (d.action === 'evict' && evictIdlest()) continue;
-          onChromeLog(`declined group Chrome ${profileDir}: ${d.reason}`);
-          return { group, profileDir, client: null, launched: false, running: false, declined: true, why: d.reason };
+          onChromeLog(`memory looks short for group Chrome ${profileDir} (${d.reason}) — launching anyway: browsers are never denied`);
+          break;
         }
       }
       stampGroupProfile({ userDataDir: profileDir, group, colors: await browserColors(), log: onChromeLog });   // no Chrome holds it (above)
@@ -1207,12 +1238,14 @@ export function createCommands({
   }
 
   // THE BROWSER-GROUP RESOLVER (every spine-side browser caller): chat → registry row (none → fixed slug; a room's
-  // id IS its slug) → chromeConversationOf over browsers.yaml, fresh. No registry → null (brain); failed read → group null.
+  // id IS its slug) → chromeConversationOf over browsers.yaml, fresh; an unlisted /split → its parent_chat's group.
+  // No registry → null (brain); failed read → group null.
   async function browserConversationOf(surface, chatId) {
     if (!loadState) return null;
     try {
-      const entry = getContact(await loadState(), surface, chatId)?.entry ?? { slug: fixedSlugFor(surface, chatId) };
-      return chromeConversationOf(entry, await browserGroups());
+      const state = await loadState();
+      const entry = getContact(state, surface, chatId)?.entry ?? { slug: fixedSlugFor(surface, chatId) };
+      return chromeConversationOf(entry, await browserGroups(), (e) => getContact(state, surface, e.parent_chat)?.entry);
     } catch (e) { return { key: '', name: '', group: null, why: `browser group lookup failed — ${e?.message ?? e}` }; }
   }
 
@@ -1224,12 +1257,73 @@ export function createCommands({
   }
   const chatClientOf = async (ev, opts) => (await chatChromeOf(surfaceOf(ev), ev.chatId, opts)).client;
 
+  // /browser refresh [group] [url] — sites refuse the pipe Chrome (Google sign-in, captchas), so a human does
+  // it in a PLAIN Chrome on the group's profile: eGPT's Chrome closes through the daemon, the plain one
+  // opens there, and the group is held until it exits. No stealth, no captcha solving here.
+  // [group]: a known group's name (any case, never url-shaped); else the chat's group and [url].
+  async function browserCmd(ev, args) {
+    const [verb, ...rest] = args.split(/\s+/);
+    const usage = (more = '') => `usage: ${hintOf('browser refresh [group] [url]', ev)} — close my browser for this chat (or [group]) and open a normal Chrome window on its profile, for you to sign in or pass a check${more}`;
+    if (verb.toLowerCase() !== 'refresh' || rest.length > 2) return usage();
+    let group = null;
+    if (rest[0] && !urlShaped(rest[0])) {
+      const known = await knownBrowserGroups();
+      group = known.find((g) => g.toLowerCase() === rest[0].toLowerCase());
+      if (!group) return usage(`; groups: ${known.join(', ')}`);
+      rest.shift();
+    }
+    const url = rest.length > 1 ? null : signinUrlOf(rest[0] ?? 'about:blank');
+    if (!url) return usage();
+    return browserRefresh(ev, url, group);
+  }
+  // The groups a name can pick: brain, shared, browsers.yaml's, the profile folders — one typeable word each.
+  async function knownBrowserGroups() {
+    const names = [BRAIN_GROUP, SHARED_GROUP, ...Object.keys(await browserGroups()), ...profileFolders()];
+    return [...new Set(names)].filter((g) => isSafeGroupName(g) && !/\s/.test(g) && !urlShaped(g)).sort();
+  }
+  async function browserRefresh(ev, url, named) {
+    const whose = named ? `group "${named}"` : 'this chat';
+    const { group, profileDir, why } = groupProfileOf(named ? { key: '', name: named, group: named } : await browserConversationOf(surfaceOf(ev), ev.chatId));
+    if (!profileDir) return `no browser for ${whose} — ${why}`;
+    if (!chromeHost) return `no browser for ${whose} — ${NO_CHROME_HOST}`;
+    await _reattached;
+    if (_signin.has(profileDir)) return `the "${group}" browser is already held for sign-in — close that Chrome window first`;
+    const hold = { group, pid: null, chatId: ev.chatId };
+    _signin.set(profileDir, hold);
+    await _ensuring.get(profileDir);
+    const live = _groups.get(profileDir);
+    const closed = chromeAlive(live);
+    if (closed) chromeHost.kill(group);
+    // Gone = the daemon reported its exit (onExit drops it) and the profile lock is free.
+    const holderOf = () => (closed && _groups.get(profileDir) === live ? `pid ${live.pid}, closing` : profileHolder(profileDir));
+    let holder = holderOf();
+    for (let i = 0; holder && closed && i < 40; i++) { await new Promise((r) => setTimeout(r, 250)); holder = holderOf(); }
+    try {
+      if (holder) throw new Error(`another Chrome holds the "${group}" profile (${holder}) — close it first`);
+      hold.pid = (await chromeHost.launchPlain({ group, profileDir, bin: chromeBinOf(cfg()), argv: chromePlainArgs({ userDataDir: profileDir, url }) })).pid;
+    } catch (e) {
+      _signin.delete(profileDir);
+      onChromeLog(`"${group}" sign-in window not opened — ${e?.message ?? e}`);
+      return `/browser refresh: ${e?.message ?? e}`;
+    }
+    onChromeLog(`"${group}" held for sign-in: plain Chrome pid ${hold.pid} on ${profileDir}`);
+    const lead = closed ? `I closed my browser for ${group}.` : `My browser for ${group} was not open.`;
+    const vnc = process.platform === 'win32' ? '' : ' Open VNC (:6080) to see it.';
+    return `${lead} A normal Chrome window opened on ${cfg().node_name ?? 'this node'} at ${url}: sign in / pass the check yourself, then close that window — I'll use the session next time.${vnc}`;
+  }
+  // The plain window's Chrome exited: the group is eGPT's again.
+  function signinDone(dir, h) {
+    _signin.delete(dir);
+    onChromeLog(`"${h.group}" sign-in window (pid ${h.pid}) closed — its Chrome relaunches on next need`);
+    if (h.chatId) Promise.resolve(send?.(h.chatId, `browser ${h.group} is back — signed-in session will be used`)).catch((e) => onChromeLog(`"${h.group}" back line not posted — ${e?.message ?? e}`));
+  }
+
   // A BOXED BEING'S `browser start` (src/spine/being-link.mjs): the launch path above and nothing
   // else — no arguments reach it from the being, and it lists no tabs (that is the operator's
   // report). Idempotent: a running Chrome is reported, not relaunched.
   async function startBrowser(conversation) {
     const r = await ensureChrome(conversation);
-    if (!r.client) return { ok: false, reason: r.declined ? 'declined' : 'no-browser', detail: r.why };
+    if (!r.client) return { ok: false, reason: 'no-browser', detail: r.why };
     return { ok: true, ...(r.launched ? { launched: true } : { alreadyRunning: true }), detail: `the "${r.group}" browser is ${r.launched ? 'up' : 'already running'}${r.pid ? ` (pid ${r.pid})` : ''}` };
   }
 
@@ -1380,9 +1474,8 @@ export function createCommands({
   // validates the subcommand + its value up front, resolves the target conversation through
   // slugArg (bare = HERE, given = resolveTarget — identical to /e auto/reset's <target>), then
   // resolves the handle set — a typed HANDLE resolved to its being KEY through the wake
-  // vocabulary (see the HANDLE → KEY block below), or every residentsOf() entry for `all`,
-  // ordered defaultKey-first when resident so the persona reads first in a multi-being
-  // reply/status — and routes to the per-subcommand handler. Every handler below takes the
+  // vocabulary (see the HANDLE → KEY block below), or every residentsOf() entry for `all`
+  // — and routes to the per-subcommand handler. Every handler below takes the
   // ALREADY-resolved (surface, jid, where, handles[, …, state, named]) — none of them re-parse
   // or re-resolve. `named` is the reply's word for the being(s): the keys for `force all`, and for a
   // single target the operator's own token plus the key when the two differ.
@@ -1454,9 +1547,7 @@ export function createCommands({
 
     // `all` = every being residentsOf() finds on that conversation's entry — the exact
     // registry-block owner /rooms's members roster is silent on (residentsOf reads
-    // entry.agents.<being> blocks, conversations-state.mjs). Ordered defaultKey-first (when
-    // resident) so the persona is always the first block/reply in a multi-being result; the
-    // rest keep residentsOf()'s own order.
+    // entry.agents.<being> blocks, conversations-state.mjs), in its own order.
     // ── THE ARGUMENT IS A HANDLE, THE RECORD IS KEYED BY THE KEY (operator 2026-09-17: "for
     // rethread the handles work to identify agent, so e and egpt are the same") ──────────────
     // It used to be `handles = [handleArg]` — whatever the operator typed became the being KEY
@@ -1477,12 +1568,10 @@ export function createCommands({
     // heartbeat-loader do: a typed argument is bare, so the node's `dispatch.address_without_at`
     // switch (about chat prose) never governs it.
     //
-    // THREE more arms, each a target that IS real but which the wake vocabulary deliberately does
+    // TWO more arms, each a target that IS real but which the wake vocabulary deliberately does
     // not cover — none of them a second handle matcher:
     //   · the KEY itself. wakeTokens drops the key once `handles:` is declared, and that rule is
     //     about who a MESSAGE wakes; here the key is the RECORD NAME the verbs write, so it works.
-    //   · defaultKey — the persona is real by definition, even with an empty agents: map (the same
-    //     exemption agentsBeingBlock already makes).
     //   · a RESIDENT record — a being seeded by an earlier turn with no config.yaml entry is real,
     //     just unconfigured on this node (agentsBeingBlock says exactly that).
     // Order matters and this is the order: a CLAIMED handle beats residency, so kg's stray `e:`
@@ -1496,13 +1585,11 @@ export function createCommands({
     if (handleArg === FORCE_ALL) {
       // `force all` = every being residentsOf() finds on that conversation's entry — the exact
       // registry-block owner /rooms's members roster is silent on (residentsOf reads
-      // entry.agents.<being> blocks, conversations-state.mjs). Ordered defaultKey-first (when
-      // resident) so the persona is always the first block/reply in a multi-being result; the
-      // rest keep residentsOf()'s own order. These are KEYS already — nothing to resolve.
+      // entry.agents.<being> blocks, conversations-state.mjs). In residentsOf()'s own
+      // order (there is no default being to put first). These are KEYS already — nothing to resolve.
       // Each node reads its OWN state, so it changes and reports only its own residents.
       const entry = getContact(state, surface, jid)?.entry;
       handles = residentsOf(entry);
-      if (handles.includes(defaultKey)) handles = [defaultKey, ...handles.filter((h) => h !== defaultKey)];
       if (!handles.length) { onLog(`/agents: force all — no resident beings ${where} on this node`); return; }
       named = handles.join(', ');
     } else {
@@ -1694,6 +1781,7 @@ export function createCommands({
   async function agentsReset(ev, surface, jid, where, handles, state, named = handles.join(', ')) {
     const sc = await oneScope(handles, ev, surface, jid);
     if (sc.error) { await send?.(ev.chatId, `/agents: reset — ${sc.error}`); return; }
+    if (forkKeyOf(state, sc.surface, sc.chatId)) { await send?.(ev.chatId, '/agents: reset — this /split fork shares its parent\'s folder; use rethread for a new thread here, or reset in the main chat'); return; }
     const room = sc.moved ? await resolveConvRoom(sc.surface, sc.chatId)
       : (where === 'here') ? await convRoomOf(ev) : await resolveConvRoom(surface, jid);
     if (!room) { await send?.(ev.chatId, "can't resolve this conversation's room"); return; }
@@ -1882,40 +1970,61 @@ export function createCommands({
   // The accum boundary below is the one thing that stays with the TYPED chat: spine.mjs reads
   // `readTranscript(ev.chatId)` for the accum window, so that line has to land where it reads.
   async function agentsRethread(ev, surface, jid, where, handles, state, named = handles.join(', ')) {
-    const sc = await oneScope(handles, ev, surface, jid);
-    if (sc.error) { await send?.(ev.chatId, `/agents: rethread — ${sc.error}`); return; }
-    const room = sc.moved ? await resolveConvRoom(sc.surface, sc.chatId)
-      : (where === 'here') ? await convRoomOf(ev) : await resolveConvRoom(surface, jid);
-    if (!room) { await send?.(ev.chatId, "can't resolve this conversation's room"); return; }
-    where = whereWrote([sc], where);
     try {
-      // THE RETIRING THREADS, read BEFORE patchBeing nulls them: ~/.egpt-jsonl/<threadId> is keyed
-      // by that id, so once the block says null the store's own name is the only thing left that
-      // knows which conversation it belonged to — which is the orphan this fixes.
-      const retiring = handles.map((h) => [h, getBeing(state, sc.surface, sc.chatId, h)?.threadId ?? null]);
-      let next = state;
-      for (const h of handles) next = patchBeing(next, sc.surface, sc.chatId, h, { threadId: null });
-      await writeState(next);
-      // THE ROLL, through the shared mover. Reported by its result, never assumed.
-      const dest = await rollTranscript(room.surface, room.slug, { io: { readFile, writeFile, rename, mkdir, readdir } });
-      // …AND THE CLI STORE GOES BESIDE IT (operator 2026-09-11) — <threadId>.cli/ next to the
-      // <threadId>.md the roll just filed. AFTER the roll, so the transcript half is already done
-      // and transcripts/ already exists (rollTranscript's ensureTree made it), and so a store that
-      // cannot be moved costs a store and not the rethread.
-      const stores = [];
-      for (const [h, tid] of retiring) {
-        const r = await moveCliStore(tid, room.transcriptsDir);
-        if (r) stores.push([h, r]);
-      }
+      const r = await rethreadAt(ev, surface, jid, where, handles, state);
+      if (r.error) { await send?.(ev.chatId, r.error); return; }
       // The roll's outcome leads its own clause and is never folded into the ✅: "but ... was
       // NOT moved" has to be readable at a glance, because the operator's next move depends on
       // it. The ✅ says the command ran; this says what it managed.
-      const rolled = dest
-        ? `and transcript.md moved to transcripts/${basename(dest)}`
+      const rolled = r.dest
+        ? `and transcript.md moved to transcripts/${basename(r.dest)}`
         : 'but transcript.md was NOT moved (nothing written there yet, or it names no thread to file it under)';
-      await send?.(ev.chatId, `✅ ${named} rethread ${where} — threadId cleared, ${rolled}.${cliStoreNote(stores)} An accum boundary is marked in transcript.md, so nothing said before now is fed back; the next message starts a fresh session (mode/access_level unchanged, the conversation folder stays where it is — /agents reset is what archives).`);
+      await send?.(ev.chatId, `✅ ${named} rethread ${r.where} — threadId cleared, ${rolled}.${cliStoreNote(r.stores)} An accum boundary is marked in transcript.md, so nothing said before now is fed back; the next message starts a fresh session (mode/access_level unchanged, the conversation folder stays where it is — /agents reset is what archives).`);
       await rethreadBoundary(ev, surface, jid, handles, state);
     } catch (e) { onLog(`/agents rethread ${ev.chatId}: ${e?.message ?? e}`); await send?.(ev.chatId, `/agents: rethread failed — ${e?.message ?? e}`); }
+  }
+
+  // The rethread itself, shared by /agents rethread and a chatbox's "end conversation"
+  // (endConversation): threadIds cleared, transcript.md rolled, CLI stores moved.
+  // { error } before any write; else { where, dest, stores }. The caller marks the boundary after.
+  async function rethreadAt(ev, surface, jid, where, handles, state) {
+    const sc = await oneScope(handles, ev, surface, jid);
+    if (sc.error) return { error: `/agents: rethread — ${sc.error}` };
+    const room = sc.moved ? await resolveConvRoom(sc.surface, sc.chatId)
+      : (where === 'here') ? await convRoomOf(ev) : await resolveConvRoom(surface, jid);
+    if (!room) return { error: "can't resolve this conversation's room" };
+    // THE RETIRING THREADS, read BEFORE patchBeing nulls them: ~/.egpt-jsonl/<threadId> is keyed
+    // by that id, so once the block says null the store's own name is the only thing left that
+    // knows which conversation it belonged to — which is the orphan this fixes.
+    const retiring = handles.map((h) => [h, getBeing(state, sc.surface, sc.chatId, h)?.threadId ?? null]);
+    let next = state;
+    for (const h of handles) next = patchBeing(next, sc.surface, sc.chatId, h, { threadId: null });
+    await writeState(next);
+    // THE ROLL, through the shared mover. Reported by its result, never assumed.
+    const dest = await rollTranscript(room.surface, room.slug, { io: { readFile, writeFile, rename, mkdir, readdir }, key: forkKeyOf(state, sc.surface, sc.chatId) });
+    // …AND THE CLI STORE GOES BESIDE IT (operator 2026-09-11) — <threadId>.cli/ next to the
+    // <threadId>.md the roll just filed. AFTER the roll, so the transcript half is already done
+    // and transcripts/ already exists (rollTranscript's ensureTree made it), and so a store that
+    // cannot be moved costs a store and not the rethread.
+    const stores = [];
+    for (const [h, tid] of retiring) {
+      const r = await moveCliStore(tid, room.transcriptsDir);
+      if (r) stores.push([h, r]);
+    }
+    return { where: whereWrote([sc], where), dest, stores };
+  }
+
+  // A chatbox visitor's "end conversation" (src/bridges/http.mjs POST end): every being in the
+  // conversation rethreads, as `/agents rethread force all` there would, with no reply in the chat.
+  // Returns the beings rethreaded; throws when it could not.
+  async function endConversation(ev) {
+    const state = await loadState();
+    const handles = residentsOf(getContact(state, ev.surface, ev.chatId)?.entry);
+    if (!handles.length) return [];
+    const r = await rethreadAt(ev, ev.surface, ev.chatId, 'here', handles, state);
+    if (r.error) throw new Error(r.error);
+    await rethreadBoundary(ev, ev.surface, ev.chatId, handles, state);
+    return handles;
   }
 
   // THE ACCUM BOUNDARY (operator ruling 2026-08-29: "the reset should clean next accum, so
@@ -2101,6 +2210,7 @@ export function createCommands({
       regular: 'confined default tools',
       all: 'unconfined: full filesystem, bare Bash',
       sandbox: "all's capability, but only ever inside the OS sandbox",
+      reader: 'Read, Glob and Grep in its own folder only',
     }[target] ?? `see config/permissions/${target}.md`;
     await send?.(ev.chatId, `✅ ${named} access ${whereWrote(scopes, where)} → ${target} (${blurb})`);
   }
@@ -2156,9 +2266,7 @@ export function createCommands({
       // resolveBeingDef's every `??` and rendering a config-shaped answer for a being that is
       // not here.
       const b = getBeing(state, sc.surface, sc.chatId, handle);
-      // defaultKey is exempt: the persona is real by definition even with an empty agents:
-      // map (resolveDefaultBrainDef's own shipped-'egpt'-type fallback). Any OTHER handle is
-      // real here iff it is either configured at the node level (agents: in config.yaml) or
+      // A handle is real here iff it is either configured at the node level (agents: in config.yaml) or
       // already RESIDENT in this conversation — getBeing ALWAYS returns a truthy object
       // (jid/slug/surface/being are set unconditionally), so its OWN `present` flag is what
       // actually says whether a per-conversation `agents.<handle>` block exists, not the
@@ -2167,7 +2275,7 @@ export function createCommands({
       // being name (keeps it runnable)", its own header) — fine for turn(), which that
       // total-ness exists to serve, but the status VIEW must not dress that bare fallback up
       // as a real being.
-      if (handle !== defaultKey && !((cfg() ?? {}).agents ?? {})[handle] && !b?.present) {
+      if (!((cfg() ?? {}).agents ?? {})[handle] && !b?.present) {
         return `being: ${handle}\nnot configured on this node`;
       }
       const c = getContact(state, sc.surface, sc.chatId);
@@ -2189,13 +2297,12 @@ export function createCommands({
       }
       const previewDef = def ? (def.dangerously_skip_permissions === true ? def : coerceAllowedTools(def)) : null;
 
-      // Determinism parity with turn(): the PERSONA's run always carries a concrete
-      // model/effort (DETERMINISTIC_MODEL/EFFORT fallback); a sibling may legitimately have
-      // neither set (inherits the CLI login default) — reported as such rather than a
-      // fabricated persona default.
-      const isDefault = handle === defaultKey;
-      const modelVal = previewDef?.model ?? (isDefault ? DETERMINISTIC_MODEL : null);
-      const effortVal = previewDef?.effort ?? (isDefault ? DETERMINISTIC_EFFORT : null);
+      // Determinism parity with turn(): a ccode being's run always carries a concrete
+      // model/effort (DETERMINISTIC_MODEL/EFFORT fallback); a local engine may legitimately have
+      // neither set — reported as such rather than a fabricated default.
+      const ccode = (previewDef?.type ?? CCODE) === CCODE;
+      const modelVal = previewDef?.model ?? (ccode ? DETERMINISTIC_MODEL : null);
+      const effortVal = previewDef?.effort ?? (ccode ? DETERMINISTIC_EFFORT : null);
       const toolsRaw = previewDef?.allowed_tools ?? DEFAULT_ALLOWED_TOOLS;
       const toolsVal = Array.isArray(toolsRaw) ? `[${toolsRaw.join(', ')}]` : (toolsRaw ?? '?');
       // def.cwd ?? convDir — the SAME derivation turn() uses for the being's actual run cwd.
@@ -3144,41 +3251,38 @@ export function createCommands({
     await radio(ev, 'say', cleaned, false);
   }
 
-  // ── /join + /split + /send + /end (operator 2026-10-03) ─────────────────────────────────────
-  // A "fork" was always TWO things; here they are two commands sharing one structure.
-  //   /join  — SUPERPOSITION. Create a side-group (operator + Rodz) and ALIAS its chatId to THIS
-  //            chat's on-disk conversation (aliasOf). The being keeps writing its ONE thread; the
-  //            group is just a second surface — no ACL (same folder), no context split (same thread),
-  //            nothing told to the model. A VIEW.
-  //   /split — REAL FORK. Create a side-group backed by a NEW conversation (its own slug/folder/entry,
-  //            NOT an alias) whose resident beings' threads are COPIED so it DIVERGES. The parent
-  //            chatId is recorded on the new entry (parent_chat) so /send+/end find the original.
-  //   /send  — relay a replied-to message back to the original chat (the alias target for /join, the
-  //            recorded parent_chat for /split). Repeatable; honours config.send.post_back_from.
-  //   /end   — archive the group (both kinds) and drop its mapping. Posts nothing.
+  // ── /split + /send + /end (operator 2026-10-03) ──────────────────────────────────────────────
+  //   /split — REAL FORK. Create a side-group with its own entry in the parent's folder (2026-10-26),
+  //            whose resident beings' threads are COPIED so it DIVERGES. The parent chatId is
+  //            recorded on the new entry (parent_chat) so /send+/end find the original.
+  //   /send  — relay a replied-to message back to the original chat (the recorded parent_chat, or the
+  //            alias target of an alias side room). Repeatable; honours config.send.post_back_from.
+  //   /end   — archive the group and drop its mapping. Posts nothing.
+  // Alias side rooms (one shared thread) are the automatic group's, and the /join rooms made before
+  // /join was retired (2026-10-25); they keep working.
   //
-  // WHICH NODE: the handle's (commandOf) — `/e join` runs on E's node, and only there; that node creates
+  // WHICH NODE: the handle's (commandOf) — `/e split` runs on E's node, and only there; that node creates
   // the group on its own primary account. A being must still RESIDE here (residesHere), which is also
-  // the "is there a thread to carry/copy" check. /send+/end act only where this node holds the group (an
+  // the "is there a thread to copy" check. /send+/end act only where this node holds the group (an
   // alias or a parent); both nodes do once the other links it (linkSideGroup).
   const residesHere = (state, surface, chatId) => {
     const agents = getContact(state, surface, chatId)?.entry?.agents ?? {};
     return Object.values(agents).some((b) => b && typeof b === 'object' && b.threadId != null);
   };
 
-  // `/join`/`/split`'s <name> (the rest of the line, it fills {name} in the group title); none → a
+  // `/split`'s <name> (the rest of the line, it fills {name} in the group title); none → a
   // random one (randomName).
-  const forkNameOf = (body) => /^\/(?:join|split)\b[ \t]*(.*)$/i.exec(String(body ?? '').trim())?.[1].trim() || randomName();
+  const forkNameOf = (body) => /^\/split\b[ \t]*(.*)$/i.exec(String(body ?? '').trim())?.[1].trim() || randomName();
 
-  // config.join.placeholder / config.split.placeholder, with the built-in fallback so a command never
-  // edits to an empty string.
+  // config.split.placeholder, with the built-in fallback so a command never edits to an empty string.
   const placeholderOf = (block, dflt) => (block && typeof block.placeholder === 'string' && block.placeholder.trim()) ? block.placeholder : dflt;
-  // SIDE_GROUP_PREFIX + config.group_title ({group}=parent chat name, {name}=the <name> arg).
+  // config.group_title_prefix (unset → SIDE_GROUP_PREFIX) + config.group_title ({group}=parent chat name, {name}=the <name> arg).
   const groupTitleTpl = () => ((typeof cfg().group_title === 'string' && cfg().group_title.trim()) ? cfg().group_title : GROUP_TITLE_DEFAULT);
+  const sidePrefix = () => (typeof cfg().group_title_prefix === 'string' ? cfg().group_title_prefix : SIDE_GROUP_PREFIX);
   // The prefix once: a title already starting with it (any case, e.g. a /join inside "SI+EduWeb") keeps its own.
-  const sidePrefixed = (title) => (String(title).toLowerCase().startsWith(SIDE_GROUP_PREFIX.toLowerCase()) ? String(title) : SIDE_GROUP_PREFIX + title);
+  const sidePrefixed = (title) => (String(title).toLowerCase().startsWith(sidePrefix().toLowerCase()) ? String(title) : sidePrefix() + title);
   const groupTitleOf = (groupName, name) =>
-    sidePrefixed(groupTitleTpl().replaceAll('{group}', String(groupName ?? '')).replaceAll('{name}', String(name ?? '')));
+    sidePrefixed(fill(groupTitleTpl(), { group: groupName, name }));
   // A discreet side group from the retired phrase triggers, made before the `discreet` flag: its title's
   // {name} slot holds a random 5-hex token (plus the " HHMM-MMDDYYYY" suffix older titles carry). A typed 5-hex name also matches; that only drops the prefix.
   const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -3186,13 +3290,12 @@ export function createCommands({
     const tpl = groupTitleTpl();
     if (!title || !tpl.includes('{name}')) return false;
     const body = tpl.split('{name}').map((p) => p.split('{group}').map(esc).join('.*')).join('[0-9a-f]{5}');
-    return new RegExp(`^(?:${esc(SIDE_GROUP_PREFIX)})?${body}( \\d{4}-\\d{8})?$`).test(String(title));
+    return new RegExp(`^(?:${esc(sidePrefix())})?${body}( \\d{4}-\\d{8})?$`).test(String(title));
   };
   // config.join.opener / config.split.opener ({group}=parent chat title, {handle}=the being's), with the
   // built-in fallback — the message posted into the new side-group so it surfaces in Beeper (postOpener).
   const openerOf = (block, dflt, groupName, ev = null) =>
-    ((block && typeof block.opener === 'string' && block.opener.trim()) ? block.opener : dflt)
-      .replaceAll('{group}', String(groupName ?? '')).replaceAll('{handle}', handleOf(ev));
+    fill((block && typeof block.opener === 'string' && block.opener.trim()) ? block.opener : dflt, { group: groupName, handle: handleOf(ev) });
   // A nameless /join or /split's {name} (operator 2026-10-19): 5 random lowercase letters/digits. Never
   // all hex: that is a retired discreet group's shape (titleLooksDiscreet).
   const randomName = () => {
@@ -3206,9 +3309,9 @@ export function createCommands({
   // config.beeper.secondary.phone's digits. Null => STOP (log only, no chat reply). Shared by both verbs.
   const resolveRodz = async (chatId, verb) => {
     const accountID = await forkBridge.chatAccountId(chatId);
-    const rodzDigits = phoneDigitsOf(cfg().beeper?.secondary?.phone);
+    const rodzDigits = phoneDigitsOf(beeperBlockOf(cfg())?.secondary?.phone);
     const rodzUserId = rodzDigits ? await forkBridge.resolveUserIdByPhone(rodzDigits, { accountID }) : null;
-    if (!rodzUserId) { onLog(`${verb}: could not resolve Rodz's Beeper user id from config.beeper.secondary.phone — refusing, nothing created.`); return null; }
+    if (!rodzUserId) { onLog(`${verb}: could not resolve Rodz's Beeper user id from the Beeper secondary connection's phone — refusing, nothing created.`); return null; }
     return { accountID, rodzUserId };
   };
 
@@ -3249,12 +3352,15 @@ export function createCommands({
   };
 
   // WHO MAKES A SIDE GROUP AND WHOM IT INVITES (operator 2026-10-18 ~21:00): the PRIMARY, which has
-  // every contact, makes all of them. /join and /split invite Rodz + the requester (the operator's own
+  // every contact, makes all of them. /split invites Rodz + the requester (the operator's own
   // request: Rodz alone); the automatic group (`everyone`) Rodz + every member of the chat. No mouth →
-  // the members alone. → { accountID, participantIDs } or null (logged).
-  const hasMouth = () => !!phoneDigitsOf(cfg().beeper?.secondary?.phone);
-  const invitableOf = (ev) => (String(ev?.senderId ?? '').endsWith(':beeper.local') ? ev.senderId : null);
+  // the members alone. A /split room inside the chat (a Telegram topic) invites nobody: everyone in the
+  // chat is in it. → { accountID, participantIDs } or null (logged).
+  const hasMouth = () => !!phoneDigitsOf(beeperBlockOf(cfg())?.secondary?.phone);
+  // A bridged id; in a room inside the chat (a topic), anyone in it.
+  const invitableOf = (ev) => (String(ev?.senderId ?? '').endsWith(':beeper.local') || (ev?.chatId != null && forkBridge.roomsInside?.(ev.chatId)) ? ev.senderId : null);
   async function sideGroupPlan(ev, verb, { everyone = false } = {}) {
+    if (!everyone && forkBridge.roomsInside?.(ev.chatId)) return { accountID: null, participantIDs: [] };
     const rodz = hasMouth() ? await resolveRodz(ev.chatId, verb) : null;
     if (hasMouth() && !rodz) return null;
     const accountID = rodz?.accountID ?? await forkBridge.chatAccountId(ev.chatId);
@@ -3270,31 +3376,34 @@ export function createCommands({
   async function membersOf(chatId, verb) {
     const items = (await forkBridge.chatRaw?.(chatId))?.participants?.items;
     if (!Array.isArray(items)) { onLog(`${verb}: could not read the members of ${chatId} — nothing created.`); return null; }
-    const ours = new Set(Object.values(cfg().beeper ?? {}).map((a) => phoneDigitsOf(a?.phone)).filter(Boolean));
+    const ours = new Set(Object.values(beeperBlockOf(cfg()) ?? {}).map((a) => phoneDigitsOf(a?.phone)).filter(Boolean));
     return items.filter((p) => !p?.isSelf && !ours.has(phoneDigitsOf(p?.phoneNumber))).map((p) => invitableOf({ senderId: p?.id })).filter(Boolean);
   }
-  // createGroup on the primary → the SHORT chat id, or null (logged).
-  async function createSideGroup(plan, title, verb) {
-    const created = await forkBridge.createGroup({ accountID: plan.accountID, participantIDs: plan.participantIDs, type: 'group', title }, { via: 'primary' });
+  // createGroup on the primary, from the chat `origin` → { chatId (SHORT), link }, or null (logged; the
+  // bridge's reason, when it gives one, is said in `origin`).
+  async function createSideGroup(plan, title, verb, origin) {
+    const created = await forkBridge.createGroup({ accountID: plan.accountID, participantIDs: plan.participantIDs, type: 'group', title }, { via: 'primary', origin });
     const raw = created?.chatID ?? created?.chatId ?? null;
-    if (!raw) onLog(`${verb}: createGroup returned no chatID (${JSON.stringify(created)}) — aborted, nothing edited/posted`);
-    return raw ? shortChatId(raw) : null;
+    if (raw) return { chatId: shortChatId(raw), link: created.link ?? '' };
+    onLog(`${verb}: createGroup returned no chatID (${JSON.stringify(created)}) — aborted, nothing edited/posted`);
+    if (created?.reason) await send?.(origin, `${verb}: ${created.reason}`);
+    return null;
   }
 
-  // THE create+alias CORE shared by /join and the automatic group (operator 2026-10-08) — §5.1: ONE
-  // create-group + ONE alias-registration path, not two. Create the side-group (sideGroupPlan),
+  // THE create+alias CORE of the automatic group (operator 2026-10-08; /join, which shared it, is
+  // retired 2026-10-25). Create the side-group (sideGroupPlan),
   // normalize createGroup's FULL matrix id to the SHORT chatId the spine keys by
   // (shortChatId — or an incoming short-form arrival spawns a separate folder+thread, the 2026-10-04
   // "side-room has no context" bug), and ALIAS it onto ev's conversation (aliasContact — so the being
   // keeps writing its ONE thread; two chat surfaces, one on-disk conversation). The side-room's
-  // sanitized title is stored as the alias's per-surface transcript key, exactly as /join does.
+  // sanitized title is stored as the alias's per-surface transcript key.
   // Returns { chatId, primaryJid, transcript } (SHORT chatId), or null on a create failure — the caller then
-  // edits/posts nothing. The caller owns the (already-unique'd) title, the trigger-message edit, the
-  // opener post, and `extra` — the fields stored on the alias entry (/join: join_name/join_by;
-  // automatic: automatic: true).
+  // posts nothing. The caller owns the title, the opener post, and `extra` — the fields stored on the
+  // alias entry (automatic: true).
   async function createAliasedSideGroup(ev, surface, title, plan, verb, extra = {}) {
-    const chatId = await createSideGroup(plan, title, verb);
-    if (!chatId) return null;
+    const made = await createSideGroup(plan, title, verb, ev.chatId);
+    if (!made) return null;
+    const { chatId } = made;
     // Reload fresh before the write (createGroup is async). Alias the new group's chatId to ev's
     // canonical (primary) entry — both ids now resolve to the SAME folder/agents/threads.
     return mutateState(writeState, async () => {
@@ -3306,44 +3415,15 @@ export function createCommands({
     });
   }
 
-  // ── /join shared by C's members (operator 2026-10-16) ──
-  // The name key is case- and space-insensitive, so `/join Emely` finds `/join emely`'s room.
-  const joinNameKey = (s) => String(s ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
-  const fillVars = (tpl, vars) => Object.entries(vars).reduce((t, [k, v]) => t.replaceAll(`{${k}}`, String(v ?? '')), tpl);
-  const joinExistsOf = (block) => (block && typeof block.exists === 'string' && block.exists.trim()) ? block.exists : JOIN_EXISTS_DEFAULT;
-  const joinLimitOf = (block) => (block && typeof block.limit === 'string' && block.limit.trim()) ? block.limit : JOIN_LIMIT_DEFAULT;
-  // C's live /join room for a name: an alias of C (never a legacy `super: true` one) carrying join_name, or,
-  // for a room made before join_name existed, the transcript key its title gives.
-  const joinRoomOf = (state, surface, primaryJid, key, legacyKey) => {
-    for (const [chatId, e] of Object.entries(state?.contacts?.[surface] ?? {})) {
-      if (e?.aliasOf !== primaryJid || e.super === true) continue;
-      if (e.join_name != null ? e.join_name === key : e.transcript === legacyKey) return { chatId, entry: e };
-    }
-    return null;
-  };
-  const rosterHas = (raw, senderId) => !!senderId && Array.isArray(raw?.participants?.items)
-    && raw.participants.items.some((p) => String(p?.id) === String(senderId));
-  // A sender's live side-rooms in C: ones they made (join_by_id) or are in. Gone (404) rooms do not count.
-  const sendersRoomsOf = async (state, surface, primaryJid, senderId) => {
-    const out = [];
-    for (const [chatId, e] of Object.entries(state?.contacts?.[surface] ?? {})) {
-      if (e?.aliasOf !== primaryJid || e.super === true) continue;
-      const raw = await forkBridge.chatRaw?.(chatId);
-      if (raw !== false && (e.join_by_id === senderId || rosterHas(raw, senderId))) out.push({ chatId, entry: e });
-    }
-    return out;
-  };
   // Whom a being would wake for this sender here, by router.resolve's allowed_users test (the
-  // conversation's block, else the agent's conversation_defaults; a stranger reaches only the
+  // conversation's block, else the agent's conversation_defaults, else its owners; a stranger reaches only the
   // conversation's own agent). Bare /agents' public list reads it.
   const senderMayWake = (state, surface, chatId, ev, being) => {
     const owner = defaultBeingOf(getContact(state, surface, chatId)?.entry);
     if (owner && being !== owner && !isKnownSender(ev?.senderId, cfg())) return false;
-    const conv = getBeing(state, surface, chatId, being)?.allowedUsers;
-    const global = cfg().agents?.[being]?.conversation_defaults?.allowed_users;
-    return allowedUsersPermits(Array.isArray(conv) ? conv : (Array.isArray(global) ? global : null), ev?.senderId);
+    return mayWake(being, cfg().agents?.[being], ev, { state, config: cfg(), surface, chatId });
   };
-  // Who besides the operator may /join or /split (operator 2026-10-18): anyone in a GROUP this node
+  // Who besides the operator may /split (operator 2026-10-18): anyone in a GROUP this node
   // hears. Refused here → a log line and the audit outcome, nothing in the chat.
   const memberRefusal = (ev, verb) => {
     if (isOperator(ev) || ev?.raw?.chatType === 'group') return null;
@@ -3393,13 +3473,14 @@ export function createCommands({
     const entry = getContact(state, surface, ev.chatId)?.entry;
     const agentOf = (b) => {
       const k = Object.keys(c.agents ?? {}).find((n) => !n.startsWith('_') && n.toLowerCase() === String(b).toLowerCase());
-      const a = k ? c.agents[k] : (b === defaultKey ? {} : null);
+      const a = k ? c.agents[k] : null;
       return a && typeof a === 'object' && !Array.isArray(a) ? a : null;
     };
     if (agentOf(defaultBeingOf(entry))?.public === true) return null;
     const arrived = String((ev.origin ?? ev).surface ?? '').toLowerCase();
     const bare = c.dispatch?.address_without_at !== false;
-    const beings = [defaultKey, ...Object.keys(c.agents ?? {}).filter((n) => !n.startsWith('_') && n.toLowerCase() !== defaultKey)];
+    const beings = Object.keys(c.agents ?? {}).filter((n) => !n.startsWith('_'));
+    const here = agentsInChat(c.agents ?? {}, state, surface, ev.chatId);
     const lines = [];
     for (const b of beings) {
       const a = agentOf(b);
@@ -3407,7 +3488,7 @@ export function createCommands({
       if (a.surface != null && surfaceOfNetwork(String(a.surface).toLowerCase()) !== arrived) continue;
       const { mode } = resolveMode(getBeing(state, surface, ev.chatId, b), b, c);
       if (!PUBLIC_MODE_WORDS[mode]) continue;
-      const hs = wakeTokens(b, a);
+      const hs = wakeTokens(b, here[b]);
       const voice = voiceWakeTokens(a);
       lines.push([
         `${a.body_emoji || '🐶'} ${a.name || hs[0] || b} — ${hs.length ? `call: ${hs.map((h) => `@${h}`).join(', ')}${bare ? ` (or start a message with "${hs[0]}")` : ''}` : 'no handle'}`,
@@ -3419,100 +3500,9 @@ export function createCommands({
     return lines.length ? ['Agents in this chat:', ...lines].join('\n') : null;
   }
 
-  // /join (anyone types /<handle> join [<name>] in chat C): create the side-group and ALIAS it to C.
-  // Every precondition resolves BEFORE any bridge/state mutation (an unresolvable Rodz STOPS, nothing
-  // created).
-  async function joinGroup(ev) {
-    const surface = surfaceOf(ev);
-    if (!loadState || !writeState) return;                   // state not wired → silent
-    const refused = memberRefusal(ev, '/join');
-    if (refused) return refused;
-    const state0 = await loadState();
-    const contact = getContact(state0, surface, ev.chatId);
-    const operator = isOperator(ev);
-    // /join only ALIASES this chat's conversation onto the new side-group, so it needs a KNOWN
-    // conversation to alias — NOT an existing being thread. A chat the being never answered in (an
-    // ingested 1:1 transcript, no agents block) is still joinable: a fresh E invocation in the
-    // group starts the first thread there, letting the operator work with this chat's context
-    // without polluting the 1:1 (operator 2026-10-06). NB /split keeps residesHere — it COPIES
-    // resident threads, so a thread-less split is meaningless. The chat where /join was typed is
-    // always a known contact; this guard only trips on a genuinely-unknown chat.
-    if (!contact) {
-      onLog(`/join: ${ev.chatId} is not a known conversation — nothing to alias, refusing.`);
-      await send?.(ev.chatId, `/join: I don't know this conversation yet — send a message here first, then ${hintOf('join', ev)}.`);
-      return;
-    }
-    // A sender other than the account itself goes into the new group; only a bridged id can be invited.
-    const invitee = ev.isSender ? null : invitableOf(ev);
-    if (!ev.isSender && !invitee) {
-      await send?.(ev.chatId, '/join: I can\'t add you to a group from this account.');
-      return 'refused — the sender id cannot be invited';
-    }
-    const cTitle = ev.chatName || (await forkBridge.chatTitle(ev.chatId)) || ev.chatId;
-    const joinName = forkNameOf(ev.body);
-    const baseTitle = groupTitleOf(cTitle, joinName);
-    const vars = (title) => ({ name: joinName, title, group: cTitle, by: ev.senderName ?? '', handle: handleOf(ev) });
-    const placeholder = (title) => fillVars(placeholderOf(cfg().join, JOIN_PLACEHOLDER_DEFAULT), vars(title));
-    // Our own message is edited in place; anyone else's is not ours to edit, so it gets a reply.
-    const announce = (text) => (ev.isSender ? forkBridge.editMessage(ev.chatId, ev.msgId, text) : send?.(ev.chatId, text));
-
-    // SAME NAME, LIVE ROOM → no second group (operator 2026-10-16). A room the bridge reports gone
-    // is dropped and replaced. The Desktop API has no add-member endpoint, so a sender not already in
-    // the room is told whom to ask.
-    const key = joinNameKey(joinName);
-    // A room made before join_name was titled before the SI+ prefix too.
-    const hit = joinRoomOf(state0, surface, contact.jid, key, sanitizeSlug(baseTitle.slice(SIDE_GROUP_PREFIX.length)));
-    if (hit) {
-      const alive = forkBridge.chatRaw ? await superChannelAlive(hit.chatId, { chatRaw: forkBridge.chatRaw, config: cfg() }) : null;
-      if (alive === false) {
-        await writeState(dropContact(await loadState(), surface, hit.chatId));
-        onLog(`/join: side-room ${hit.chatId} ("${joinName}") is gone — alias dropped, creating a new one`);
-      } else {
-        if (ev.isSender || rosterHas(await forkBridge.chatRaw?.(hit.chatId), ev.senderId)) {
-          await announce(placeholder(baseTitle));
-          return `already in ${hit.chatId} ("${joinName}")`;
-        }
-        await send?.(ev.chatId, fillVars(joinExistsOf(cfg().join), { ...vars(baseTitle), by: hit.entry.join_by ?? 'the operator' }));
-        return `"${joinName}" exists (${hit.chatId}) — the sender is not in it and cannot be added from here`;
-      }
-    }
-    // THE CAP (operator 2026-10-16): config.join.member_cap live side-rooms per non-operator per chat —
-    // every create is An's own WhatsApp account. -1/unset (or anything but an integer >= 1) = unlimited.
-    const cap = Number(cfg().join?.member_cap);
-    if (!operator && Number.isInteger(cap) && cap >= 1) {
-      const mine = await sendersRoomsOf(state0, surface, contact.jid, ev.senderId);
-      if (mine.length >= cap) {
-        const names = mine.map((r) => r.entry.join_name ?? r.entry.transcript ?? r.chatId).join(', ');
-        await send?.(ev.chatId, fillVars(joinLimitOf(cfg().join), { ...vars(baseTitle), name: names }));
-        return `refused — the sender already has ${mine.length} side-room(s) here (member_cap ${cap})`;
-      }
-    }
-
-    const plan = await sideGroupPlan(ev, '/join');
-    if (!plan) return;
-    const title = baseTitle;   // duplicate titles are fine: nothing finds a group by its title
-
-    // ── mutations begin ──
-    // (a+b) CREATE the group (sideGroupPlan: who creates, whom it invites; no inline opener — the
-    //       group inherits C's whole thread by the alias) and ALIAS its SHORT chatId to C's canonical
-    //       entry, via the create+alias core (createAliasedSideGroup, which also stores the sanitized
-    //       title as the alias's per-surface transcript key; join_name/join_by find this room for the
-    //       next /join of the same name). null → no chatId: abort, placeholder NOT edited, nothing posted.
-    const aliased = await createAliasedSideGroup(ev, surface, title, plan, '/join', { join_name: key, ...(ev.senderName ? { join_by: ev.senderName } : {}), ...(invitee ? { join_by_id: invitee } : {}) });
-    if (!aliased) return;
-    const { chatId: joinChatId, primaryJid, transcript } = aliased;
-    // (c) EDIT the operator's /join message into the placeholder (raw, no persona; a reply for anyone else).
-    await announce(placeholder(title));
-    onLog(`/join: ${cTitle} -> group ${joinChatId} aliased to ${primaryJid} (invited ${plan.participantIDs.join(', ')})`);
-    // (d) POST THE OPENER so the new (otherwise-empty) group surfaces in Beeper — added step AFTER the
-    //     success path; a failure here never undoes the alias/placeholder above.
-    await postOpener({ verb: '/join', newChatId: joinChatId, openerText: openerOf(cfg().join, JOIN_OPENER_DEFAULT, cTitle, ev), origin: primaryJid, kind: 'join', transcript });
-  }
-
   // /split (anyone types /<handle> split [<name>] in chat C): create a side-group backed by a NEW
   // conversation that DIVERGES from C — each resident being's thread is COPIED under a new thread id.
-  // Same preconditions/gate as /join; the difference is a NEW entry + per-being thread copy instead of
-  // an alias.
+  // Inside the chat (a Telegram topic) the answer is the room's link.
   async function splitGroup(ev) {
     const surface = surfaceOf(ev);
     if (!loadState || !writeState) return;                   // state not wired → silent
@@ -3527,72 +3517,88 @@ export function createCommands({
     const plan = await sideGroupPlan(ev, '/split');
     if (!plan) return;
     const cTitle = ev.chatName || (await forkBridge.chatTitle(ev.chatId)) || ev.chatId;
-    const placeholder = placeholderOf(cfg().split, SPLIT_PLACEHOLDER_DEFAULT);
     const title = groupTitleOf(cTitle, forkNameOf(ev.body));
 
     // ── mutations begin ──
-    // (a) CREATE the group (sideGroupPlan). SHORT id, same reason as /join above: the new entry +
-    // parent_chat must key by the form the spine resolves incoming messages under, or a short-form
-    // arrival spawns a second entry. null → aborted, placeholder NOT edited.
-    const splitChatId = await createSideGroup(plan, title, '/split');
-    if (!splitChatId) return;
+    // (a) CREATE the group (sideGroupPlan). SHORT id: the new entry + parent_chat must key by the form
+    // the spine resolves incoming messages under, or a short-form arrival spawns a second entry.
+    // null → aborted, placeholder NOT edited.
+    const made = await createSideGroup(plan, title, '/split', ev.chatId);
+    if (!made) return;
+    const { chatId: splitChatId, link } = made;
+    const placeholder = fill(placeholderOf(cfg().split, link ? SPLIT_LINK_DEFAULT : SPLIT_PLACEHOLDER_DEFAULT), { link });
     // (b)+(c) its own conversation, each resident's thread copied (registerSplit).
     state = await loadState();
     const split = await registerSplit(state, surface, splitChatId, ev.chatId, { title, verb: '/split' });
     await writeState(split.state);
     // (d) EDIT the operator's /split message into the placeholder marker — not anyone else's message
-    //     (not ours to edit; the new group's opener is their answer).
+    //     (not ours to edit; the new group's opener is their answer). A room with a link (a topic) is
+    //     found only by it: anyone else gets it as a reply.
     if (ev.isSender) await forkBridge.editMessage(ev.chatId, ev.msgId, placeholder);
-    onLog(`/split: ${cTitle} -> NEW conv ${splitChatId} (${split.slug}, invited ${plan.participantIDs.join(', ')}); copied threads for ${split.copied.join(', ') || '(none)'} (parent ${ev.chatId})`);
+    else if (link) await send?.(ev.chatId, placeholder);
+    onLog(`/split: ${cTitle} -> fork ${splitChatId} in ${split.slug} (transcript-${split.transcript}.md, invited ${plan.participantIDs.join(', ')}); copied threads for ${split.copied.join(', ') || '(none)'} (parent ${ev.chatId})`);
     // (e) POST THE OPENER so the new group surfaces in Beeper — added step AFTER the copy + placeholder;
     //     a failure here never undoes the conversation/threads already written.
     await postOpener({ verb: '/split', newChatId: splitChatId, openerText: openerOf(cfg().split, SPLIT_OPENER_DEFAULT, cTitle, ev), origin: ev.chatId, kind: 'split' });
   }
 
-  // A /split group's own conversation, on the creator (/split) and on the other node (linkSideGroup):
-  // → { state, slug, copied }; the caller writes the state.
+  // A being block's thread/session bookkeeping: a fork gets its own, never the parent's.
+  const THREAD_FIELDS = new Set(['threadId', 'threadCreatedAt', 'identityInjectedAt', 'compactionWelcome']);
+  // A /split group's fork, on the creator (/split) and on the other node (linkSideGroup):
+  // → { state, slug, transcript, copied }; the caller writes the state.
   async function registerSplit(state, surface, splitChatId, parentChatId, { title, verb }) {
-    // (b) REGISTER the new group as its OWN conversation (ensureContact FIRST — recordThread/patch
-    //     below no-op on an unknown contact), and record the parent chat so /send+/end find the
-    //     original (a split group is NOT an alias).
-    const cSlug = getContact(state, surface, parentChatId)?.slug ?? 'conv';
-    const ensured = ensureContact(state, surface, splitChatId, { pushedName: title, slugHint: `egpt-split-${cSlug}` });
-    state = ensured.state;
-    const splitConvDir = slugDir(surface, ensured.slug);
-    state = patchContact(state, surface, splitChatId, { parent_chat: parentChatId });
-    // (c) COPY each resident being's thread into the split conversation as a NEW, DIVERGING thread.
-    //     The residents + their source thread ids come off the ORIGINAL entry (read fresh). For each:
-    //     mint a newThreadId, TRANSFORM-copy the source jsonl into the new thread's store at the
-    //     project dir matching the SPLIT conversation's cwd (sessionId→newThreadId, cwd→splitConvDir),
-    //     and record the new thread on the split entry's agents.<being> block. `flag:'wx'` never
-    //     clobbers an existing dest (EEXIST → refuse that one copy, log, still record the thread id).
+    // (b) REGISTER the group as a FORK (operator 2026-10-26: "/split gives the context and folder with
+    //     all previous files"): the parent's folder, its own transcript-<key>.md, parent_chat for /send+/end.
+    const base = sanitizeSlug(title) || 'fork';
+    const keys = new Set(Object.values(state.contacts?.[surface] ?? {}).map((e) => e?.transcript).filter(Boolean));
+    let transcript = base;
+    for (let n = 2; keys.has(transcript); n++) transcript = `${base}-${n}`;
+    state = forkContact(state, surface, splitChatId, parentChatId, { pushedName: title, transcript });
+    const slug = getContact(state, surface, splitChatId)?.slug ?? null;
+    // (c) COPY each resident being's thread into the fork as a NEW, DIVERGING thread. The residents +
+    //     their source thread ids come off the ORIGINAL entry. Same folder, so the same cwd: the session
+    //     file is copied beside its source (the boxed store of the new id, or the same ~/.claude project
+    //     dir), sessionId → the new id. `flag:'wx'` never clobbers an existing dest (EEXIST → refuse that
+    //     one copy, log, still record the thread id).
     const origEntry = getContact(state, surface, parentChatId)?.entry;
+    // Each being's chat settings (allowed_users, mode, access_level, …) come with the fork (operator 2026-10-26).
+    for (const [being, block] of Object.entries(origEntry?.agents ?? {})) {
+      const settings = Object.fromEntries(Object.entries(block ?? {}).filter(([k]) => !THREAD_FIELDS.has(k)));
+      if (Object.keys(settings).length) state = patchBeing(state, surface, splitChatId, being, settings);
+    }
     const residents = residentsOf(origEntry)
       .map((being) => [being, getBeing(state, surface, parentChatId, being)?.threadId ?? null])
       .filter(([, threadId]) => threadId);
     const copied = [];
+    let lastThread = null;
     for (const [being, srcThreadId] of residents) {
       const newThreadId = randomUUID();
-      const srcStore = jsonlStoreDirOf(srcThreadId, { jsonlStoreRoot });
-      const srcFound = (srcStore ? findThreadJsonl(srcThreadId, [], { projectsRoot: join(srcStore, 'projects') }) : null)
-        ?? findThreadJsonl(srcThreadId, []);
-      if (srcFound) {
-        const projDir = join(jsonlStoreDirOf(newThreadId, { jsonlStoreRoot }), 'projects', sanitizeCwdDir(splitConvDir));
+      const src = findSessionFile(srcThreadId, { storeRoot: jsonlStoreRoot, ...(claudeProjectsRoot ? { claudeProjects: claudeProjectsRoot } : {}) });
+      if (src) {
+        const srcStore = jsonlStoreDirOf(srcThreadId, { jsonlStoreRoot });
+        const boxed = !!srcStore && src.startsWith(srcStore + sep);
+        const projDir = boxed ? join(jsonlStoreDirOf(newThreadId, { jsonlStoreRoot }), 'projects', basename(dirname(src))) : dirname(src);
         const destJsonl = join(projDir, `${newThreadId}.jsonl`);
         try {
           await mkdir(projDir, { recursive: true });
-          const srcRaw = await readFile(srcFound.jsonlPath, 'utf8');
-          await writeFile(destJsonl, rewriteForkSessionJsonl(srcRaw, { sessionId: newThreadId, cwd: splitConvDir }), { flag: 'wx' });
+          const srcRaw = await readFile(src, 'utf8');
+          await writeFile(destJsonl, rewriteForkSessionJsonl(srcRaw, { sessionId: newThreadId }), { flag: 'wx' });
           copied.push(being);
         } catch (e) {
-          onLog(`${verb}: thread copy for ${being} ${srcFound.jsonlPath} -> ${destJsonl} failed — ${e?.message ?? e}`);
+          onLog(`${verb}: thread copy for ${being} ${src} -> ${destJsonl} failed — ${e?.message ?? e}`);
         }
       } else {
-        onLog(`${verb}: can't find ${being}'s thread store for #${srcThreadId} — recording the new thread id without a copy`);
+        onLog(`${verb}: can't find ${being}'s session for #${srcThreadId} — recording the new thread id without a copy`);
       }
       state = recordThread(state, surface, splitChatId, newThreadId, undefined, being);
+      lastThread = newThreadId;
     }
-    return { state, slug: ensured.slug, copied };
+    // The fork's log names its thread, so the parent's next roll leaves it alone.
+    if (slug && lastThread) {
+      try { await mkdir(slugDir(surface, slug), { recursive: true }); } catch { /* the stamp says why */ }
+      await stampThreadId(surface, slug, lastThread, { key: transcript });
+    }
+    return { state, slug, transcript, copied };
   }
 
   // /send (anyone in a join/split group REPLIES /send to a message M there): relay M's text into the
@@ -3635,7 +3641,7 @@ export function createCommands({
       const stored = side.aliasOf ? side.transcript : side.pushedName;
       const sideTitle = ev.chatName || (await forkBridge.chatTitle(ev.chatId)) || stored || null;
       const discreet = side.discreet === true || [sideTitle, stored].some(titleLooksDiscreet);
-      if (sideTitle && (origin === 'always' || !discreet)) prefix = originTpl.replaceAll('{group}', sideTitle);
+      if (sideTitle && (origin === 'always' || !discreet)) prefix = fill(originTpl, { group: sideTitle });
     }
     const pbf = String(cfg().send?.post_back_from ?? '').trim().toLowerCase();
     // A member's /send (operator 2026-10-18) is said by the mouth, signed: only the operator's posts as him.
@@ -3757,7 +3763,7 @@ export function createCommands({
       if (c.kind === 'split') {
         const split = await registerSplit(state, surface, chatId, c.origin, { title: ev.chatName || chatId, verb: 'split' });
         state = split.state;
-        as = `its own conversation (parent ${c.origin}; copied threads for ${split.copied.join(', ') || '(none)'})`;
+        as = `a fork in ${split.slug} (parent ${c.origin}; copied threads for ${split.copied.join(', ') || '(none)'})`;
       } else {
         const { jid } = getContact(state, surface, c.origin);
         state = aliasContact(state, surface, chatId, jid, { transcript: c.transcript ?? sanitizeSlug(ev.chatName || chatId), ...(c.kind === 'automatic' ? { automatic: true } : {}) });
@@ -3772,6 +3778,28 @@ export function createCommands({
       onLog(`${c.kind}: ${chatId} linked as ${as}${own ? ', converting the entry it had from being seen' : ''}${mouth} — from its opener (made by <${ev.fromNode}>)`);
       if (switched) onLog(`automatic: reply_in_side_group set on for ${switched} here, as on <${ev.fromNode}> (its side group ${chatId})`);
     });
+  }
+
+  // A Telegram topic made outside /split (operator 2026-10-25/27: topics always fork): its first event,
+  // with no entry here and its General chat a conversation, registers it as that chat's fork
+  // (registerSplit), before the line is routed. A topic egpt made (/split, a chatbox team topic) has its entry.
+  async function forkTopic(ev) {
+    const parent = forkBridge.topicParentOf?.(ev?.chatId) ?? null;
+    if (!parent || !loadState || !writeState) return;
+    const surface = surfaceOf(ev);
+    const { chatId } = ev;
+    const unclaimed = (state) => !state?.contacts?.[surface]?.[chatId] && !!getContact(state, surface, parent);
+    try {
+      if (!unclaimed(await loadState())) return;
+      await mutateState(writeState, async () => {
+        const state = await loadState();
+        if (!unclaimed(state)) return;
+        const title = ev.chatName || `topic ${chatId.slice(parent.length + 1)}`;
+        const split = await registerSplit(state, surface, chatId, parent, { title, verb: 'topic' });
+        await writeState(split.state);
+        onLog(`topic: ${chatId} "${title}" -> fork of ${parent} in ${split.slug} (transcript-${split.transcript}.md); copied threads for ${split.copied.join(', ') || '(none)'}`);
+      });
+    } catch (e) { onLog(`topic: ${chatId} not forked from ${parent} — ${e?.message ?? e}`); }
   }
 
   // ── COMMAND ALIASES (operator 2026-10-19): config/commands_alias.yaml, `<alias>: /<handle> <command> [args]` ──
@@ -3968,7 +3996,7 @@ export function createCommands({
           }
         }
         convs = String(n);
-        try { mode = getBeing(st, ev.surface, ev.chatId, defaultKey)?.mode ?? null; } catch { mode = null; }
+        try { mode = getBeing(st, ev.surface, ev.chatId, subjectOf(getContact(st, ev.surface, ev.chatId)?.entry))?.mode ?? null; } catch { mode = null; }
       }
     } catch { convs = '?'; }
 
@@ -4049,8 +4077,8 @@ export function createCommands({
       }
     } catch { lines.push('transcription: off'); }
 
-    // agents — local agents from cfg().agents. The persona (default:true) shows its
-    // handles; a relay agent (scalar or multipath, agentPaths normalizes both) shows
+    // agents — from cfg().agents. Every local agent shows its handles (there is no default
+    // agent, 2026-10-22); a relay agent (scalar or multipath, agentPaths normalizes both) shows
     // its `to` once. Omitted entirely when cfg().agents is absent/empty.
     try {
       const agentsCfg = cfg().agents;
@@ -4058,7 +4086,7 @@ export function createCommands({
         const agentLines = [];
         for (const [name, agent] of Object.entries(agentsCfg)) {
           try {
-            if (agent && agent.default) {
+            if (agent && typeof agent === 'object' && !isRelayAgent(agent)) {
               const handles = Array.isArray(agent.handles) ? agent.handles.join(', ') : '';
               agentLines.push(`  ${name} (${handles})`);
             } else {
@@ -4196,7 +4224,8 @@ export function createCommands({
     let convPath = c?.entry?.conversation_path;
     if (!convPath) { try { convPath = conversationPathOf(r.surface, slug); } catch { convPath = '?'; } }
 
-    const b = getBeing(state, r.surface, r.jid, defaultKey);
+    const being = subjectOf(c?.entry);
+    const b = being ? getBeing(state, r.surface, r.jid, being) : null;
     const mode = b?.mode ?? `${DEFAULT_AUTO_MODE} (default)`;
 
     // The persona's LIVE brain def (phase 1, operator 2026-08-14): there is no more
@@ -4206,7 +4235,7 @@ export function createCommands({
     // name-the-existing-thing, not a second derivation).
     let previewDef = null;
     try {
-      const raw = resolveDefaultBrainDef({ getConfig: cfg, brains, convDir, brainType: CCODE });
+      const raw = resolveDefaultBrainDef({ getConfig: cfg, brains, convDir, brainType: CCODE, being });
       previewDef = raw?.dangerously_skip_permissions === true ? raw : coerceAllowedTools(raw);
     } catch { previewDef = null; }
 
@@ -4263,7 +4292,7 @@ export function createCommands({
         // The ratio AND window the spine applies to this being here, override included
         // (compact-being's compactionPolicy, 2026-09-24) - not the node ratio over the model's
         // table window, which ignored a conversation's own `compaction:` and `context_window`.
-        const p = compactionPolicy(cfg(), model, compactionOverrideOf(b, cfg(), defaultKey));
+        const p = compactionPolicy(cfg(), model, compactionOverrideOf(b, cfg(), being));
         const { tokens, threshold } = dueFor({ sessionId: b.threadId, model, window: p.window }, { ratio: p.ratio });
         const limit = threshold ?? p.threshold;
         if (tokens != null) context = `${tokens}/${limit} tok (compact at ${Math.round(p.ratio * 100)}% of ${p.window})`;
@@ -4284,6 +4313,7 @@ export function createCommands({
       `surface: ${r.surface}`,
       `slug: ${slug}`,
       `conversation_path: ${convPath}`,
+      `being: ${being ?? 'none'}`,
       `mode: ${mode}`,
       `agent: ${agentVal}`,
       `engine: ${engineVal}`,
@@ -4325,5 +4355,5 @@ export function createCommands({
   // above). `/e`/`/egpt` now carry no special meaning at all and fall through to the generic
   // catch-all like any other unrecognized token.
 
-  return { isCommand, commandOf, hintOf, run, currentRoomOf, startBrowser, chromeClientFor: ensureChrome, browserConversationOf, chatChromeOf, autoSideGroup, linkSideGroup };
+  return { isCommand, commandOf, hintOf, run, currentRoomOf, startBrowser, chromeClientFor: ensureChrome, browserConversationOf, chatChromeOf, autoSideGroup, linkSideGroup, forkTopic, endConversation };
 }

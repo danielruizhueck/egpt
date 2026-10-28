@@ -142,6 +142,8 @@ export function reactionAction({ emoji, targetId, snippet } = {}) {
   const snip = String(snippet ?? '').replace(/\s+/g, ' ').trim().slice(0, 60);
   return `reacted ${e} to #${id}${snip ? ` "${snip}"` : ''}`;
 }
+// …and its emoji back; null for any other body.
+export function reactionEmoji(body) { return /^reacted (\S+) to #/.exec(String(body ?? ''))?.[1] ?? null; }
 
 // The body of an EDIT stage-direction (MESSAGES-FIRST-CLASS-PLAN): a message's
 // text changed after it was sent → a two-line git-style diff:
@@ -190,6 +192,7 @@ export function limbAction(action = {}) {
     case 'ask': return `asked the advice channel${snip(action.question) ? ` "${snip(action.question)}"` : ''}`;
     case 'book': return `/book ${action.date ?? '?'} ${action.time ?? '?'}${snip(action.summary) ? ` "${snip(action.summary)}"` : ''} → ${action.outcome ?? '?'}`;
     case 'email': return `/email${snip(action.text) ? ` "${snip(action.text)}"` : ''} → ${action.outcome ?? '?'}`;
+    case 'group': return `/group ${action.what}${snip(action.value) ? ` "${snip(action.value)}"` : ''} → ${action.outcome ?? '?'}`;
     default: return null;   // an unknown limb invents no vocabulary — the raw reply line already holds it
   }
 }

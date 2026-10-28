@@ -49,7 +49,7 @@ function fakeTimers() {
 
 function build({ mode = 'on', reply = 'ok', partials = [], tasks = [] } = {}) {
   const agents = { egpt: { configuration: 'egpt', handles: ['e', 'egpt'], default: true, mode } };
-  const config = { agents };
+  const config = { conversation_defaults: { allowed_users: ['u-1'] }, agents };   // An (u-1) owns the node
   const bridge = streamingBridge();
   const brain = {
     calls: [], tasks,
@@ -78,6 +78,7 @@ function build({ mode = 'on', reply = 'ok', partials = [], tasks = [] } = {}) {
 }
 
 describe('on mode, a non-human line — no placeholder up front', () => {
+  // contract 6.2
   it("REPRODUCE: a '…' silence posts NOTHING (no ⏳, no ✓, no edit) and logs one line", async () => {
     const b = build({ reply: '…' });
     await b.bridge.emit(msg('qué calor hace hoy', BEING));

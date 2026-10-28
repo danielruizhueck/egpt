@@ -21,7 +21,7 @@ const DM = '!dmStranger';
 const MEMBER = '@whatsapp_lid-777000:beeper.local';
 const OPERATOR = '@an:beeper.com';
 const AGENTS = {
-  e: { name: 'E', body_emoji: '🐶', handles: ['e', 'egpt'], voice_handles: ['perro'], default: true, configuration: 'egpt' },
+  e: { name: 'E', body_emoji: '🐶', handles: ['e', 'egpt'], voice_handles: ['perro'], default: true, configuration: 'egpt', conversation_defaults: { allowed_users: ['*'] } },
   wren: { name: 'Wren', body_emoji: '🐦', handles: ['wren'], mode: 'mention-direct', conversation_defaults: { allowed_users: [OPERATOR] } },
   don: { relay_channel: 'mesh-room', handles: ['don'] },
   mk: { name: 'Mark', body_emoji: '📣', public: true, handles: ['mk'] },
@@ -102,6 +102,13 @@ describe('bare /agents from a non-operator: the public list', () => {
     const lines = sent[0].text.split('\n');
     expect(lines[1]).toMatch(/^🐶 E — .* · you can call it: no$/);
     expect(lines[2]).toMatch(/^🐦 Wren — .* · you can call it: yes$/);
+  });
+
+  it('per-chat handles: where this chat\'s entry sets E\'s handles, the list tells that list (operator 2026-10-24)', async () => {
+    const { cmds, sent } = harness({ st: patchBeing(seed(), 'whatsapp', GROUP, 'e', { handles: ['ekg'] }) });
+    await cmds.run(msg('/agents'));
+    expect(sent[0].text.split('\n')[1]).toBe('🐶 E — call: @ekg (or start a message with "ekg") · voice: "perro" · answers only when called · you can call it: yes');
+    expect(sent[0].text.split('\n')[2]).toBe(LIST_C.split('\n')[2]);   // Wren keeps its node-wide handles
   });
 
   it('a mode change shows up (the operator\'s /agents mode, then the member asks again)', async () => {

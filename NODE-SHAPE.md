@@ -53,12 +53,14 @@ is named for its **role** — the same word as its config key:
 
 | name | kind | job |
 |---|---|---|
-| `egpt-daemon` | scheduled task (at logon) | keeps the node loop alive in **session 1** — the node's one runner |
+| `egpt-daemon` | Windows service (nssm, Auto, as you) | runs the node in **session 0** while nobody is logged in; holds off (no spine) while session 1 has it |
+| `egpt-daemon` | scheduled task (at logon) | runs the node in **session 1** while you are logged in — the browsers live here |
 | `egpt-beeper-primary` | Windows service (nssm, Auto) | Beeper for the primary account — the ear |
 | `egpt-beeper-secondary` | Windows service (nssm, Auto) | Beeper for the secondary account — the mouth; two-number nodes only |
 
-The Session 0 `egpt-daemon` service is **retired** (2026-10-17: stopped and Disabled on
-both nodes; `setup\uninstall-nssm-service.cmd` removes it).
+The service and the task share a name (the SCM and Task Scheduler are separate namespaces).
+`setup\install-nssm-service.cmd` installs the service, at the console: it asks your password
+(checked, never stored) and lets you stop and start it unelevated.
 
 **Never an account name in a service name.** The role is what the spine reads,
 so `egpt-beeper-primary` is the install behind `beeper.primary` on every node,
@@ -70,8 +72,8 @@ during an incident, exactly when the services list gets read.
 
 | state | node processes |
 |---|---|
-| before anyone logs in | **0** — the node is down until logon |
-| logged in | **2** — the session 1 daemon and the spine it supervises |
+| before anyone logs in | **2** — the session 0 daemon and its spine |
+| logged in | **3** — the session 1 daemon and its spine, and the session 0 daemon holding off |
 
 In Task Manager none of these is called "egpt". Node shows as *Node.js
 JavaScript Runtime* and nssm as *The non-sucking service manager* — both labels
@@ -87,11 +89,16 @@ the service hosting it.
 Identity lives entirely in `--user-data-dir`: different directory = different
 install = different device = different token. Same directory twice and the
 second launch loses Chromium's singleton and exits (`process_singleton_win.cc`,
-`Lock file can not be created! Error code: 32` — a sharing violation, not
-damage). So the installs cannot be merged the way the spines can: a token
+`Lock file can not be created! Error code: 32` — a sharing violation, across
+sessions and users too). Not harmless: on 2026-09-07 a loser still reached
+`os_crypt` and re-keyed the profile's `Local State` before it quit, so the
+lockfile is a backstop, never the thing that keeps two instances apart. So the installs cannot be merged the way the spines can: a token
 belongs to an install.
 
-Run every one of them in session 0 as an nssm service, LocalSystem, **Auto**.
+Run every one of them in session 0 as an nssm service, LocalSystem, **Auto** —
+or as the desktop user (`setup\beeper-services-run-as-user.cmd`, `-Revert`), but
+only a service with its own `--user-data-dir`: one without would open that user's
+own window profile, a second instance of one device, so the script refuses it.
 
 **Auto, not Manual.** A service that inherits `Manual` from whatever it was
 renamed from leaves the node half-alive after a reboot: the spine up, one
@@ -103,30 +110,48 @@ not a loopback socket** — measured on 2026-09-06, a real Chrome and two
 to you, not reachability for the spine. (The Beepers serve no CDP since 2026-10-11.)
 
 
-## One node, one runner
+## One node, one runner at a time
 
-Since 2026-10-17 each node runs from **one** loop, in session 1: a spine there can
-**spawn and supervise a browser as an ordinary child process**, and a session 0
-browser is invisible to you. The S0→S1 handover (`/standdown`, exit 45) is gone.
+Since 2026-10-22 (GENOME 6) a node is never deaf for want of a login. The `egpt-daemon`
+**service** runs the node in session 0 while nobody is logged in. At logon the `egpt-daemon`
+**task** starts the session 1 daemon: it takes `state/s1.claim` and drops `/standdown` into
+`state/ingest`; the session 0 spine finishes its turns in flight (new messages are still
+answered), ends its background work — each being says so once where it ran — and leaves
+with 45; the session 0 daemon holds off, and the session 1 daemon spawns the spine, whose
+browsers need the desktop. At logoff Windows ends session 1, the OS drops `s1.claim`, and
+the session 0 daemon takes the node back within seconds. Locking does not hand back.
 
 Two spines on one `EGPT_HOME` would open two connections per token (every message
 ingested twice, answered twice), race `config/conversations.yaml` and
-`state/ingest/`, and collide on the console port (23475 by default). So a daemon
-refuses to start while `state/spine.pid` names a live process with a fresh
-`state/alive.txt` beat, and says which pid.
+`state/ingest/`, and collide on the console port (23475 by default). So before
+EVERY spawn a daemon must hold `state/runner.lock` and find no live spine
+(`state/spine.pid` + a fresh `state/alive.txt` beat); a session 0 daemon also
+waits while `state/s1.claim` is held. Both files are share-none opens the OS drops
+with the process (`src/daemon-singleton.mjs`), so a logoff, a crash or `taskkill /F`
+frees them. A daemon that may not spawn waits and says why; it never exits for it.
+
+Session 0 has no browser: a browser request there is told it is available once
+someone logs in. The claude sessions are held by the daemon in both sessions; a
+handover ends them, and threads resume by id on the next turn.
 
 
 ## The config shape
 
 ```yaml
-beeper:
-  primary:                        # the EAR — your account
-    account: email@domain.com
-    token: bdapi_...
-  secondary:                      # the MOUTH — omit it on a one-number node
-    account: email.second@domain.com
-    token: bdapi_...
+limbs:                            # the I/O transports; an http limb will sit beside beeper
+  beeper:
+    primary:                      # the EAR — your account
+      account: email@domain.com
+      token: bdapi_...
+    secondary:                    # the MOUTH — omit it on a one-number node
+      account: email.second@domain.com
+      token: bdapi_...
 ```
+
+A top-level `beeper:` (before migration 0049) is still read, with one
+deprecation line per boot; 0049 copies it under `limbs:`, comments included, and
+leaves the old block as a DEPRECATED copy for older code, ignored once
+`limbs.beeper` is set.
 
 **The role names are load-bearing.** The spine resolves the ear from the key
 `primary` and the mouth from the key `secondary` (`src/spine/boot.mjs`), and each
@@ -137,6 +162,16 @@ With no `secondary` block, `primary` is both ear and mouth: the one-number shape
 `primary_gui` may also be declared, for your own logged-in Beeper window. It is
 **never** an ear — ingesting a second install of an account another connection
 already is would hear every message twice.
+
+**Or one profile for both (optional).** `setup\share-beeper-primary-profile.cmd`
+points `egpt-beeper-primary` at your own window's profile: one device, one token,
+no `primary_gui`. The window runs it while Beeper is open; the service runs it
+otherwise; never both. `setup\beeper-window.cmd` (logon, and the "Beeper (eGPT)"
+shortcut) stops the service before opening Beeper and starts it when Beeper
+exits; the service's NSSM Start/Pre hook refuses to start it while the window
+claims or runs the profile; `egpt-s0-identity` (as you, S4U) starts it after a
+logoff. So `egpt-beeper-primary` is **Stopped while your Beeper is open** — that
+is the shape, not a fault.
 
 One bridge is opened per distinct token.
 
@@ -156,8 +191,10 @@ one profile, so there is no second profile to carry.
 Run it before saying yes.
 
 1. One Beeper service per account, named for its role (`egpt-beeper-primary`,
-   `egpt-beeper-secondary`), **Running** and **Auto**
-2. One `egpt-daemon` logon task, and no running `egpt-daemon` service
+   `egpt-beeper-secondary`), **Running** and **Auto** (a primary that shares your
+   window's profile is Stopped while that window is open)
+2. One `egpt-daemon` logon task, and one `egpt-daemon` service: Automatic, as you,
+   AppExit 0 = Exit, and you may stop and start it (`node setup\verify-install.mjs`)
 3. Exactly **one** spine live — two live is the failure, not the goal
 4. One `config.yaml`, one block per account under `primary` / `secondary`,
    `account` + `token` — **no Beeper ports**. The console port IS pinned, and
@@ -171,8 +208,9 @@ Run it before saying yes.
    chat they share it stays silent, and that is not a fault to chase.
 7. Handles disjoint between accounts, and no other node claiming them
 8. **It survives a reboot** — services come back, discovery finds the installs
-   cold, the spine subscribes untouched once the operator logs on (the task's only
-   trigger; `egpt-wake-duty` runs only while logged on too)
+   cold, and the session 0 spine subscribes untouched before anyone logs on; at logon
+   the session 1 daemon takes over, and at logoff the service takes the node back
+   (`egpt-wake-duty` still runs only while logged on)
 
 
 ## What is deployed today

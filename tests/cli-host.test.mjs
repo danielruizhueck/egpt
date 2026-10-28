@@ -18,21 +18,27 @@ import { ipcPair, fakeClaude } from './fake-claude-cli.mjs';
 const KEY = 'egpt:ccode:whatsapp:fam';
 const flush = async (n = 20) => { for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r)); };
 
-function world() {
+// `mute(i)`: spawn #i takes stdin and never answers (nothing reads the pipe).
+function world({ mute = () => false } = {}) {
   const spawns = [];
   const logs = [];
   const host = createCliHost({
     log: (m) => logs.push(m),
     setPriority: () => {},
-    spawn: (bin, args, opts) => { const child = fakeClaude(7000 + spawns.length); spawns.push({ bin, args, opts, child }); setImmediate(() => child.emit('spawn')); return child; },
+    spawn: (bin, args, opts) => {
+      const child = fakeClaude(7000 + spawns.length);
+      if (mute(spawns.length)) child.stdin.write = () => true;
+      spawns.push({ bin, args, opts, child }); setImmediate(() => child.emit('spawn')); return child;
+    },
   });
   // One spine: a fresh IPC pair to the SAME host, its end of it, and its warm pool — wired as boot wires them.
-  const spine = ({ factory = (o) => createWarmCliSession(o), poolLogs = [] } = {}) => {
+  const spine = ({ factory = (o) => createWarmCliSession(o), poolLogs = [], max } = {}) => {
     const pair = ipcPair();
     host.attach(pair.daemonSide);
     const cli = connectCliHost(pair.spineSide, { [CLI_HOST_ENV]: '1' }, { uuid: (() => { let n = 0; return () => `h${spawns.length}-${++n}-${Math.random()}`; })() });
     const woken = [];
     const pool = createWarmPool({
+      max,
       makeSession: (opts) => factory({ ...opts, spawn: cli.spawner(opts.pool.key, { ...opts.pool, sessionId: opts.sessionId ?? null }) }),
       onBackgroundDone: (key, info) => { woken.push({ key, ...info }); },
       onLog: (m) => poolLogs.push(m),
@@ -300,5 +306,177 @@ describe('the host, across more than one restart', () => {
     p.drop();
     const s = createWarmCliSession({ spawn: cli.spawner(KEY, { opened: {} }) });
     await expect(s.turn('hola')).rejects.toThrow(/daemon holding the sessions is gone/);
+  });
+});
+
+// Live 2026-10-21 (kg, E in SI+EduWeb): a sandboxed session LRU-evicted, its launcher gone, the host still
+// listing it — adopted dead on every spine restart, the next turn written into nothing, the lane wedged for hours.
+describe('a dead held session never wedges a conversation', () => {
+  const OTHER = 'egpt:ccode:whatsapp:other';
+  // A sandbox launcher: kill ends it, but the claude it started holds its stdio — 'exit', never 'close'.
+  const launcherDies = (child) => { child.kill = () => { child.killed = true; setImmediate(() => child.emit('exit', null, 'SIGTERM')); return true; }; };
+
+  for (const [kind, prep] of [['a claude that closes', () => {}], ['a launcher whose pipes outlive it', launcherDies]]) {
+    it(`(a) LRU eviction takes it off the host — ${kind} — so the next spine cannot adopt it`, async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        const w = world();
+        const one = w.spine({ max: 1 });
+        await run(one, 'hola');
+        const evicted = w.spawns[0].child;
+        prep(evicted);
+        await one.pool.run(OTHER, 'hey', () => {}, { brainOptions: { model: 'sonnet' }, klass: 'conversation' });
+        await flush();
+        expect(evicted.killed).toBe(true);
+        vi.advanceTimersByTime(5_000);
+        expect(w.logs).toContain(`cli-host: ${KEY} pid 7000 exited (SIGTERM)`);
+        one.pair.drop();
+        const two = w.spine();
+        expect((await two.cli.list()).map((h) => h.key)).toEqual([OTHER]);
+      } finally { vi.useRealTimers(); }
+    });
+  }
+
+  it('a process that exits with its stdio held open still ends its session on the spine', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const w = world();
+      const one = w.spine();
+      await run(one, 'hola');
+      w.spawns[0].child.emit('exit', 1, null);
+      await flush();
+      vi.advanceTimersByTime(5_000);
+      await flush();
+      expect(w.host.size).toBe(0);
+      expect((await run(one, 'sigues?', { model: 'sonnet', sessionId: 'sess-1' })).text).toBe('echo:sigues?');
+      expect(w.spawns).toHaveLength(2);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('(B) an eviction mid-turn ends that turn even when its process is already dead — the lane goes on', async () => {
+    const w = world();
+    const one = w.spine();
+    await run(one, 'hola');
+    const dead = w.spawns[0].child;
+    dead.stdin.write = () => true;                     // nothing reads the pipe…
+    dead.kill = () => true;                            // …and nothing will ever close it
+    const turn = run(one, 'estás?', { model: 'sonnet', sessionId: 'sess-1' }).catch((e) => e);
+    await flush();
+    expect(await one.pool.interrupt(KEY, { graceMs: 10 })).toEqual({ stopped: 'evict' });   // /agents stop
+    expect(String((await turn).message)).toMatch(/closed mid-turn/);
+    expect((await run(one, 'y', { model: 'sonnet', sessionId: 'sess-1' })).text).toBe('echo:y');
+    expect(w.spawns).toHaveLength(2);
+  });
+
+  it('(c) a turn the process never answers (no event at all) is evicted and run once more on a fresh process, same thread', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const w = world();
+      const one = w.spine();
+      await run(one, 'hola');
+      const mute = w.spawns[0].child;
+      mute.stdin.write = () => true;
+      const turn = run(one, 'estás?', { model: 'sonnet', sessionId: 'sess-1' });
+      await flush();
+      vi.advanceTimersByTime(120_000);
+      expect((await turn).text).toBe('echo:estás?');
+      expect(mute.killed).toBe(true);
+      expect(w.spawns).toHaveLength(2);
+      expect(w.spawns[1].args).toEqual(expect.arrayContaining(['--resume', 'sess-1']));
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('(c) …once: a fresh process that is silent too fails the turn, it does not spawn again', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const w = world({ mute: () => true });
+      const one = w.spine();
+      const turn = run(one, 'hola').catch((e) => e);
+      await flush();
+      vi.advanceTimersByTime(120_000);
+      await flush();
+      vi.advanceTimersByTime(120_000);
+      const err = await turn;
+      expect(err.unresponsive).toBe(true);
+      expect(w.spawns).toHaveLength(2);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('a long turn that is talking is never cut by that bound', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const w = world();
+      const one = w.spine();
+      await run(one, 'hola');
+      const claude = w.spawns[0].child;
+      claude.holdNext = true;
+      const turn = run(one, 'informe largo', { model: 'sonnet', sessionId: 'sess-1' });
+      await flush();
+      claude.stdout.emit('data', `${JSON.stringify({ type: 'system', subtype: 'init', session_id: 'sess-1' })}\n`);
+      await flush();
+      vi.advanceTimersByTime(3_600_000);
+      claude.release();
+      expect((await turn).text).toBe('echo:informe largo');
+      expect(w.spawns).toHaveLength(1);
+    } finally { vi.useRealTimers(); }
+  });
+
+  // Live 2026-10-22 (reve): pid 32420, evicted 23:40, was re-adopted at five restarts and sent a turn at 08:29.
+  it('what a spine evicted is never offered to the next one, even while its process is still up — the next turn spawns fresh', async () => {
+    const w = world();
+    const one = w.spine({ max: 1 });
+    await run(one, 'hola');
+    const evicted = w.spawns[0].child;
+    evicted.kill = () => { evicted.killed = true; return true; };      // no 'exit', no 'close' yet
+    const write = evicted.stdin.write;
+    evicted.stdin.write = (d) => (evicted.ended ? true : write(d));    // its stdin is ended: nothing reaches it
+    await one.pool.run(OTHER, 'hey', () => {}, { brainOptions: { model: 'sonnet' }, klass: 'conversation' });
+    await flush();
+    expect(evicted.killed).toBe(true);
+    one.pair.drop();
+    const two = w.spine();
+    expect((await two.cli.list()).map((h) => h.key)).toEqual([OTHER]);
+    await two.adoptAll();
+    expect((await run(two, 'estás?', { model: 'sonnet', sessionId: 'sess-1' })).text).toBe('echo:estás?');
+    expect(w.spawns).toHaveLength(3);
+    expect(w.spawns[2].args).toEqual(expect.arrayContaining(['--resume', 'sess-1']));
+  });
+
+  it('the turn an adopted process was answering is not lost when that process dies: the being is woken to answer it, and the turn queued behind runs fresh', async () => {
+    const w = world();
+    const one = w.spine();
+    await run(one, 'hola');
+    const claude = w.spawns[0].child;
+    claude.holdNext = true;
+    run(one, 'revisa el sitio', { model: 'sonnet', sessionId: 'sess-1' }).catch(() => {});
+    await flush();
+    one.pair.drop();
+    const two = w.spine();
+    await two.adoptAll();
+    const queued = run(two, 'estás de vuelta?', { model: 'sonnet', sessionId: 'sess-1' });
+    claude.emit('exit', 1, null);
+    claude.emit('close', 1, null);
+    expect((await queued).text).toBe('echo:estás de vuelta?');
+    await flush();
+    expect(two.woken).toEqual([{ key: KEY, lost: 'revisa el sitio', why: expect.stringMatching(/exited 1/) }]);
+    expect(w.spawns).toHaveLength(2);
+  });
+
+  it('…but an adopted turn ended on purpose (/agents stop, an eviction) wakes nothing', async () => {
+    for (const end of [(s) => s.pool.interrupt(KEY, { graceMs: 10 }), (s) => s.pool.evict(KEY)]) {
+      const w = world();
+      const one = w.spine();
+      await run(one, 'hola');
+      const claude = w.spawns[0].child;
+      claude.holdNext = true;
+      run(one, 'revisa el sitio', { model: 'sonnet', sessionId: 'sess-1' }).catch(() => {});
+      await flush();
+      one.pair.drop();
+      const two = w.spine();
+      await two.adoptAll();
+      await end(two);
+      await flush();
+      expect(two.woken).toEqual([]);
+    }
   });
 });

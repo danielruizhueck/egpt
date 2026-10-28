@@ -4,20 +4,22 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { AUTO_MODES, mentionHits, mentionHitsAnywhere, mentionStatus, replyAllowed, receives, isAutoMode, DEFAULT_AUTO_MODE, mayEmit, mayEmitChat, isSilenceReply, fanOutDecision } from '../src/auto-mode.mjs';
 
+const EW = ['e', 'egpt'];   // kg's wake set, passed explicitly (no default list)
+
 describe('mentionStatus', () => {
   it('detects @e as a standalone token, anywhere and at start', () => {
-    expect(mentionStatus('@e hello')).toEqual({ atEAnywhere: true, atEStart: true });
-    expect(mentionStatus('To @e my assistant')).toEqual({ atEAnywhere: true, atEStart: false });
-    expect(mentionStatus('@egpt do this')).toEqual({ atEAnywhere: true, atEStart: true });
+    expect(mentionStatus('@e hello', EW)).toEqual({ atEAnywhere: true, atEStart: true });
+    expect(mentionStatus('To @e my assistant', EW)).toEqual({ atEAnywhere: true, atEStart: false });
+    expect(mentionStatus('@egpt do this', EW)).toEqual({ atEAnywhere: true, atEStart: true });
   });
   it('does NOT match @e glued inside a word/email', () => {
-    expect(mentionStatus('me@e.com')).toEqual({ atEAnywhere: false, atEStart: false });
-    expect(mentionStatus('write to me@e.com please')).toEqual({ atEAnywhere: false, atEStart: false });
-    expect(mentionStatus('hey@egpt')).toEqual({ atEAnywhere: false, atEStart: false });
-    expect(mentionStatus('email')).toEqual({ atEAnywhere: false, atEStart: false });
+    expect(mentionStatus('me@e.com', EW)).toEqual({ atEAnywhere: false, atEStart: false });
+    expect(mentionStatus('write to me@e.com please', EW)).toEqual({ atEAnywhere: false, atEStart: false });
+    expect(mentionStatus('hey@egpt', EW)).toEqual({ atEAnywhere: false, atEStart: false });
+    expect(mentionStatus('email', EW)).toEqual({ atEAnywhere: false, atEStart: false });
   });
   it('handles leading whitespace for atEStart', () => {
-    expect(mentionStatus('   @e hi').atEStart).toBe(true);
+    expect(mentionStatus('   @e hi', EW).atEStart).toBe(true);
   });
 
   // WAKE-WORD SET honors configured handles (operator 2026-07-07, DOLLY sleep-test bug):
@@ -36,9 +38,9 @@ describe('mentionStatus', () => {
     // @egpt must match 'egpt', not the shorter 'e' then stop (no false glue).
     expect(mentionStatus('hey@ed', wake)).toEqual({ atEAnywhere: false, atEStart: false });
   });
-  it('an empty/absent wake set falls back to the network default e/egpt', () => {
-    expect(mentionStatus('@e hi', [])).toEqual({ atEAnywhere: true, atEStart: true });
-    expect(mentionStatus('@ed hi', [])).toEqual({ atEAnywhere: false, atEStart: false });   // no handles → @ed does not wake
+  it('an empty/absent wake set matches nothing (no default agent)', () => {
+    expect(mentionStatus('@e hi', [])).toEqual({ atEAnywhere: false, atEStart: false });
+    expect(mentionStatus('@e hi')).toEqual({ atEAnywhere: false, atEStart: false });
   });
 
   // ONE MATCHER (operator 2026-07-25): mentionStatus and the AGENT matcher (spine/router.mjs
@@ -47,14 +49,14 @@ describe('mentionStatus', () => {
   // token, not @egpt — which is what the router's `@([a-z0-9_-]+)` capture always meant (it
   // resolved `don-local` whole) and what tests/room.test.mjs already locks for the room router.
   // Agent names carry hyphens (`don-local`), so a plain \b here would let `@don-x` wake `don`.
-  it('a hyphen does not break a token: @egpt-bot / @e-bot are their OWN tokens, not the persona', () => {
-    expect(mentionStatus('@egpt-bot hi')).toEqual({ atEAnywhere: false, atEStart: false });
-    expect(mentionStatus('@e-bot hi')).toEqual({ atEAnywhere: false, atEStart: false });
-    expect(mentionStatus('@e-bot and @e hi')).toEqual({ atEAnywhere: true, atEStart: false });   // the real @e still wakes
+  it('a hyphen does not break a token: @egpt-bot / @e-bot are their OWN tokens, not e/egpt', () => {
+    expect(mentionStatus('@egpt-bot hi', EW)).toEqual({ atEAnywhere: false, atEStart: false });
+    expect(mentionStatus('@e-bot hi', EW)).toEqual({ atEAnywhere: false, atEStart: false });
+    expect(mentionStatus('@e-bot and @e hi', EW)).toEqual({ atEAnywhere: true, atEStart: false });   // the real @e still wakes
   });
 
-  it('a DOT is still a boundary: the qualified @e.kg form wakes the persona', () => {
-    expect(mentionStatus('@e.kg hola')).toEqual({ atEAnywhere: true, atEStart: true });
+  it('a DOT is still a boundary: the qualified @e.kg form wakes e', () => {
+    expect(mentionStatus('@e.kg hola', EW)).toEqual({ atEAnywhere: true, atEStart: true });
   });
 
   // Real bug (operator 2026-07-24): /status emits a fenced ```yaml block whose
@@ -69,22 +71,22 @@ describe('mentionStatus', () => {
         'version: refactor(bridge): @e voice-note transcript reuses transcript.md',
         '```',
       ].join('\n');
-      expect(mentionStatus(text)).toEqual({ atEAnywhere: false, atEStart: false });
+      expect(mentionStatus(text, EW)).toEqual({ atEAnywhere: false, atEStart: false });
     });
     it('an @e inside inline code does not wake', () => {
-      expect(mentionStatus('use `@e` to mention')).toEqual({ atEAnywhere: false, atEStart: false });
+      expect(mentionStatus('use `@e` to mention', EW)).toEqual({ atEAnywhere: false, atEStart: false });
     });
     it('an UNCLOSED fenced block strips to end-of-text — an @e after it is not detected', () => {
       const text = 'before the fence\n```\nsome code @e trailing, never closed';
-      expect(mentionStatus(text)).toEqual({ atEAnywhere: false, atEStart: false });
+      expect(mentionStatus(text, EW)).toEqual({ atEAnywhere: false, atEStart: false });
     });
     // Regression: a genuine @e OUTSIDE any code region still wakes normally.
     it('a real @e outside code regions still wakes (regression)', () => {
-      expect(mentionStatus('@e hello')).toEqual({ atEAnywhere: true, atEStart: true });
-      expect(mentionStatus('please @e look')).toEqual({ atEAnywhere: true, atEStart: false });
-      expect(mentionStatus('@egpt hi')).toEqual({ atEAnywhere: true, atEStart: true });
-      expect(mentionStatus('me@e.com')).toEqual({ atEAnywhere: false, atEStart: false });
-      expect(mentionStatus('hey@egpt')).toEqual({ atEAnywhere: false, atEStart: false });
+      expect(mentionStatus('@e hello', EW)).toEqual({ atEAnywhere: true, atEStart: true });
+      expect(mentionStatus('please @e look', EW)).toEqual({ atEAnywhere: true, atEStart: false });
+      expect(mentionStatus('@egpt hi', EW)).toEqual({ atEAnywhere: true, atEStart: true });
+      expect(mentionStatus('me@e.com', EW)).toEqual({ atEAnywhere: false, atEStart: false });
+      expect(mentionStatus('hey@egpt', EW)).toEqual({ atEAnywhere: false, atEStart: false });
     });
     it('custom wakeWords: a fenced @ed does not wake, but a live @ed does', () => {
       const wake = ['ed', 'egptd'];
@@ -107,7 +109,7 @@ describe('mentionStatus', () => {
         '',
         'agarra el spine de kg que reconoce a e',
       ].join('\n');
-      expect(mentionStatus(text)).toEqual({ atEAnywhere: false, atEStart: false });
+      expect(mentionStatus(text, EW)).toEqual({ atEAnywhere: false, atEStart: false });
     });
   });
 });
@@ -436,6 +438,7 @@ describe('mentionStatus({ voiceWake }) — a spoken alias wakes only at the STAR
   });
 });
 
+// contract 6.2
 describe('replyAllowed', () => {
   const M = (o) => ({ atEStart: false, atEAnywhere: false, replyToBot: false, ...o });
   it('on always allows (personality decides downstream)', () => {
@@ -503,7 +506,7 @@ describe('receives / isAutoMode', () => {
 describe('mention-direct gate is immune to the @e-routing rewrite', () => {
   // Minimal model of the bridge's at_e_anywhere expansion.
   const routeRewrite = (body) =>
-    (!/^@\S/.test(body) && mentionStatus(body).atEAnywhere) ? `@e ${body}` : body;
+    (!/^@\S/.test(body) && mentionStatus(body, EW).atEAnywhere) ? `@e ${body}` : body;
 
   it('mid-body @e routes to @e but does NOT open mention-direct', () => {
     const original = 'hello @e are you up?';
@@ -511,18 +514,18 @@ describe('mention-direct gate is immune to the @e-routing rewrite', () => {
     expect(routed).toBe('@e hello @e are you up?');     // routing prepends for parseInput
 
     // WRONG (the bug): gate computed on the rewritten body → false-positive start.
-    expect(mentionStatus(routed).atEStart).toBe(true);
+    expect(mentionStatus(routed, EW).atEStart).toBe(true);
 
     // RIGHT: gate computed on the original body → mention-direct stays closed,
     // mention still fires (the @e is genuinely present, just not at the start).
-    const gate = mentionStatus(original);
+    const gate = mentionStatus(original, EW);
     expect(gate).toEqual({ atEAnywhere: true, atEStart: false });
     expect(replyAllowed('mention-direct', gate)).toBe(false);
     expect(replyAllowed('mention', gate)).toBe(true);
   });
 
   it('genuine @e-at-start opens both mention and mention-direct', () => {
-    const gate = mentionStatus('@e ping');
+    const gate = mentionStatus('@e ping', EW);
     expect(replyAllowed('mention-direct', gate)).toBe(true);
     expect(replyAllowed('mention', gate)).toBe(true);
   });
@@ -576,6 +579,7 @@ describe('fanOutDecision — single record-always / gate-on-mode chokepoint', ()
 });
 
 describe('mayEmit — outbound backstop', () => {
+  // contract 6.3
   it('HARD-blocks mute/off even when replyAllowed is (wrongly) true', () => {
     expect(mayEmit('mute', { replyAllowed: true })).toBe(false);
     expect(mayEmit('off',  { replyAllowed: true })).toBe(false);
@@ -618,6 +622,7 @@ describe('mayEmit — outbound backstop', () => {
 // it here guards against its silent removal. The wrapper delegates to this fn,
 // so this IS the real gate, pause included — not a parallel copy.
 describe('mayEmitChat — global pause kill over the mode gate', () => {
+  // contract 6.3
   it('paused BLOCKS every mode — even on, even with replyAllowed', () => {
     expect(mayEmitChat({ paused: true, mode: 'on' })).toBe(false);
     expect(mayEmitChat({ paused: true, mode: 'on', replyAllowed: true })).toBe(false);
@@ -636,6 +641,7 @@ describe('mayEmitChat — global pause kill over the mode gate', () => {
       }
     }
   });
+  // contract 6.1
   it('defaults are fail-safe (no args → no emit)', () => {
     expect(mayEmitChat()).toBe(false);                       // no mode, not paused → mayEmit(undefined) → false
     expect(mayEmitChat({ mode: 'mention' })).toBe(false);    // mention w/o replyAllowed → fails closed

@@ -127,6 +127,7 @@ function memIo() {
 }
 
 describe('boot()', () => {
+  // contract 1.1
   it("assembles the v1 pipe and round-trips an 'on'-mode message bridge→brain→bridge", async () => {
     const { start, spy } = fakeStart();
     let state = seedMode(emptyState(), 'on');
@@ -232,6 +233,8 @@ describe('boot()', () => {
     app.stop();
   });
 
+  // contract 2
+  // contract 13.2
   it('registers the alive beat as a spawned command: spine.pid written, immediate first beat on tick, cadence honored, env carries EGPT_HOME + pump stats', async () => {
     const { start } = fakeStart();
     let state = seedMode(emptyState(), 'on');
@@ -455,7 +458,7 @@ describe('boot() — heartbeats/: a being\'s own beats, end to end', () => {
 // (token / wakeWords / echoDecider / echoMaxAgeMs / isAllowedUser) and app.peerNodes.
 describe('boot() — config-shape migration', () => {
   const AG = { egpt: { configuration: 'egpt', handles: ['e', 'egpt'], default: true } };
-  async function captureBoot(config) {
+  async function captureBoot(config, { state = null } = {}) {
     let opts = null;
     // optsList: EVERY startBridge call, in order (operator 2026-08-30, multi-connection Beeper —
     // boot now calls startBridge once per DISTINCT resolved token, not always once). `opts`
@@ -471,7 +474,7 @@ describe('boot() — config-shape migration', () => {
       // refuses to start without one), so the helper supplies a default; a case that cares about
       // the node name still sets its own, which the spread keeps.
       readConfig: () => ({ node_name: 'kg', ...config }), startBridge: start, makeSession: fakeSession,
-      loadState: async () => emptyState(), writeState: async () => {},
+      loadState: async () => state ?? emptyState(), writeState: async () => {},
       io: memIo(), ingest: false, tickMs: 0, log: { line: () => {} },
     });
     return { opts, optsList, app };
@@ -656,12 +659,13 @@ describe('boot() — config-shape migration', () => {
       chatId: '!rodz-view:beeper.com', chatName: 'famR', network: 'whatsapp',
       userId: 'u-1', senderName: 'An', authorized: true, msgKey: 'mR2',
     });
-    expect(rodzSpy.streams).toHaveLength(2);
-    expect(rodzSpy.streams[1].finals[0]).toContain('hola');
-    expect(rodzSpy.streams[1].chatId).toBe('!rodz-view:beeper.com');
+    // Two more streams: rodz (named) and egpt (on in this chat answers every line, 2026-10-23).
+    expect(rodzSpy.streams).toHaveLength(3);
+    expect(rodzSpy.streams.slice(1).every((s) => s.chatId === '!rodz-view:beeper.com' && s.finals[0].includes('hola'))).toBe(true);
     app.stop();
   });
 
+  // contract 7.1
   it('networks: wrapper — per-surface allowed_users; chat_ids is a LIST (self-DM = first)', async () => {
     const { opts, app } = await captureBoot({ agents: AG, networks: {
       whatsapp: { chat_ids: ['self-1', 'self-2'], allowed_users: ['op@wa'] },
@@ -670,6 +674,22 @@ describe('boot() — config-shape migration', () => {
     expect(opts.isAllowedUser('op@wa', 'whatsapp')).toBe(true);
     expect(opts.isAllowedUser('op@tg', 'telegram')).toBe(true);
     expect(opts.isAllowedUser('op@tg', 'whatsapp')).toBe(false);   // per-surface namespace, not shared
+    app.stop();
+  });
+
+  // ONE OWNER LIST (operator 2026-10-26): commands read networks.<surface>.allowed_users when set,
+  // else the node's conversation_defaults.allowed_users — ids of any network, mixed.
+  // contract 7.1
+  it('commands follow the node owner list; networks.<surface>.allowed_users replaces it on that surface', async () => {
+    const { opts, app } = await captureBoot({ agents: AG, conversation_defaults: { allowed_users: ['op@any', '*'] }, networks: {
+      whatsapp: { chat_ids: ['self-1'] },
+      telegram: { chat_ids: [], allowed_users: ['op@tg'] },
+    } });
+    expect(opts.isAllowedUser('op@any', 'whatsapp')).toBe(true);     // no list here: the node's
+    expect(opts.isAllowedUser('op@any', 'googlevoice')).toBe(true);  // no block at all: the node's
+    expect(opts.isAllowedUser('op@any', 'telegram')).toBe(false);    // this surface's own list wins
+    expect(opts.isAllowedUser('op@tg', 'telegram')).toBe(true);
+    expect(opts.isAllowedUser('stranger', 'whatsapp')).toBe(false);  // "*" names nobody here
     app.stop();
   });
 
@@ -684,6 +704,7 @@ describe('boot() — config-shape migration', () => {
   // must NOT fall back to whatsapp's list. surfaceCfg resolves an absent block to {} →
   // allowed_users [] → isAllowedUser denies EVERYONE, fail-closed by default (this is intended,
   // not a bug: authorizing a new surface is an explicit config step).
+  // contract 7.1
   it('a brand-new surface with no networks.<surface> block denies everyone by default (fail-closed)', async () => {
     const { opts, app } = await captureBoot({ agents: AG, networks: {
       whatsapp: { chat_ids: ['self-1'], allowed_users: ['op@wa'] },
@@ -703,25 +724,47 @@ describe('boot() — config-shape migration', () => {
     normal.app.stop();
   });
 
-  // THE REPLY GATE'S OWN LIST (operator 2026-09-01). The beeper limb's bare-reply gate — reply
-  // with nothing but a wake token to read that message back — is a DIFFERENT consumer from the
-  // mention gate, so it gets its own list: the persona's wake tokens ∪ the persona's OWN
-  // fallback_handle tokens. `wakeWords` is deliberately NOT widened: it feeds atE, computed
-  // BEFORE any membership guard exists to say otherwise, which is the two-spines-answer-one-
-  // mention bug the fallback exists to prevent (src/spine/router.mjs).
-  it('replyWakeWords = the persona\'s handles ∪ its fallback tokens; wakeWords stays the DECLARED handles alone', async () => {
-    const kg = await captureBoot({ agents: { egpt: { configuration: 'egpt', handles: ['ekg', 'egptkg'], fallback_handle: { handle: ['e', 'egpt'], unless_present: '+13472576794' }, default: true } } });
-    expect([...kg.opts.wakeWords].sort()).toEqual(['egptkg', 'ekg']);                       // the MENTION path — untouched
-    expect([...kg.opts.replyWakeWords].sort()).toEqual(['e', 'egpt', 'egptkg', 'ekg']);     // the REPLY gate — wider
+  // THE NODE'S WAKE SET (2026-10-22): every agent's declared handles ∪ its fallback tokens — the
+  // limbs' own mention flag only (atE no longer routes anything; the router decides who answers).
+  it('wakeWords = every agent\'s declared handles ∪ its fallback tokens; a half-written fallback adds nothing', async () => {
+    const kg = await captureBoot({ agents: { egpt: { configuration: 'egpt', handles: ['ekg', 'egptkg'], fallback_handle: { handle: ['e', 'egpt'], unless_present: '+13472576794' } } } });
+    expect([...kg.opts.wakeWords].sort()).toEqual(['e', 'egpt', 'egptkg', 'ekg']);
     kg.app.stop();
-    // A HALF-WRITTEN fallback is ignored here exactly as the router ignores it (fallbackWake).
-    const half = await captureBoot({ agents: { egpt: { configuration: 'egpt', handles: ['ekg'], fallback_handle: { handle: ['e'] }, default: true } } });
-    expect(half.opts.replyWakeWords).toEqual(['ekg']);
+    const half = await captureBoot({ agents: { egpt: { configuration: 'egpt', handles: ['ekg'], fallback_handle: { handle: ['e'] } } } });
+    expect(half.opts.wakeWords).toEqual(['ekg']);
     half.app.stop();
-    // …and a persona with NO fallback hands the two lists identical — byte-identical to before.
-    const plain = await captureBoot({ agents: AG });
-    expect([...plain.opts.replyWakeWords].sort()).toEqual([...plain.opts.wakeWords].sort());
-    plain.app.stop();
+  });
+
+  // THE BARE-REPLY READBACK'S LIST (operator 2026-10-23: the readback stays): every LOCAL being's
+  // wake, fallback and voice tokens — not a relay's, which names a being on another node.
+  // contract 8.4
+  it('replyWakeWords = every local being\'s wake + fallback + voice tokens; a relay contributes none', async () => {
+    const r = await captureBoot({ agents: {
+      egpt: { configuration: 'egpt', handles: ['ekg'], fallback_handle: { handle: ['e'], unless_present: '+13472576794' } },
+      wren: { configuration: 'egpt', handles: ['w'], voice_handles: ['ren'] },
+      don: { relay_channel: '!relay:beeper.local', handles: ['d'] },
+    } });
+    expect([...r.opts.replyWakeWords].sort()).toEqual(['e', 'ekg', 'ren', 'w']);
+    r.app.stop();
+  });
+
+  // PER-CHAT HANDLES (operator 2026-10-24): a chat whose entry sets agents.<being>.handles gets its
+  // own three sets through wakeWordsIn (router.mjs agentsInChat); every other chat gets null.
+  // contract 8.4
+  it('wakeWordsIn: the override chat\'s sets drop `e` (declared AND fallback) and keep `ekg`; any other chat → null', async () => {
+    const state = { contacts: { telegram: { 'team-tg': { slug: 'team', agents: { egpt: { handles: ['ekg'] } } } } } };
+    const r = await captureBoot({ agents: {
+      egpt: { configuration: 'egpt', handles: ['egpt', 'ekg'], fallback_handle: { handle: ['e'], unless_present: '+13472576794' }, voice_handles: ['perro'] },
+      wren: { configuration: 'egpt', handles: ['w'] },
+    } }, { state });
+    const here = await r.opts.wakeWordsIn('telegram', 'team-tg');
+    expect([...here.wakeWords].sort()).toEqual(['ekg', 'w']);
+    expect([...here.replyWakeWords].sort()).toEqual(['ekg', 'perro', 'w']);   // voice_handles stay node-wide
+    expect(here.voiceWakeWords).toEqual(['perro']);
+    expect(await r.opts.wakeWordsIn('telegram', 'other-chat')).toBeNull();
+    expect(await r.opts.wakeWordsIn('whatsapp', 'team-tg')).toBeNull();      // the entry is per surface
+    expect([...r.opts.replyWakeWords].sort()).toEqual(['e', 'egpt', 'ekg', 'perro', 'w']);   // the node sets are untouched
+    r.app.stop();
   });
 
   // 👂 ECHO — REAL HRW ON A NODE-STABLE AUDIO HASH + ORDERED FAILOVER (operator 2026-07-24; revives HRW
@@ -1374,44 +1417,45 @@ describe('boot() — transcriptor worker role', () => {
   });
 });
 
-// PERSONA = `default: true` (operator 2026-07-10, agent-identity refactor): the persona is
-// the single default agent, resolved by the `default: true` marker — NOT hardcoded e/egpt.
-// boot is FATAL on zero or more-than-one default agent, and the persona's KEY becomes the
-// being-id (so a persona keyed `assistant` boots + wakes on its OWN handles, no e/egpt magic).
-describe('boot() — persona default:true rule', () => {
-  const bootWith = (agents) => {
-    const { start } = fakeStart();
-    return boot({
-      readConfig: () => ({ whatsapp: {}, node_name: 'kg', agents }),
-      startBridge: start, makeSession: fakeSession,
-      loadState: async () => emptyState(), writeState: async () => {},
-      io: memIo(), ingest: false, tickMs: 0, log: { line: () => {} },
-    });
-  };
-
-  it('FATAL when NO agent carries default:true (was: any e/egpt handle)', async () => {
-    await expect(bootWith({ egpt: { configuration: 'egpt', handles: ['e', 'egpt'] } })).rejects.toThrow(/default: true/);
-  });
-
-  it('FATAL when MORE THAN ONE agent carries default:true', async () => {
-    await expect(bootWith({
-      egpt: { configuration: 'egpt', handles: ['e'], default: true },
-      alt:  { configuration: 'egpt', handles: ['a'], default: true },
-    })).rejects.toThrow(/exactly one/);
-  });
-
-  it('a persona keyed "assistant" (default:true, handles [a]) boots + wakes on its OWN handles, personaEmoji from IT (no e/egpt)', async () => {
+// NO DEFAULT AGENT (operator 2026-10-22): boot needs an agents map and nothing else of it.
+// `default:` is ignored (one log line per agent); an on/auto mode set for a being or for the node
+// is warned, because it applies in every chat; the limbs get EVERY agent's wake tokens.
+// contract 12.1
+describe('boot() — no default agent', () => {
+  const bootWith = async (agents, extra = {}) => {
+    const lines = [];
     let opts = null;
     const start = async (o) => { opts = o; return { async send() { return { ok: true }; }, startStreamMessage() { return { delivered: false, update() {}, async finish() {} }; }, isAlive: () => true, stop() {} }; };
     const app = await boot({
-      readConfig: () => ({ whatsapp: {}, node_name: 'kg', agents: { assistant: { configuration: 'egpt', handles: ['a'], body_emoji: '🤖', default: true } } }),
+      readConfig: () => ({ whatsapp: {}, node_name: 'kg', agents, ...extra }),
       startBridge: start, makeSession: fakeSession,
       loadState: async () => emptyState(), writeState: async () => {},
-      io: memIo(), ingest: false, tickMs: 0, log: { line: () => {} },
+      io: memIo(), ingest: false, tickMs: 0, log: { line: (l) => lines.push(l) },
     });
-    expect(opts.wakeWords.sort()).toEqual(['a']);                // the default agent's DECLARED handles — not its key, not e/egpt
-    expect(opts.personaEmoji).toBe('🤖');                        // resolved from the default agent's body_emoji
     app.stop();
+    return { lines, opts };
+  };
+
+  it('no agents block refuses to boot', async () => {
+    await expect(bootWith(undefined)).rejects.toThrow(/no agents block is a fatal misconfiguration/);
+  });
+
+  it('REPRODUCE-FIRST: boots with no `default: true` anywhere', async () => {
+    const { opts } = await bootWith({ egpt: { configuration: 'egpt', handles: ['e', 'egpt'] }, wren: { configuration: 'egpt', handles: ['w'] } });
+    expect(opts.wakeWords.sort()).toEqual(['e', 'egpt', 'w']);   // every agent's DECLARED handles
+    expect(opts).not.toHaveProperty('personaEmoji');
+  });
+
+  it('`default:` is ignored — two of them boot, one log line each', async () => {
+    const { lines } = await bootWith({ egpt: { configuration: 'egpt', handles: ['e'], default: true }, alt: { configuration: 'egpt', handles: ['a'], default: true } });
+    expect(lines.filter((l) => /agents\.(egpt|alt)\.default is ignored/.test(l))).toHaveLength(2);
+  });
+
+  it('a being-level or node-level on/auto mode is warned: it applies in every chat', async () => {
+    const { lines } = await bootWith({ egpt: { configuration: 'egpt', handles: ['e'], mode: 'on' }, ken: { configuration: 'egpt', handles: ['k'], mode: 'accum' } }, { dispatch: { auto_default_mode: 'auto' } });
+    expect(lines.some((l) => /WARNING agents\.egpt\.mode: on/.test(l))).toBe(true);
+    expect(lines.some((l) => /agents\.ken\.mode/.test(l))).toBe(false);
+    expect(lines.some((l) => /WARNING dispatch\.auto_default_mode: auto/.test(l))).toBe(true);
   });
 });
 

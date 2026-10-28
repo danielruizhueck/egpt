@@ -16,7 +16,7 @@ const _PRIVATE_HOME = vi.hoisted(() => {
 
 import { createServer } from 'node:http';
 import { WebSocketServer } from 'ws';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -46,6 +46,7 @@ import { createReplyActions } from '../src/spine/reply-actions.mjs';
 import { superChannelAlive } from '../src/spine/gating.mjs';
 import { startTranscriptorServer } from '../src/tools/transcriptor.mjs';
 import { startSynthesizerServer } from '../src/tools/synthesizer.mjs';
+import { freeSafeHttpPort } from './free-safe-http-port.mjs';
 
 const CHATS_PER_PAGE = 2;   // fake /v1/chats page size (live it's 25) — small so page 2 is readable
 
@@ -53,7 +54,7 @@ async function startFakeBeeper() {
   const posts = [];   // POSTs to /v1/chats/:id/messages — each records the CONFIRMED id it created
   let confirmedSeq = 1000;   // the per-chat sequence Beeper assigns; NEVER equal to the pending id
   const edits = [];   // PUTs to /v1/chats/:id/messages/:msgId (in-place stream edits)
-  const deletes = [];   // DELETEs to /v1/chats/:id/messages/:msgId (trigger cleanup, e.g. the text→voice mirror)
+  const deletes = [];   // DELETEs to /v1/chats/:id/messages/:msgId — must stay empty: nothing is ever deleted (operator 2026-10-27)
   const reactions = [];   // POSTs to /v1/chats/:id/messages/:msgId/reactions (E's react limb + the bridge's 🎧 ack)
   const unreactions = []; // DELETEs to /v1/chats/:id/messages/:msgId/reactions/:key (the 🎧 ack's own removal)
   // Fault injection for the 🎧 listening ack: a non-zero status makes the fake REFUSE that half of
@@ -222,7 +223,7 @@ async function startFakeBeeper() {
       res.statusCode = 404; res.end('{}');
     });
   });
-  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  await freeSafeHttpPort().then((p) => new Promise((r) => server.listen(p, '127.0.0.1', r)));
   const port = server.address().port;
   const wss = new WebSocketServer({ server, path: '/v1/ws' });
   const sockets = [];
@@ -338,6 +339,7 @@ async function startBridge(extra = {}) {
     transcribe: async () => 'fake transcript',
     onLog: (m) => { if (/failed|DROPPED|error/i.test(m)) console.error('[BRIDGELOG]', m); },
     postsBackDelayMs: 0,   // tests assert the 👂 gate synchronously; debounce timing is covered in incoming-media.test.mjs
+    wakeWords: EW,         // what boot hands a node whose beings answer to e/egpt (the bridge itself has no default)
     ...extra,
   });
   bridges.push(bridge);
@@ -375,6 +377,7 @@ function voiceAtt(bytes = 'fake-ogg-bytes', name = `voice-${Math.random().toStri
 // mirror that so the '!'-prefix fast path in name resolution is exercised
 // the same way as production.
 const CHAT = (n) => `!${n}:beeper.local`;
+const EW = ['e', 'egpt'];   // a node's wake set, as boot passes it (the bridge has no default)
 const liveMsg = (over = {}) => ({
   id: `m-${Math.random().toString(36).slice(2)}`,
   chatID: CHAT('chat-1'),
@@ -386,8 +389,9 @@ const liveMsg = (over = {}) => ({
 });
 
 describe('beeper bridge', () => {
+  // contract 7.2
   it('dispatches a live message; authorized mirrors isSender', async () => {
-    const { incoming } = await startBridge();
+    const { incoming } = await startBridge({ wakeWords: EW });
     fake.emit({ type: 'message.upserted', entries: [liveMsg({ isSender: false, senderName: 'Bea' })] });
     fake.emit({ type: 'message.upserted', entries: [liveMsg({ text: '@e hola' })] });
     await waitFor(() => incoming.length === 2);
@@ -459,6 +463,7 @@ describe('beeper bridge', () => {
   // one ordinary reply count as a whole burst against the loop guard. (2) A frame must not
   // advance the diff BASELINE, or the settle — the one entry that IS kept — reads against the
   // last PARTIAL instead of against the placeholder.
+  // contract 6.5
   it("a PEER's live stream frames are ONE message, diffed placeholder → settled", async () => {
     const { incoming } = await startBridge();
     const id = `${Math.floor(Math.random() * 1e6)}`;
@@ -496,6 +501,7 @@ describe('beeper bridge', () => {
   // 2026-10-13 it is no longer DROPPED at the bridge (that blocked a same-node sibling's @mention):
   // it reaches onIncoming marked `from.fromNode` (this node) so the SPINE's per-being echo gate
   // suppresses the wake. Marking works for a reply even WITHOUT the persona emoji.
+  // contract 7.3
   it("marks E's own re-ingested reply as own output (from.fromNode) — even one that does NOT lead with the persona emoji", async () => {
     const { bridge, incoming } = await startBridge({ nodeName: 'kg' });
     await sendSettled(bridge, '🐶 egpt: roger', { chatId: CHAT('chat-1') });        // resolves + remembers its confirmed id
@@ -522,6 +528,7 @@ describe('beeper bridge', () => {
     expect(incoming[0].text).toBe('te entiendo **An**, mira [aquí](https://x.com/p)');
   });
 
+  // contract 7.2
   it('authorizes a non-isSender message when its senderID is allow-listed', async () => {
     // Beeper does not reliably tag the owner's own sends as isSender (fails even
     // on Self, operator 2026-06-16), so the bridge must authorize from the
@@ -644,6 +651,7 @@ describe('beeper bridge', () => {
   // IS the saved label, no separate pushName exists), the sender falls back to a
   // NON-PRIVATE id: the phone number from the WhatsApp jid. The label appears NOWHERE
   // in the sender identity (senderName / firstName / username all leak-safe).
+  // contract 4.4
   it('NEVER falls back to the operator\'s contact-list label — uses the phone/id instead', async () => {
     const { incoming } = await startBridge();
     fake.emit({ type: 'message.upserted', entries: [liveMsg({
@@ -727,6 +735,8 @@ describe('beeper bridge', () => {
 
   // CONTRACT C2 (the regression): a voice note must be transcribed AND its file
   // handed to onMedia — not transcribed-then-dropped.
+  // contract 8.3
+  // contract 9.1
   it('a voice note is transcribed AND its file handed to onMedia (caption = transcript)', async () => {
     const { incoming, media } = await startBridge();
     const att = fakeAttachment({ name: 'ptt.ogg', mimeType: 'audio/ogg', isVoiceNote: true });
@@ -755,6 +765,7 @@ describe('beeper bridge', () => {
     const hung = new Promise((r) => { release = r; });
     let started = 0;
     const { incoming } = await startBridge({
+      wakeWords: EW,
       transcribe: async () => { started += 1; await hung; return 'fake transcript'; },
     });
     fake.emit({ type: 'message.upserted', entries: [liveMsg({
@@ -849,6 +860,8 @@ describe('beeper bridge', () => {
   // ROUTE A (operator 2026-06-16): a video is handed to E with keyframes (Read
   // them) + the audio transcript — onMedia (the host) returns the augmented
   // descriptor; the bridge announces frames + transcript on the dispatch line.
+  // contract 4.3
+  // contract 8.5
   it('a video surfaces host-extracted frames + the audio transcript to the model', async () => {
     const { incoming } = await startBridge({
       onMedia: async () => ({ savedPath: '/m/clip.mp4', framePaths: ['/m/clip-frame-01.jpg', '/m/clip-frame-02.jpg'], transcript: 'hola desde el video' }),
@@ -896,6 +909,7 @@ describe('beeper bridge', () => {
     expect(media).toHaveLength(0);
   });
 
+  // contract 8.1
   it('"images_docs" saves an image but skips audio', async () => {
     const { media } = await startBridge({ media: { download: 'images_docs' } });
     fake.emit({ type: 'message.upserted', entries: [liveMsg({ type: 'IMAGE', text: null, attachments: [fakeAttachment({ name: 'a.jpg', mimeType: 'image/jpeg' })] })] });
@@ -910,7 +924,7 @@ describe('beeper bridge', () => {
     // persona-marker guard cannot catch its echo; the sent-id set IS the own-output
     // key. The operator's OWN typed line is isSender too but was never sent by us, so
     // it is NOT marked and reaches the host to accumulate.
-    const { bridge, incoming } = await startBridge({ nodeName: 'kg' });   // NO personaEmoji — auto sends carry none
+    const { bridge, incoming } = await startBridge({ nodeName: 'kg' });
     await sendSettled(bridge, 'all good, talk soon', { chatId: CHAT('chat-1') });
     fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: fake.posts[0].confirmedID, isSender: true, text: 'all good, talk soon' })] });   // E's reply, echoed back under its real id
     fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: 'op-id', isSender: true, text: 'note for later' })] });                          // operator's OWN typed message
@@ -1619,6 +1633,7 @@ describe('beeper bridge', () => {
     expect(incoming[0].text).toBe('wa-instance');
   });
 
+  // contract 4.1
   it('default network scope is OPEN ([]): EVERY network is processed (Beeper is the transport; network is metadata, not a gate)', async () => {
     fake.chats.set(CHAT('chat-unknown'), { title: 'X', type: 'single', isMuted: false, accountID: null });
     fake.chats.set(CHAT('chat-telegram'), { title: 'T', type: 'single', isMuted: false, accountID: 'telegram' });
@@ -1912,6 +1927,7 @@ describe('beeper bridge — /v1/chats cursor pagination', () => {
 // host-facing (onIncoming's `from`, onMedia, listChats, getChatName/getChatSlug)
 // sees short ids only; every fake.posts[*].chatID (what actually hit the API) is
 // the full form.
+// contract 4.5
 describe('beeper bridge — short-id boundary', () => {
   it('onIncoming/from.chatId is the SHORT id, never the wire\'s full Matrix form', async () => {
     const { incoming } = await startBridge();
@@ -1938,6 +1954,17 @@ describe('beeper bridge — short-id boundary', () => {
     expect(r?.ok).toBe(true);
     expect(r.chatId).toBe('chat-1');                            // normalized down for the caller
     expect(fake.posts[0].chatID).toBe(CHAT('chat-1'));           // still expands to full for the API
+  });
+});
+
+// Telegram HTML is the Telegram limb's alone (md-to-tg-html.mjs); a Beeper send is never converted.
+describe('beeper bridge — Markdown leaves as written', () => {
+  it('a send with **bold**, `code` and <b> is byte-identical on the wire', async () => {
+    const { bridge } = await startBridge();
+    const text = '**bold** _it_ `code` <b>x</b> a & b';
+    expect((await sendSettled(bridge, text, { chatId: CHAT('chat-1') }))?.ok).toBe(true);
+    expect(fake.posts[0].text).toBe(text);
+    expect(fake.posts[0].parse_mode).toBeUndefined();
   });
 });
 
@@ -2031,8 +2058,8 @@ describe('beeper bridge — wake words (own handles only, no injection)', () => 
     expect(m.from.atEAnywhere).toBe(false);   // pre-2026-07-09: true, via the removed network-wide injection
   });
 
-  it('a node with handles [e, egpt] still wakes on @e (default wake set)', async () => {
-    const { incoming } = await startBridge();   // default wakeWords e/egpt
+  it('a node with handles [e, egpt] still wakes on @e', async () => {
+    const { incoming } = await startBridge({ wakeWords: EW });
     fake.emit({ type: 'message.upserted', entries: [liveMsg({ isSender: false, senderName: 'Bea', text: '@e estás?' })] });
     await waitFor(() => incoming.length === 1);
     expect(incoming[0].from.atEAnywhere).toBe(true);
@@ -2142,8 +2169,8 @@ describe('beeper bridge — a picker @-mention addresses only when it names the 
 });
 
 // ── A REACTION FROM AN ACCOUNT WE SPEAK THROUGH IS OUR OWN OUTPUT (live, kg, 2026-10-10) ──
-// "eGPT Rodz Lulu An", mode on: E steered the operator's #26445 into its live turn and acked it 📩 then
-// 👀 through the mouth. Both came back on the PRIMARY as reactions by Rodz's lid, read as a human, and
+// "eGPT Rodz Lulu An", mode on: E steered the operator's #26445 into its live turn and acked it ✍️ then
+// 👍 through the mouth. Both came back on the PRIMARY as reactions by Rodz's lid, read as a human, and
 // each queued a turn ("⏳ Queued (1 ahead)…", "(2 ahead)…"). Payloads below are the live ones.
 describe('beeper bridge — a reaction placed by an account this node speaks through wakes nobody', () => {
   const RODZ_LID = '@whatsapp_lid-69433129173200:beeper.local';
@@ -2165,11 +2192,11 @@ describe('beeper bridge — a reaction placed by an account this node speaks thr
     const spine = createSpine({
       bridge: { onMessage() {}, send() {}, stop() {}, wasSentByUs: () => false },
       brain, identity: createIdentity({ now: () => 1000 }), router: { resolve: () => 'e' },
-      gating: { async decide() { return { mode: 'on', receives: true, mayReply: true, sendToEgpt: 'mode' }; }, surfaces: () => true },
+      gating: { async decide() { return { mode: 'on', receives: true, mayReply: true }; }, surfaces: () => true },
       sender: { open(chatId, o) { opens.push(o); return { activate() {}, update() {}, async finish() {}, fail() {} }; } },
       transcript: { async log(ev, reply) { if (reply == null) recorded.push(ev); } }, heartbeats: { runDue() {} },
       mesh: { isEnvelope: () => false, async handle() {} },
-      fromThisNode, isSelfChat: () => false, clock: { now: () => 1000 }, defaultBeing: 'e', log: { line: (s) => notes.push(s) },
+      fromThisNode, isSelfChat: () => false, clock: { now: () => 1000 }, log: { line: (s) => notes.push(s) },
     });
     const feed = (body, from) => { fed.push(from); pending.push(spine.handleInbound({ body, from })); };
     return { brain, opens, notes, fed, recorded, feed, release, settled: () => Promise.all(pending) };
@@ -2178,14 +2205,14 @@ describe('beeper bridge — a reaction placed by an account this node speaks thr
   const dropped = (logs) => logs.some((l) => /a mouth's own — dropped/.test(l));
 
   // A being's reaction is OUTPUT (operator 2026-10-18): it never re-enters, not even as a record.
-  it('REPRODUCE: the mouth\'s 📩 steer-ack on the operator\'s message never reaches the spine — no turn, no ingestion line', async () => {
+  it('REPRODUCE: the mouth\'s ✍️ steer-ack on the operator\'s message never reaches the spine — no turn, no ingestion line', async () => {
     roster([{ id: '@anrodriguez:beeper.com', isSelf: true }, { id: RODZ_LID, phoneNumber: '+13472576794', fullName: 'Rodz' }]);
     const s = onSpine();
     const logs = [];
     await startBridge({ nodeName: 'kg', speakingIdentities: async () => MOUTH, earIdentities: async () => EAR, onIncoming: s.feed, onLog: (m) => logs.push(m) });
     fake.emit({ type: 'message.upserted', entries: [opMsg()] });
     await waitFor(() => s.brain.calls.length === 1);   // E's turn on #26445 is live
-    fake.emit({ type: 'message.upserted', entries: [reacted(opMsg(), RODZ_LID, '📩')] });
+    fake.emit({ type: 'message.upserted', entries: [reacted(opMsg(), RODZ_LID, '✍️')] });
     await waitFor(() => dropped(logs));
     s.release();
     await s.settled();
@@ -2203,7 +2230,7 @@ describe('beeper bridge — a reaction placed by an account this node speaks thr
     const msg = opMsg({ id: '10006', senderID: '@whatsapp_lid-1:beeper.local', isSender: false });
     fake.emit({ type: 'message.upserted', entries: [msg] });
     await waitFor(() => s.brain.calls.length === 1);
-    fake.emit({ type: 'message.upserted', entries: [reacted(msg, '@dolly-egpt:beeper.com', '👀')] });
+    fake.emit({ type: 'message.upserted', entries: [reacted(msg, '@dolly-egpt:beeper.com', '👍')] });
     await waitFor(() => dropped(logs));
     expect(s.fed.filter((f) => f.isReaction)).toEqual([]);
     expect(s.opens).toHaveLength(1);
@@ -2300,7 +2327,7 @@ describe('beeper bridge — an outbound `@Nombre` leaves as a real mention of th
     logs = [];
     fake.chats.set(GRP, { title: 'Familia', type: 'group', isMuted: false, accountID: 'whatsapp', participants: ROSTER });
   });
-  const start = () => startBridge({ onLog: (m) => logs.push(m) });
+  const start = (extra = {}) => startBridge({ onLog: (m) => logs.push(m), ...extra });
   // What actually went over the wire, through the REAL send path (no private entry point).
   const sent = async (text, chatId = GRP) => {
     const { bridge } = await start();
@@ -2342,7 +2369,9 @@ describe('beeper bridge — an outbound `@Nombre` leaves as a real mention of th
   });
 
   it('a name this node WAKES ON addresses the being, never the human of that name in the chat', async () => {
-    expect(await sent('@e responde tú')).toBe('@e responde tú');   // wakeWords default ['e','egpt']; "E" is also a human here
+    const { bridge } = await start({ wakeWords: EW });   // "E" is also a human here
+    await sendSettled(bridge, '@e responde tú', { chatId: GRP });
+    expect(fake.posts.at(-1).text).toBe('@e responde tú');
     expect(logs.join('\n')).toMatch(/"@e" stays plain text .*wakes on that handle/);
   });
 
@@ -2671,8 +2700,8 @@ describe('beeper bridge — a quote-reply to a being\'s post names that being (o
   it('END TO END: the arrival, the envelope, the router and the gate wake E — and ken, in a mention-direct chat', async () => {
     const { incoming } = await startBridge({ nodeName: 'kg' });
     fake.messages.set(CHAT('chat-1'), [{ id: '7143', text: E_POST }, { id: '7150', text: KEN_POST }]);
-    const agents = { egpt: { handles: ['e', 'egpt'], default: true, name: 'E' }, ken: { handles: ['ken'], name: 'Ken' } };
-    const router = createRouter({ getAgents: () => agents, defaultBeing: 'egpt' });
+    const agents = { egpt: { handles: ['e', 'egpt'], name: 'E' }, ken: { handles: ['ken'], name: 'Ken' } };
+    const router = createRouter({ getAgents: () => agents });
     const identity = createIdentity();
     fake.emit(quoteReply('7143', 'a E'));
     fake.emit(quoteReply('7150', 'a Ken'));
@@ -2828,17 +2857,18 @@ describe('beeper bridge — a streamed reply finishes to exactly the frame it wa
     expect(fake.edits.map((e) => e.text)).toEqual(['🌉kg 🤝 don: hola ✅ 💸']);
   });
 
-  // A limb-only turn's placeholder (operator 2026-10-19): deleted by its confirmed id, in the room it opened in.
-  it('delete() removes the placeholder by its confirmed id in its own room; a finish after it edits nothing', async () => {
+  // A limb-only turn's placeholder (operator 2026-10-27, "nadie borra nunca nada"): the handle has no
+  // delete — the placeholder settles by an EDIT, by its confirmed id, in the room it opened in.
+  it('a stream has no delete: a limb-only placeholder is EDITED to ✓ by its confirmed id in its own room, never DELETEd', async () => {
     const chat = CHAT('chat-1');
     const { bridge } = await startBridge();
     const handle = bridge.startStreamMessage('⏳ Thinking…', { chatId: chat });
-    expect(await handle.delete()).toBe(true);
-    const placeholder = fake.posts.find((p) => p.text === '⏳ Thinking…');
-    expect(fake.deletes).toEqual([{ chatID: chat, messageID: placeholder.confirmedID }]);
-    expect(handle.confirmedId).toBe(null);
+    expect(handle.delete).toBeUndefined();
     await handle.finish('✓');
-    expect(fake.edits).toHaveLength(0);
+    const placeholder = fake.posts.find((p) => p.text === '⏳ Thinking…');
+    expect(fake.edits.map((e) => [e.chatID, e.messageID, e.text])).toEqual([[chat, placeholder.confirmedID, '✓']]);
+    expect(handle.confirmedId).toBe(placeholder.confirmedID);
+    expect(fake.deletes).toEqual([]);
   });
 });
 
@@ -2941,6 +2971,7 @@ describe('stale-twin placeholder landmine — pre-send id floor', () => {
   // THE KEY LOCK (operator 2026-07-20): the @e reply REUSES the note's already-made arrival
   // transcription from transcript.md and NEVER re-transcribes (the old branch downloaded the audio
   // and ran whisper a SECOND time — a wasteful double transcription this rework removes).
+  // contract 8.4
   it('a bare @e reply to a voice note REUSES the transcript.md text (👂 <text>) and calls transcribe ZERO times; E is NOT dispatched', async () => {
     const transcribe = countingTranscribe();
     const doc = transcriptDoc(voiceLine('vn-1', 'hola que tal'));
@@ -2988,6 +3019,7 @@ describe('stale-twin placeholder landmine — pre-send id floor', () => {
     expect(incoming.find((i) => i.from.msgKey === 'reply-miss').from.atEStart).toBe(true);   // a plain @e still wakes E
   });
 
+  // contract 8.4
   it('REGRESSION: a bare wake-word PLUS extra text (@e what did she say) replying to a voice note wakes E normally — NO substitution', async () => {
     const transcribe = countingTranscribe();
     const { incoming } = await startBridge({ readTranscript: async () => transcriptDoc(voiceLine('vn-2', 'hola')), transcribe });
@@ -3065,8 +3097,9 @@ describe('stale-twin placeholder landmine — pre-send id floor', () => {
   // 2026-08-10 to never touch the trigger). The above branch's exact counterpart for a quoted
   // TEXT entry instead of a voice one: no model turn, no new content — the quoted words,
   // verbatim, synthesized and sent as audio. Synthesis takes real time, so an immediate ACK
-  // ('🔊 reading…') — OUR OWN message — is posted first and deleted afterward; the trigger
-  // itself is never edited or deleted.
+  // ('🔊 reading…') — OUR OWN message — is posted first and EDITED afterward: to '🔊' above the
+  // audio, or to say it could not be read (operator 2026-10-27: nothing is ever deleted). The
+  // trigger itself is never edited or deleted.
   // Counts calls so a test can assert the quoted text reaches synthesize UNCHANGED.
   const countingSynthesize = (audio = Buffer.from('AUDIO')) => {
     const f = async (spokenText) => { f.calls++; f.lastText = spokenText; return audio; };
@@ -3074,7 +3107,8 @@ describe('stale-twin placeholder landmine — pre-send id floor', () => {
     return f;
   };
 
-  it('a bare @e reply to a TEXT message synthesizes it VERBATIM, sends it as audio, cleans up its own ack (never the trigger), and does NOT wake E', async () => {
+  // contract 8.4
+  it('a bare @e reply to a TEXT message synthesizes it VERBATIM, sends it as audio, EDITS its own ack to 🔊 (never the trigger, never a delete), and does NOT wake E', async () => {
     const synthesize = countingSynthesize();
     const doc = transcriptDoc(textLine('tn-audio', 'hello there'));
     const { incoming } = await startBridge({ readTranscript: async () => doc, synthesize, voice: 'ona' });
@@ -3088,9 +3122,9 @@ describe('stale-twin placeholder landmine — pre-send id floor', () => {
     const mediaPost = await waitFor(() => fake.posts.find((p) => p.attachment));   // the media POST is a SEPARATE call after the upload
     expect(mediaPost).toBeTruthy();                                           // the synthesized audio, sent as media
     expect(mediaPost.replyToMessageID).toBe('tn-audio');                      // …as a reply to the ORIGINAL quoted message (not the ack)
-    await waitFor(() => fake.deletes.some((d) => d.messageID === ack.confirmedID));   // our own ack IS deletable/deleted
-    expect(fake.edits).toHaveLength(0);
-    expect(fake.deletes.some((d) => d.messageID === 'reply-txt')).toBe(false);   // the TRIGGER is never touched
+    await waitFor(() => fake.edits.length > 0);
+    expect(fake.edits.map((e) => [e.messageID, e.text])).toEqual([[ack.confirmedID, '🔊']]);   // our own ack, EDITED to 🔊 above the audio — the TRIGGER is never touched
+    expect(fake.deletes).toEqual([]);                                         // nothing is ever deleted
     fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: 'sentinel-txt', text: 'plain human line' })] });
     await waitFor(() => incoming.some((i) => i.from.msgKey === 'sentinel-txt'));
     expect(incoming.some((i) => i.from.msgKey === 'reply-txt')).toBe(false);   // the @e reply never reached the persona turn
@@ -3193,6 +3227,7 @@ describe('stale-twin placeholder landmine — pre-send id floor', () => {
   // matching "ev" inside ordinary prose), this gate already requires the WHOLE reply to be
   // nothing but the wake-word, so a bare 'e' (no '@') carries the same negligible false-positive
   // risk as '@e' — accepted on both the voice-note branch and this text-mirror branch.
+  // contract 8.4
   it('a BARE "e" (no @) reply to a TEXT message triggers the mirror exactly like "@e"', async () => {
     const synthesize = countingSynthesize();
     const doc = transcriptDoc(textLine('tn-bare', 'hello there'));
@@ -3202,13 +3237,15 @@ describe('stale-twin placeholder landmine — pre-send id floor', () => {
     expect(synthesize.calls).toBe(1);
     expect(synthesize.lastText).toBe('hello there');
     const ack = await waitFor(() => fake.posts.find((p) => p.text === '🔊 reading…'));
-    await waitFor(() => fake.deletes.some((d) => d.messageID === ack.confirmedID));   // our own ack deleted …
-    expect(fake.deletes.some((d) => d.messageID === 'reply-bare')).toBe(false);       // … the trigger is never touched
+    await waitFor(() => fake.edits.some((e) => e.messageID === ack.confirmedID && e.text === '🔊'));   // our own ack edited …
+    expect(fake.edits.some((e) => e.messageID === 'reply-bare')).toBe(false);                         // … the trigger is never touched
+    expect(fake.deletes).toEqual([]);
     fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: 'sentinel-bare', text: 'plain human line' })] });
     await waitFor(() => incoming.some((i) => i.from.msgKey === 'sentinel-bare'));
     expect(incoming.some((i) => i.from.msgKey === 'reply-bare')).toBe(false);
   });
 
+  // contract 8.4
   it('a BARE "e" (no @) reply to a VOICE note triggers the transcript reveal exactly like "@e"', async () => {
     const doc = transcriptDoc(voiceLine('vn-bare', 'hola bare'));
     const { incoming } = await startBridge({ readTranscript: async () => doc });
@@ -3218,6 +3255,54 @@ describe('stale-twin placeholder landmine — pre-send id floor', () => {
     expect(fake.deletes).toHaveLength(0);
     expect(fake.posts.find((p) => p.text === '👂 hola bare').replyToMessageID).toBe('vn-bare');
     expect(incoming.some((i) => i.from.msgKey === 'reply-vbare')).toBe(false);
+  });
+
+  // ANY LOCAL BEING'S NAME (operator 2026-10-23: no default agent, the readback stays): the gate's
+  // list is every local being's tokens (boot's replyWakeWords), so `w` reads back like `e`. Anything
+  // more than the bare name, a non-voice quote with no synthesizer, or a stranger: a normal wake.
+  // contract 8.4
+  describe('a bare name of ANY local being reads back (w beside e)', () => {
+    const LOCAL = { wakeWords: [...EW, 'w'], replyWakeWords: [...EW, 'w'] };
+    it('a bare "w" reply to a voice note → 👂 transcript, no turn', async () => {
+      const transcribe = countingTranscribe();
+      const { incoming } = await startBridge({ ...LOCAL, readTranscript: async () => transcriptDoc(voiceLine('vn-w', 'hola w')), transcribe });
+      fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: 'reply-w', text: 'w', isSender: true, linkedMessageID: 'vn-w' })] });
+      const reveal = await waitFor(() => fake.posts.find((p) => p.text === '👂 hola w'));
+      expect(reveal.replyToMessageID).toBe('vn-w');
+      expect(transcribe.calls).toBe(0);
+      fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: 'sentinel-w', text: 'plain human line' })] });
+      await waitFor(() => incoming.some((i) => i.from.msgKey === 'sentinel-w'));
+      expect(incoming.some((i) => i.from.msgKey === 'reply-w')).toBe(false);
+    });
+    it('"w what does it say?" replying to a voice note is a normal wake — nothing posted', async () => {
+      const { incoming } = await startBridge({ ...LOCAL, readTranscript: async () => transcriptDoc(voiceLine('vn-w2', 'hola')) });
+      fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: 'reply-w2', text: 'w what does it say?', isSender: true, linkedMessageID: 'vn-w2' })] });
+      await waitFor(() => incoming.some((i) => i.from.msgKey === 'reply-w2'));
+      expect(fake.posts).toHaveLength(0);
+    });
+    it('a bare "w" replying to a TEXT message with no synthesizer wired is a normal wake', async () => {
+      const { incoming } = await startBridge({ ...LOCAL, readTranscript: async () => transcriptDoc(textLine('tn-w', 'hello there')) });
+      fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: 'reply-w3', text: 'w', isSender: true, linkedMessageID: 'tn-w' })] });
+      await waitFor(() => incoming.some((i) => i.from.msgKey === 'reply-w3'));
+      expect(fake.posts).toHaveLength(0);
+    });
+    it('🔊 a bare "w" replying to a TEXT message calls synthesize as before and wakes nobody', async () => {
+      const synthesize = countingSynthesize();
+      const { incoming } = await startBridge({ ...LOCAL, readTranscript: async () => transcriptDoc(textLine('tn-w4', 'hello there')), synthesize, voice: 'ona' });
+      fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: 'reply-w4', text: 'w', isSender: true, linkedMessageID: 'tn-w4' })] });
+      await waitFor(() => fake.uploads.length === 1);
+      expect(synthesize.calls).toBe(1);
+      expect(synthesize.lastText).toBe('hello there');
+      fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: 'sentinel-w4', text: 'plain human line' })] });
+      await waitFor(() => incoming.some((i) => i.from.msgKey === 'sentinel-w4'));
+      expect(incoming.some((i) => i.from.msgKey === 'reply-w4')).toBe(false);
+    });
+    it('a stranger\'s bare "w" (not the account, not allowed) gets no readback — a normal wake', async () => {
+      const { incoming } = await startBridge({ ...LOCAL, readTranscript: async () => transcriptDoc(voiceLine('vn-w5', 'hola')) });
+      fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: 'reply-w5', text: 'w', isSender: false, senderID: 'someone@beeper.local', linkedMessageID: 'vn-w5' })] });
+      await waitFor(() => incoming.some((i) => i.from.msgKey === 'reply-w5'));
+      expect(fake.posts).toHaveLength(0);
+    });
   });
 
   // E's OWN reply lines carry NO id in transcript.md (replyLine's format is `[@being
@@ -3237,8 +3322,9 @@ describe('stale-twin placeholder landmine — pre-send id floor', () => {
     expect(synthesize.calls).toBe(1);
     expect(synthesize.lastText).toBe('this is what E said earlier');   // found via _seenText, not transcript.md
     const ack = await waitFor(() => fake.posts.find((p) => p.text === '🔊 reading…'));
-    await waitFor(() => fake.deletes.some((d) => d.messageID === ack.confirmedID));
-    expect(fake.deletes.some((d) => d.messageID === 'reply-own')).toBe(false);   // the trigger is never touched
+    await waitFor(() => fake.edits.some((e) => e.messageID === ack.confirmedID && e.text === '🔊'));
+    expect(fake.edits.some((e) => e.messageID === 'reply-own')).toBe(false);   // the trigger is never touched
+    expect(fake.deletes).toEqual([]);
     fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: 'sentinel-own', text: 'plain human line' })] });
     await waitFor(() => incoming.some((i) => i.from.msgKey === 'sentinel-own'));
     expect(incoming.some((i) => i.from.msgKey === 'reply-own')).toBe(false);   // E did NOT wake for it
@@ -3283,7 +3369,7 @@ describe('stale-twin placeholder landmine — pre-send id floor', () => {
     expect(incoming.find((i) => i.from.msgKey === 'reply-miss2').from.atEStart).toBe(true);
   });
 
-  it('synthesis FAILURE (synthesize returns null) → falls through to @e→E; no media sent, trigger not touched, ack cleaned up', async () => {
+  it('synthesis FAILURE (synthesize returns null) → falls through to @e→E; no media sent, trigger not touched, ack edited to say so', async () => {
     const synthesize = async () => null;   // declines, e.g. the worker rejected the request
     const doc = transcriptDoc(textLine('tn-fail', 'hello there'));
     const { incoming } = await startBridge({ readTranscript: async () => doc, synthesize, voice: 'ona' });
@@ -3292,12 +3378,13 @@ describe('stale-twin placeholder landmine — pre-send id floor', () => {
     expect(fake.uploads).toHaveLength(0);
     const ack = await waitFor(() => fake.posts.find((p) => p.text === '🔊 reading…'));
     expect(ack).toBeTruthy();                                                       // ack IS posted before synthesis is attempted …
-    await waitFor(() => fake.deletes.some((d) => d.messageID === ack.confirmedID));   // … and cleaned up on decline
-    expect(fake.deletes.some((d) => d.messageID === 'reply-synthfail')).toBe(false);   // trigger never touched
+    await waitFor(() => fake.edits.length > 0);
+    expect(fake.edits.map((e) => [e.messageID, e.text])).toEqual([[ack.confirmedID, '🔊 could not read it aloud']]);   // … EDITED to say so on decline; trigger never touched
+    expect(fake.deletes).toEqual([]);
     expect(incoming.find((i) => i.from.msgKey === 'reply-synthfail').from.atEStart).toBe(true);   // fell through, not eaten
   });
 
-  it('synthesis THROWS → falls through to @e→E cleanly (never blocks the normal wake path); ack cleaned up', async () => {
+  it('synthesis THROWS → falls through to @e→E cleanly (never blocks the normal wake path); ack edited to say so', async () => {
     const synthesize = async () => { throw new Error('tts worker unreachable'); };
     const doc = transcriptDoc(textLine('tn-throw', 'hello there'));
     const { incoming } = await startBridge({ readTranscript: async () => doc, synthesize, voice: 'ona' });
@@ -3306,8 +3393,9 @@ describe('stale-twin placeholder landmine — pre-send id floor', () => {
     expect(fake.uploads).toHaveLength(0);
     const ack = await waitFor(() => fake.posts.find((p) => p.text === '🔊 reading…'));
     expect(ack).toBeTruthy();
-    await waitFor(() => fake.deletes.some((d) => d.messageID === ack.confirmedID));
-    expect(fake.deletes.some((d) => d.messageID === 'reply-throw')).toBe(false);
+    await waitFor(() => fake.edits.length > 0);
+    expect(fake.edits.map((e) => [e.messageID, e.text])).toEqual([[ack.confirmedID, '🔊 could not read it aloud']]);
+    expect(fake.deletes).toEqual([]);
     expect(incoming.find((i) => i.from.msgKey === 'reply-throw').from.atEStart).toBe(true);
   });
 
@@ -3325,6 +3413,7 @@ describe('stale-twin placeholder landmine — pre-send id floor', () => {
   const KG_WAKE = ['ekg', 'egptkg'];              // kg's DECLARED handles — the MENTION path's list
   const KG_REPLY_WAKE = ['ekg', 'egptkg', 'e'];   // …∪ its fallback_handle token — THIS gate's list
 
+  // contract 8.4
   it('REPRODUCE-FIRST: replying `e` to a VOICE NOTE reads the transcript back (before: nothing — `e` had left wakeWords)', async () => {
     const doc = transcriptDoc(voiceLine('vn-fb', 'hola que tal'));
     const { incoming } = await startBridge({ readTranscript: async () => doc, wakeWords: KG_WAKE, replyWakeWords: KG_REPLY_WAKE });
@@ -3347,6 +3436,7 @@ describe('stale-twin placeholder landmine — pre-send id floor', () => {
   // ONE GATE, TWO BEHAVIOURS, chosen by WHAT IS QUOTED (operator 2026-09-01: "replying to 'e' to a
   // text should read it then also. before it was 'ev', but we can reuse the 'e'"). The text branch
   // is the SAME 2026-08-10 mirror above — no second synthesis path; only its vocabulary changed.
+  // contract 8.4
   it('REPRODUCE-FIRST: replying `e` to a TEXT synthesizes that text and returns it as audio', async () => {
     const synthesize = countingSynthesize();
     const doc = transcriptDoc(textLine('tn-fb', 'hello there'));
@@ -3358,8 +3448,9 @@ describe('stale-twin placeholder landmine — pre-send id floor', () => {
     const mediaPost = await waitFor(() => fake.posts.find((p) => p.attachment));   // the media POST lands a tick after the upload
     expect(mediaPost.replyToMessageID).toBe('tn-fb');                         // audio replies to the ORIGINAL quoted text
     const ack = await waitFor(() => fake.posts.find((p) => p.text === '🔊 reading…'));
-    await waitFor(() => fake.deletes.some((d) => d.messageID === ack.confirmedID));
-    expect(fake.deletes.some((d) => d.messageID === 'reply-fbtxt')).toBe(false);
+    await waitFor(() => fake.edits.some((e) => e.messageID === ack.confirmedID && e.text === '🔊'));
+    expect(fake.edits.some((e) => e.messageID === 'reply-fbtxt')).toBe(false);
+    expect(fake.deletes).toEqual([]);
     fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: 'sentinel-fbtxt', text: 'plain human line' })] });
     await waitFor(() => incoming.some((i) => i.from.msgKey === 'sentinel-fbtxt'));
     expect(incoming.some((i) => i.from.msgKey === 'reply-fbtxt')).toBe(false);
@@ -3408,6 +3499,46 @@ describe('stale-twin placeholder landmine — pre-send id floor', () => {
     expect(fake.posts.some((p) => (p.text || '').startsWith('👂'))).toBe(false);   // not in the vocabulary → no substitution
     fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: 'reply-reg2', text: 'ekg', isSender: true, linkedMessageID: 'vn-reg' })] });
     await waitFor(() => fake.posts.some((p) => p.text === '👂 hola'));            // …a DECLARED handle is unaffected
+  });
+
+  // PER-CHAT HANDLES (operator 2026-10-24): where a chat's entry sets E's handles to [ekg], boot hands
+  // the bridge that chat's sets (wakeWordsIn); there a bare `e` is no name of E's and `ekg` is.
+  describe('beeper bridge — per-chat handles (wakeWordsIn)', () => {
+    const NODE = { wakeWords: ['e', 'egpt', 'ekg'], replyWakeWords: ['e', 'egpt', 'ekg'] };
+    const HERE = { wakeWords: ['ekg'], voiceWakeWords: [], replyWakeWords: ['ekg'] };
+    const asked = [];
+    const wakeWordsIn = async (network, chatID) => { asked.push([network, chatID]); return chatID === 'chat-team' ? HERE : null; };
+    const team = (over) => liveMsg({ chatID: CHAT('chat-team'), isSender: true, ...over });
+
+    // contract 8.4
+    it('REPRODUCE-FIRST: in the override chat a bare `e` reply to a voice note reads nothing back; `ekg` does', async () => {
+      const doc = transcriptDoc(voiceLine('vn-pc', 'hola equipo'));
+      const { incoming } = await startBridge({ ...NODE, wakeWordsIn, readTranscript: async () => doc });
+      fake.emit({ type: 'message.upserted', entries: [team({ id: 'reply-pc-e', text: 'e', linkedMessageID: 'vn-pc' })] });
+      await waitFor(() => incoming.some((i) => i.from.msgKey === 'reply-pc-e'));
+      expect(fake.posts.some((p) => (p.text || '').startsWith('👂'))).toBe(false);
+      expect(incoming.find((i) => i.from.msgKey === 'reply-pc-e').from.atEAnywhere).toBe(false);
+      fake.emit({ type: 'message.upserted', entries: [team({ id: 'reply-pc-ekg', text: 'ekg', linkedMessageID: 'vn-pc' })] });
+      await waitFor(() => fake.posts.some((p) => p.text === '👂 hola equipo'));
+      expect(asked).toContainEqual(['whatsapp', 'chat-team']);
+    });
+
+    it('the mention flag follows the chat\'s set: "e hola" there is atE=false, "ekg hola" atE=true', async () => {
+      const { incoming } = await startBridge({ ...NODE, wakeWordsIn });
+      fake.emit({ type: 'message.upserted', entries: [team({ id: 'pc-e', text: 'e hola', isSender: false })] });
+      fake.emit({ type: 'message.upserted', entries: [team({ id: 'pc-ekg', text: 'ekg hola', isSender: false })] });
+      await waitFor(() => incoming.some((i) => i.from.msgKey === 'pc-ekg') && incoming.some((i) => i.from.msgKey === 'pc-e'));
+      expect(incoming.find((i) => i.from.msgKey === 'pc-e').from.atEAnywhere).toBe(false);
+      expect(incoming.find((i) => i.from.msgKey === 'pc-ekg').from.atEStart).toBe(true);
+    });
+
+    // contract 8.4
+    it('LOCK: a chat with no override keeps the node sets — a bare `e` reads back', async () => {
+      const doc = transcriptDoc(voiceLine('vn-pc2', 'hola resto'));
+      await startBridge({ ...NODE, wakeWordsIn, readTranscript: async () => doc });
+      fake.emit({ type: 'message.upserted', entries: [liveMsg({ id: 'reply-pc2', text: 'e', isSender: true, linkedMessageID: 'vn-pc2' })] });
+      await waitFor(() => fake.posts.some((p) => p.text === '👂 hola resto'));
+    });
   });
 });
 
@@ -4428,6 +4559,7 @@ describe('beeper bridge — 🎧 listening mark: placed where the decode runs, t
 //
 // Two chats, the two shapes the operator named: a 1:1 on the ear the mouth is not in (Favel), and
 // a group both accounts are in, which is two rooms with two ids and so two arrivals of every message.
+// contract 8.4
 describe('the whole node — replying `e` reads the message back (ear, mouth, record, workers)', () => {
   const KEY = 'dGVzdC1rZXktdGVzdC1rZXktdGVzdC1rZXktMDA';
   const AN = '+15550000001', RODZ = '+15550000002', FAVEL = '+15550000003', DON = '+15550000004';
@@ -4469,10 +4601,10 @@ describe('the whole node — replying `e` reads the message back (ear, mouth, re
 
     // dolly's two workers, real endpoints: only the engines behind them are fakes.
     const heard = [], spoken = [];
-    const transcriptor = await startTranscriptorServer({ port: 0, keyB64: KEY, transcribe: async (p) => { heard.push(p); return 'hola desde la nota'; } });
+    const transcriptor = await startTranscriptorServer({ port: await freeSafeHttpPort(), keyB64: KEY, transcribe: async (p) => { heard.push(p); return 'hola desde la nota'; } });
     const voicesDir = mkdtempSync(join(stateDir, 'voices-'));
     writeFileSync(join(voicesDir, 'ona.onnx'), 'model');
-    const synthesizer = await startSynthesizerServer({ port: 0, keyB64: KEY, pythonPath: 'python.exe', voicesDir, synthesize: async (text) => { spoken.push(text); return Buffer.from('OGG-AUDIO'); } });
+    const synthesizer = await startSynthesizerServer({ port: await freeSafeHttpPort(), keyB64: KEY, pythonPath: 'python.exe', voicesDir, synthesize: async (text) => { spoken.push(text); return Buffer.from('OGG-AUDIO'); } });
 
     const config = {
       node_name: 'kg',
@@ -4530,7 +4662,7 @@ describe('the whole node — replying `e` reads the message back (ear, mouth, re
     } finally { await node.close(); }
   });
 
-  it('Favel shape — `e` on a WRITTEN message: the 🔊 reading goes out as audio replying to it, and the ack is cleaned up', BOOTS_A_NODE, async () => {
+  it('Favel shape — `e` on a WRITTEN message: the 🔊 reading goes out as audio replying to it, and the ack is edited to 🔊', BOOTS_A_NODE, async () => {
     const node = await bootKg();
     try {
       upsert(fake, textFrom(I('fv-text-1'), FAVEL_CHAT, 'nos vemos a las cinco', Date.now()));
@@ -4540,8 +4672,9 @@ describe('the whole node — replying `e` reads the message back (ear, mouth, re
       expect(node.spoken).toEqual(['nos vemos a las cinco']);
       expect(fake.posts.find((p) => p.attachment).replyToMessageID).toBe(I('fv-text-1'));
       const ack = fake.posts.find((p) => p.text === '🔊 reading…');
-      await waitFor(() => fake.deletes.some((d) => d.messageID === ack.confirmedID));
-      expect(fake.deletes.some((d) => d.messageID === I('fv-reply-2'))).toBe(false);
+      await waitFor(() => fake.edits.some((e) => e.messageID === ack.confirmedID && e.text === '🔊'));
+      expect(fake.edits.some((e) => e.messageID === I('fv-reply-2'))).toBe(false);
+      expect(fake.deletes).toEqual([]);
       expect(node.mouth.posts).toEqual([]);
     } finally { await node.close(); }
   });
@@ -4583,7 +4716,8 @@ describe('the whole node — replying `e` reads the message back (ear, mouth, re
     await waitFor(() => node.lines.some((l) => l.includes(`#${I(`${tag}-reply-mouth`)}`) || l.includes(`↩${I(`${tag}-text-mouth`)}`)));
     await waitFor(() => fake.posts.some((p) => p.attachment));
     const ack = fake.posts.find((p) => p.text === '🔊 reading…');
-    await waitFor(() => fake.deletes.some((d) => d.messageID === ack.confirmedID));
+    await waitFor(() => fake.edits.some((e) => e.messageID === ack.confirmedID && e.text === '🔊'));
+    expect(fake.deletes).toEqual([]);
   }
 
   it('a group BOTH accounts are in — `e` on a WRITTEN message: the 🔊 reading goes out from the ear, replying to the ear\'s copy', BOOTS_A_NODE, async () => {
@@ -4649,6 +4783,7 @@ describe('a node that SLEPT is not a node that just started — the backlog cuto
     expect(incoming.find((i) => i.text === 'hace veinte minutos').from.backlog).toBe(true);   // before it: backfilled
   });
 
+  // contract 15.1
   it('REPRODUCE-FIRST (the bridge): stamped during the sleep and delivered after the resume → backlog; stamped after it → live', async () => {
     let resumed = null;
     const { incoming } = await startBridge({ resumedAt: () => resumed });
@@ -4725,7 +4860,7 @@ describe('a node that SLEPT is not a node that just started — the backlog cuto
       readConfig: () => ({
         node_name: 'do', user_name: 'An',
         beeper: { use: 'main', main: { account: 'an@example.com', token: 'TOK-do', base_url: `http://127.0.0.1:${fake.port}` } },
-        agents: { egpt: { configuration: 'egpt', handles: ['e', 'egpt'], default: true } },
+        agents: { egpt: { configuration: 'egpt', handles: ['e', 'egpt'] } },
         liveness: { every_ms: TICK },   // the liveness pulse would otherwise size the tick down to 15 s
       }),
       makeSession, probeEndpoint: async () => ({ ok: false, status: 0 }),
@@ -4742,6 +4877,7 @@ describe('a node that SLEPT is not a node that just started — the backlog cuto
       jump: (ms) => { t += ms; },
       now: () => t,
       recorded: (needle) => [...io.files.values()].some((v) => v.includes(needle)),
+      count: (needle) => [...io.files.values()].reduce((n, v) => n + v.split(needle).length - 1, 0),
       resumes: () => lines.filter((l) => /resumed after/.test(l)),
     };
   }
@@ -4813,6 +4949,100 @@ describe('a node that SLEPT is not a node that just started — the backlog cuto
       await waitFor(() => node.turns.some((m) => m.includes('¿se cortó?')));
       expect(node.resumes()).toEqual([]);
     } finally { node.app.stop(); }
+  });
+
+  // A RESTART (operator 2026-10-21, see the describe below): the previous spine beat alive.txt a
+  // minute ago; a message said in between, delivered when the new bridge connects, is answered
+  // through the ordinary intake and recorded once, however often Beeper hands it over.
+  it('REPRODUCE-FIRST (the whole node, a restart): a message said while the spine restarted is answered and recorded once', BOOTS_A_NODE, async () => {
+    const beat = join(EGPT_HOME, 'state', 'alive.txt');
+    mkdirSync(dirname(beat), { recursive: true });
+    writeFileSync(beat, 'beat');
+    const lastBeat = Date.now() - 60_000;
+    utimesSync(beat, lastBeat / 1000, lastBeat / 1000);
+    let node;
+    try {
+      node = await bootDo();
+      const gap = said(ID('restart'), '@e ¿sigues ahí? durante el reinicio', lastBeat + 30_000);
+      fake.emit(gap);
+      await waitFor(() => node.turns.some((m) => m.includes('durante el reinicio')));
+      fake.emit(gap);                                                    // Beeper hands it over again
+      fake.emit(said(ID('after'), '@e listo', Date.now()));
+      await waitFor(() => node.turns.some((m) => m.includes('listo')));
+      expect(node.turns.filter((m) => m.includes('durante el reinicio'))).toHaveLength(1);
+      expect(node.count('durante el reinicio')).toBe(1);
+    } finally { node?.app.stop(); rmSync(beat, { force: true }); }
+  });
+});
+
+// ═══ A RESTART IS NOT AN OUTAGE (operator 2026-10-21) ═════════════════════════════════════════════
+//
+// "messages sent shouldn't be lost by eGPT during a restart. beeper delivers on first connection."
+// reve, 2026-10-19 18:37 (a deploy): last alive beat 18:36:50Z, /upgrade exit 18:37:42Z, bridge start
+// 18:37:57Z — and Diego Pérez's 18:37:45Z message, delivered on connect, was backfilled as backlog
+// because the cutoff was bridge start. The previous spine's last alive beat (state/alive.txt mtime)
+// is the last moment the node surely ingested; within the wake window it is the cutoff.
+describe('a restart is not an outage — the backlog cutoff is the last alive beat', () => {
+  const lastBeat = (msAgo) => {
+    const at = Date.now() - msAgo;
+    const p = join(stateDir, 'alive.txt');
+    writeFileSync(p, 'beat');
+    utimesSync(p, at / 1000, at / 1000);
+    return at;
+  };
+
+  // contract 15.1
+  it('REPRODUCE-FIRST: stamped after the last beat and delivered on connect → answered; stamped before it → backlog', async () => {
+    const beat = lastBeat(60_000);
+    const { incoming } = await startBridge();
+    fake.emit({ type: 'message.upserted', entries: [liveMsg({ text: 'durante el reinicio', timestamp: beat + 30_000 })] });
+    fake.emit({ type: 'message.upserted', entries: [liveMsg({ text: 'antes del reinicio', timestamp: beat - 60_000 })] });
+    fake.emit({ type: 'message.upserted', entries: [liveMsg({ text: 'de la semana pasada', timestamp: beat - 7 * 86_400_000 })] });
+    await waitFor(() => incoming.length === 3);
+    expect(incoming.find((i) => i.text === 'durante el reinicio').from.backlog).toBe(false);
+    expect(incoming.find((i) => i.text === 'antes del reinicio').from.backlog).toBe(true);
+    expect(incoming.find((i) => i.text === 'de la semana pasada').from.backlog).toBe(true);
+  });
+
+  it('a long outage keeps bridge start: a last beat older than the wake window moves nothing', async () => {
+    lastBeat(2 * 3600_000);
+    const { incoming } = await startBridge();
+    fake.emit({ type: 'message.upserted', entries: [liveMsg({ text: 'hace un minuto', timestamp: Date.now() - 60_000 })] });
+    fake.emit({ type: 'message.upserted', entries: [liveMsg({ text: 'ahora' })] });
+    await waitFor(() => incoming.length === 2);
+    expect(incoming.find((i) => i.text === 'hace un minuto').from.backlog).toBe(true);
+    expect(incoming.find((i) => i.text === 'ahora').from.backlog).toBe(false);
+  });
+
+  it('dedup holds: what the previous spine handled is not answered again; a gap message handed over twice is answered once', async () => {
+    const first = await startBridge();
+    const handled = liveMsg({ text: 'ya atendido' });
+    fake.emit({ type: 'message.upserted', entries: [handled] });
+    await waitFor(() => first.incoming.length === 1);
+    first.bridge.stop();
+
+    lastBeat(30_000);
+    const second = await startBridge();
+    const gap = liveMsg({ text: 'durante el reinicio', timestamp: Date.now() - 20_000 });
+    fake.emit({ type: 'message.upserted', entries: [handled] });
+    fake.emit({ type: 'message.upserted', entries: [gap] });
+    fake.emit({ type: 'message.upserted', entries: [gap] });
+    fake.emit({ type: 'message.upserted', entries: [liveMsg({ text: 'sentinel' })] });
+    await waitFor(() => second.incoming.some((i) => i.text === 'sentinel'));
+    expect(second.incoming.filter((i) => i.text === 'ya atendido')).toHaveLength(0);
+    expect(second.incoming.filter((i) => i.text === 'durante el reinicio').map((i) => i.from.backlog)).toEqual([false]);
+  });
+
+  it('a wake after the restart still moves the cutoff up to the resume, less the wake window', async () => {
+    lastBeat(60_000);
+    let resumed = null;
+    const { incoming } = await startBridge({ resumedAt: () => resumed });
+    resumed = Date.now() + 2 * 3600_000;
+    fake.emit({ type: 'message.upserted', entries: [liveMsg({ text: 'durante el sueño', timestamp: resumed - 20 * 60_000 })] });
+    fake.emit({ type: 'message.upserted', entries: [liveMsg({ text: 'en la siesta', timestamp: resumed - 10 * 60_000 })] });
+    await waitFor(() => incoming.length === 2);
+    expect(incoming.find((i) => i.text === 'durante el sueño').from.backlog).toBe(true);
+    expect(incoming.find((i) => i.text === 'en la siesta').from.backlog).toBe(false);
   });
 });
 
@@ -4925,9 +5155,9 @@ describe('beeper bridge — a chat id is addressed as is, never through the chat
     const logs = [];
     const commands = createCommands({
       getConfig: () => ({ node_name: 'kg', node_role: 'primary', beeper: { primary: { phone: '+16468217865' } } }),
-      send: async () => {}, loadState: async () => st, writeState: async (s) => { st = s; }, defaultKey: 'e',
+      send: async () => {}, loadState: async () => st, writeState: async (s) => { st = s; },
       forkBridge: {
-        createGroup: (o) => port.createGroup(o),
+        createGroup: (o, { origin = null } = {}) => port.createGroup(origin, o),
         postReply: (chatId, text, replyTo, { canary = null } = {}) => port.send(chatId, text, { replyTo, canary }),
         chatAccountId: async () => 'whatsapp',
         chatRaw: (id) => port.chatRaw(id),
@@ -5005,6 +5235,7 @@ describe('beeper bridge — a voice note is two lines: its arrival now, its tran
     await waitFor(() => incoming.length === 1);
   });
 
+  // contract 8.3
   it('…and the onMedia meta its outcome saves the audio with, caption aside — what a restart saves into media/', async () => {
     const { incoming, arrivals, media } = await startBridge({ transcribe: async () => 'Mira marico' });
     fake.emit({ type: 'message.upserted', entries: [note()] });
@@ -5029,6 +5260,7 @@ describe('beeper bridge — a voice note is two lines: its arrival now, its tran
     });
   }
 
+  // contract 9.2
   it('transcription OFF for the chat: nothing is pending — one `[voice note]` line, as before', async () => {
     const { incoming, arrivals } = await startBridge({ resolveTranscriptionService: async () => ({ enabled: false, postsBack: false }) });
     fake.emit({ type: 'message.upserted', entries: [note()] });
@@ -5050,7 +5282,7 @@ describe('beeper bridge — a voice note is two lines: its arrival now, its tran
     const spine = createSpine({
       bridge: { onMessage() {}, send() {}, stop() {}, wasSentByUs: () => false },
       brain, identity: createIdentity({ now: () => now }), router: { resolve: () => 'e' },
-      gating: { async decide() { return { mode: 'on', receives: true, mayReply: true, sendToEgpt: 'mode' }; }, surfaces: () => true },
+      gating: { async decide() { return { mode: 'on', receives: true, mayReply: true }; }, surfaces: () => true },
       sender: { open() { return { activate() {}, update() {}, async finish() {}, fail() {} }; } },
       transcript: createTranscript({ contacts: { resolve: async () => 'diego' }, io }),
       heartbeats: { runDue() {} }, mesh: { isEnvelope: () => false, async handle() {} }, clock: { now: () => 1000 }, turnTimeoutMs: 0,
@@ -5067,6 +5299,7 @@ describe('beeper bridge — a voice note is two lines: its arrival now, its tran
   const CHATTER = 'Bea@[Diego Pérez].wa (16:13) #31504: jaja';
   const OUTCOME = 'Diego Pérez@[Diego Pérez].wa (16:15): [re #31503] (voice transcription) Mira marico';
 
+  // contract 9.1
   it('end to end: the record gets the arrival at arrival time, then the chatter, then the transcription — appended, nothing rewritten, only the transcription prompts', async () => {
     fake.chats.set(CHAT('chat-1'), { title: 'Diego Pérez', type: 'single', isMuted: false, accountID: 'whatsapp' });
     const s = recordingSpine();

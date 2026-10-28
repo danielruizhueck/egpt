@@ -18,7 +18,7 @@ import { createRouter } from '../src/spine/router.mjs';
 import { createCommands } from '../src/spine/commands.mjs';
 import { parseReplyActions } from '../src/spine/reply-actions.mjs';
 import { mentionStatus } from '../src/auto-mode.mjs';
-import { ensureContact, recordThread } from '../src/conversations-state.mjs';
+import { ensureContact, recordThread, patchBeing } from '../src/conversations-state.mjs';
 
 const GROUP = 'grpC';
 const RODZ_ID = '@whatsapp_lid-69433129173200:beeper.local';
@@ -29,8 +29,8 @@ const BASE = {
   group_title: '{group}-{name}', peer_nodes: ['kg', 'do'],
 };
 const NODES = {
-  kg: { ...BASE, node_name: 'kg', node_role: 'primary', agents: { egpt: { handles: ['e', 'egpt'], default: true } } },
-  do: { ...BASE, node_name: 'do', node_role: 'secondary', agents: { egpt: { handles: ['d', 'don'], default: true } } },
+  kg: { ...BASE, node_name: 'kg', node_role: 'primary', agents: { egpt: { handles: ['e', 'egpt'], conversation_defaults: { allowed_users: ['*'] } } } },   // members reach E
+  do: { ...BASE, node_name: 'do', node_role: 'secondary', agents: { egpt: { handles: ['d', 'don'], conversation_defaults: { allowed_users: ['*'] } } } },
 };
 const ALIASES = join(HOME, 'config', 'commands_alias.yaml');
 const writeAliases = (text) => { mkdirSync(join(HOME, 'config'), { recursive: true }); writeFileSync(ALIASES, text, 'utf8'); };
@@ -43,18 +43,19 @@ const member = (body, over = {}) => ({
 });
 const operator = (body, over = {}) => member(body, { senderId: '@an:beeper.com', senderName: 'An', isSender: true, authorized: true, ...over });
 
-// One node: its own state, bridge, commands and spine. `mode` is the chat's reply mode ('on' answers
-// every line; 'mention' only a line that addresses the being).
-function node(name, { mode = 'mention' } = {}) {
-  const config = NODES[name];
+// One node: its own state, bridge, commands and spine. `mode` is the being's reply mode ('on' answers
+// every line; 'mention' only a line that addresses the being). `handlesHere`: this chat's entry sets E's
+// handles (per-chat handles) — only then is the router handed the state.
+function node(name, { mode = 'mention', handlesHere = null } = {}) {
+  const config = { ...NODES[name], agents: { egpt: { ...NODES[name].agents.egpt, mode } } };
   let st = ensureContact({ contacts: {} }, 'whatsapp', GROUP, { pushedName: 'C' }).state;
   st = recordThread(st, 'whatsapp', GROUP, `${name}-thread`, '2026-10-19T00:00:00Z', 'egpt');
+  if (handlesHere) st = patchBeing(st, 'whatsapp', GROUP, 'egpt', { handles: handlesHere });
   const calls = { create: [], exit: [], sent: [], logs: [], notes: [], transcript: [], brain: [], ran: [], stop: [] };
   const real = createCommands({
     getConfig: () => config, send: async (chatId, text) => { calls.sent.push(text); },
     exit: async (code) => { calls.exit.push(code); },
     loadState: async () => st, writeState: async (s) => { st = s; },
-    defaultKey: 'egpt',
     commandAliasesPath: ALIASES,
     forkBridge: {
       editMessage: async () => true,
@@ -70,7 +71,7 @@ function node(name, { mode = 'mention' } = {}) {
     onLog: (m) => calls.logs.push(m),
   });
   const commands = { ...real, run: (e) => { calls.ran.push(e.body); return real.run(e); } };
-  const router = createRouter({ getAgents: () => config.agents, defaultBeing: 'egpt' });
+  const router = createRouter({ getAgents: () => config.agents, ...(handlesHere ? { loadState: async () => st } : {}) });
   const spine = createSpine({
     bridge: { onMessage() {}, send() {}, stop() {}, wasSentByUs: () => false },
     brain: { async turn(being, ev) { calls.brain.push({ being, body: ev.body }); return { text: 'ok', sessionId: `${name}-thread`, being }; }, async accessLevel() { return 'regular'; } },
@@ -80,7 +81,7 @@ function node(name, { mode = 'mention' } = {}) {
     gating: {
       async decide(being, ev, mention) {
         const mayReply = mode === 'on' || !!(mention?.atEStart || mention?.atEAnywhere);
-        return { mode, receives: true, mayReply, sendToEgpt: 'mode' };
+        return { mode, receives: true, mayReply };
       },
       surfaces: (d) => d.mayReply,
     },
@@ -88,7 +89,7 @@ function node(name, { mode = 'mention' } = {}) {
     transcript: { async log(ev, reply) { if (reply == null) calls.transcript.push(ev.body); } },
     stopSwitch: { present: () => false, async pull(o) { calls.stop.push(o.reason); } },
     stopPhrase: () => 'EGPT STOP',
-    defaultBeing: 'egpt', clock: { now: () => 1 }, turnTimeoutMs: 0,
+    clock: { now: () => 1 }, turnTimeoutMs: 0,
     onLog: (m) => calls.notes.push(m),
   });
   // The bridge's persona mention, as it computes it (mentionStatus over the persona's handles).
@@ -110,19 +111,19 @@ const recordedOnly = (n, body) => {
 beforeEach(() => { rmSync(HOME, { recursive: true, force: true }); });
 
 describe('/<handle> <command>: the handle\'s node runs it, the other node ignores it', () => {
-  it('/e join viaje: kg creates SI+C-viaje; dolly records the line and creates nothing', async () => {
+  it('/e split viaje: kg creates SI+C-viaje; dolly records the line and creates nothing', async () => {
     const { kg, dolly, say } = pair();
-    await say(operator('/e join viaje'));
-    expect(kg.calls.ran).toEqual(['/join viaje']);
+    await say(operator('/e split viaje'));
+    expect(kg.calls.ran).toEqual(['/split viaje']);
     expect(kg.calls.create.map((c) => c.title)).toEqual(['SI+C-viaje']);
     expect(dolly.calls.create).toEqual([]);
-    recordedOnly(dolly, '/e join viaje');
+    recordedOnly(dolly, '/e split viaje');
   });
 
-  it('/e join with no name: a random 5-character name (lowercase letters and digits)', async () => {
+  it('/e split with no name: a random 5-character name (lowercase letters and digits)', async () => {
     const { kg, say } = pair();
-    await say(operator('/e join'));
-    await say(operator('/e join'));
+    await say(operator('/e split'));
+    await say(operator('/e split'));
     const titles = kg.calls.create.map((c) => c.title);
     expect(titles).toHaveLength(2);
     for (const t of titles) expect(t).toMatch(/^SI\+C-[a-z0-9]{5}$/);
@@ -182,7 +183,7 @@ describe('/<handle> <not a command> is ordinary text that addresses nobody', () 
   it('/e hola: the router addresses no one; nothing runs; nobody is woken on either node', async () => {
     const { kg, dolly, say } = pair();
     const routed = await kg.router.resolve(member('/e hola'));
-    expect(routed.targets[0].fallthrough).toBe(true);
+    expect(routed.targets).toEqual([]);
     await say(member('/e hola'));
     for (const n of [kg, dolly]) recordedOnly(n, '/e hola');
   });
@@ -195,12 +196,38 @@ describe('/<handle> <not a command> is ordinary text that addresses nobody', () 
   });
 });
 
+// PER-CHAT HANDLES (operator 2026-10-24): where this chat's entry sets E's handles to [ekg], a command
+// addressed `/e …` is not E's here (kg records it, as for another node's being) and `/ekg …` is.
+describe("/<handle> <command> follows the chat's own handles", () => {
+  it("REPRODUCE-FIRST: handles [ekg] here — `/e agents` is not E's, `/ekg agents` is", async () => {
+    const kg = node('kg', { handlesHere: ['ekg'] });
+    await kg.say(operator('/e agents'));
+    recordedOnly(kg, '/e agents');
+    await kg.say(operator('/ekg agents'));
+    expect(kg.calls.ran).toEqual(['/agents']);
+  });
+
+  it('…and the chat line follows suit: "e hola" wakes nobody there, "ekg hola" wakes E', async () => {
+    const kg = node('kg', { handlesHere: ['ekg'] });
+    await kg.say(member('e hola'));
+    expect(kg.calls.brain).toEqual([]);
+    await kg.say(member('ekg hola'));
+    expect(kg.calls.brain.map((b) => b.being)).toEqual(['egpt']);
+  });
+
+  it('LOCK: with no per-chat key `/e agents` runs on kg as before', async () => {
+    const kg = node('kg');
+    await kg.say(operator('/e agents'));
+    expect(kg.calls.ran).toEqual(['/agents']);
+  });
+});
+
 describe('aliases target /<handle> <command>', () => {
-  it('"aparte: /e join": a member\'s "aparte viaje" makes SI+C-viaje on kg only', async () => {
-    writeAliases('aparte: /e join\n');
+  it('"aparte: /e split": a member\'s "aparte viaje" makes SI+C-viaje on kg only', async () => {
+    writeAliases('aparte: /e split\n');
     const { kg, dolly, say } = pair();
     await say(member('aparte viaje'));
-    expect(kg.calls.ran).toEqual(['/join viaje']);
+    expect(kg.calls.ran).toEqual(['/split viaje']);
     expect(kg.calls.create.map((c) => c.title)).toEqual(['SI+C-viaje']);
     recordedOnly(dolly, 'aparte viaje');
   });

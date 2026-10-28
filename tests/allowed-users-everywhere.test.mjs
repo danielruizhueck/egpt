@@ -14,12 +14,12 @@ const Y = '@anrodriguez:beeper.com';
 const CHAT = { surface: 'whatsapp', chatId: '!g', chatName: 'grupo', kind: 'text', raw: { chatType: 'group' } };
 
 const queen = (mode = 'mention', extra = {}) => ({
-  egpt: { configuration: 'egpt', handles: ['q'], default: true, mode, conversation_defaults: { allowed_users: [X] } },
+  egpt: { configuration: 'egpt', handles: ['q'], mode, conversation_defaults: { allowed_users: [X] } },
   wren: { configuration: 'egpt', handles: ['wren'] },
   ...extra,
 });
 const open = (mode = 'mention') => ({
-  egpt: { configuration: 'egpt', handles: ['e', 'egpt'], default: true, mode },
+  egpt: { configuration: 'egpt', handles: ['e', 'egpt'], mode },
   wren: { configuration: 'egpt', handles: ['wren'] },
 });
 
@@ -30,18 +30,18 @@ const msg = (senderId, body, { wake = ['q'], replyToBeing = null } = {}) => ({
   mention: { ...mentionStatus(body, wake), replyToBot: replyToBeing != null },
 });
 
-function build(agents, { state = null, dispatch = {} } = {}) {
+function build(agents, { state = null } = {}) {
   let cb = null;
   const bridge = { onMessage(fn) { cb = fn; }, send() {}, emit(m) { return cb(m); }, stop() {} };
   const brain = { calls: [], async turn(being, ev) { this.calls.push({ being, ev }); return { text: 'ok', sessionId: 's', being }; } };
   const transcript = { entries: [], async log(ev, reply) { this.entries.push({ ev, reply }); } };
   const sender = { open() { return { update() {}, fail() {}, async finish() {} }; } };
   const loadState = state ? async () => state : null;
-  const config = { agents, dispatch };
-  const router = createRouter({ getAgents: () => agents, getConfig: () => config, defaultBeing: 'egpt', loadState });
-  const gating = createGating({ getConfig: () => config, loadState, defaultKey: 'egpt' });
+  const config = { conversation_defaults: { allowed_users: [Y] }, agents };   // Y (An) owns the node
+  const router = createRouter({ getAgents: () => agents, getConfig: () => config, loadState });
+  const gating = createGating({ getConfig: () => config, loadState });
   const spine = createSpine({
-    bridge, brain, router, gating, sender, transcript, defaultBeing: 'egpt',
+    bridge, brain, router, gating, sender, transcript,
     identity: { build: (m) => ({ ...m, line: m.body }) },
     heartbeats: { runDue() {} }, readTranscript: async () => '', clock: { now: () => 1 },
   });
@@ -58,11 +58,11 @@ describe('allowed_users holds on every wake — the persona fall-through (dg, Qu
     expect(inbound()).toEqual(['q hola']);
   });
 
-  it('the router marks the fall-through as denied, and only then', async () => {
-    const { router } = build(queen('mention'));
-    expect((await router.resolve(msg(Y, 'q hola'))).targets)
-      .toEqual([{ being: 'egpt', mention: msg(Y, 'q hola').mention, address: null, fallthrough: true, denied: true }]);
-    expect((await router.resolve(msg(X, 'hola'))).targets[0].denied).toBeUndefined();
+  it('the router drops a denied sender\'s being, named or taken by its mode — no target at all', async () => {
+    const { router } = build(queen('on'));
+    expect((await router.resolve(msg(Y, 'q hola'))).targets).toEqual([]);
+    expect((await router.resolve(msg(Y, 'buenas'))).targets).toEqual([]);
+    expect((await router.resolve(msg(X, 'buenas'))).targets).toEqual([{ being: 'egpt', mention: {}, address: null, fallthrough: true }]);
   });
 
   it('X writes "q hola" — Queen D wakes', async () => {
@@ -99,14 +99,6 @@ describe('allowed_users holds on every wake — the persona fall-through (dg, Qu
     expect(brain.calls.map((c) => c.being)).toEqual(['egpt']);
   });
 
-  it('send_to_egpt: always does not reopen it — no context turn for a denied sender', async () => {
-    const { bridge, brain } = build(queen('mention'), { dispatch: { send_to_egpt: 'always' } });
-    await bridge.emit(msg(Y, 'q hola'));
-    expect(brain.calls).toEqual([]);
-    await bridge.emit(msg(X, 'buenas'));
-    expect(brain.calls.map((c) => c.being)).toEqual(['egpt']);   // X's unaddressed line: the context turn, as before
-  });
-
   it('the conversation\'s own allowed_users replaces the global list for the fall-through too', async () => {
     const state = { contacts: { whatsapp: { '!g': { slug: 'grupo', agents: { egpt: { allowed_users: [Y] } } } } } };
     const { bridge, brain } = build(queen('mention'), { state });
@@ -123,20 +115,23 @@ describe('allowed_users holds on every wake — the persona fall-through (dg, Qu
   });
 });
 
-describe('allowed_users — unchanged where nobody set a list', () => {
-  it('a persona with NO allowed_users still wakes for anyone, addressed or (mode on) not', async () => {
-    const { bridge, brain } = build(open('on'));
+describe('allowed_users — where nobody set a list, the node owners only (operator 2026-10-26)', () => {
+  it('a persona with NO allowed_users wakes for an owner, addressed or (mode on) not, and never for anyone else', async () => {
+    const { bridge, brain, inbound } = build(open('on'));
     await bridge.emit(msg(Y, 'e hola', { wake: ['e', 'egpt'] }));
+    await bridge.emit(msg(Y, 'buenas', { wake: ['e', 'egpt'] }));
+    await bridge.emit(msg('+1555', 'e hola', { wake: ['e', 'egpt'] }));
     await bridge.emit(msg('+1555', 'buenas', { wake: ['e', 'egpt'] }));
     expect(brain.calls.map((c) => c.being)).toEqual(['egpt', 'egpt']);
+    expect(inbound()).toEqual(['e hola', 'buenas', 'e hola', 'buenas']);
   });
 
   it('the stranger agent still answers a stranger\'s new 1:1 (ownerOnly), the persona\'s list notwithstanding', async () => {
-    const agents = queen('mention', { marketer: { configuration: 'egpt', handles: ['mk'], mode: 'on' } });
+    const agents = queen('mention', { marketer: { configuration: 'egpt', handles: ['mk'], mode: 'on', conversation_defaults: { allowed_users: ['*'] } } });
     const config = { agents, dispatch: { stranger_agent: { secondary: 'marketer' } } };
-    const router = createRouter({ getAgents: () => agents, getConfig: () => config, defaultBeing: 'egpt', loadState: async () => ({ contacts: {} }) });
+    const router = createRouter({ getAgents: () => agents, getConfig: () => config, loadState: async () => ({ contacts: {} }) });
     const dm = { ...msg('+58414', 'hola'), chatId: '!dm', connection: 'secondary', raw: { chatType: 'private' } };
-    expect((await router.resolve(dm)).targets).toEqual([{ being: 'marketer', mention: dm.mention, address: null, fallthrough: true }]);
+    expect((await router.resolve(dm)).targets).toEqual([{ being: 'marketer', mention: {}, address: null, fallthrough: true }]);
     expect((await router.resolve({ ...dm, body: 'q hola' })).targets.map((t) => [t.being, !!t.denied])).toEqual([['marketer', false]]);
   });
 });

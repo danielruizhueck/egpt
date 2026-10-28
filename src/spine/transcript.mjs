@@ -24,8 +24,6 @@ import { existsSync as fsExistsSync } from 'node:fs';
 
 export function createTranscript({
   contacts,                              // the shared contact-resolver (createContacts) — chatId → slug + rename self-heal
-  persona = null,
-  defaultKey = 'egpt',                   // the persona being-id (its `agents:` MAP KEY), injected by boot — the fallback label when a reply carries no being. NOT a handle: `e` is one of the persona's handles (`handles: [e, egpt, ev]`), and this value is written into the record as the speaker, so a handle here labels the file with something no reader can route on (operator 2026-08-28)
   labelOf = (being) => String(being ?? ''),   // THE being→display-name resolver (boot.mjs labelOf: the agents-registry `name:`, else the map key), injected — the SAME function createSender and createReplyActions already take, so the record and the chat call an agent by one name. Default identity (tests) = the key
   timeZone = null,                       // the node's config default_time_zone (boot-resolved via the heartbeat loader's resolveTimeZone) — the zone the reply line's HH:MM renders in. null → UTC, unchanged
   io = {},                               // { appendFile, mkdir, existsSync } — real by default
@@ -40,7 +38,7 @@ export function createTranscript({
   // repo's convention for an optional seam nobody wired) = every write lands on ev's own native
   // (surface, chatId), byte-identical to before this option existed.
   currentRoomOf = () => null,
-  // (ev) => seed blocks for the conversation this inbound would CREATE (boot: the stranger rule), or null.
+  // (ev) => what the conversation this inbound would CREATE starts with ({ agents, … }; boot: the stranger rule), or null.
   seedOf = () => null,
 } = {}) {
   if (typeof contacts?.resolve !== 'function') {
@@ -111,12 +109,12 @@ export function createTranscript({
     // write==read helper (src/spine/contacts.mjs). A resolver without it (a unit fake) degrades to
     // resolve()+transcript.md, byte-identical to before — the same default-seam convention as
     // currentRoomOf above.
-    const agents = redirected ? null : seedOf(ev);
+    const seed = redirected ? null : seedOf(ev);
     if (contacts.transcriptTarget) {
-      const t = await contacts.transcriptTarget(surface, chatId, { chatName: ev.chatName, agents });
+      const t = await contacts.transcriptTarget(surface, chatId, { chatName: ev.chatName, seed });
       return t ? { surface, chatId, slug: t.slug, room: t.room, transcriptPath: t.path } : null;
     }
-    const slug = await contacts.resolve(surface, chatId, { chatName: ev.chatName, agents });
+    const slug = await contacts.resolve(surface, chatId, { chatName: ev.chatName, seed });
     if (!slug) return null;
     const room = Room.forChat(surface, slug);
     return { surface, chatId, slug, room, transcriptPath: room.transcriptPath };
@@ -198,7 +196,7 @@ export function createTranscript({
         // Same front-matter rule transcriptAppend applies, for the case where a stream is the
         // first thing this file ever receives (normally the inbound line is already in: the
         // spine records at ingestion, before any turn is dispatched).
-        if (!existsSync(fpath)) head += renderFrontMatter({ name: ev.chatName ?? t.chatId ?? t.slug, surface: t.surface, slug: t.slug, chat_id: t.chatId, persona });
+        if (!existsSync(fpath)) head += renderFrontMatter({ name: ev.chatName ?? t.chatId ?? t.slug, surface: t.surface, slug: t.slug, chat_id: t.chatId });
         // A train that OPENS on a new day says so, like any other entry. It rides the block
         // HEAD, so the marker lands above the first byte of the stream and never inside it —
         // which is also why dayMark is called here and not per increment: one entry, one day.
@@ -246,7 +244,7 @@ export function createTranscript({
      * @param {string} before        the accumulated text ALREADY logged for this turn ('' at turn start)
      * @param {string} after         the accumulated text as it now stands
      */
-    logStream(ev, before, after, { being = defaultKey } = {}) {
+    logStream(ev, before, after, { being = null } = {}) {
       if (!ev?.chatId) return Promise.resolve(false);
       const bytes = streamRecord(before, after);
       if (!bytes) return Promise.resolve(false);
@@ -269,7 +267,7 @@ export function createTranscript({
      * @param {object} ev      the InboundEvent the turn was answering (supplies chat + surface)
      * @param {object} action  one entry of createReplyActions' parsed `run`
      */
-    async logAction(ev, action, { being = defaultKey } = {}) {
+    async logAction(ev, action, { being = null } = {}) {
       if (!ev?.chatId) return false;
       return onFile(ev, async () => { try {
         const body = limbAction(action);
@@ -285,7 +283,7 @@ export function createTranscript({
         // with no boundary written in it. Same order at every write site below.
         const entry = transcriptAppend({
           existing: existsSync(fpath), body: line,
-          name: ev.chatName, surface: t.surface, slug: t.slug, chatId: t.chatId, persona,
+          name: ev.chatName, surface: t.surface, slug: t.slug, chatId: t.chatId,
         });
         await appendFile(fpath, dayMark(fpath, now()) + entry, 'utf8');
         return true;
@@ -351,7 +349,7 @@ export function createTranscript({
           // C7.6); transcriptAppend prepends front matter on a fresh file.
           const entry = transcriptAppend({
             existing: existsSync(fpath), body: ev.line ?? ev.body,
-            name: ev.chatName, surface: targetSurface, slug, chatId: targetChatId, persona,
+            name: ev.chatName, surface: targetSurface, slug, chatId: targetChatId,
           });
           // ev.ts, not now(): the inbound line's own HH:MM was rendered from it (identity.build),
           // so the boundary and the line under it must answer to the same clock — a backlog
@@ -359,7 +357,7 @@ export function createTranscript({
           await appendFile(fpath, dayMark(fpath, ev.ts) + entry, 'utf8');
         } else {
           const text = typeof reply === 'string' ? reply : reply.text;
-          const being = (typeof reply === 'object' && reply.being) || defaultKey;
+          const being = (typeof reply === 'object' && reply.being) || null;
           const surfaced = typeof reply === 'object' ? reply.surfaced !== false : true;
           // `msgId` — the id of the message this reply was POSTED as, which makes the line
           // addressable (`#<id>`) the way an inbound line is. No caller carries one yet: the

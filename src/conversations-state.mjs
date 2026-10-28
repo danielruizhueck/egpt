@@ -14,7 +14,7 @@
 // explicit read/write helpers at the bottom that take paths. Easy to
 // test, easy to call from any host.
 
-import { readFile, writeFile, mkdir, stat, rename, appendFile, readdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, stat, rename, appendFile, readdir, unlink } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -145,19 +145,23 @@ export function slugTranscriptPath(surface, slug) {
 // logs may carry no front matter of their own). The alias roll is WALLED OFF in its own try/catch:
 // the main roll and this function's return (the main dest, or null) are byte-identical to before
 // for every caller — a side-room that can't be filed is left behind, never failing the main roll.
-export async function rollTranscript(surface, slug, { io = {} } = {}) {
+// `keep` (2026-10-23): thread ids the file must NOT roll away from — another being's live thread.
+// `key` (2026-10-26): a /split fork's own transcript-<key>.md rolls alone. A side-room log stamped
+// with another thread (a fork's) is not rolled with the main file.
+export async function rollTranscript(surface, slug, { io = {}, keep = null, key = null } = {}) {
   const readFileFn = io.readFile ?? readFile;
   const writeFileFn = io.writeFile ?? writeFile;
   const renameFn = io.rename ?? rename;
   const readdirFn = io.readdir ?? readdir;
   const room = Room.forChat(surface, slug);
-  const src = room.transcriptPath;   // the Room's own getter — same file slugTranscriptPath names
+  const src = room.transcriptPathFor(key);   // the Room's own getter — transcript.md without a key
   try {
     let text = null;
     try { text = await readFileFn(src, 'utf8'); } catch { return null; }   // no transcript yet → nothing to roll
     const head = parseFrontMatter(text ?? '');
     const id = sanitizeSlug(head.thread_id ?? '');
     if (!id) return null;                                                  // un-stamped → the guard
+    if (keep?.has(String(head.thread_id))) return null;                    // names another being's live thread
     const taken = async (p) => { try { return (await readFileFn(p, 'utf8')) != null; } catch { return false; } };
     // Pick a never-clobbering archive path for `<base>.md`: a taken name takes the next `-N`
     // suffix; 99 archives of one base → null (leave it alone). ONE picker, so the main file and
@@ -167,11 +171,12 @@ export async function rollTranscript(surface, slug, { io = {} } = {}) {
       for (let n = 2; n <= 99 && await taken(dest); n++) dest = join(room.transcriptsDir, `${base}-${n}.md`);
       return (await taken(dest)) ? null : dest;
     };
-    const dest = await archiveDest(id);
+    const dest = await archiveDest(key ? `${id}--${sanitizeSlug(key)}` : id);
     if (!dest) return null;                                                // 99 archives of one id: leave it alone
     await room.ensureTree({ io: { mkdir: io.mkdir ?? mkdir } });
     await renameFn(src, dest);
     await writeFileFn(src, renderFrontMatter({ ...head, thread_id: null }), 'utf8');
+    if (key) return dest;
     // ALSO roll every side-room alias log (transcript-<key>.md) in this folder, keyed off the SAME
     // thread_id. Walled off so it can never change `dest` (already final) or the return value.
     try {
@@ -184,6 +189,8 @@ export async function rollTranscript(surface, slug, { io = {} } = {}) {
         const aliasSrc = room.transcriptPathFor(key);                      // the Room's own getter — the file readdir named
         let aliasText = '';
         try { aliasText = (await readFileFn(aliasSrc, 'utf8')) ?? ''; } catch { continue; }   // vanished mid-roll → skip
+        const own = parseFrontMatter(aliasText).thread_id;
+        if (own && String(own) !== String(head.thread_id)) continue;      // a fork's log: its own thread
         const aliasDest = await archiveDest(`${id}--${key}`);
         if (!aliasDest) continue;                                          // 99 archives of this alias → leave it
         await renameFn(aliasSrc, aliasDest);
@@ -207,12 +214,12 @@ export async function rollTranscript(surface, slug, { io = {} } = {}) {
 // are appending to, so it runs exactly once per thread.
 // NEVER THROWS (like rollTranscript / seedIdentityLayers): a failed stamp logs and the turn
 // continues. Returns true when it wrote.
-export async function stampThreadId(surface, slug, threadId, { io = {} } = {}) {
+export async function stampThreadId(surface, slug, threadId, { io = {}, key = null } = {}) {
   const readFileFn = io.readFile ?? readFile;
   const writeFileFn = io.writeFile ?? writeFile;
   const id = String(threadId ?? '').trim();
   if (!id) return false;
-  const src = Room.forChat(surface, slug).transcriptPath;
+  const src = Room.forChat(surface, slug).transcriptPathFor(key);
   try {
     let text = '';
     try { text = (await readFileFn(src, 'utf8')) ?? ''; } catch { text = ''; }   // no transcript yet → the block is born here
@@ -1146,6 +1153,7 @@ export function getContact(state, surface, jid) {
 export const CONTACT_BOOKKEEPING_KEYS = new Set([
   'slug', 'pushedName', 'firstSeenAt', 'aliasOf', 'jids', 'agents',
   'conversation_path', 'home_dir',
+  'closed',   // closed_chats' marker (src/spine/closed-chats.mjs)
 ]);
 
 const _obj = (v) => (v && typeof v === 'object' && !Array.isArray(v)) ? v : null;
@@ -1165,9 +1173,9 @@ export function getBeing(state, surface, jid, being) {
   const alias = own?.aliasOf ? own : null;
   return {
     jid: c.jid, slug: c.slug, surface, being,
+    chatId:             jid,                    // the id asked about; `jid` follows an alias to its origin
     present:            !!b,
     mode:               _beingBlock(alias ?? {}, being)?.mode ?? b?.mode ?? null,
-    send_to_egpt:       b?.send_to_egpt       ?? null,  // per-conv 'always'|'mode' override
     threadId:           b?.threadId           ?? null,
     // PER-CONVERSATION allowed_paths OVERRIDE (operator 2026-10-01, /fork's read-only grant). Same
     // shape as config.yaml's agents.<being>.allowed_paths — a { path: grant } map where a grant
@@ -1178,6 +1186,9 @@ export function getBeing(state, surface, jid, being) {
     // read-only grant on the ORIGINAL chat's folder. null/absent = no per-conversation paths,
     // byte-identical to before.
     allowedPaths:       b?.allowed_paths      ?? null,
+    // sandbox_pin (operator 2026-10-27): this being's own pool account here, plus standing paths in
+    // the allowed_paths shape. src/spine/sandbox-pins.mjs.
+    sandboxPin:         b?.sandbox_pin        ?? null,
     // IS AN IDENTITY RE-FEED ARMED for this being's RUNNING thread (operator 2026-09-10,
     // `/agents refresh <handle>`). Read by brainpool.mjs's turn(): an armed RESUMED thread
     // re-wraps with the identity feed on its next turn and stamps identityInjectedAt back,
@@ -1273,11 +1284,14 @@ export function getBeing(state, surface, jid, being) {
     // room-outbox.resolveOutboxTarget is the one place that decides what it MEANS (unset ⇒ the
     // feature is OFF; unknown ⇒ off AND reported by name, never silently).
     outboxTo:           b?.outbox_to            ?? null,
+    // THIS being's handles IN THIS CHAT (operator 2026-10-24): set, it REPLACES the node-wide
+    // list here; [] = nothing names it here. RAW; router.mjs agentsInChat applies it.
+    handles:            b?.handles              ?? null,
   };
 }
 
-// A conversation entry's OWN default being: the first `agents.<being>` block carrying `default: true`
-// (the config registry's persona marker, one tier more specific). null = the node persona.
+// A conversation entry's OWNER: the first `agents.<being>` block carrying `default: true` (a
+// stranger there reaches only it — router.mjs). null = no owner. There is no node default agent.
 export function defaultBeingOf(entry) {
   const agents = _obj(_obj(entry)?.agents) ?? {};
   return Object.keys(agents).find((b) => _obj(agents[b])?.default === true) ?? null;
@@ -1291,13 +1305,12 @@ export function defaultBeingOf(entry) {
 //
 // THREE STATES, NOT TWO (operator 2026-09-05):
 //
-//   absent   inherit. Nothing at either tier is nothing to enforce, so it permits — this is
-//            what nearly every being in the profile relies on, and it does not change.
+//   absent   permits HERE. A being's reachability never hands it absent any more: router.mjs's
+//            mayWake answers no list at either tier with the owners (operator 2026-10-26).
 //   []       DENY EVERYONE. Somebody wrote a list and put nobody on it; that is an answer,
 //            not a silence.
-//   ["*"]    permit everyone. The explicit wildcard, and the escape hatch an access_level:'all'
-//            being needs (see brainpool.mjs's ACCESS-LEVEL/ALLOWED-USERS gate) — without it,
-//            "*" would just be an entry no real sender id ever equals, denying everyone.
+//   ["*"]    permit everyone. The explicit wildcard — without it, "*" would just be an entry
+//            no real sender id ever equals, denying everyone.
 //
 // This used to be two states: `|| !allowedUsers.length` folded [] in with absent and permitted
 // both, so `allowed_users: []` — the exact syntax README.md:63 and MANUAL.md:155 teach as deny —
@@ -1371,7 +1384,7 @@ export function recentContacts(state, { limit = 10, offset = 0, recencyOf } = {}
 function _findByslug(state, surface, slug) {
   const bucket = state.contacts?.[surface] ?? {};
   for (const [jid, entry] of Object.entries(bucket)) {
-    if (entry?.aliasOf) continue;
+    if (entry?.aliasOf || isForkEntry(entry)) continue;   // a fork shares its parent's slug
     if (entry?.slug === slug) return { primaryJid: jid, entry };
   }
   return null;
@@ -1512,6 +1525,8 @@ export function fixedSlugFor(surface, jid) {
   // to. It also gives chatIdForEntity (boot.mjs) the reverse lookup for free: that function
   // already resolves any fixed-slug surface generically through this one.
   if (surface === 'room' || surface === 'agent') return sanitizeName(jid) || null;
+  // A chatbox session `http:<client>-<sid>` lives in conversations/http/<client>-<sid>/ (limbs.http).
+  if (surface === 'http') return /^http:./.test(String(jid)) ? sanitizeName(String(jid).slice(5)) : null;
   return (surface === 'shell' && jid === 'main') ? LOBBY_SLUG : null;
 }
 
@@ -1587,7 +1602,7 @@ export function ensureContact(state, surface, jid, ctx = {}) {
     let renamedFrom = null, renamedTo = null;
     const nameBase = sanitizeSlug(ctx.pushedName);
     const curBase = String(cur.slug ?? '').replace(/-\d{10}$/, '');
-    if (!viaAlias && !fixed && nameBase && nameBase !== 'contact' && nameBase !== curBase) {
+    if (!viaAlias && !fixed && !isForkEntry(cur) && nameBase && nameBase !== 'contact' && nameBase !== curBase) {
       const suffix = String(cur.slug).match(/-(\d{10})$/)?.[1]
         || slugSuffix(cur.firstSeenAt ? new Date(cur.firstSeenAt) : new Date());
       const candidate = suffix ? `${nameBase}-${suffix}` : nameBase;
@@ -1656,8 +1671,8 @@ export function ensureContact(state, surface, jid, ctx = {}) {
     conversation_path: conversationPathOf(surface, candidateSlug),
     home_dir: homeDirMsys(),
     pushedName: ctx.pushedName ?? '',
-    // seed blocks for a brand-new conversation only (the stranger rule's `{ <being>: { default: true } }`)
-    ...(_obj(ctx.agents) ? { agents: ctx.agents } : {}),
+    // a brand-new conversation's seed only (the stranger rule's `{ agents: { <being>: { default: true } } }`)
+    ...(_obj(ctx.seed) ? ctx.seed : {}),
   };
   nextBucket[jid] = entry;
   return { state: next, surface, jid, slug: candidateSlug, entry, isNew: true, changed: true };
@@ -1706,6 +1721,28 @@ export function aliasContact(state, surface, jid, primaryJid, extra = {}) {
   return { ...state, contacts: { ...(state.contacts ?? {}), [surface]: nextBucket } };
 }
 
+// A /split FORK (operator 2026-10-26: "/split gives the context and folder with all previous files"):
+// its own entry and thread in its parent's folder — the parent's slug, so conversation_path, the box
+// uid and every file are the parent's — with parent_chat, and its own log transcript-<transcript>.md.
+// A /split entry without `transcript` is a fork made before this, in a folder of its own.
+export function isForkEntry(entry) {
+  return !!entry && !entry.aliasOf && !!entry.parent_chat && typeof entry.transcript === 'string' && !!entry.transcript;
+}
+// The fork's transcript key (also what keeps its warm session apart from the parent's), else null.
+export function forkKeyOf(state, surface, jid) {
+  const entry = state?.contacts?.[surface]?.[jid];
+  return isForkEntry(entry) ? entry.transcript : null;
+}
+// Write `jid` as a fork of `parentJid` (replacing whatever entry it had). No-op when the parent is unknown.
+export function forkContact(state, surface, jid, parentJid, { pushedName = '', transcript } = {}) {
+  assertPathSafeSurface(surface, 'forkContact');
+  const parent = _resolveByJid(state, surface, parentJid);
+  if (!jid || !parent || !transcript) return state;
+  const { slug } = parent.entry;
+  const entry = { slug, conversation_path: conversationPathOf(surface, slug), home_dir: homeDirMsys(), pushedName, parent_chat: parentJid, transcript };
+  return { ...state, contacts: { ...(state.contacts ?? {}), [surface]: { ...(state.contacts?.[surface] ?? {}), [jid]: entry } } };
+}
+
 // Remove a jid's OWN entry (used by /end to close the fork room). No-op when absent.
 export function dropContact(state, surface, jid) {
   const prevBucket = state.contacts?.[surface];
@@ -1713,6 +1750,20 @@ export function dropContact(state, surface, jid) {
   const nextBucket = { ...prevBucket };
   delete nextBucket[jid];
   return { ...state, contacts: { ...(state.contacts ?? {}), [surface]: nextBucket } };
+}
+
+// A chat that carries on under a new id (a Telegram group turned supergroup, 2026-10-25): its entry
+// moves to `to` whole, in place (folder, threads, beings' settings), and every side room naming it
+// (aliasOf, parent_chat) follows. The same state when `from` has no entry or `to` already has one.
+export function moveChatId(state, surface, from, to) {
+  const bucket = state?.contacts?.[surface];
+  if (!bucket?.[from] || !to || bucket[to]) return state;
+  const next = {};
+  for (const [id, e] of Object.entries(bucket)) {
+    if (id === from) next[to] = e;
+    else next[id] = e?.aliasOf === from ? { ...e, aliasOf: to } : e?.parent_chat === from ? { ...e, parent_chat: to } : e;
+  }
+  return { ...state, contacts: { ...state.contacts, [surface]: next } };
 }
 
 // The primary a jid is an ALIAS OF, read RAW (not alias-resolved), or null when it is a primary
@@ -1944,6 +1995,12 @@ async function _identityLayers(name) {
 // skeletonIdentityFiles, so "what gets written" and "what counts as the skeleton" cannot drift.
 const _sharedLayers = (layers) => layers.filter(({ file }) => file !== IDENTITY_SLOT);
 
+// The shared layers that name nothing internal — all an access_level `reader` being is fed or finds
+// in its directives/ (2026-10-26, chatboxes). 30-pointers names src, Chrome, the spine helper and
+// ssh keys, so it is out. An allowlist: a layer added later stays out until someone judges it.
+export const PUBLIC_LAYERS = Object.freeze(['10-actions.md', '40-rules.md']);
+const _publicLayers = (layers) => layers.filter(({ file }) => file === IDENTITY_SLOT || PUBLIC_LAYERS.includes(file));
+
 // Seed the room's SHARED directive layers into a Room's OWN folder — a chat conversation or
 // an operator-named room alike, since both ARE Rooms (operator 2026-07-25: "they
 // all get to model at the beginning, but should also be copied for local consult, since by
@@ -1998,13 +2055,15 @@ const _sharedLayers = (layers) => layers.filter(({ file }) => file !== IDENTITY_
 //
 // NEVER throws — a seeding hiccup must not break a turn (or a /rooms create). Returns the
 // filenames it wrote.
-export async function seedIdentityLayers(room, name, { io = {}, overwrite = false } = {}) {
+export async function seedIdentityLayers(room, name, { io = {}, overwrite = false, publicOnly = false } = {}) {
   const readFileFn = io.readFile ?? readFile;
   const writeFileFn = io.writeFile ?? writeFile;
   const mkdirFn = io.mkdir ?? mkdir;
+  const unlinkFn = io.unlink ?? unlink;
   const wrote = [];
   try {
-    const layers = _sharedLayers(await _identityLayers(name));
+    const shared = _sharedLayers(await _identityLayers(name));
+    const layers = publicOnly ? _publicLayers(shared) : shared;
     const dir = room.directivesDir;
     // The Room's WHOLE tree — directives/ AND media/ files/ scripts/ — through the
     // abstraction's own ensureTree, the SAME call /rooms create makes (operator 2026-07-26:
@@ -2027,6 +2086,13 @@ export async function seedIdentityLayers(room, name, { io = {}, overwrite = fals
       }
       await writeFileFn(fp, text, 'utf8');
       wrote.push(file);
+    }
+    // A public desk holds no card its being is not fed — an /agents refresh|reset or an earlier
+    // level may have filed one there.
+    if (publicOnly) {
+      for (const { file } of shared.filter((l) => !layers.includes(l))) {
+        try { await unlinkFn(join(dir, file)); } catch (e) { if (e?.code !== 'ENOENT') throw e; }
+      }
     }
   } catch (e) { console.error(`!! seedIdentityLayers(${room?.baseDir?.() ?? '?'}): ${e?.message ?? e}`); }
   return wrote;
@@ -2066,8 +2132,9 @@ export function fillCardPlaceholders(text, config = {}) {
     .join('\n');
 }
 
-export async function readIdentityFeed(name, config = {}) {
-  const raw = (await _identityLayers(name)).map(({ text }) => text.trim()).filter(Boolean).join('\n\n');
+export async function readIdentityFeed(name, config = {}, { publicOnly = false } = {}) {
+  const layers = await _identityLayers(name);
+  const raw = (publicOnly ? _publicLayers(layers) : layers).map(({ text }) => text.trim()).filter(Boolean).join('\n\n');
   return fillCardPlaceholders(raw, config);
 }
 

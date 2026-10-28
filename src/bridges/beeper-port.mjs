@@ -85,11 +85,6 @@ export async function createBeeperBridgePort(opts = {}, { start = startBeeperBri
   // characters and appended to every frame. The visible layers above are "prescindable"; THIS is
   // what identifies the node machine-readably, and boot refuses to start without a node_name.
   const nodeName = opts.nodeName ?? '';
-  // Wrap what this node posts concentrically: outer bridge layer (per-node, above), inner agent
-  // layer (per-being, from opts.agentSig*), around the stamped core. The composition lives in the
-  // shared persona-wrap module (used identically by shell-port and by the 👂 echo one layer down);
-  // this closure just binds this node's bridge-signature layer.
-  const wrapPersona = makeWrapPersona({ bridgeSignatureOpen, bridgeSignatureClose, nodeName, plainOf: opts.plainOf });   // plainOf: a public being's sends are unstamped (persona-wrap.mjs)
   const real = await start({
     ...rest,
     // Forward inbound to the spine. This resolves when the message's TURN completes
@@ -107,6 +102,13 @@ export async function createBeeperBridgePort(opts = {}, { start = startBeeperBri
     // (or video descriptor) back, so return whatever the host hands us.
     onMedia: async (m) => (onMediaCb ? onMediaCb(m) : undefined),
   });
+  // Wrap what this node posts concentrically: outer bridge layer (per-node, above), inner agent
+  // layer (per-being, from opts.agentSig*), around the stamped core. The composition lives in the
+  // shared persona-wrap module (used identically by shell-port and by the 👂 echo one layer down);
+  // this closure just binds this node's bridge-signature layer.
+  // plainOf: a public being's sends are unstamped. visibleOnly: the limb says its surface takes no
+  // invisible characters (Telegram), so this one wrap adds no structural frame (persona-wrap.mjs).
+  const wrapPersona = makeWrapPersona({ bridgeSignatureOpen, bridgeSignatureClose, nodeName, plainOf: opts.plainOf, visibleOnly: real.visibleOnly === true });
 
   return {
     onMessage(cb) { onMsg = cb; },
@@ -167,7 +169,7 @@ export async function createBeeperBridgePort(opts = {}, { start = startBeeperBri
       return real.startStreamMessage ? real.startStreamMessage(String(init ?? ''), { chatId: chat }) : null;
     },
 
-    // In-place edit-stream. Returns the §2b { update, finish, delete } plus
+    // In-place edit-stream. Returns the §2b { update, finish } plus
     // delivered / lastError passthrough: the sender's fallback-send must send fresh
     // ONLY when the stream did not deliver in place (§7 invariant — "the host
     // skips its fallback send only when the stream reports delivered").
@@ -220,7 +222,6 @@ export async function createBeeperBridgePort(opts = {}, { start = startBeeperBri
       return {
         update: (t) => h.update(frame(mark(t, LIVE_FRAME_MARK))),
         finish: (t) => h.finish(frame(mark(t, DONE_MARK))),
-        delete: () => h.delete?.() ?? false,   // the bridge's own placeholder, never a limb (sender.mjs)
         get delivered() { return h.delivered; },
         get lastError() { return h.lastError; },
         get confirmedId() { return h.confirmedId; },
@@ -228,8 +229,8 @@ export async function createBeeperBridgePort(opts = {}, { start = startBeeperBri
       };
     },
 
-    // A — the knee-jerk status message: post it (returns the confirmed id), edit
-    // it, or delete it (the train deletes it once the reply starts streaming).
+    // A — the knee-jerk status message: post it (returns the confirmed id) or edit
+    // it. Never delete it (operator 2026-10-27: nothing is ever deleted).
     //
     // SIGNED like every other send (operator 2026-07-25, "period"; fixed 2026-07-26, HANDOFF C12).
     // This was the one outbound here that skipped the wrap, and its other caller is the ADVICE
@@ -242,12 +243,11 @@ export async function createBeeperBridgePort(opts = {}, { start = startBeeperBri
     // The edit REPLACES the text of a status line that postStatus signed — an unsigned edit strips
     // the node signature back off it, so it renders through the same wrap (C13, 2026-07-26).
     editStatus(chat, msgId, text) { return real.editMessage?.(chat, msgId, wrapPersona({}, text)); },
-    deleteStatus(chat, msgId) { return real.deleteMessage?.(chat, msgId); },
 
     // Conversation-E LIMBS (ROADMAP §3). react/sendMedia are OUTBOUND sends; editOwn
     // mutate an existing message (no new send). A media caption + an edit are E speaking →
     // persona-stamped, exactly like send(). react carries no persona text.
-    // No deleteOwn: there is no delete limb (operator 2026-08-24).
+    // No deleteOwn: there is no delete limb (operator 2026-08-24), and no delete at all (2026-10-27).
     react(chat, msgId, emoji) {
       return real.sendReaction?.(chat, msgId, emoji);
     },
@@ -337,8 +337,9 @@ export async function createBeeperBridgePort(opts = {}, { start = startBeeperBri
     async editMessage(chat, msgId, text) {
       return real.editMessage ? await real.editMessage(chat, msgId, text) : false;
     },
-    async createGroup(opts) {
-      return real.createGroup ? await real.createGroup(opts) : null;
+    // `chat`: the chat the room is made from (a Telegram topic lives in it; Beeper ignores it).
+    async createGroup(chat, opts) {
+      return real.createGroup ? await real.createGroup(opts, { chatId: chat }) : null;
     },
     // PHONE → BEEPER USER ID (operator 2026-10-03) — a READ of this account's own rosters (like
     // chatRaw/listChatsRaw), forwarded so /fork can resolve Rodz's `@whatsapp_lid-…` id for the
@@ -348,6 +349,11 @@ export async function createBeeperBridgePort(opts = {}, { start = startBeeperBri
     },
     async archiveChat(chat, opts) {
       return real.archiveChat ? await real.archiveChat(chat, opts) : false;
+    },
+    // /group (2026-10-26): the chat's photo/title/description — RAW like createGroup (not speech).
+    // A transport without it (Beeper) answers null, which the limb reads as not-supported.
+    async setChatInfo(chat, info) {
+      return real.setChatInfo ? await real.setChatInfo(chat, info) : null;
     },
     getChatName(id) {
       return real.getChatName ? real.getChatName(id) : null;

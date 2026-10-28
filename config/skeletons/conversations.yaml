@@ -44,6 +44,9 @@ contacts:
       # browser group: browsers.yaml uploads:
       #privileged_browser: true
 
+      # keep this conversation's sessions warm: never idle- or LRU-evicted (config-schema warm)
+      #warm: { keep: true }
+
       # no reply here: every reply goes to a side group the primary makes (config-schema reply_in_side_group);
       # true/yes/on → "SI+<title>", any other text → that title
       #reply_in_side_group: on
@@ -62,14 +65,11 @@ contacts:
           # accum = the mention gate, PLUS every turn is prompted with what was
           # said here SINCE THIS AGENT'S LAST TURN (read back out of transcript.md,
           # labelled as context beside the trigger, 8000 chars max). It closes the
-          # gap send_to_egpt: mode leaves - an un-@mentioned message otherwise
+          # gap the mention gate leaves - an un-@mentioned message otherwise
           # never reaches the agent. It changes WHAT a turn is prompted with, never
           # WHEN one happens: no buffering, no batch, no heartbeat flush (that was
           # the OLD accum, retired 2026-07-01 - same word, different mechanism).
           #mode: mention
-
-          # persona only - keep it in context on messages it won't answer: always | mode
-          #send_to_egpt: mode
 
           # /e access all|regular - points this agent at config/permissions/<level>.md,
           # read fresh every turn (NOT a freeze). REPLACES (does not merge with) this
@@ -83,6 +83,12 @@ contacts:
           # agents.<name>.allowed_users default when set; unset here falls to that
           # global default, then to "reachable by anyone" (today's ordinary default).
           #allowed_users: []
+
+          # the names that address this agent IN THIS CHAT (@name, a leading bare name,
+          # /<name> commands, the bare-name readback). REPLACES config.yaml
+          # agents.<name>.handles here, its fallback_handle too; [] = no name addresses it
+          # here. voice_handles stay node-wide.
+          #handles: [ekg]
 
           # spine-written, don't hand-edit. Deleting threadId starts a new session
           # AND re-resolves this agent's engine/model/effort/tools fresh from

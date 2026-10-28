@@ -21,13 +21,14 @@ import { createStopGuard } from '../src/stop-guard.mjs';
 import { createRouter } from '../src/spine/router.mjs';
 import { createCommands } from '../src/spine/commands.mjs';
 
-const AGENTS = {
-  egpt: { configuration: 'sonnet-high', handles: ['e', 'egpt'], default: true },   // the persona
+// Every agent answers anyone here, as on kg after migration 0050.
+const AGENTS = Object.fromEntries(Object.entries({
+  egpt: { configuration: 'sonnet-high', handles: ['e', 'egpt'] },   // the persona
   wren: { configuration: 'egpt-xhigh', handles: ['wren', 'w'] },   // the meta engineer on kg
   codex: { configuration: 'codex' },
   dren: { configuration: 'relay', relay_channel: 'egpt-mesh-do-kg', to: 'dren.do' },   // do's meta engineer, reached by relay
   don: { configuration: 'relay', relay_channel: 'egpt-mesh-do-kg', to: 'don.do' },     // do's persona, reached by relay
-};
+}).map(([k, a]) => [k, { ...a, conversation_defaults: { allowed_users: ['*'] } }]));
 
 const ADMIN = 'trYqoMoH7jETBozvcOQh';
 const CH = `whatsapp:${ADMIN}`;
@@ -59,7 +60,7 @@ function build({ levels = {}, turns = 3, stopSwitch = null, isSelfChat = () => f
     },
   };
   // THE COMMAND PATH'S OWN AUTHORITY — the real isCommand, not a model of it.
-  const real = createCommands({ getConfig: () => ({ whatsapp: { chat_id: '!self' } }), send: async () => {}, exit: () => {}, brains: { resolve: (name) => ({ name, type: 'ccode' }) } });
+  const real = createCommands({ getConfig: () => ({ whatsapp: { chat_id: '!self' }, agents: AGENTS }), send: async () => {}, exit: () => {}, brains: { resolve: (name) => ({ name, type: 'ccode' }) } });
   const ran = [];
   const commands = { commandOf: real.commandOf, isCommand: real.isCommand, run: async (e) => { ran.push(e.body); } };
   const mesh = {
@@ -73,11 +74,10 @@ function build({ levels = {}, turns = 3, stopSwitch = null, isSelfChat = () => f
   const spine = createSpine({
     bridge, brain, commands, mesh, guard, stopSwitch, isSelfChat, heartbeats,
     identity: { build: (m) => ({ ...m }) },
-    router: createRouter({ getAgents: () => AGENTS, defaultBeing: 'egpt' }),
-    gating: { async decide() { return { mode: 'on', receives: true, mayReply: true, sendToEgpt: 'mode' }; }, surfaces: (d) => d.mayReply },
+    router: createRouter({ getAgents: () => AGENTS }),
+    gating: { async decide() { return { mode: 'on', receives: true, mayReply: true }; }, surfaces: (d) => d.mayReply },
     sender: { open() { return { update() {}, activate() {}, fail() {}, async finish() {} }; } },
     transcript: { async log() {} },
-    defaultBeing: 'egpt',
     clock: { now: () => 1 },
   });
   return { spine, guard, brain, ran, mesh, heartbeats, asked };

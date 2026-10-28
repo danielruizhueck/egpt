@@ -5,7 +5,7 @@
 // arrive it edits in place into the answer. A send failure ends it with
 // "… ❌ Sending failed."; an 'on'/'auto'-mode '...' silence resolves it to the quiet limb mark
 // '✓' (an edit, never deleted; a fresh '✓' when it cannot be edited) — in mention/mention-direct/accum the '...' surfaces. A
-// limb-only turn's placeholder is deleted, else edited to '✓', else a fresh '✓' replies (2026-10-19).
+// limb-only turn's placeholder settles the same way: edited to '✓', else a fresh '✓' replies (operator 2026-10-27).
 // An 'on' turn on a non-human line (`ambient`, operator 2026-10-18) opens nothing until it has text
 // or begin() is called (the being started working): its quick silence posts nothing, only a log line.
 //
@@ -58,10 +58,10 @@ const commandMark = (verbs = []) => `⚙️ processing ${verbs.length > 1 ? 'com
 // [the] reaction also appear as a thinking process"). commandMark is the DEBUG/record view — the
 // legible "a limb ran" line the note above keeps for the verbose reader. With verbose OFF the chat
 // should show JUST the reaction (which already landed on its target, visibly). The ⏳-only
-// placeholder a limb-only turn opened holds no model content, so with verbose OFF the bridge DELETES
-// it (operator 2026-10-19: "that leftover is not needed in the train"). Text already read is kept,
-// nothing appended (the mirror of "the silence mark never lands beside prose", below). This minimal
-// neutral mark is where a placeholder whose delete failed settles. NOT commandMark (the record), NOT
+// placeholder a limb-only turn opened holds no model content, so with verbose OFF it is EDITED to
+// this minimal neutral mark — never deleted (operator 2026-10-27: "nadie borra nunca nada, ningún
+// bot, ni el spine"). Text already read is kept, nothing appended (the mirror of "the silence mark
+// never lands beside prose", below). NOT commandMark (the record), NOT
 // BRIDGE_SILENCE (a limb turn is not silence/error), NOT a faked '…' (the model's own word). The
 // legible record of WHAT ran is the transcript stage-direction (dispatch-line.limbAction), written
 // regardless of verbose — so suppressing this chat line drops no record.
@@ -239,12 +239,13 @@ export const RETAINED_SEAM = '\n\n— ↓ reply —\n\n';
  * resolved without knowing who is replying. It was not passed, and could not have been, while the
  * only mouth was a peer spine — that one is a property of the node.
  *
- * `react()` IS THE ONE PLACEMENT OF A REACTION (2026-09-16), shared by the steer 📩/👀
+ * `react()` IS THE ONE PLACEMENT OF A REACTION (2026-09-16), shared by the steer ✍️/👍
  * (turns.mjs) and the /react limb (reply-actions.mjs). Live on kg the limb reacted on the EAR —
  * `bridge` above — so the 👍 came from the operator's own account while the reply came from the
  * mouth; the steer ack already asked route() first. Moved here from turns.mjs so both ask it:
  *   no mouth    ⇒ nothing is placed, logged (2026-10-18): the only account is the operator's.
- *                 A removal still runs on `bridge` (a stale 🎧 from before).
+ *                 A removal still runs on `bridge` (a stale 🎧 from before). A limb whose account
+ *                 is the being's own (`beingAccount`, the Telegram bot) reacts on `bridge`.
  *   holder IS the mouth ⇒ `bridge` reacts with the local `msgId`. A throw propagates:
  *                 each caller already had its own handling for that.
  *   a mouth     ⇒ the mouth reacts on ITS OWN copy, named by the cross-account key `keyOf()`
@@ -290,11 +291,13 @@ export function makeOutbound({ bridge, bridgeOf = null, peerMouth = null, onLog 
     const out = {
       bridge: bridgeOf ? (bridgeOf(being, chatId) ?? bridge) : bridge,
       route: () => (peerMouth ? Promise.resolve().then(() => peerMouth.route(chatId, being)).catch((e) => { onLog(`mouth: could not decide the route for ${chatId} — posting locally: ${e?.message ?? e}`); return null; }) : null),
+      // May a being react here? A mouth, or a limb whose account is the being's own (a bot: `beingAccount`).
+      reacts: () => !!peerMouth || out.bridge?.beingAccount === true,
       async react(msgId, emoji, keyOf, what = 'react', { remove = false, temporary = false } = {}) {
         // NO MOUTH ON THIS NODE — one account, the operator's (operator 2026-10-18): a reaction from
         // it is his own, so none is placed (taking one off still works: a stale 🎧 from before).
         // The /react limb says it as a quoted line instead.
-        if (!peerMouth && !remove) { onLog(`${what} ${being}/${chatId}: no mouth account on this node — no ${emoji} placed`); return false; }
+        if (!out.reacts() && !remove) { onLog(`${what} ${being}/${chatId}: no mouth account on this node — no ${emoji} placed`); return false; }
         const says = out.route();
         const mouthChat = says ? await says : null;
         // A being reacts ONLY through its mouth (operator 2026-10-18): where the mouth is a different
@@ -374,7 +377,7 @@ const QUOTE_MEMO_MAX = 200;
 // publicOf(being) / noticeAdmin({ being, chatId, text }) (2026-10-15): a PUBLIC being
 // (agents.<name>.public) takes the plain branch below, and its error lines go to noticeAdmin
 // (boot: the admin channel) instead of the chat.
-export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null, labelOf = () => null, agentSignatureOpenOf = () => '', agentSignatureCloseOf = () => '', defaultKey = 'e', peerMouth = null, publicOf = () => false, noticeAdmin = async () => {}, onUndeliverable = () => {}, onLog = () => {}, now = () => Date.now() } = {}) {
+export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null, labelOf = () => null, agentSignatureOpenOf = () => '', agentSignatureCloseOf = () => '', peerMouth = null, publicOf = () => false, noticeAdmin = async () => {}, onUndeliverable = () => {}, onLog = () => {}, now = () => Date.now() } = {}) {
   if (!bridge) throw new Error('createSender: bridge is required');
   const textOf = (v) => (typeof v === 'string' ? v : v?.text ?? '');
   const outbound = makeOutbound({ bridge, bridgeOf, peerMouth, onLog });
@@ -385,10 +388,10 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
   const later = (room, opts) => {
     let asked = null, out = null;
     const ask = () => (asked ??= Promise.resolve().then(room)
-      .catch((e) => { onLog(`sender: ${opts.being ?? defaultKey} — making its room threw: ${e?.message ?? e}`); return null; })
+      .catch((e) => { onLog(`sender: ${opts.being ?? '?'} — making its room threw: ${e?.message ?? e}`); return null; })
       .then((id) => {
         if (id) out = sender.open(id, opts);
-        else onLog(`sender: ${opts.being ?? defaultKey} — its room could not be made, nothing posted`);
+        else onLog(`sender: ${opts.being ?? '?'} — its room could not be made, nothing posted`);
         return out;
       }));
     const onOpen = (f) => ask().then((o) => (o ? f(o) : undefined));
@@ -401,7 +404,7 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
       async end(text) { if (asked) await onOpen((o) => o.end(text)); },
       async finish(reply, o = {}) {
         if (asked || (o.surface !== false && textOf(reply).trim())) return onOpen((x) => x.finish(reply, o));
-        onLog(`sender: ${opts.being ?? defaultKey} turn withheld before its room was made — nothing posted`);
+        onLog(`sender: ${opts.being ?? '?'} turn withheld before its room was made — nothing posted`);
       },
       async fail(e) { if (asked) await onOpen((o) => o.fail(e)); },
       get confirmedId() { return out?.confirmedId ?? null; },
@@ -417,7 +420,7 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
     // `hideSilence`: an 'on' turn — a partial that may still be its '…' silence is never shown (operator 2026-10-18).
     open(chatId, opts = {}) {
       if (typeof chatId === 'function') return later(chatId, opts);
-      let { being = defaultKey, replyTo = null, replyIn = undefined, replyKey = null, queued = false, queuedAhead = 0, auto = false, ambient = false, hideSilence = false, origin = null, status = null } = opts;
+      let { being = null, replyTo = null, replyIn = undefined, replyKey = null, queued = false, queuedAhead = 0, auto = false, ambient = false, hideSilence = false, origin = null, status = null } = opts;
       const { bridge: bridgeForThisBeing, route: peerRoute, keyOf } = outbound(being, chatId);
       // ROUTED-TARGET FALLBACK (never a silent drop): a send the sending account can't place on the
       // routed room (a super/alias room it isn't a member of → resolveChatId null → DROPPED) re-sends
@@ -697,8 +700,8 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
           const peerChat = route ? await route : null;
           const t = textOf(reply);
           // Gate-withheld ('on'-mode silence / not surfaced). NOTHING IS EVER
-          // DELETED (operator 2026-08-24) — except a limb-only turn's own ⏳-only
-          // placeholder (operator 2026-10-19, below). The placeholder resolves to the
+          // DELETED (operator 2026-08-24; An 2026-10-27: "nadie borra nunca nada, ningún
+          // bot, ni el spine"). The placeholder resolves to the
           // silence mark instead of vanishing. 40-rules.md already names it —
           // "A polite silence is '...' or '…'" — so the withheld turn reads as
           // a deliberate silence rather than a message that disappeared.
@@ -717,15 +720,9 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
             openStream(peerChat);
             // A LIMB-ONLY turn says what it is DOING, never that it heard nothing. With verbose ON
             // that is the legible commandMark record; with verbose OFF the chat shows just the
-            // reaction — keep what was already read (append nothing), else DELETE the ⏳-only
-            // placeholder where it opened; a delete that fails settles on quietLimbMark (settle).
+            // reaction — keep what was already read (append nothing), else EDIT the ⏳-only
+            // placeholder to quietLimbMark where it opened (settle). Never deleted (operator 2026-10-27).
             if (commands?.length) {
-              if (!verbose && !shown() && stream) {
-                let gone = false;
-                try { gone = (await stream.delete?.()) === true; } catch { /* settles on ✓ below */ }
-                if (gone) return;
-                onLog(`sender: ${being}/${chatId} limb-only turn — its placeholder could not be deleted, settling on ✓`);
-              }
               const settled = verbose ? commandMark(commands) : (shown() ? '' : quietLimbMark());
               await settle(settled);
               return;

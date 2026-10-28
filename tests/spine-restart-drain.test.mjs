@@ -6,11 +6,11 @@
 // with the process and the question was never answered.
 //
 // So /restart (43) and /upgrade (42) now go through spine.drainForRestart: the spine KEEPS SERVING,
-// and leaves at the first moment turns.mjs's `trains` is empty — or at the 30-minute cap. /rewind
-// (44), STOP and the daemon's wedge-kill stay immediate.
+// and leaves at the first moment turns.mjs's `trains` is empty — no cap (2026-10-26); `force` waits for
+// nothing. /rewind (44), STOP and the daemon's wedge-kill stay immediate.
 //
 // Two halves. The SPINE half drives createSpine directly with an injected interval + clock, so the
-// poll, the 30 s line and the cap are exercised without waiting. The BOOT half is the reproduction:
+// poll, the 30 s line and the 30-min notice are exercised without waiting. The BOOT half is the reproduction:
 // the real boot(), a fake Beeper transport, a warm session whose turn is held open, and the typed
 // command in Self — on the code before this change `/upgrade` exited 42 with the turn still open.
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
@@ -30,7 +30,7 @@ import { createSpine } from '../src/spine/spine.mjs';
 
 const DRAINING = join(_PRIVATE_HOME, 'state', 'draining.json');
 const STOP_PATH = join(_PRIVATE_HOME, 'STOP');
-const CAP_MS = 30 * 60_000;
+const NOTICE_MS = 30 * 60_000;
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
@@ -115,7 +115,7 @@ describe('spine.drainForRestart — /restart and /upgrade wait for the turns in 
     spine.drainForRestart(() => exits.push('exit'));
     expect(exits).toEqual([]);
     expect(timers.armed()).toEqual([1000]);                       // polled once a second
-    expect(drainLines()).toEqual([`drain: waiting for 1 turn(s) before restarting — ${KEY_A} (cap 30 min; new messages are still answered)`]);
+    expect(drainLines()).toEqual([`drain: waiting for 1 turn(s) before restarting — ${KEY_A} (no cap — /restart force skips the wait; new messages are still answered)`]);
 
     timers.fire();
     expect(exits).toEqual([]);                                    // still writing, still here
@@ -134,7 +134,7 @@ describe('spine.drainForRestart — /restart and /upgrade wait for the turns in 
     await flush();
     const ran = [];
     spine.drainForRestart(() => ran.push('update'), { purpose: 'restarting Beeper for the update' });
-    expect(drainLines()).toEqual([`drain: waiting for 1 turn(s) before restarting Beeper for the update — ${KEY_A} (cap 30 min; new messages are still answered)`]);
+    expect(drainLines()).toEqual([`drain: waiting for 1 turn(s) before restarting Beeper for the update — ${KEY_A} (no cap — /restart force skips the wait; new messages are still answered)`]);
     brain.release('one');
     await p1;
     timers.fire();
@@ -205,7 +205,7 @@ describe('spine.drainForRestart — /restart and /upgrade wait for the turns in 
     spine.drainForRestart(() => {}, { onWait: (rec) => published.push(rec) });
     await flush();
     const since = new Date(clock.t).toISOString();
-    expect(published).toEqual([{ since, busy: [KEY_A], turns: 1, cap: CAP_MS, background: [] }]);
+    expect(published).toEqual([{ since, busy: [KEY_A], turns: 1, background: [] }]);
 
     clock.t += 29_000; timers.fire();
     expect(drainLines()).toHaveLength(1);                         // not yet
@@ -217,19 +217,50 @@ describe('spine.drainForRestart — /restart and /upgrade wait for the turns in 
     expect(drainLines()).toHaveLength(2);                         // one line per ~30 s, not per poll
   });
 
-  it('THE CAP: a turn that never finishes cannot hold the restart past 30 min — it says so loudly and leaves', async () => {
-    const { spine, bridge, timers, clock, drainLines } = build();
-    bridge.emit(msg('one', A, 'm1'));                             // never released
+  it('NO CAP (2026-10-26): a turn past 30 min still holds the restart, the logging group is told, and it leaves when the turn lands', async () => {
+    const posted = [];
+    const { spine, bridge, brain, timers, clock, drainLines } = build({ logToGroup: async (t) => { posted.push(t); } });
+    const p1 = bridge.emit(msg('one', A, 'm1'));
     await flush();
     const exits = [];
     spine.drainForRestart(() => exits.push('exit'));
 
-    clock.t += CAP_MS - 1; timers.fire();
+    clock.t += NOTICE_MS; timers.fire();
+    clock.t += 3 * NOTICE_MS; timers.fire();
     expect(exits).toEqual([]);
-    clock.t += 1; timers.fire();
+    expect(timers.armed()).toEqual([1000]);
+    expect(posted).toEqual([`restart waiting 30m00s for 1 turn(s): ${KEY_A}. Send /restart force to proceed.`, `restart waiting 2h00m for 1 turn(s): ${KEY_A}. Send /restart force to proceed.`]);
+    expect(drainLines().at(-1)).toBe(`drain: still waiting after 7200s — 1 turn(s): ${KEY_A}`);
+
+    brain.release('one');
+    await p1;
+    timers.fire();
+    expect(exits).toEqual(['exit']);
+    expect(drainLines().at(-1)).toBe('drain: nothing in flight after 7200s — restarting');
+  });
+
+  it('force waits for no turn: it leaves at once and names what it leaves behind', async () => {
+    const { spine, bridge, timers, drainLines } = build();
+    bridge.emit(msg('one', A, 'm1'));                             // never released
+    await flush();
+    const exits = [];
+    spine.drainForRestart(() => exits.push('exit'), { force: true });
     expect(exits).toEqual(['exit']);
     expect(timers.armed()).toEqual([]);
-    expect(drainLines().at(-1)).toBe(`drain: CAP — 1 turn(s) STILL in flight after 30 min: ${KEY_A} — restarting ANYWAY; they die with this process`);
+    expect(drainLines()).toEqual([`drain: force — not waiting for 1 turn(s): ${KEY_A}`]);
+  });
+
+  it('a force arriving while a turn holds the drain leaves at once — one exit, the pending one', async () => {
+    const { spine, bridge, clock, timers, drainLines } = build();
+    bridge.emit(msg('one', A, 'm1'));                             // never released
+    await flush();
+    const exits = [];
+    spine.drainForRestart(() => exits.push('first'));
+    clock.t += 45 * 60_000; timers.fire();
+    spine.drainForRestart(() => exits.push('second'), { force: true });
+    expect(exits).toEqual(['first']);
+    expect(timers.armed()).toEqual([]);
+    expect(drainLines().slice(-2)).toEqual([`drain: force — not waiting for 1 turn(s): ${KEY_A}`, 'drain: force — restarting after 2700s']);
   });
 
   it('a second /restart or /upgrade during the drain starts NO second drain', async () => {
@@ -251,8 +282,8 @@ describe('spine.drainForRestart — /restart and /upgrade wait for the turns in 
 });
 
 // STEP C (INFORME-reinicios-sin-matar-agentes, 2026-10-16): a restart kills each warm `claude` and
-// its background agents with it, so the drain waits for them too. Never capped into a kill: past the
-// cap the logging group is told and the wait goes on. `/restart force` skips it; turns are still waited.
+// its background agents with it, so the drain waits for them too. Never capped into a kill: past 30
+// min the logging group is told and the wait goes on. `/restart force` skips it (turns too, 2026-10-26).
 describe('spine.drainForRestart — background work holds the restart, and is never cut short', () => {
   const T0 = 1_000_000;   // build()'s clock
   const iso = (ms) => new Date(ms).toISOString();
@@ -266,7 +297,7 @@ describe('spine.drainForRestart — background work holds the restart, and is ne
     spine.drainForRestart(() => exits.push('exit'));
     expect(exits).toEqual([]);
     expect(timers.armed()).toEqual([1000]);
-    expect(drainLines()).toEqual([`drain: waiting for 1 background task(s) before restarting — e/${A}: indexing the archive (5m00s) (cap 30 min for turns; background work has none — /restart force skips it; new messages are still answered)`]);
+    expect(drainLines()).toEqual([`drain: waiting for 1 background task(s) before restarting — e/${A}: indexing the archive (5m00s) (no cap — /restart force skips the wait; new messages are still answered)`]);
 
     timers.fire();
     expect(exits).toEqual([]);
@@ -295,13 +326,13 @@ describe('spine.drainForRestart — background work holds the restart, and is ne
     expect(exits).toEqual(['exit']);
   });
 
-  it('(c) past the cap: ONE line to the logging group, still waiting — repeated at most every 30 min', () => {
+  it('(c) past 30 min: ONE line to the logging group, still waiting — repeated at most every 30 min', () => {
     const posted = [];
     const { spine, timers, clock } = build({ backgroundWork: () => [task()], logToGroup: async (t) => { posted.push(t); } });
     const exits = [];
     spine.drainForRestart(() => exits.push('exit'));
 
-    clock.t += CAP_MS - 1; timers.fire();
+    clock.t += NOTICE_MS - 1; timers.fire();
     expect(posted).toEqual([]);
     clock.t += 1; timers.fire();
     expect(exits).toEqual([]);
@@ -309,42 +340,46 @@ describe('spine.drainForRestart — background work holds the restart, and is ne
 
     clock.t += 60_000; timers.fire();
     expect(posted).toHaveLength(1);
-    clock.t += CAP_MS - 60_000; timers.fire();
+    clock.t += NOTICE_MS - 60_000; timers.fire();
     expect(posted).toHaveLength(2);
     expect(posted[1]).toMatch(/^restart waiting 1h00m for background work: /);
     expect(exits).toEqual([]);
   });
 
-  it('the turns\' cap does not end the wait while background work holds it — it counts from when the work is gone', async () => {
+  it('a turn and background work together: the notice names both, and the wait goes on after the work is gone', async () => {
     let tasks = [task()];
-    const { spine, bridge, timers, clock } = build({ backgroundWork: () => tasks, logToGroup: async () => {} });
+    const posted = [];
+    const { spine, bridge, timers, clock } = build({ backgroundWork: () => tasks, logToGroup: async (t) => { posted.push(t); } });
     bridge.emit(msg('one', A, 'm1'));                             // never released
     await flush();
     const exits = [];
     spine.drainForRestart(() => exits.push('exit'));
 
-    clock.t += CAP_MS + 1_000; timers.fire();
-    expect(exits).toEqual([]);
+    clock.t += NOTICE_MS; timers.fire();
+    expect(posted).toEqual([`restart waiting 30m00s for 1 turn(s): ${KEY_A}; background work: e/${A}: indexing the archive (35m00s). Send /restart force to proceed.`]);
     tasks = [];
-    clock.t += 1_000; timers.fire();
+    clock.t += 2 * NOTICE_MS; timers.fire();
     expect(exits).toEqual([]);
-    clock.t += CAP_MS; timers.fire();
-    expect(exits).toEqual(['exit']);
   });
 
-  it('(d) force skips the background wait — and still waits for the turn in flight', async () => {
+  it('(d) force skips the background wait and the turn in flight alike', async () => {
+    const { spine, bridge, timers, drainLines } = build({ backgroundWork: () => [task()] });
+    bridge.emit(msg('one', A, 'm1'));
+    await flush();
+    const exits = [];
+    spine.drainForRestart(() => exits.push('exit'), { force: true });
+    expect(exits).toEqual(['exit']);
+    expect(timers.armed()).toEqual([]);
+    expect(drainLines()).toEqual([`drain: force — not waiting for 1 turn(s) and 1 background task(s): ${KEY_A}; e/${A}: indexing the archive (5m00s)`]);
+  });
+
+  it('background: false (/standdown) waits for the turn in flight, not for background work', async () => {
     const { spine, bridge, brain, timers, drainLines } = build({ backgroundWork: () => [task()] });
     const p1 = bridge.emit(msg('one', A, 'm1'));
     await flush();
     const exits = [];
-    spine.drainForRestart(() => exits.push('exit'), { force: true });
-    expect(exits).toEqual([]);
-    expect(drainLines()).toEqual([
-      `drain: force — not waiting for 1 background task(s): e/${A}: indexing the archive (5m00s)`,
-      `drain: waiting for 1 turn(s) before restarting — ${KEY_A} (cap 30 min; new messages are still answered)`,
-    ]);
-    timers.fire();
-    expect(exits).toEqual([]);
+    spine.drainForRestart(() => exits.push('exit'), { background: false });
+    expect(drainLines()).toEqual([`drain: waiting for 1 turn(s) before restarting — ${KEY_A} (no cap — /restart force skips the wait; new messages are still answered)`]);
     brain.release('one');
     await p1;
     timers.fire();
@@ -374,7 +409,7 @@ describe('spine.drainForRestart — background work holds the restart, and is ne
     const { spine, timers, clock, drainLines } = build({ backgroundWork: () => tasks });
     spine.drainForRestart(() => {}, { onWait: (rec) => published.push(rec) });
     await flush();
-    expect(published).toEqual([{ since: iso(T0), busy: [], turns: 0, cap: CAP_MS, background: [{ being: 'e', chatId: A, description: 'indexing the archive', since: iso(T0 - 5 * 60_000), running: '5m00s', duringDrain: false }] }]);
+    expect(published).toEqual([{ since: iso(T0), busy: [], turns: 0, background: [{ being: 'e', chatId: A, description: 'indexing the archive', since: iso(T0 - 5 * 60_000), running: '5m00s', duringDrain: false }] }]);
 
     tasks = [...tasks, task({ chatId: B, description: 'crawl', since: T0 + 10_000 })];   // a turn started new work mid-drain: not blocked, reported
     clock.t += 30_000; timers.fire();
@@ -454,7 +489,7 @@ function heldSessions() {
   };
 }
 
-async function bootHeld() {
+async function bootHeld(extra = {}) {
   const { start, built } = fakeTransport();
   const sessions = heldSessions();
   const timers = fakeIntervals();
@@ -478,6 +513,7 @@ async function bootHeld() {
     setInterval: timers.setInterval,
     clearInterval: timers.clearInterval,
     log: { line: (s) => lines.push(s) },
+    ...extra,
   });
   live.push(app);
   const say = (body, { atE = false } = {}) => built[0].onIncoming(body, {
@@ -485,7 +521,7 @@ async function bootHeld() {
     userId: 'u-1', senderName: 'An', authorized: true, msgKey: `m-${body}-${Math.random()}`,
     atEStart: atE, atEAnywhere: atE,
   });
-  return { app, sessions, timers, exits, lines, say };
+  return { app, sessions, timers, exits, lines, say, sent: () => built[0].sent };
 }
 
 async function waitFor(check, { timeoutMs = 2000, stepMs = 5 } = {}) {
@@ -510,7 +546,8 @@ describe('boot — a typed /upgrade with a turn in flight (the kg 16:10 incident
 
     expect(await waitFor(() => existsSync(DRAINING))).toBe(true);
     const rec = JSON.parse(readFileSync(DRAINING, 'utf8'));
-    expect(rec).toMatchObject({ turns: 1, cap: CAP_MS, since: '2026-09-28T16:10:00.000Z' });
+    expect(rec).toMatchObject({ turns: 1, since: '2026-09-28T16:10:00.000Z' });
+    expect(rec).not.toHaveProperty('cap');
     expect(rec.busy).toHaveLength(1);
     expect(rec.busy[0]).toContain(SELF_DM);
 
@@ -570,7 +607,7 @@ describe('boot — a typed /upgrade with a turn in flight (the kg 16:10 incident
   });
 
   it('a draining.json left behind by a spine that died mid-drain is cleared at boot', async () => {
-    await fs.writeFile(DRAINING, JSON.stringify({ since: '2026-09-28T16:00:00.000Z', busy: ['e:whatsapp:!x'], turns: 1, cap: CAP_MS }));
+    await fs.writeFile(DRAINING, JSON.stringify({ since: '2026-09-28T16:00:00.000Z', busy: ['e:whatsapp:!x'], turns: 1, cap: 30 * 60_000 }));
     await bootHeld();
     expect(existsSync(DRAINING)).toBe(false);
   });
@@ -630,5 +667,112 @@ describe('boot — a /restart with background work live on a warm session (step 
   it('the ingest box carries force too (source lock): boot hands lifecycleForce(line) to announceAndExit', () => {
     const BOOT_SRC = readFileSync(new URL('../src/spine/boot.mjs', import.meta.url), 'utf8');
     expect(BOOT_SRC).toContain('await announceAndExit(code, { force: lifecycleForce(line) })');
+  });
+});
+
+// /STANDDOWN (operator 2026-10-22, GENOME 6): the Session 1 daemon is waiting for this profile
+// (state/s1.claim, injected here as successorWaiting). Turns in flight finish — the same drain, and
+// new messages are still answered; background work is NOT waited for: it ends with the Session 0
+// daemon, and each being whose work ends says so once where it ran. Then exit 45.
+describe('boot — /standdown hands the profile to Session 1', () => {
+  async function bootWithBackground(extra) {
+    const h = await bootHeld(extra);
+    const turn = h.say('e lanza un agente', { atE: true });
+    await waitFor(() => h.sessions.started.length === 1);
+    h.sessions.release();
+    await turn;
+    h.sessions.bg.push({ description: 'indexing the archive', since: Date.UTC(2026, 8, 28, 16, 0) });
+    return h;
+  }
+  const stopped = (sent) => sent.filter((m) => m.text.startsWith('⏹'));
+
+  it('nobody waiting for the profile: ignored — no drain, no exit, and it says why', async () => {
+    const { exits, say, lines } = await bootHeld({ successorWaiting: () => false });
+    await say('/e standdown');
+    await flush();
+    expect(exits).toEqual([]);
+    expect(lines.some((l) => /standdown.*s1\.claim/.test(l))).toBe(true);
+  });
+
+  // contract 14.4
+  it('a turn in flight finishes first; background work is not waited for; then exit 45', async () => {
+    const h = await bootWithBackground({ successorWaiting: () => true });
+    const turn = h.say('e otra cosa', { atE: true });
+    await waitFor(() => h.sessions.started.length === 2);
+    await h.say('/e standdown');
+    await flush();
+    expect(h.exits).toEqual([]);                         // the turn is still being written
+    h.sessions.release();
+    await turn;
+    h.timers.fire();
+    expect(await waitFor(() => h.exits.length > 0)).toBe(true);
+    expect(h.exits).toEqual([45]);                        // the indexing task did not hold it
+  });
+
+  it('each being whose background work ends says so ONCE where it ran, naming the work', async () => {
+    const h = await bootWithBackground({ successorWaiting: () => true });
+    await h.say('/e standdown');
+    expect(await waitFor(() => h.exits.length > 0)).toBe(true);
+    expect(h.exits).toEqual([45]);
+    const lines = stopped(h.sent());
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({ chatId: SELF_DM });
+    expect(lines[0].text).toContain('indexing the archive');
+    expect(lines[0].text).toMatch(/ask again/i);
+  });
+
+  it('no background work: no such line', async () => {
+    const h = await bootHeld({ successorWaiting: () => true });
+    await h.say('/e standdown');
+    expect(await waitFor(() => h.exits.length > 0)).toBe(true);
+    expect(h.exits).toEqual([45]);
+    expect(stopped(h.sent())).toEqual([]);
+  });
+
+  it('Session 1 lets go while the turn drains: it stays — no exit, no line', async () => {
+    let waiting = true;
+    const h = await bootWithBackground({ successorWaiting: () => waiting });
+    const turn = h.say('e otra cosa', { atE: true });
+    await waitFor(() => h.sessions.started.length === 2);
+    await h.say('/e standdown');
+    waiting = false;                                      // a quick logoff
+    h.sessions.release();
+    await turn;
+    h.timers.fire();
+    await flush(); await flush();
+    expect(h.exits).toEqual([]);
+    expect(stopped(h.sent())).toEqual([]);
+  });
+
+  it('/standdown force leaves without waiting for the turn in flight', async () => {
+    const h = await bootHeld({ successorWaiting: () => true });
+    const turn = h.say('e busca esto', { atE: true });
+    await waitFor(() => h.sessions.started.length === 1);
+    await h.say('/e standdown force');
+    expect(await waitFor(() => h.exits.length > 0)).toBe(true);
+    expect(h.exits).toEqual([45]);
+    h.sessions.release();
+    await turn;
+  });
+
+  it('a Session 1 spine refuses it: nothing to hand over to', async () => {
+    const { exits, say, lines } = await bootHeld({ session1: true, successorWaiting: () => true });
+    await say('/e standdown');
+    await flush();
+    expect(exits).toEqual([]);
+    expect(lines.some((l) => /standdown.*Session 1/.test(l))).toBe(true);
+  });
+
+  it('an /upgrade pending when it arrives still leaves as the /upgrade (42 outranks 45: the pull must happen)', async () => {
+    const h = await bootHeld({ successorWaiting: () => true });
+    const turn = h.say('e busca esto', { atE: true });
+    await waitFor(() => h.sessions.started.length === 1);
+    await h.say('/e upgrade');
+    await h.say('/e standdown');
+    h.sessions.release();
+    await turn;
+    h.timers.fire();
+    expect(await waitFor(() => h.exits.length > 0)).toBe(true);
+    expect(h.exits).toEqual([42]);
   });
 });

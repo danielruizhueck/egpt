@@ -19,7 +19,7 @@ const toBeing = { replyToBeing: 'egpt', replyToBot: true };
 // `sent`: ids this account sent (bridge wasSentByUs) — the one-account node sends the beings' posts.
 function build(mode, { sent = [] } = {}) {
   const agents = {
-    egpt: { configuration: 'egpt', handles: ['e', 'egpt'], default: true, mode },
+    egpt: { configuration: 'egpt', handles: ['e', 'egpt'], mode },
     wren: { configuration: 'egpt', handles: ['wren'], mode },
   };
   let cb = null;
@@ -30,9 +30,9 @@ function build(mode, { sent = [] } = {}) {
   const sender = { open(chatId, o) { opens.push(o); return { update() {}, fail() {}, async finish() {} }; } };
   const config = { agents };
   const spine = createSpine({
-    bridge, brain, sender, transcript, defaultBeing: 'egpt',
-    router: createRouter({ getAgents: () => agents, getConfig: () => config, defaultBeing: 'egpt' }),
-    gating: createGating({ getConfig: () => config, defaultKey: 'egpt' }),
+    bridge, brain, sender, transcript,
+    router: createRouter({ getAgents: () => agents, getConfig: () => config }),
+    gating: createGating({ getConfig: () => config }),
     identity: createIdentity({ now: () => 1 }), fromThisNode: (ev) => ev.fromNode === 'kg',
     heartbeats: { runDue() {} }, readTranscript: async () => '', clock: { now: () => 1 },
   });
@@ -48,13 +48,15 @@ async function both(mode, r, t, opts) {
 }
 
 describe('a person\'s reaction gates like a text reply to the same message', () => {
-  it('on: wakes the being, as a text would', async () => {
+  // contract 6.4
+  it('on: wakes every being on there, as a text would', async () => {
     const { reaction, text } = await both('on', reactionTo('hola'), textReply('👍'));
-    expect(text.brain.calls.map((c) => c.being)).toEqual(['egpt']);
-    expect(reaction.brain.calls).toEqual([{ being: 'egpt', kind: 'reaction' }]);
-    expect(reaction.opens).toHaveLength(1);
+    expect(text.brain.calls.map((c) => c.being).sort()).toEqual(['egpt', 'wren']);
+    expect(reaction.brain.calls.map((c) => `${c.being}/${c.kind}`).sort()).toEqual(['egpt/reaction', 'wren/reaction']);
+    expect(reaction.opens).toHaveLength(2);
   });
 
+  // contract 6.4
   it('mention: a reaction to the BEING\'s post wakes it, as a reply to that post does', async () => {
     const { reaction, text } = await both('mention', reactionTo('🐶 e: listo', toBeing), textReply('👍', toBeing));
     expect(text.brain.calls.map((c) => c.being)).toEqual(['egpt']);
@@ -85,14 +87,34 @@ describe('a person\'s reaction gates like a text reply to the same message', () 
     expect(m.text.brain.calls.map((c) => c.being)).toEqual(['egpt']);
     expect(m.reaction.brain.calls.map((c) => c.being)).toEqual(['egpt']);
     const on = await both('on', reactionTo('🐶 e: listo', toBeing), textReply('👍', toBeing), { sent });
-    expect(on.reaction.brain.calls.map((c) => c.being)).toEqual(['egpt']);
+    expect(on.reaction.brain.calls.map((c) => c.being).sort()).toEqual(['egpt', 'wren']);
   });
 
+  // contract 6.4
   it('mute: recorded, no turn — off: not even recorded', async () => {
     const mute = build('mute'); await mute.bridge.emit(reactionTo('🐶 e: listo', toBeing));
     expect(mute.brain.calls).toEqual([]);
     expect(mute.recorded).toEqual(['reaction']);
     const off = build('off'); await off.bridge.emit(reactionTo('🐶 e: listo', toBeing));
+    expect(off.brain.calls).toEqual([]);
+    expect(off.recorded).toEqual([]);
+  });
+});
+
+describe('a person\'s edit gates like a message', () => {
+  const editOf = () => ({ body: 'edited #m1\n    - hola\n    + chau', from: { ...base, msgKey: 'm1', isStageDirection: true } });
+
+  // contract 6.4
+  it('on wakes every being; mention/accum without a handle and mute record only; off drops', async () => {
+    const on = build('on'); await on.bridge.emit(editOf());
+    expect(on.brain.calls.map((c) => `${c.being}/${c.kind}`).sort()).toEqual(['egpt/edit', 'wren/edit']);
+    expect(on.recorded).toEqual(['edit']);
+    for (const mode of ['mention', 'accum', 'mute']) {
+      const s = build(mode); await s.bridge.emit(editOf());
+      expect(s.brain.calls).toEqual([]);
+      expect(s.recorded).toEqual(['edit']);
+    }
+    const off = build('off'); await off.bridge.emit(editOf());
     expect(off.brain.calls).toEqual([]);
     expect(off.recorded).toEqual([]);
   });

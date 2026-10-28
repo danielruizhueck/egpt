@@ -32,6 +32,7 @@ describe('tool limitation + trusted access', () => {
     expect(valsOf(buildClaudeArgs({ allowedTools: '*' }), '--allowedTools')).toEqual([DEFAULT_ALLOWED_TOOLS.join(' ')]);
     expect(has(buildClaudeArgs({ allowedTools: '*' }), '--dangerously-skip-permissions')).toBe(false);
   });
+  // contract 11.1
   it("'all'/'*' NEVER grant bare Bash or Agent — the coerced list contains neither", () => {
     for (const at of ['all', '*']) {
       const allow = valsOf(buildClaudeArgs({ allowedTools: at }), '--allowedTools')[0].split(' ');
@@ -294,6 +295,17 @@ describe('the three permission tiers (2026-09-23)', () => {
     const a = buildClaudeArgs({ ...opts, osConfined: true, dangerouslySkipPermissions: true });
     expect(a.filter((x) => x === '--dangerously-skip-permissions')).toHaveLength(1);
     expect(valsOf(a, '--permission-mode')).toEqual(['bypassPermissions']);
+  });
+});
+
+describe('no MCP server (operator 2026-10-26: "off for all beings")', () => {
+  it('every tier carries --strict-mcp-config, once — the claude.ai connectors never load', () => {
+    for (const o of [{}, { allowedTools: ['Read'] }, { confineToDirs: ['/c/conv'], allowedTools: ['Read'] }, { dangerouslySkipPermissions: true }, { osConfined: true }, { strictMcpConfig: true }]) {
+      expect(buildClaudeArgs(o).filter((x) => x === '--strict-mcp-config')).toHaveLength(1);
+    }
+  });
+  it('strictMcpConfig: false drops it (textecute: not a being)', () => {
+    expect(has(buildClaudeArgs({ strictMcpConfig: false }), '--strict-mcp-config')).toBe(false);
   });
 });
 

@@ -9,7 +9,7 @@
 //
 // Effectful deps (conv-state load/write, fs) are injected so it's testable
 // in-memory; the pure slug/rename helpers are imported directly.
-import { slugDir, ensureContact, renameLogLine, mutateState, aliasTargetOf, aliasTranscriptKeyOf, patchContact, getContact, conversationPathOf } from '../conversations-state.mjs';
+import { slugDir, ensureContact, renameLogLine, mutateState, aliasTargetOf, aliasTranscriptKeyOf, forkKeyOf, patchContact, getContact, conversationPathOf } from '../conversations-state.mjs';
 import { Room } from '../room-core.mjs';
 import { shortChatId } from '../bridges/chat-id.mjs';
 import { rename as fsRename, appendFile as fsAppendFile } from 'node:fs/promises';
@@ -21,6 +21,10 @@ export function createContacts({ loadState, writeState, io = {}, onLog = () => {
   }
   const rename = io.rename ?? fsRename;
   const appendFile = io.appendFile ?? fsAppendFile;
+  // A chat that moved to a new id (boot moveChat): its old id resolves to where it went. In memory
+  // (moves are rare): a restart forgets it, and the limb re-learns it from the next refused send.
+  const movedTo = new Map();
+  const current = (surface, chatId) => movedTo.get(`${surface}\0${chatId}`) ?? chatId;
 
   /**
    * Resolve (and self-heal) the slug for a chat. ALWAYS calls ensureContact —
@@ -28,14 +32,14 @@ export function createContacts({ loadState, writeState, io = {}, onLog = () => {
    * the conversation_path backfill, and the name-tracking rename. ensureContact
    * only reports `changed` when a field actually differs, so a steady-state
    * re-sight (same title, nothing to backfill) does no write.
-   * `agents` seeds a BRAND-NEW entry's per-being blocks (ensureContact ignores it otherwise).
+   * `seed` is what a BRAND-NEW entry is created with (ensureContact ignores it otherwise).
    * @returns {Promise<string|null>} the slug, or null when unresolvable (caller treats null as skip)
    */
-  async function resolve(surface, chatId, { chatName, agents } = {}) {
+  async function resolve(surface, chatId, { chatName, seed } = {}) {
       // A known chat with nothing to change is a READ: answered without the node-wide lock.
       if (chatId) {
         try {
-          const seen = ensureContact(await loadState(), surface, chatId, { pushedName: chatName, slugHint: chatName, agents });
+          const seen = ensureContact(await loadState(), surface, current(surface, chatId), { pushedName: chatName, slugHint: chatName, seed });
           if (!seen.changed) return seen.slug ?? null;
         } catch { /* the locked path below reports it */ }
       }
@@ -45,8 +49,9 @@ export function createContacts({ loadState, writeState, io = {}, onLog = () => {
       return mutateState(writeState, async () => {
       try {
         if (!chatId) return null;
+        chatId = current(surface, chatId);   // again under the lock: a move may have landed meanwhile
         const state = await loadState();
-        const ens = ensureContact(state, surface, chatId, { pushedName: chatName, slugHint: chatName, agents });
+        const ens = ensureContact(state, surface, chatId, { pushedName: chatName, slugHint: chatName, seed });
 
         // Rename: the chat's TITLE changed (a group renamed, or a placeholder
         // learning its real name) → ensureContact already recomputed the slug
@@ -99,17 +104,17 @@ export function createContacts({ loadState, writeState, io = {}, onLog = () => {
    * RAW read of the alias map — what distinguishes "this chatId IS a side-room" from "the primary".
    * @returns {Promise<{slug:string, room:Room, path:string}|null>} null when unresolvable
    */
-  async function transcriptTarget(surface, chatId, { chatName, agents } = {}) {
-    const slug = await resolve(surface, chatId, { chatName, agents });
+  async function transcriptTarget(surface, chatId, { chatName, seed } = {}) {
+    const slug = await resolve(surface, chatId, { chatName, seed });
     if (!slug) return null;
     const room = Room.forChat(surface, slug);
     const state = await loadState();
     // aliasTargetOf non-null ⇒ a side-room ⇒ transcript-<key>.md, key = its stored title (else the
-    // short chatId); a primary/standalone chat ⇒ null ⇒ transcript.md.
+    // short chatId); a /split fork ⇒ its own key; a primary/standalone chat ⇒ null ⇒ transcript.md.
     const aliased = aliasTargetOf(state, surface, chatId);
-    const key = aliased ? (aliasTranscriptKeyOf(state, surface, chatId) ?? shortChatId(chatId)) : null;
+    const key = aliased ? (aliasTranscriptKeyOf(state, surface, chatId) ?? shortChatId(chatId)) : forkKeyOf(state, surface, chatId);
     return { slug, room, path: room.transcriptPathFor(key) };
   }
 
-  return { resolve, transcriptTarget };
+  return { resolve, transcriptTarget, moved: (surface, from, to) => movedTo.set(`${surface}\0${from}`, to) };
 }

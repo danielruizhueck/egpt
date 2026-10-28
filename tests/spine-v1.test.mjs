@@ -79,7 +79,7 @@ function harness(config = {}, mode) {
     bridge, brain,
     identity: createIdentity({ now: () => Date.UTC(2026, 5, 29, 14, 5) }),
     gating: createGating({ getConfig: () => config, loadState }),
-    router: createRouter(),
+    router: createRouter({ getAgents: () => ({ e: {} }), loadState }),
     sender: createSender({ bridge }),
     transcript, heartbeats: { runDue() {} },
   });
@@ -178,6 +178,8 @@ describe('v1 pipe — gated receive → brain → reply → send, per mode', () 
     expect(onlyFile(files)).toContain('e@[fam].wa (14:05): ↩ @e estas?');
   });
 
+  // contract 6.1
+  // contract 6.3
   it('auto_e_paused: absolute kill — even @e in on-mode is withheld but logged', async () => {
     const { bridge, brain, files } = harness({ whatsapp: { auto_e_paused: true } }, 'on');
     await bridge.emit(msg({ body: '@e estas?', atE: true }));
@@ -249,7 +251,7 @@ function siblingHarness(config = {}, { eMode, wrenMode } = {}) {
     bridge, brain,
     identity: createIdentity({ now: () => Date.UTC(2026, 5, 29, 14, 5) }),
     gating: createGating({ getConfig: () => config, loadState }),
-    router: createRouter({ getAgents: () => config.agents ?? {} }),
+    router: createRouter({ getAgents: () => config.agents ?? {}, loadState }),
     sender: createSender({ bridge, bodyEmojiOf, labelOf }),
     transcript, heartbeats: { runDue() {} },
   });
@@ -258,7 +260,7 @@ function siblingHarness(config = {}, { eMode, wrenMode } = {}) {
 }
 
 describe('v1 pipe — local agent routing (@wren)', () => {
-  const cfg = { agents: { wren: { configuration: 'sonnet-high', name: 'wren', body_emoji: '🐦' } } };
+  const cfg = { agents: { e: {}, wren: { configuration: 'sonnet-high', name: 'wren', body_emoji: '🐦' } } };
 
   it("'@wren do X': brain.turn(being=wren), reply delivered with wren's emoji+label, transcript line wren@[fam].wa …", async () => {
     const { bridge, brain, files } = siblingHarness(cfg);

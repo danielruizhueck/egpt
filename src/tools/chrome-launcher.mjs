@@ -141,6 +141,9 @@ export function resolveBrainProfile({ egptHome = EGPT_HOME, fs = defaultFs, read
 export function chromePipeArgs({ userDataDir, extensionDir, url = 'about:blank', windowName }) {
   const args = [
     '--remote-debugging-pipe',
+    // The pipe alone sets navigator.webdriver = true for every site, so captchas and bot filters
+    // refuse the operator's own browsing (NYSCEF, ticket sites; measured 2026-10-27).
+    '--disable-blink-features=AutomationControlled',
     `--user-data-dir=${userDataDir}`,
     '--no-first-run',
     '--restore-last-session',
@@ -155,6 +158,12 @@ export function chromePipeArgs({ userDataDir, extensionDir, url = 'about:blank',
   if (extensionDir) args.push(`--load-extension=${extensionDir}`);
   args.push(url);
   return args;
+}
+
+// A plain Chrome on a group's profile: no pipe, no automation flags. A human signs in or passes a
+// check there (/browser refresh); the group's pipe Chrome reuses that session afterwards.
+export function chromePlainArgs({ userDataDir, url = 'about:blank' }) {
+  return [`--user-data-dir=${userDataDir}`, '--no-first-run', url];
 }
 
 // A group's color: browsers.yaml `colors.<group>` when it is "#RRGGBB", else a fixed pick by name hash.

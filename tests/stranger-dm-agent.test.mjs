@@ -108,8 +108,8 @@ function fakeSession(opts) {
 }
 
 const MARKETER = () => ({
-  configuration: 'egpt', personality: 'edw-marketer', handles: [], name: 'EduWeb', body_emoji: '🎓', mode: 'on',
-  conversation_defaults: { access_level: 'regular', sandboxed: false },
+  configuration: 'egpt', personality: 'edw-marketer', handles: [], name: 'EduWeb', body_emoji: '🎓',
+  conversation_defaults: { access_level: 'regular', sandboxed: false, allowed_users: ['*'] },   // it answers strangers
 });
 
 // kg: An's account is the ear, Rodz's a per-chat ear; the persona in accum, as live.
@@ -123,7 +123,7 @@ const KG = ({ rule = true } = {}) => ({
   networks: { whatsapp: { allowed_users: [AN, '@anrodriguez:beeper.com'] } },
   dispatch: { auto_default_mode: 'accum', ...(rule ? { stranger_agent: { secondary: 'edw-marketer' } } : {}) },
   agents: {
-    egpt: { configuration: 'egpt', default: true, handles: ['e', 'egpt', 'rodz'], name: 'E', body_emoji: '🐶' },
+    egpt: { configuration: 'egpt', handles: ['e', 'egpt', 'rodz'], name: 'E', body_emoji: '🐶', conversation_defaults: { allowed_users: ['*'] } },   // kg after 0050
     ken: { configuration: 'egpt', handles: ['k', 'ken'], name: 'K', body_emoji: '🤴', conversation_defaults: { allowed_users: [FRIEND] } },
     'edw-marketer': MARKETER(),
   },
@@ -140,7 +140,7 @@ const DO = () => ({
   networks: { whatsapp: { allowed_users: [AN, '@anrodriguez:beeper.com'] } },
   dispatch: { auto_default_mode: 'mention' },
   agents: {
-    don: { configuration: 'egpt', default: true, handles: ['d', 'don', 'rodz'], name: 'D', body_emoji: '🤝', mode: 'accum' },
+    don: { configuration: 'egpt', handles: ['d', 'don', 'rodz'], name: 'D', body_emoji: '🤝', mode: 'accum' },
   },
 });
 
@@ -333,7 +333,7 @@ describe('heartbeats are off in a conversation whose own agent says `heartbeats:
     mkdirSync(join(dir, 'heartbeats'), { recursive: true });
     writeFileSync(join(dir, 'heartbeats', 'escape.yaml'), 'frequency: 1m\ncommand: whoami\n');
     writeFileSync(join(dir, 'heartbeats', 'wake.yaml'), 'frequency: 1m\nagent: e\nprompt: hi\n');
-    const config = { agents: { egpt: { default: true, handles: ['e'] }, 'edw-marketer': { ...MARKETER(), ...(off ? { heartbeats: false } : {}) } } };
+    const config = { agents: { egpt: { handles: ['e'] }, 'edw-marketer': { ...MARKETER(), ...(off ? { heartbeats: false } : {}) } } };
     const registry = { contacts: { whatsapp: { [NEW_DM]: { slug, agents: { 'edw-marketer': { default: true } } } } } };
     const read = [];
     const resolver = createConfigResolver({

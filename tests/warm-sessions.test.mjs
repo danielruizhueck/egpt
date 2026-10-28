@@ -69,6 +69,7 @@ describe('warm-session pool', () => {
     expect(pool.has('k3')).toBe(true);
   });
 
+  // contract 10.2
   it('idle-evicts after the per-class TTL and closes the session', async () => {
     const { makeSession, made } = fakeFactory();
     const pool = createWarmPool({ makeSession, idleTtlByClass: { conversation: 20 } });
@@ -83,6 +84,7 @@ describe('warm-session pool', () => {
   // migrations/0013 and the boot defaults carry). The pool holds no thread state of its own: the
   // session id lives in the conversation record and comes back down as brainOptions, so the turn
   // after an eviction opens a NEW process on the SAME session and resumes it.
+  // contract 10.2
   it('a turn after the class TTL evicted the session reopens on the same session id', async () => {
     const { makeSession, made } = fakeFactory();
     const pool = createWarmPool({ makeSession, idleTtlByClass: { conversation: 20 } });
@@ -699,5 +701,40 @@ describe('warm-session pool — background work', () => {
     await pool.run('k3', 'c');
     expect(pool.has('k1')).toBe(true);
     expect(pool.has('k2')).toBe(false);
+  });
+});
+
+// warm.keep (operator 2026-10-22: "that group should be kept always on"), read live through keepWarm(key).
+describe('warm-session pool — warm.keep', () => {
+  it('a kept session outlives its idle TTL; once no longer kept it idles out, with no turn in between', async () => {
+    const { makeSession, made } = fakeFactory();
+    let keep = true;
+    const pool = createWarmPool({ makeSession, idleTtlByClass: { conversation: 20 }, keepWarm: (k) => k === 'kept' && keep });
+    await pool.run('kept', 'a', () => {}, { klass: 'conversation' });
+    await pool.run('other', 'b', () => {}, { klass: 'conversation' });
+    await sleep(60);
+    expect(pool.has('kept')).toBe(true);
+    expect(made[0].closed).toBe(false);
+    expect(pool.has('other')).toBe(false);
+    keep = false;
+    await sleep(60);
+    expect(pool.has('kept')).toBe(false);
+    expect(made[0].closed).toBe(true);
+  });
+
+  it('LRU passes over a kept session; a pool full of kept sessions grows past max', async () => {
+    const { makeSession } = fakeFactory();
+    const kept = new Set(['k1']);
+    const pool = createWarmPool({ makeSession, max: 2, keepWarm: (k) => kept.has(k) });
+    await pool.run('k1', 'a');
+    await sleep(2);
+    await pool.run('k2', 'b');
+    await sleep(2);
+    await pool.run('k3', 'c');
+    expect(pool.has('k1')).toBe(true);
+    expect(pool.has('k2')).toBe(false);
+    kept.add('k3');
+    await pool.run('k4', 'd');
+    expect(pool.stats().keys).toEqual(['k1', 'k3', 'k4']);
   });
 });

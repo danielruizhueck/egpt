@@ -25,9 +25,10 @@ import { createStopGuard } from '../src/stop-guard.mjs';
 import { encodeNodeSignature } from '../src/node-signature.mjs';
 
 // THIS node is 'kg' with a persona `egpt` (@e/@egpt) and a sibling `eplus` (@eplus). 'do' is a PEER.
+const ANYONE = { allowed_users: ['*'] };   // open beings, as on kg after migration 0050
 const AGENTS = {
-  egpt:  { default: true, handles: ['e', 'egpt'] },
-  eplus: { handles: ['eplus'] },
+  egpt:  { handles: ['e', 'egpt'], conversation_defaults: ANYONE },
+  eplus: { handles: ['eplus'], conversation_defaults: ANYONE },
 };
 // fromThisNode exactly as boot wires it: fromNode set AND the node is ours ('kg').
 const fromThisNode = (ev) => ev?.fromNode != null && String(ev.fromNode).toLowerCase() === 'kg';
@@ -41,15 +42,16 @@ const SIG_DO_DON = encodeNodeSignature('do', 'don');    // a PEER node's being
 function buildSpine({ mode = 'mention', guard = null } = {}) {
   const brain = { calls: [], async turn(being, ev) { this.calls.push({ being, body: ev.body }); return { text: 'x' }; } };
   const identity = createIdentity({ now: () => 1000 });
-  const router = createRouter({ getAgents: () => AGENTS, defaultBeing: 'egpt' });
-  const gating = createGating({ getConfig: () => ({ dispatch: { auto_default_mode: mode } }), loadState: null, defaultKey: 'egpt' });
+  const config = { dispatch: { auto_default_mode: mode } };
+  const router = createRouter({ getAgents: () => AGENTS, getConfig: () => config });
+  const gating = createGating({ getConfig: () => config, loadState: null });
   const transcript = { logged: [], async log(ev) { this.logged.push(ev); } };
   const sender = { opened: 0, open() { this.opened++; return { activate() {}, update() {}, async finish() {}, fail() {} }; } };
   const spine = createSpine({
     bridge: { onMessage() {}, send() {}, stop() {}, wasSentByUs: () => false },
     brain, identity, router, gating, sender, transcript,
     heartbeats: { runDue() {} }, mesh: { isEnvelope: () => false, async handle() {} },
-    fromThisNode, guard, isSelfChat: () => false, clock: { now: () => 1000 }, defaultBeing: 'egpt',
+    fromThisNode, guard, isSelfChat: () => false, clock: { now: () => 1000 },
   });
   return { spine, brain, transcript };
 }
@@ -78,6 +80,7 @@ describe('clean ingest — the three-check wake model', () => {
   // 3. ECHO. E's own signed output re-entering (no cross-being address), in mode 'on' (replies to
   //    everything) — must NOT re-wake E. This is the PALMA loop's REPLY face: only the own-output
   //    classification stops it, since 'on' has no mention gate.
+  // contract 7.3
   it("3. E's own signed output re-entering does NOT re-wake E (mode on)", async () => {
     const { spine, brain, transcript } = buildSpine({ mode: 'on' });
     await spine.handleInbound({ body: `ya terminé la tarea${SIG_KG_E}`, from: from({ msgKey: 'kg-e-3', isSender: false }) });
@@ -204,12 +207,13 @@ describe('clean ingest — a signed line wakes only the being it explicitly addr
     expect(transcript.logged).toHaveLength(0);
   });
 
-  it('LOCK: a human (unsigned) line in a mode-on chat still wakes E', async () => {
+  it('LOCK: a human (unsigned) line in a mode-on chat still wakes every being on there', async () => {
     const { spine, brain } = buildSpine({ mode: 'on' });
     await spine.handleInbound({ body: 'hola', from: from({ msgKey: 'h-2', isSender: false, senderName: 'Bob' }) });
-    expect(wokeBeings(brain)).toEqual(['egpt']);
+    expect(wokeBeings(brain).sort()).toEqual(['egpt', 'eplus']);
   });
 
+  // contract 7.3
   it("LOCK: this node's own node-only frame wakes nobody, even naming @eplus", async () => {
     const { spine, brain } = buildSpine({ mode: 'on' });
     await spine.handleInbound({ body: `@eplus aviso${encodeNodeSignature('kg')}`, from: from({ msgKey: 'kg-sys-1', isSender: true }) });
