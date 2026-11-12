@@ -64,6 +64,7 @@
 //                                     do not exist, in every tier above (2026-10-15)
 //   strictMcpConfig (unless false)  → --strict-mcp-config: no MCP server from any config, the
 //                                     claude.ai connectors included — every being (2026-10-26)
+//                                     unless the being's configuration says `connectors: true` (2026-11-12)
 //   model   → --model ;  effort → --effort ;  sessionId → --resume ;
 //   appendSystemPrompt → --append-system-prompt
 //

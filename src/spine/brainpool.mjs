@@ -401,6 +401,9 @@ function shapeDef(name, def, agent = {}, brainType = 'ccode') {
     // wren's live egpt-xhigh.yaml sets verbose_thinking here and in neither config.yaml tier.
     verbose_thinking: def?.verbose_thinking === true,
     chrome: def?.chrome === true,   // Claude in Chrome (--chrome); read by baseOpts, honoured only on the full-access tier
+    // connectors (operator 2026-11-12, SI Admin #62860 «opción B»): this ONE being may load the operator's MCP
+    // servers and claude.ai connectors (no --strict-mcp-config). Default stays off for every being (2026-10-26).
+    connectors: def?.connectors === true,
   };
 }
 
@@ -1283,7 +1286,8 @@ export function createBrainPool({
         allowedTools: def.allowed_tools ?? DEFAULT_ALLOWED_TOOLS,
         ...(toolsOnly ? { tools: [...new Set(toolsOnly.map(toolBase))] } : {}),
         // MCP off for every being (2026-10-26). Stated, so a live session spawned without it reopens by resume.
-        strictMcpConfig: true,
+        // A being with `connectors: true` in its configuration opts back in (operator 2026-11-12, E&M creativo only).
+        strictMcpConfig: def.connectors === true ? false : true,
         ...(runModel ? { model: runModel } : {}),
         ...(runEffort ? { effort: runEffort } : {}),
         ...(def.chrome === true ? { chrome: true } : {}),
