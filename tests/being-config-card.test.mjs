@@ -13,11 +13,11 @@ const SECRETS = {
   sandbox_oauth_token: 'SECRET-OAUTH-0001',
   beeper: { primary: { token: 'SECRET-BEEPER-0002' }, secondary: { token: 'SECRET-BEEPER-0003' } },
   shell: { token: 'SECRET-SHELL-0004' },
-  radio_service: { wildnloyal: { relay_password: 'SECRET-RADIO-0005' } },
+  radio_service: { examplefm: { relay_password: 'SECRET-RADIO-0005' } },
 };
 const SECRET_WORDS = ['SECRET-', 'sandbox_oauth_token', 'beeper', 'shell', 'token', 'relay_password'];
 
-const EGPT_TYPE = { type: 'ccode', model: 'opus', effort: 'high', verbose_thinking: true, allowed_paths: { 'C:/Users/an/src/egpt': { allowed_tools: ['Read', 'Glob', 'Grep'] } } };
+const EGPT_TYPE = { type: 'ccode', model: 'opus', effort: 'high', verbose_thinking: true, allowed_paths: { 'C:/Users/user/src/egpt': { allowed_tools: ['Read', 'Glob', 'Grep'] } } };
 const baseConfig = () => ({
   node_name: 'kg',
   ...SECRETS,
@@ -81,7 +81,7 @@ describe('renderConfigBlock — what a being is shown', () => {
     expect(data).toMatchObject({
       handles: ['e', 'egpt', 'ekg', 'egptkg'], node: 'kg', configuration: 'opus-default', engine: 'ccode', model: 'opus', effort: 'high',
       access_level: 'sandbox', sandboxed: true, mode: 'mention', verbose_thinking: true,
-      allowed_paths: { 'C:/Users/an/src/egpt': ['Read', 'Glob', 'Grep'] }, compaction: { ratio: 0.25 },
+      allowed_paths: { 'C:/Users/user/src/egpt': ['Read', 'Glob', 'Grep'] }, compaction: { ratio: 0.25 },
       thread: '53e9e587-384a-4d1b-9795-7e947847292c',
     });
   });
@@ -103,6 +103,12 @@ describe('renderConfigBlock — what a being is shown', () => {
   it('in a room, mode is per chat rather than whichever chat spoke last', () => {
     const text = renderConfigBlock({ being: 'egpt', config: baseConfig(), scoped: true, def: {}, mode: { mode: 'on', source: 'conversation' }, sources: {} });
     expect(YAML.parse(text).egpt.mode).toBe('per chat');
+  });
+
+  it("verbose_thinking 'text' is shown as text", () => {
+    const text = renderConfigBlock({ being: 'egpt', config: baseConfig(), def: {}, sources: {}, verboseThinking: 'text', verboseSource: 'conversation' });
+    expect(text).toMatch(/verbose_thinking: text\s+# this conversation/);
+    expect(YAML.parse(text).egpt.verbose_thinking).toBe('text');
   });
 
   it('a fresh thread says its id is still to come', () => {
@@ -178,6 +184,48 @@ describe('brainpool writes the card at the start of every turn', () => {
     expect(after.egpt.model).toBe('haiku');
     expect(after.egpt.mode).toBe('on');
     expect(after.ken).toEqual(kenBefore);
+  });
+
+  it("a conversation's verbose_thinking 'text' shows on the card over the agent's true", async () => {
+    const h = harness();
+    await h.brain.turn('egpt', ev);
+    expect(cardOf(h.io)).toMatch(/verbose_thinking: true\s+# agent default/);
+    h.setState(patchBeing(h.getState(), ev.surface, ev.chatId, 'egpt', { verbose_thinking: 'text' }));
+    await h.brain.turn('egpt', ev);
+    expect(cardOf(h.io)).toMatch(/verbose_thinking: text\s+# this conversation/);
+  });
+
+  it("allowed_users on the card JOINS the agent's list and the conversation's (2026-11-07), and names both sources", async () => {
+    const config = baseConfig();
+    config.agents.egpt.conversation_defaults.allowed_users = ['agent-id'];
+    const h = harness({ config });
+    await h.brain.turn('egpt', ev);
+    expect(cardOf(h.io)).toMatch(/allowed_users: \[ agent-id \]\s+# agent default/);
+    h.setState(patchBeing(h.getState(), ev.surface, ev.chatId, 'egpt', { allowed_users: ['chat-id'] }));
+    await h.brain.turn('egpt', ev);
+    expect(YAML.parse(cardOf(h.io)).egpt.allowed_users).toEqual(['agent-id', 'chat-id']);
+    expect(cardOf(h.io)).toMatch(/allowed_users: \[ agent-id, chat-id \]\s+# agent default \(config\.yaml\) \+ this conversation/);
+    h.setState(patchBeing(h.getState(), ev.surface, ev.chatId, 'egpt', { allowed_users: [] }));   // adds nobody
+    await h.brain.turn('egpt', ev);
+    expect(YAML.parse(cardOf(h.io)).egpt.allowed_users).toEqual(['agent-id']);
+  });
+
+  it("allowed_users_inheritance: false shows '(final)' on the card: the conversation's list alone, or the agent's with the node's dropped", async () => {
+    const config = baseConfig();
+    config.agents.egpt.conversation_defaults.allowed_users = ['agent-id'];
+    const h = harness({ config });
+    await h.brain.turn('egpt', ev);   // creates the entry
+    h.setState(patchBeing(h.getState(), ev.surface, ev.chatId, 'egpt', { allowed_users: ['chat-id'], allowed_users_inheritance: false }));
+    await h.brain.turn('egpt', ev);
+    expect(YAML.parse(cardOf(h.io)).egpt.allowed_users).toEqual(['chat-id']);
+    expect(cardOf(h.io)).toMatch(/allowed_users: \[ chat-id \]\s+# this conversation \(final\)/);
+    config.agents.egpt.conversation_defaults.allowed_users_inheritance = false;
+    h.setState(patchBeing(h.getState(), ev.surface, ev.chatId, 'egpt', { allowed_users: ['chat-id'], allowed_users_inheritance: null }));
+    await h.brain.turn('egpt', ev);
+    expect(cardOf(h.io)).toMatch(/allowed_users: \[ agent-id, chat-id \]\s+# agent default \(config\.yaml\) \(final\) \+ this conversation/);
+    h.setState(patchBeing(h.getState(), ev.surface, ev.chatId, 'egpt', { allowed_users: null }));
+    await h.brain.turn('egpt', ev);
+    expect(cardOf(h.io)).toMatch(/allowed_users: \[ agent-id \]\s+# agent default \(config\.yaml\) \(final\)/);
   });
 
   it('the file never holds a node-level key', async () => {

@@ -48,6 +48,12 @@
 #   owner_node         WHICH node wakes on this connection, when the SAME account
 #                      is live on several nodes. Every other node still SENDS on
 #                      it. Absent = every node wakes, which is right for one node.
+#   networks           The networks this connection HEARS, e.g. [whatsapp]. Absent
+#                      = every network on the account. Each entry is a PREFIX of
+#                      the message's Beeper account id (whatsapp..., telegram...);
+#                      anything else is dropped on arrival, reactions and edits
+#                      too. Inbound only: sending and creating chats still work
+#                      on every network.
 #   use                On `beeper:` ITSELF, not inside a connection. OVERRIDES the
 #                      default MOUTH the names derive. OUTPUT ONLY: it can never
 #                      move the ear, and it cannot put a message into a chat its
@@ -62,12 +68,14 @@ limbs:
     main:
       account: "you@example.com"    # the account this token belongs to (label)
       token: "PASTE_YOUR_TOKEN_HERE"
+      # networks: [whatsapp]        # OPTIONAL - hear only these networks here - see above
     # alt:
     #   account: "other@example.com"
     #   token: "PASTE_YOUR_TOKEN_HERE"
     # use: main                     # OPTIONAL override of the default mouth - see above
     # auto_update:                  # keeping Beeper itself current: auto | manual | none
-    #   windows: { method: manual } # the default: a log_to_group notice, install on /<handle> update beeper
+    #   windows: { method: manual } # per OS (windows, linux, mac). The default is auto: installs at a quiet moment;
+    #                               # manual: a log_to_group notice, install on /<handle> update beeper
   # telegram:                       # a Telegram BOT, no Beeper needed. Its token is NOT here: it is the file
   #   main:                         # <EGPT_HOME>/secrets/telegram-main.token (node setup/telegram-token.mjs main)
   #     account: "my_egpt_bot"      # the bot's username (label); who may command: networks.telegram.allowed_users
@@ -78,21 +86,32 @@ limbs:
   #   # ayde: { on: false, path: /ayde, public_max_level: team, scope: [] }   # true: the team's read-only EGPT_HOME browser (node setup/ayde-user.mjs add <user> <level>)
   #   #                               # public_max_level: the highest level a login opens through the proxy (X-Forwarded-For): team | devs | admin | root
   #   #                               # scope: the conversations below root reads, by chat id; none: nothing. Each entry:
-  #   #                               #   tg:<group> (the group + its topics) | <prefix>- (e.g. http:eduweb-: every session) | <chat id> (that chat only)
-  #   clients:
-  #     mysite:
-  #       being: e                  # the agent that answers; any visitor wakes it in its own session
-  #       # seed: desks/mysite      # copied once into each new session's folder (relative: under EGPT_HOME)
-  #       # allowed_origins: []     # CORS; empty = same-origin only
-  #       # title: "Chat"           # strings: { placeholder, send, ... } override the Spanish defaults
-  #       # label: "Marketer — website"   # its section's title in /ayde; default the title
-  #       # max_chars: 4000
-  #       # rate: { messages: 30, minutes: 10 }   # per session
-  #       # new_sessions: { count: 30, minutes: 60 }   # per visitor address
-  #       # team_group: -1001234567890  # a Telegram forum group: a topic per session, the team replies there
-  #       # team_name: "Equipo"         # the team's name in the widget
-  #       # topic_title: "{title} · {sid}"  # also {abrin} {user_type} {short_name} {username}
-  #       # identity: off               # optional | required: a signed user (key: secrets/chatbox-mysite.key)
+  #   #                               #   tg:<group> (the group + its topics) | <prefix>- (e.g. http:contoso-: every session) | <chat id> (that chat only)
+  #   chatboxes: [ mysite ]         # each one a top-level block below (mysite:); the older clients: { mysite: {...} } map still works
+
+# mysite:                           # a chatbox named in limbs.http.chatboxes: its keys and its UI strings, flat
+#   # url: mysite                   # its id: /chat/mysite/widget.js, chat ids http:mysite-<sid>; default the block's name
+#   being: e                        # the agent that answers; any visitor wakes it in its own session
+#   # seed: desks/mysite            # copied once into each new session's folder (relative: under EGPT_HOME)
+#   # card_claims: [cuentas]          # signed claims also kept on the card (desktop/user.json), refreshed when they change
+#   # allowed_origins: []           # CORS; empty = same-origin only
+#   # title: "Chat"
+#   # intro: "¡Hola!"               # the panel's first line; placeholder, send, end, ... (every UI string) override the Spanish defaults here too
+#   # waiting: ["Un momento…", "Ya casi…"]   # phrases in the loading bubble instead of ⏳ (at most 12 of 80 characters)
+#   # waiting_cold: ["Corriendo a tu encuentro…", "Despertando, estirándome…"]   # shown instead when the conversation is cold (no line in 4 min)
+#   # label: "Marketer — website"   # its section's title in /ayde; default the title
+#   # max_chars: 4000
+#   # rate: { messages: 30, minutes: 10, turns_per_identity_per_hour: 0 }   # per session; the last: one signed identity across its sessions, 0 = off
+#   # new_sessions: { count: 30, minutes: 60 }   # per visitor address
+#   # team_group: -1001234567890    # a Telegram forum group: a topic per session, the team replies there
+#   # team_name: "Equipo"           # the team's name in the widget
+#   # topic_title: "{title} · {sid}"  # also {abrin} {user_type} {short_name} {username}, any {<claim>}
+#   # chat_title: "{abrin} · {short_name} · {username}"   # a signed chat's name in /ayde's lists, like topic_title: any {<claim>} (default as shown)
+#   # chat_subtitle: "{user_type}"  # and its line under the title
+#   # session_days: 365             # idle days before a session expires; also /ayde's "active" window: a chat is active while its last line is this recent
+#   # identity: { mode: off, required: [abrin, username], key: [abrin, username] }   # mode off | optional | required: a signed user (secrets/chatbox-mysite.key); required: claims a token must carry; key: the claims that are the identity; its text: strings: { identity: "..." }
+#   # conversation_by: session      # identity: one conversation per signed identity, every session and tab (needs identity)
+#   # init: false                   # true: the widget posts {kind: init} on load; a new session records one "opened the chatbox" line (needs identity). prime: opening the chatbox sends the widget's opening phrase as the visitor's first line (the phrase lives in the plugin's skin.yaml, not here)
 
 # --- This node's identity ----------------------------------------------------
 node_name: kg                     # REQUIRED - this node's name on the network, and the
@@ -116,6 +135,7 @@ wake_up:
 # co-account nodes collapse to one member, so list them here to complete the HRW
 # candidate set. Omit for a solo node.
 # peer_nodes: [kg, do]
+# node_role: primary              # primary | secondary of a co-account pair (log_to_group audit merge); unset = single node
 
 # egpt_nodes - the eGPT nodes YOU run, and HOW TO REACH each one. OPTIONAL: a
 # single node needs none of this. Read by src/tools/beeper-whoami.mjs (the
@@ -211,11 +231,12 @@ agents:
     # conversation_defaults:      # THIS AGENT'S global defaults for fields conversations.yaml can
     #                             # override per-conversation - the nesting IS the allowlist (only
     #                             # fields living here get a per-conversation override at all).
-    #   allowed_users: ['*']      # who may wake it: ids, or ['*'] = anyone; [] = nobody. Unset = only this
-    #                             # node's owners (the top-level conversation_defaults.allowed_users below).
-    #                             # Overridable per-conversation (conversations.yaml
-    #                             # agents.<name>.allowed_users) - the override REPLACES this list
-    #                             # there, it does not merge with it.
+    #   allowed_users: ['*']      # who else may wake it: ids, or ['*'] = anyone; [] adds nobody. The node's
+    #                             # owners (the top-level conversation_defaults.allowed_users below) always may.
+    #                             # A conversation's own list (conversations.yaml
+    #                             # agents.<name>.allowed_users) JOINS this one, it does not replace it.
+    #   allowed_users_inheritance: true  # false = this list is FINAL: the node's lists are not joined in
+    #                             # (the Operator always passes); chats below still join onto it.
     #   access_level: regular     # access_level default (all|regular) - points at
     #                             # config/permissions/<level>.md. Overridable per-conversation
     #                             # (conversations.yaml agents.<name>.access_level, same replace-not-merge rule).
@@ -231,6 +252,7 @@ agents:
     #                             # (conversations.yaml agents.<name>.verbose_thinking). The one field
     #                             # here with a THIRD tier below it: the agent-TYPE file's own
     #                             # verbose_thinking, used only when both tiers above are unset.
+    #                             # `text` = the same as true, without the tool-call lines.
     #   allow_new_input: same_sender
     #                             # none|same_sender|any (default same_sender) - what happens to a
     #                             # message that arrives while this agent is ALREADY streaming a turn
@@ -265,29 +287,64 @@ agents:
     conversation_defaults:
       access_level: all         # the ONE unsandboxed being - it runs as you, because its job is to change the machine
       sandboxed: false
+  # S, the chat superintendent: one per chat (its own thread there, started in the chat's folder),
+  # woken ONLY by "/<handle> super <message>" from you or a being - so no handles.
+  # super:
+  #   configuration:
+  #     type: ccode
+  #     model: opus
+  #     effort: xhigh
+  #     personality: super        # config/agents/identities/super.md
+  #   handles: []
+  #   name: "S"
+  #   body_emoji: "🦉"
+  #   mode: accum                 # prompted with what the chat said since its last turn
+  #   conversation_defaults:
+  #     access_level: all         # runs as you, unboxed
+  #     sandboxed: false
+  #     allowed_users: []         # adds nobody (an owner's quote of its post still wakes it); the command reads neither
 
 # Relay agents (optional - foreign-mesh across SEPARATE accounts). A relay
 # forwards a mention into another chat; `to:` chains hops. Not needed within one account.
 # carol: { relay_channel: rodz1, to: don.do }
 
+# --- Folder grants and the sandbox token (all optional; unset = none) --------
+# allowed_paths:                  # every being on this node; a being's own entry for the same path wins
+#   C:/Users/you/src: { allowed_tools: [Read, Glob, Grep] }   # read-only; an empty value = full access
+# background_agents:              # model/effort of the sub-agents a being launches; model defaults to sonnet; effort unset = the CLI's default
+#   model: sonnet                 # sonnet | opus | haiku | inherit (inherit = the parent's model)
+#   effort: medium                # low | medium | high | xhigh | max
+#   (per being: agents.<name>.background_agents: { effort: high } overrides these, key by key)
+# global_read_paths:              # standing read-only mounts in every sandboxed being's home; re-run setup/provision-sandbox-account.ps1 after a change
+#   - repos: C:/Users/you/src     # mounted as ~/repos
+# outbox_targets:                 # where a room's outbox/ may drain; the room picks one by name (outbox_to:)
+#   my-drive: G:/My Drive/shared
+# sandbox_oauth_token: ""         # Claude token for sandboxed turns; unset = secrets/claude-oauth.token
+
 # --- Owners (who may command this node, and whom its beings answer) ---------
 # Your STABLE ids (jids / phone numbers / Telegram numeric ids, never display
-# names); ids of every network may be mixed here. [] = nobody (the account owner
-# is always allowed).
+# names); ids of every network may be mixed here. The Operator is defined here, at
+# the root, and is always allowed; lists below the root only ADD people (2026-11-07).
+# [] = no listed owner (the account owner is always allowed).
 conversation_defaults:
-  allowed_users: [] # your ids: beings answer only them by default, and they may run commands; networks.<surface>.allowed_users overrides per network
+  allowed_users: [] # your ids: they may run commands and always wake your beings; networks.<surface>.allowed_users and the beings' lists add to them
 
 # --- Surfaces ----------------------------------------------------------------
-# Per-surface, because ids are per-network namespaces. chat_id = your Self-DM
-# command channel, auto-captured on first contact.
+# Per-surface, because ids are per-network namespaces. admin_chat_ids = your
+# command channels (the Self-DM first); /restart and /upgrade announce in the
+# first one of whatsapp, else of telegram. (Older configs' chat_ids still work.)
 networks:
   whatsapp:
-    chat_ids: [] # chats that accept commands (/egpt, /restart, /upgrade, etc)
-    # allowed_users: [] # this network's owners, REPLACING conversation_defaults.allowed_users here
-  telegram: { chat_ids: [] } # limbs.telegram bot; its owners are Telegram numeric ids
-  signal:   { chat_ids: [] }
+    admin_chat_ids: [] # chats that accept commands (/egpt, /restart, /upgrade, etc)
+    # allowed_users: [] # more owners on this network, ADDED to conversation_defaults.allowed_users
+  telegram: { admin_chat_ids: [] } # limbs.telegram bot; its owners are Telegram numeric ids
+  signal:   { admin_chat_ids: [] }
 # commands anyone in a chat may run; a chat's own conversations.yaml list replaces it
-# public_commands: [split, send, end]
+# public_commands: [split, send, end, side]
+
+# group chats reply in their "SI+<group>" side group unless their conversations.yaml entry says
+# otherwise; never a 1:1 or Telegram. Unset = off (config-schema reply_in_side_group)
+# reply_in_side_group: on
 
 # --- Side-group texts (/split, /send) ----------------------------------------
 # All optional; unset = the text shown. Each {word} listed is filled in; any other
@@ -310,7 +367,15 @@ networks:
 #                                   # accum gates exactly like mention AND prompts each turn with what was said since that
 #                                   # agent's LAST turn. on/auto here = every agent answers everything everywhere (boot warns).
 #   auto_paused: false              # absolute @e-emit kill-switch (/e auto pause|resume)
-#   address_without_at: true        # a BARE handle opening a message addresses its agent ("d hola" = "@d hola").
+#   bot_quiet: true                 # a turn another being/node's line triggered: no ⏳ train, posted once whole,
+#                                   # its '…' never shown (only logged). false = shown like a human's. Humans unaffected.
+#   thinking_train: emoji           # emoji: no ⏳ bubble; the line gets 👾 at arrival, 🤔 when its turn starts, off at the end.
+#                                   # A tool use takes it off and opens the ⏳ bubble with the text so far.
+#                                   # bubble: the ⏳ placeholder as before; also any chat no reaction can go on.
+#   thinking_frames: random         # the emoji train's started phase, one every thinking_frame_ms until the mark comes off:
+#                                   # random = 🤔, then any of Telegram's reaction set but the one showing; or a list, in order.
+#   thinking_frame_ms: 2000
+#   address_without_at: true       # a BARE handle opening a message addresses its agent ("d hola" = "@d hola").
 #                                   # false = the '@' is required. Node-wide; the '@' form and the quick reply ("r ok") are unaffected.
 
 # chats no being answers; message (optional) is posted there once, and again to anyone who addresses a being (at most once a day)
@@ -330,7 +395,7 @@ networks:
 #   use_config: main
 #   main:
 #     fallback_order: [gpu, local]
-#     gpu:   { type: whisper-server-remote, endpoint: "http://192.168.1.102:23390", token: "SHARED_SECRET" }
+#     gpu:   { type: whisper-server-remote, endpoint: "http://192.0.2.102:23390", token: "SHARED_SECRET" }
 #     local: { type: whisper-cli, command: C:\path\whisper-cli.exe, model_path: C:\path\ggml-large-v3.bin, language: es, ffmpeg_command: C:\path\ffmpeg.exe }
 #
 # A GPU woken only when a note needs it: whisper-server in an ECS service (desired 0 = asleep).
@@ -375,7 +440,7 @@ networks:
 #   use_config: main
 #   main:
 #     fallback_order: [gpu]
-#     gpu: { type: piper-server-remote, endpoint: "http://192.168.1.102:23391", token: "SHARED_SECRET" }
+#     gpu: { type: piper-server-remote, endpoint: "http://192.0.2.102:23391", token: "SHARED_SECRET" }
 #
 # To HOST the server for other nodes (the GPU box - the "synthesizer" worker role):
 # synthesizer:
@@ -387,6 +452,15 @@ networks:
 # Piper itself is NOT config: set the RADIO_PIPER env var to the piper install root on
 # this machine (must contain venv\Scripts\python.exe, or venv/bin/python off Windows, and voices\*.onnx).
 
+# --- Folder watcher (docker/scripts/dir-sync) -----------------------------
+# Runs a command when a folder changes (after quiet_seconds without changes) and, with
+# fallback_timer, every N minutes regardless. One entry per folder (one per direction for pairs).
+# dir_sync:
+#   enabled: true
+#   fallback_timer: { enabled: true, minutes: 30 }
+#   folders:
+#     - { name: drive, path: /home/me/Drive, command: /home/me/drive-sync.sh, quiet_seconds: 15 }
+
 # --- Transcript echo: who posts the ear ("listened") transcript --------------
 # The echo posts a voice note's transcript back into the chat. Among the echo-capable
 # eGPT nodes present in a room, HRW picks exactly ONE to post each note (rotates per
@@ -395,12 +469,39 @@ networks:
 # echo: true                      # this node may echo (default true)
 # echo_timeout_ms: 5000           # rank N+1 promotes after this much silence
 # echo_max_age_ms: 3600000        # never echo a note older than this (skips resynced backlog)
+# echo_coverage_similarity: 0.6   # a reply whose transcript overlaps ours this much already covers the note
+
+# --- Signature wraps (all default "" = nothing added) ------------------------
+# bridge_signature_open: ""       # outer line above every stamped reply and echo this node posts
+# bridge_signature_close: ""      # outer line below them
+# agent_signature_open: ""        # inner line above a being's reply; agents.<name>.agent_signature_open wins
+# agent_signature_close: ""       # inner line below it
+# transcription_open: ""          # inner line above the echoed transcript
+# transcription_close: ""         # inner line below it
+
+# --- Radio (optional) --------------------------------------------------------
+# radio_service:                  # stations a room may join: /<handle> radio join myradio
+#   myradio:
+#     name: "My radio"
+#     listen_url: https://radio.example.org/
+#     enabled: false              # true = joined rooms' voice notes upload here
+#     endpoint: https://radio.example.org
+#     relay_user: egpt
+#     relay_password: ""
+#     default_speaker: egpt       # for a sender not in the room's radio.hosts
+# radio_blocked_senders: []       # sender ids that may not relay; /radio disable <person> writes it
+# radio_quick_reply_string: "rs"  # reply with just this to put the quoted message on air; "" = off
 
 # --- Everyday knobs (defaults shown) -----------------------------------------
 # turn_timeout_ms: 0             # opt-in per-turn timeout (ms; > 0): the turn fails and its session is evicted. 0/absent = no limit (default)
 # auto_restart_on_config_change: false   # true = editing this file auto-triggers /restart (full drain+respawn) so the edit applies; keyed on content (no-op saves + mid-write/malformed files never restart). Default false.
+# auto_update: { egpt: auto-full, ask_on_boot: true }   # keeping eGPT itself current (Beeper's own: limbs.beeper.auto_update). egpt: every 6 h + at boot the checkout's upstream is fetched, ONE log_to_group line per new upstream sha; auto-full (default) is auto, unless necessary: plain /upgrade at the next quiet moment (once per sha), /upgrade full only when a file the daemon loads changed (and only where something respawns the daemon); auto always runs plain /upgrade (spine only); manual only notices; none does nothing. ask_on_boot (default true): at boot, one line after "✅ egpt back up!" of what is pending (eGPT and/or Beeper) and the command for each
 # default_time_zone: "America/New_York"                       # timezone-less heartbeat times
-# warm: { max: 6, idle_ttl_by_class: { conversation: 15m } }  # -1 = never evict, 0 = always
+# warm:                           # eviction is memory-based, built in: reserve max(15% of memory, 500 MB), Linux PSI > 10. All optional:
+#   max: 20                       # a backstop on live sessions; unset = no cap (default)
+#   idle_ttl: 15m                 # idle timer, every conversation; unset = off (default), -1 = never, 0 = at turn end
+#   idle_ttl_by_class: { chatbox: 15m }   # idle timer per class: chatbox, conversation, sibling, resident, system; unset = off (default)
+#   # keep: true                  # per conversation (its conversations.yaml entry or folder config.yaml): never evicted
 # compaction: { enabled: true, ratio: 0.20, cooling_ms: 120000 }
 # Graceful compaction (all OPTIONAL; unset = today's behavior - no handoff turn, re-feed with no
 # welcome). {agent} is replaced with the being's handle, {YYMMDD-HHMM} with the warn's local time
@@ -422,8 +523,16 @@ networks:
 #   outbound: { messages: 18, window_ms: 10000, edits: 4000, chat_messages: 5, chat_window_ms: 3000, chat_similar_count: 5, chat_similar_window_ms: 2000, chat_similar_ratio: 0.85, chat_burst_count: 10, chat_burst_window_ms: 2000 }   # outbound ceiling: an over-ceiling emit STOPS the node; a chat with 5 near-identical / 10 any sends in 2s, or 5 per 3s twice running, is PAUSED; <=0 = that rule off
 # stop_phrase: "EGPT STOP"        # the whole message, from an allowed user, in ANY chat → this node writes EGPT_HOME/STOP and stops; "" = off
 # advice_channel: "EGPT AUTO"     # mode:auto consult chat (fail-closed if unset)
-# log_to_group: "eGPT Admin"      # per-/command audit → this group: one metadata-only line per command ("/<cmd> in <chat> by <sender> → <outcome?>"), NEVER the reply body. May equal or differ from admin_channel; unset = off
+# log_to_group: "eGPT Logs"       # per-/command audit → this group: one metadata-only line per command ("/<cmd> in <chat> by <sender> → <outcome?>"), NEVER the reply body; also the lifecycle lines (↻ / ✅ back up / started) and the node's other log-type notices (compaction, a public being's error; operator 2026-11-20: "please put eGPT Logs in its channel, so eGPT Admin stays clean"). A name, short room id or tg:<chat>[/<topic>]. May equal or differ from admin_channel; unset = no audit, and those notices go to admin_channel
+# admin_channel: "eGPT Admin"     # this node's own notices that need you (/browser's control link, the captcha notice, a `silent:` heartbeat's output); the log-type ones (compaction, a public being's error) go to log_to_group when it is set, here otherwise: a chat name, short room id or tg:<chat>[/<topic>]; unset = daemon log only. README quickstart C
 # aliases: { "@whatsapp_5215512345678:beeper.local": An }     # /status display labels
+# mesh: { timeout_ms: 60000 }     # a relayed mention waits this long, then "<target> did not answer"
+# liveness: { every_ms: 15000, background_every_ms: 600000, background_change_ms: 120000 }   # how often a running turn's placeholder is re-edited; how often an unchanged background status is posted again; how long a change waits after the last status
+# lag_probe: { threshold_ms: 10000, every_ms: 5000 }   # event-loop lag over threshold -> one line to log_to_group
+# ear_probe: { every: 30m, timeout: 45s, telegram: { token: "BOT_TOKEN", chat_id: -1001234567890 } }   # deaf-Beeper check: a bot posts into a chat Beeper bridges; no token/chat = off
+# media_flood: { count: 5, window_ms: 20000, cooldown_ms: 600000, never_ban: [] }   # mute a sender posting count media within window_ms; count <= 0 = off
+# agents_list: { every_ms: 60000, ban_after: 5, ban_window_ms: 600000 }   # public /agents: one list per chat per every_ms; ban_after 0 = never mute
+# ingest: { show: true, auto: false, ask: "received message, dispatch? reply yes / no", ttl_ms: 600000 }   # state/ingest /to files: post the line; auto false = an owner's yes dispatches it; an open question (this one, or a refused mention's) expires after ttl_ms
 
 # --- Chrome control (optional) -----------------------------------------------
 # The brain Chrome (CDP :9221) and the per-group Chrome pool. WHICH chat uses which Chrome is
@@ -435,6 +544,7 @@ networks:
 #   profile_dir: ""            # --user-data-dir of the `brain` group; unset = discovered brain profile
 #   launch_estimate_mb: 500    # per-Chrome memory cost floor for group-Chrome admission when none is running to measure
 #   memory_margin_mb: 1024     # free physical memory a group-Chrome launch must leave; below it the idlest group Chrome is evicted, else it launches anyway (logged; never denied)
+#   idle_minutes: 30           # a browser screen link closes after this many minutes with no browser use and no click/typing in it, viewers or not (the Chrome stays); 0 or keep = never. Per launch: /<handle> browser keep
 
 # --- Auto-login (opt-in) -----------------------------------------------------
 # /login <site> signs in on the brain Chrome using CHROME'S OWN saved password: the spine reads the
@@ -448,3 +558,17 @@ networks:
 #   otp_sources: [gmail, google_voice]   # where the 2FA branch reads the OTP (read + entered inside the limb, never surfaced)
 #   captcha_channel: admin_channel       # CONFIG KEY whose channel the CAPTCHA branch posts to (metadata only)
 #   submit_overrides: {}                 # per-domain fixups: { "example.com": { url: "https://example.com/login", submit: "#signin" } }
+
+# --- /email and /book limbs (a being whose agents.<name>.actions lists them) -
+# email:                          # Amazon SES; the being never picks sender, recipients or subject
+#   from: "eGPT <egpt@example.com>"   # a verified SES sender
+#   to: [team@example.com]        # empty = not-configured
+#   credentials_file: C:\path\ses.credentials   # or aws_access_key_id + aws_secret_access_key here
+#   # region: us-east-1
+#   # subject_prefix: "[eGPT]"
+# book:                           # /book <YYYY-MM-DD> <HH:MM> <summary>: a free slot gets an invitation over email:
+#   ics_url: "SECRET_ICAL_ADDRESS"   # the calendar's secret iCal address
+#   calendar_email: team@example.com # every invitation goes here
+#   # timezone: America/Caracas
+#   # duration_minutes: 30
+#   # working_hours: { days: [mon, tue, wed, thu, fri], start: "08:00", end: "17:00" }

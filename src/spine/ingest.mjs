@@ -6,6 +6,7 @@
 //
 //   /restart        -> exit 43  (daemon respawns this checkout — picks up commits)
 //   /upgrade        -> exit 42  (daemon git pull + npm + build, then respawn)
+//   /upgrade full   -> exit 46  (the same, then the daemon exits too, for its supervisor to respawn)
 //   /rewind <ref>   -> exit 44  (daemon checks out <ref>, then respawn)
 //   /standdown      -> exit 45  (hand the profile to the waiting Session 1 daemon; the Session 0
 //                                daemon holds off until Session 1 lets go — daemon-runtime.mjs)
@@ -21,14 +22,17 @@
 // `/to <chatId>` (2026-10-26): the lines below it are typed into that chat as the node's owner
 // (boot → spine.handleInbound, the limbs' own entry):
 //
-//   /to tg:-1004408163350/55
+//   /to tg:-1000000000101/55
 //   ed, resume the thread above
 //
 // The chat must already have a conversations.yaml entry; an unknown id or empty text is ignored.
 // `/file <path>` lines attach files. ingest.show posts the line in the chat; ingest.auto false holds
-// it until an owner answers the posted question (boot ingestTo / answerIngest).
+// it until an owner answers the posted question (boot ingestTo / answerIngest). An unanswered question
+// expires after ingest.ttl_ms (default 10 min), showing the time left and edited as it runs down.
 import { readdir as fsReaddir, readFile as fsReadFile, unlink as fsUnlink, mkdir as fsMkdir, writeFile as fsWriteFile, rename as fsRename } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
+import { hhmm } from '../dispatch-line.mjs';
+import { BEING_STAMP } from '../bridges/persona-wrap.mjs';
 
 export function createIngest({ dir, handle, intervalMs = 1000, io = {}, onLog = () => {} } = {}) {
   if (!dir) throw new Error('createIngest: dir is required');
@@ -93,18 +97,71 @@ export function toLine(content) {
 
 // The question under a `/to` line while ingest.auto is false (config ingest.ask overrides it).
 export const INGEST_ASK = 'received message, dispatch? reply yes / no';
+// The question for a being's mention allowed_users turned away (spine classify → boot askMention): the
+// being that said it, the being it names. The glyph keeps the first name from opening the line as an address.
+// The line is quoted (operator 2026-11-20): without what was said the chat cannot decide yes or no.
+export const mentionAsk = (sender, being, quote = '') => `❓ ${sender} → ${being}: ${quote ? `"${quote}" ` : ''}pass it on? reply yes / no`;
+// What a question is edited to when it runs out. The glyph leads for the same reason: a being name never opens the line.
+// It quotes the same sentence, so the edited post still says what was not passed on.
+export const mentionExpired = (sender, being, quote = '') => `⌛ ${sender} → ${being}: ${quote ? `"${quote}" ` : ''}expired, not passed on`;
 
-const YES = new Set(['yes', 'si', 'sí', 'y', 'ok', '👍']);
-const NO = new Set(['no', 'n', '👎']);
-// An owner's answer to that question: true = dispatch, false = drop, null = not an answer.
+// THE SENTENCE OF A BEING'S LINE THAT NAMES A BEING (operator 2026-11-20), for the question to quote. `names` are the
+// handles the being answers to; `@name` is looked for first, then the bare name (the router takes it as an address too).
+// The sentence around the first hit, whitespace collapsed, Markdown emphasis dropped, cut to `max` with … on the side
+// that was cut; no hit → the start of the line. The being's own stamp ("🐦 Lark:") is not part of what was said.
+export function mentionQuote(text, names, max = 140) {
+  const flat = (t) => t.replace(/[*~`]+|(?<![\p{L}\p{N}])_+|_+(?![\p{L}\p{N}])/gu, '').replace(/\s+/g, ' ').trim();   // snake_case keeps its _
+  const body = flat(String(text ?? '').replace(BEING_STAMP, ''));
+  const alt = [...new Set((names ?? []).map((n) => String(n).toLowerCase()).filter(Boolean))].sort((a, b) => b.length - a.length)
+    .map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  const glued = '(?![\\p{L}\\p{N}_])';
+  const find = (t) => alt ? (new RegExp(`(?:^|\\s)@(?:${alt})${glued}`, 'iu').exec(t) ?? new RegExp(`(?:^|[\\s(¿¡"'])(?:${alt})${glued}`, 'iu').exec(t)) : null;
+  const hit = find(body);
+  let s = body, at = 0;
+  if (hit) {
+    at = hit.index + hit[0].search(/\S/);
+    const from = body.slice(0, at).search(/[^.!?…]*$/u);
+    const end = body.slice(at).search(/[.!?…](?=\s|$)/u);
+    s = body.slice(from, end < 0 ? body.length : at + end + 1).trim();
+    at -= from + (body.slice(from, at).length - body.slice(from, at).trimStart().length);
+  }
+  if (s.length <= max) return s;
+  if (!hit) return `${s.slice(0, max).trimEnd()}…`;
+  const start = Math.max(0, Math.min(at - Math.floor(max / 2), s.length - max));
+  return `${start > 0 ? '…' : ''}${s.slice(start, start + max).trim()}${start + max < s.length ? '…' : ''}`;
+}
+export const INGEST_EXPIRED = '⌛ expired, not dispatched';
+
+// HOW LONG A QUESTION STAYS OPEN: ingest.ttl_ms, default 10 minutes; 0 or less = never (the answer is waited for forever).
+export const ASK_TTL_MS = 10 * 60_000;
+export function askTtlMs(cfg) {
+  const v = cfg?.ingest?.ttl_ms;
+  return v == null || v === '' || !Number.isFinite(Number(v)) ? ASK_TTL_MS : Math.round(Number(v));
+}
+// The time left, in whole minutes, rounded up: it changes once a minute, so the question is edited once a minute.
+export const minutesLeft = (ms) => Math.max(1, Math.ceil(ms / 60_000));
+// A question as posted: the countdown, or (where the chat's connection cannot edit it) the clock time it closes.
+export const withCountdown = (text, leftMs) => `${text} · ⏳ ${minutesLeft(leftMs)} min`;
+export const withDeadline = (text, at, timeZone) => `${text} · ⏳ until ${hhmm(at, timeZone)}`;
+
+const YES = new Set(['yes', 'si', 'sí', 'y', 's', 'ok', '👍']);
+const NO = new Set(['no', 'n', 'non', '👎']);
+// An answer to an open question: true = dispatch, false = drop, null = not an answer.
 export function answerOf(text) {
   const t = String(text ?? '').trim().toLowerCase().replace(/[\u{1F3FB}-\u{1F3FF}\uFE0F]/gu, '').replace(/[.!]+$/, '');
   return YES.has(t) ? true : NO.has(t) ? false : null;
 }
 
-// The open questions — { chatId, ids (the posts that ask it), body } — kept in `path` so a restart
-// keeps them. No expiry. Rewritten whole, temp + rename.
-export function createIngestAsks({ path, io = {}, onLog = () => {} }) {
+// The open questions — { chatId, ids (the posts that ask it), body } for a `/to` line (an owner answers), or
+// { chatId, ids, being, ev, target } for a mention that being's allowed_users turned away (whoever may wake that
+// being answers: the Operator or its lists; ev is the line as it arrived, target the router's refused target) — kept
+// in `path` so a restart keeps them. Each carries `expiresAt` (ms; boot gives it a deadline when it asks), `shown`
+// (the minutes its post last said) and `post` { id, text, expired }: the post that carries the question, what it says
+// without the countdown, and what it is edited to at the end. An entry from before expiry existed (no `post`) gets a
+// fresh deadline at load and, boot's tick finding it past it, leaves the store with a log line and nothing in the chat;
+// with a ttl of 0 or less it has none and never expires. An expired entry is not found (an answer
+// after the deadline is ordinary chat) even before boot's tick takes it out. Rewritten whole, temp + rename.
+export function createIngestAsks({ path, io = {}, onLog = () => {}, now = Date.now, ttlMs = () => ASK_TTL_MS }) {
   const readFile = io.readFile ?? fsReadFile;
   const writeFile = io.writeFile ?? fsWriteFile;
   const rename = io.rename ?? fsRename;
@@ -117,17 +174,33 @@ export function createIngestAsks({ path, io = {}, onLog = () => {} }) {
     await writeFile(tmp, `${JSON.stringify(asks, null, 2)}\n`, 'utf8');
     await rename(tmp, path);
   }).catch((e) => onLog(`could not write ${path}: ${e?.message ?? e}`)));
+  const live = (a) => a.expiresAt == null || a.expiresAt > now();
   return {
     async load() {
       try { const d = JSON.parse(await readFile(path, 'utf8')); asks = Array.isArray(d) ? d.filter((a) => a?.chatId && Array.isArray(a.ids)) : []; }
       catch (e) { if (e?.code !== 'ENOENT') onLog(`${path} unreadable (${e?.message ?? e}) — no open questions`); }
+      const ttl = ttlMs();
+      const old = ttl > 0 ? asks.filter((a) => !Number.isFinite(a.expiresAt)) : [];
+      if (old.length) {
+        for (const a of old) a.expiresAt = now() + ttl;
+        onLog(`${old.length} open question(s) from before expiry now close in ${minutesLeft(ttl)} min`);
+        await persist();
+      }
     },
+    // When a question asked now closes: null = never.
+    deadline() { const ttl = ttlMs(); return ttl > 0 ? now() + ttl : null; },
     add(ask) { asks = [...asks, ask]; return persist(); },
     // A reaction on Telegram names no topic: `tg:<chat>` finds a question asked in `tg:<chat>/<topic>`.
-    find(chatId, id) { return id == null ? null : asks.find((a) => (a.chatId === chatId || a.chatId.startsWith(`${chatId}/`)) && a.ids.includes(String(id))) ?? null; },
+    find(chatId, id) { return id == null ? null : asks.find((a) => live(a) && (a.chatId === chatId || a.chatId.startsWith(`${chatId}/`)) && a.ids.includes(String(id))) ?? null; },
     take(ask) { asks = asks.filter((a) => a !== ask); return persist(); },
+    has(ask) { return asks.includes(ask); },
+    list() { return [...asks]; },
+    mark(ask, patch) { if (!asks.includes(ask)) return chain; Object.assign(ask, patch); return persist(); },
   };
 }
+
+// `full` and `force` in either order: `/upgrade full force` and `/upgrade force full` are one command.
+const UPGRADE_FULL = /^(full(\s+force)?|force\s+full)$/;
 
 // Map a command line to the daemon exit code (+ side effect). Returns the exit
 // code to call, or null for an unknown command. Pure + exported so the mapping is
@@ -136,7 +209,7 @@ export function lifecycleExit(line, { writeRewindTarget } = {}) {
   const cmd = String(line ?? '').trim();
   const tok = cmd.split(/\s+/)[0];
   if (tok === '/restart') return 43;
-  if (tok === '/upgrade') return 42;
+  if (tok === '/upgrade') return UPGRADE_FULL.test(cmd.slice(tok.length).trim()) ? 46 : 42;
   if (tok === '/rewind') {
     const ref = cmd.slice(tok.length).trim();
     if (ref) writeRewindTarget?.(ref);
@@ -150,5 +223,5 @@ export function lifecycleExit(line, { writeRewindTarget } = {}) {
 // still waited for). `/standdown force`: it does not wait for the turns either (background work is
 // never waited for there). Same code as the bare command; the callers hand this to announceAndExit.
 export function lifecycleForce(line) {
-  return /^\/(restart|upgrade|standdown)\s+force$/.test(String(line ?? '').trim());
+  return /^\/(restart|upgrade(\s+full)?|standdown)\s+force$|^\/upgrade\s+force\s+full$/.test(String(line ?? '').trim());
 }

@@ -8,7 +8,7 @@
 // the process is kept RESIDENT instead of re-spawned per turn.
 //
 // Interface = what `src/warm-sessions.mjs` (createWarmPool) expects of a session:
-//   turn(message, onUpdate) -> { text, sessionId, usage?, model?, bgStarted? }  ·  inject(message) -> bool  ·  interrupt()  ·  close()  ·  background  ·  backgroundTasks
+//   turn(message, onUpdate) -> { text, sessionId, usage?, model?, bgStarted? }  ·  inject(message) -> bool  ·  interrupt()  ·  close()  ·  background  ·  backgroundTasks  ·  backgroundOutcome(taskId)
 //   · reconfigure(changes) · reconfigurable · orphan (an `adopt`ed process: src/cli-host.mjs)
 // The pool owns lazy-warm, idle-evict (the residency/reap policy), LRU, and
 // per-key serialization, so this primitive only manages ONE process running ONE
@@ -37,7 +37,7 @@
 // made far above it (conversation_defaults.allow_new_input → spine → warm pool `steer`).
 //
 // …AND WHAT IT RETURNS IS NOW EVIDENCE, NOT A SUCCESSFUL WRITE (operator 2026-09-09, after the
-// live fault in `Joyce Vicente-2606301852`: four messages steered, a 👀 on each, no reply ever;
+// live fault in `Julia Demo-2606301852`: four messages steered, a 👀 on each, no reply ever;
 // the sandboxed claude.exe measured afterwards with NO CHILDREN and ~350s of CPU over 21 hours,
 // i.e. idle). `proc.stdin.write` on a LIVE process's pipe succeeds whether or not anything on
 // the other end ever reads it, so the old `return true` meant SENT and was read one layer up as
@@ -80,7 +80,8 @@ function userLine(text) {
   return JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: String(text ?? '') }] } }) + '\n';
 }
 // The CLI's own stop (/agents stop). Measured 2026-10-15 on claude 2.1.301: a control_response,
-// then the turn's `result` as error_during_execution; process and session id survive.
+// then the turn's `result` as error_during_execution; process and session id survive. Its background
+// agents do not (measured 2026-10-30, 2.1.309 — see BACKGROUND WORK below).
 let interruptSeq = 0;
 function interruptLine() {
   return JSON.stringify({ type: 'control_request', request_id: `egpt-interrupt-${++interruptSeq}`, request: { subtype: 'interrupt' } }) + '\n';
@@ -151,6 +152,13 @@ const SELF_TURN_START_MS = 5_000;
 // measured ~13s on kg). Nothing at all past this: nobody reads the pipe — the pool retries once, fresh.
 const FIRST_EVENT_MS = 120_000;
 
+// How finished background tasks ended (`outcomes` below): the last this many are kept, each message one
+// line of at most OUTCOME_MAX chars.
+const OUTCOMES_KEPT = 50;
+const OUTCOME_MAX = 200;
+// The CLI's end states: task_notification says completed|failed|stopped, its task_updated killed for stopped.
+const ENDED = { completed: 'completed', failed: 'failed', stopped: 'stopped', killed: 'stopped' };
+
 // 60 chars. The rendered text is a WhatsApp reply, and an agentic turn emits DOZENS of
 // tool calls — the budget is paid once per call, so it is a signpost ("which file? which
 // host?"), not a payload. 60 keeps `Bash(<60>)` inside ~70 columns, about one wrapped
@@ -168,7 +176,7 @@ const SUMMARY_MAX = 60;
 // Deliberately biased toward over-redaction: a stub that says `***` too often costs
 // nothing, a stub that leaks once cannot be unposted.
 const SECRET_PATTERNS = [
-  // https://user:pass@host → https://***@host. Requires the ':' so a bare `ssh://an@dolly`
+  // https://user:pass@host → https://***@host. Requires the ':' so a bare `ssh://user@dolly`
   // (a username, not a credential) still renders.
   [/\b([a-z][a-z0-9+.-]*:\/\/)[^\s:/@]+:[^\s@/]*@/gi, '$1***@'],
   // curl basic auth, spaced or '=': `-u user:pass`, `--user user:pass`, `--user=user:pass`.
@@ -228,6 +236,19 @@ export function renderToolUse(block) {
   return s ? `${name}(${s})` : `${name}()`;
 }
 
+// A background task's description, as every status, ask, registry and listing names it, is ONE short line
+// (operator 2026-11-01: "por qué los mensajes se están viendo así? … se van así"). The CLI describes a
+// background Bash with no `description` by its whole command: the status posted a heredoc line by line, code
+// and any secret in it with it. Its first non-empty line — collapsed, redacted, capped, as renderToolUse
+// does — ending "…" when anything was left out; none → the task id.
+const DESCRIPTION_MAX = 80;
+function describeTask(t) {
+  const lines = String(t.description ?? '').split('\n').map((l) => l.replace(/\s+/g, ' ').trim()).filter(Boolean);
+  if (!lines.length) return t.task_id;
+  const s = redactSecrets(lines[0]);
+  return s.length > DESCRIPTION_MAX || lines.length > 1 ? s.slice(0, DESCRIPTION_MAX - 1) + '…' : s;
+}
+
 // verboseThinking rendering (operator 2026-08-29, wren's "see your full chain of thought"
 // request over WhatsApp: "tool use can be only like Bash()"). One assistant event's content
 // blocks -> pushed onto pending.verboseBlocks, arrival order preserved across the WHOLE turn
@@ -237,14 +258,16 @@ export function renderToolUse(block) {
 // parens carry a redacted, truncated summary of the INPUT (operator 2026-08-30), never the
 // result. A tool_result arrives on a separate `user`-role event, which onStdout never routes
 // here, so it never appears regardless. Only called when verboseThinking is on — the default
-// OFF path never calls this.
-function pushVerboseBlocks(pending, content) {
+// OFF path never calls this. verboseThinking 'text' is the same without the tool_use stubs.
+function pushVerboseBlocks(pending, content, tools) {
   for (const c of content) {
     if (c?.type === 'text' && typeof c.text === 'string' && c.text) pending.verboseBlocks.push(c.text);
     else if (c?.type === 'thinking' && typeof c.thinking === 'string' && c.thinking) pending.verboseBlocks.push(c.thinking);
-    else if (c?.type === 'tool_use' && typeof c.name === 'string' && c.name) pending.verboseBlocks.push(renderToolUse(c));
+    else if (tools && c?.type === 'tool_use' && typeof c.name === 'string' && c.name) pending.verboseBlocks.push(renderToolUse(c));
   }
 }
+// true | 'text' | false; anything else is false.
+export const verboseOf = (v) => (v === 'text' ? 'text' : v === true);
 
 // Resolve the claude binary to a FULL path. A Windows SERVICE inherits a minimal
 // PATH (not the login PATH), and — verified the hard way (operator 2026-06-14:
@@ -269,7 +292,7 @@ export function createWarmCliSession(options = {}) {
   // Opt-in, default off (operator 2026-08-29 ruling): when on, the turn's resolved `text` is
   // the full verbose transcript (thinking verbatim + tool-name stubs) instead of the CLI's own
   // clean `ev.result`. Wired the same way as cwd/model/effort — see brainpool.mjs baseOpts.
-  let verboseThinking = options.verboseThinking === true;
+  let verboseThinking = verboseOf(options.verboseThinking);
   const opts = { ...options };      // what a (re)spawn builds its argv from; reconfigure() updates it
   const controls = new Map();       // control request id → { resolve, reject }
   let orphan = null;                // an adopted turn the previous spine started, until it ends
@@ -282,16 +305,36 @@ export function createWarmCliSession(options = {}) {
   let closed = false;
   // BACKGROUND WORK (measured 2026-10-15, claude 2.1.301). background_tasks_changed lists the CLI's
   // background tasks; each ends with a task_notification. A turn in flight absorbs it (replayed with
-  // origin.kind 'task-notification'); with none, the CLI starts a turn of its own. That turn is
-  // stopped and reported up (onBackgroundDone) so the spine decides whether to wake the being.
-  let background = new Map();       // task_id -> { description, since }, still running
+  // origin.kind 'task-notification'); with none, the CLI starts a turn of its own. That turn runs to
+  // its end and its answer is reported up (onBackgroundDone) so the spine wakes the being to send it.
+  //
+  // IT IS NO LONGER STOPPED (ED, live 2026-10-30: "the background agents I launched all stopped a few
+  // minutes later. It happens every time one of them reports it finished"). Measured 2026-10-30, claude
+  // 2.1.309, two background tasks, the quick one's notification starting the CLI's own turn: the
+  // `interrupt` written on its `init` killed the OTHER, still-running background AGENT 34-41ms later,
+  // ahead of its control_response — task_updated {status:'killed'}, task_notification 'stopped',
+  // background_tasks_changed [] — whether that agent was generating or blocked in a foreground Bash
+  // (that Bash was stopped with it). A background Bash (local_bash) survived it and completed at 90s.
+  // Not interrupted, the other agent ran on and completed at ~100s, and the CLI's own turn ended in 2-3s
+  // with a report ("quick finished … slow is still running"). No gentler stop exists: `send_now: true`
+  // on the interrupt answered send_now 'nothing_waiting' and stopped nothing; `stop_task` stops a task.
+  let background = new Map();       // task_id -> { description, since, taskType?, parentTaskId?, ambient? }, still running
   let finished = [];                // completions no turn has taken yet
-  let selfTurn = null;              // the CLI's own turn on `finished`: { done, end, timer, started }
+  const outcomes = new Map();       // task_id -> { status, message, at }: how each ended, the last OUTCOMES_KEPT
+  let selfTurn = null;              // the CLI's own turn on `finished`: { done, end, timer, started, summaries }
   let model = null;                 // the model the CLI reports in its `init` event (agent stats)
+  // A listed task as kept: the live background agent that launched it (parent_task_id; the status nests
+  // it, operator 2026-10-31), and `ambient` (the CLI's doc: "not activity … hosts should exclude them from activity
+  // indicators"). Kept here, not dropped: an ambient task is the CLI's task all the same — while it runs
+  // the pool must not evict its process, and its notification and end are read like any (the CLI's own
+  // turn, its outcome). Only the activity shown leaves it out: liveness's status (src/spine/liveness.mjs).
+  const taskOf = (t, since) => ({ description: describeTask(t), since, ...(t.task_type ? { taskType: t.task_type } : {}), ...(t.parent_task_id ? { parentTaskId: t.parent_task_id } : {}), ...(t.ambient === true ? { ambient: true } : {}) });
   // THE BEING LINK for an UNBOXED session (src/spine/being-link.mjs): its credential rides the spawn
   // env, revoked at close. A boxed session's rides the launcher's -SetEnv and hands none in here.
   const link = typeof options.beingLink?.mint === 'function' ? options.beingLink.mint() : null;
-  const env = link ? { ...process.env, ...Object.fromEntries(link.env.map((e) => [e.slice(0, e.indexOf('=')), e.slice(e.indexOf('=') + 1)])) } : null;
+  // ...and the sub-agent model/effort (config `background_agents`), unboxed the same way.
+  const extraEnv = [...(link ? link.env : []), ...(Array.isArray(options.backgroundAgentEnv) ? options.backgroundAgentEnv : [])];
+  const env = extraEnv.length ? { ...process.env, ...Object.fromEntries(extraEnv.map((e) => [e.slice(0, e.indexOf('=')), e.slice(e.indexOf('=') + 1)])) } : null;
 
   function spawnProc() {
     // Reuse the tested confinement/model/effort/--resume arg-builder, then add
@@ -362,15 +405,40 @@ export function createWarmCliSession(options = {}) {
     selfTurn = null;
     if (t) { clearTimeout(t.timer); t.end(); }
   }
+  // HOW A BACKGROUND TASK ENDED IS THE CLI'S OWN VERDICT (operator 2026-10-31: "si termina en error (muy
+  // raro) debería mostrar una X y el mensaje de error? esto debe ser estructural, no pongas al SI a
+  // determinar el error cuando falla el proceso"). task_notification carries it (status; its summary,
+  // sometimes a reason); the task_updated just before it is kept in case none follows. Anything but
+  // completed keeps what the CLI said: one line, redacted, capped — collapsed, redacted, truncated, as
+  // renderToolUse does.
+  function taskEnded(taskId, status, said) {
+    let message = status === 'completed' ? '' : redactSecrets(String(said ?? '').replace(/\s+/g, ' ').trim());
+    if (message.length > OUTCOME_MAX) message = message.slice(0, OUTCOME_MAX - 1) + '…';
+    outcomes.delete(taskId);
+    outcomes.set(taskId, { status, message: message || null, at: Date.now() });
+    if (outcomes.size > OUTCOMES_KEPT) outcomes.delete(outcomes.keys().next().value);
+  }
+
+  // Not interrupted (see BACKGROUND WORK above): an interrupt here killed every other background agent.
   function startSelfTurn() {
     const t = expectSelfTurn();
     clearTimeout(t.timer);
     t.started = true;
-    const summaries = finished.splice(0);
-    if (typeof options.onBackgroundDone !== 'function') { onLog(`warm-cli: the CLI answers ${summaries.length} finished background task(s) on its own — nobody is listening`); return; }
-    try { proc.stdin.write(interruptLine()); } catch { /* exiting — onClose ends the turn */ }
-    onLog(`warm-cli: background task(s) finished with no turn in flight (${summaries.join('; ')}) — stopped the CLI's own turn, reporting up`);
-    try { options.onBackgroundDone({ summaries }); } catch (e) { onLog(`warm-cli: onBackgroundDone threw: ${e?.message ?? e}`); }
+    t.summaries = finished.splice(0);
+    if (typeof options.onBackgroundDone !== 'function') { onLog(`warm-cli: the CLI answers ${t.summaries.length} finished background task(s) on its own — nobody is listening`); return; }
+    onLog(`warm-cli: background task(s) finished with no turn in flight (${t.summaries.join('; ')}) — the CLI answers on its own, reported up when it ends`);
+  }
+  // Its `result`: the answer is the being's report on the task(s), and it has reached no chat — the
+  // spine hands it to the being to send (`reply`, the adopted turn's path). None (an error, or an empty
+  // result: measured 2.1.309, a second notification queued behind the first gives a 0-turn "" result
+  // and is answered by the next one) — the completion alone, and the being is asked to report.
+  function reportSelfTurn(ev) {
+    const { summaries } = selfTurn;
+    endSelfTurn();
+    if (typeof options.onBackgroundDone !== 'function') return;
+    const reply = ev.subtype === 'success' && ev.is_error !== true && typeof ev.result === 'string' && ev.result.trim() ? ev.result : null;
+    onLog(`warm-cli: the CLI's own turn on ${summaries.join('; ')} ended (${reply == null ? `no answer: ${ev.subtype}` : `${reply.length} chars`}) — reporting up`);
+    try { options.onBackgroundDone(reply == null ? { summaries } : { summaries, reply }); } catch (e) { onLog(`warm-cli: onBackgroundDone threw: ${e?.message ?? e}`); }
   }
 
   function onStdout(chunk) {
@@ -386,7 +454,7 @@ export function createWarmCliSession(options = {}) {
       // it sits on the ONLY path a turn has to finish: the turn's own `result` arrives as one
       // of these lines, and if the line is unreadable it is dropped here, `pending` is never
       // settled, the pool's `busy` stays true forever and the conversation wedges with the CLI
-      // alive and idle — which is exactly the state the Joyce session was measured in. Whether
+      // alive and idle — which is exactly the state the Julia session was measured in. Whether
       // that is what happened there cannot be known now; what can be fixed is that it would
       // have left no trace at all. Capped, because a stdout that has started emitting garbage
       // must not also flood the log.
@@ -413,14 +481,20 @@ export function createWarmCliSession(options = {}) {
         if (ev.subtype === 'background_tasks_changed') {
           const tasks = Array.isArray(ev.tasks) ? ev.tasks : [];
           if (pending) pending.bgStarted = (pending.bgStarted ?? 0) + tasks.filter((t) => !background.has(t.task_id)).length;
-          background = new Map(tasks.map((t) => [t.task_id, background.get(t.task_id) ?? { description: t.description || t.task_id, since: Date.now() }]));
+          background = new Map(tasks.map((t) => [t.task_id, background.get(t.task_id) ?? taskOf(t, Date.now())]));
         } else if (ev.subtype === 'task_notification' && background.has(ev.task_id)) finished.push(`${background.get(ev.task_id).description} — ${ev.status ?? 'done'}`);
         else if (ev.subtype === 'init' && !pending && finished.length) startSelfTurn();
+        if (ev.subtype === 'task_notification' && background.has(ev.task_id) && ENDED[ev.status]) taskEnded(ev.task_id, ENDED[ev.status], ev.reason || ev.summary);
+        else if (ev.subtype === 'task_updated' && background.has(ev.task_id) && ENDED[ev.patch?.status]) taskEnded(ev.task_id, ENDED[ev.patch.status], ev.patch.error);
       }
-      if (ev.type === 'user' && ev.isReplay === true && ev.origin?.kind === 'task-notification') finished.shift();
+      // Absorbed by a turn — the CLI's own one included, which now runs on and reports it with its own.
+      if (ev.type === 'user' && ev.isReplay === true && ev.origin?.kind === 'task-notification') {
+        const s = finished.shift();
+        if (s && selfTurn?.started && !pending) selfTurn.summaries.push(s);
+      }
       // A subagent's own events (measured 2.1.301): parent_tool_use_id = its Agent call. Not the being's words.
       if (ev.parent_tool_use_id) continue;
-      if (selfTurn?.started && !pending) { if (ev.type === 'result') endSelfTurn(); continue; }
+      if (selfTurn?.started && !pending) { if (ev.type === 'result') reportSelfTurn(ev); continue; }
       // THE INJECTION ACK (operator 2026-09-09 — see the header measurement). `isReplay` marks
       // the CLI echoing back a user line it has just TAKEN, which is the only thing in this
       // stream that says the model got a steered message; the write itself says nothing.
@@ -445,7 +519,7 @@ export function createWarmCliSession(options = {}) {
       // existing (unchanged, below) `!pending.acc` first-wins fallback — additive only, a
       // no-op when the option is off. See pushVerboseBlocks above.
       if (verboseThinking && ev.type === 'assistant' && ev.message?.content && pending) {
-        pushVerboseBlocks(pending, ev.message.content);
+        pushVerboseBlocks(pending, ev.message.content, verboseThinking === true);
         // Progressive preview, mirroring pending.acc's onUpdate below: grow the WhatsApp
         // placeholder message-by-message instead of delivering the whole transcript once,
         // at `result`. The final `result`-event resolution below is unchanged/authoritative.
@@ -543,7 +617,7 @@ export function createWarmCliSession(options = {}) {
 
   // Tell every injection still waiting on this turn what became of it. Called from EVERY way a
   // turn can end, so a steered line is never left with nobody ever answering for it — that
-  // silence is precisely what the Joyce incident was made of.
+  // silence is precisely what the Julia incident was made of.
   function settleInjections(p, reason) {
     for (const rec of p?.injections ?? []) {
       if (rec.done) continue;
@@ -615,7 +689,7 @@ export function createWarmCliSession(options = {}) {
     const a = options.adopt;
     sessionId = a.sessionId ?? sessionId;
     model = a.model ?? null;
-    background = new Map((a.background ?? []).map((t) => [t.task_id, { description: t.description || t.task_id, since: t.since }]));
+    background = new Map((a.background ?? []).map((t) => [t.task_id, taskOf(t, t.since)]));
     // A turn the previous spine was waiting on: its result is still this conversation's reply.
     if (a.orphan) {
       const opener = String(a.orphan.opener ?? '');
@@ -697,7 +771,7 @@ export function createWarmCliSession(options = {}) {
       if (closed) throw new Error('warm-cli: session closed');
       for (const [k, v] of Object.entries(changes)) {
         if (!RECONFIGURABLE.has(k)) throw new Error(`warm-cli: ${k} cannot change in a live process`);
-        if (k === 'verboseThinking') verboseThinking = v === true;
+        if (k === 'verboseThinking') verboseThinking = verboseOf(v);
         else if (proc) {
           const request = LIVE_REQUEST[k](v);
           try { await control(request); }
@@ -720,9 +794,13 @@ export function createWarmCliSession(options = {}) {
       proc = null;
     },
     get sessionId() { return sessionId; },
-    // Background tasks still running — the pool will not idle-evict while this is > 0.
-    get background() { return background.size; },
-    // …and what they are, with when each started (the spine's liveness status and its ask).
+    // Background tasks still running — the pool will not idle-evict while this is > 0. The CLI's own
+    // turn counts as one while it runs: it is no longer stopped, and an eviction would cut its report.
+    get background() { return background.size + (selfTurn?.started ? 1 : 0); },
+    // …and what they are, with when each started (the spine's liveness status and its ask), the agent that
+    // launched each (parentTaskId) and whether it is ambient, where the CLI says so.
     get backgroundTasks() { return [...background].map(([taskId, t]) => ({ taskId, ...t })); },
+    // …and how a finished one ended, as the CLI said it: { status: completed|failed|stopped, message, at }, or null.
+    backgroundOutcome(taskId) { return outcomes.get(taskId) ?? null; },
   };
 }

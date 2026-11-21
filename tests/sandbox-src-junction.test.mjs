@@ -123,7 +123,7 @@ describe('the pool profile gets a read-only src junction onto the eGPT checkout'
   });
 
   it('the read mounts come from config.yaml global_read_paths - no folder is spelled in the launcher or the provisioner', () => {
-    // Operator 2026-09-28: "sandboxed beings should have access to my 'C:\Users\an\src\siran', we
+    // Operator 2026-09-28: "sandboxed beings should have access to my 'C:\Users\user\src\siran', we
     // can call it repos/", then "please frame this in config.yaml as global_read_paths list". The
     // launcher is HANDED the list (-ReadMounts, from the spine) and parses it with the ONE parser.
     const src = launcher();
@@ -231,8 +231,12 @@ describe('the OTHER half: a standing read grant on the junction target', () => {
     // must not have is an icacls INVOCATION of its own.)
     expect(p).not.toMatch(/&\s*icacls/);
     // ~\src keeps its TRAVERSE ace (walk through, do not list) — that is what still lets the
-    // pool reach the checkout by name without enumerating what else is in there.
-    expect(p).toMatch(/'the operator source' = Join-Path \$env:USERPROFILE 'src'/);
+    // pool reach the checkout by name without enumerating what else is in there. Since
+    // 2026-11-12 it is a folder above the checkout, so the chain over the provisioner's own
+    // standing leaves grants it.
+    expect(p).toMatch(/\$traverseLeaves = @\(Join-Path \$env:USERPROFILE 'src\\egpt'\)/);
+    expect(p).toMatch(/Grant-SandboxTraverseChain -Paths \$traverseLeaves/);
+    expect(accountLib()).not.toMatch(/function Get-SandboxAncestorDirs/);
     // ...AND THE RETIREMENT HAS TO PUT IT BACK (2026-09-23, second pass). `/remove:g` takes off
     // EVERY explicit ACE for the named principal on that object — it cannot remove one of two —
     // so the revoke above also removed the traverse ACE the ancestor step had just granted,
@@ -288,7 +292,7 @@ describe('the OTHER half: a standing read grant on the junction target', () => {
     expect(pred).not.toMatch(/icacls/);
     expect(pred).not.toMatch(/Set-Acl/);
     // ONE ACL tool for every grant, the same one the revoke uses. Set-Acl is what hung twice
-    // on C:\Users\an, and it persists the SACL as well as the DACL.
+    // on C:\Users\user, and it persists the SACL as well as the DACL.
     expect(fn).not.toMatch(/Set-Acl/);
     // Plain /grant, never /grant:r — the grants stay additive and never narrow.
     expect(fn).not.toMatch(/\/grant:r/);
@@ -475,8 +479,8 @@ describe('a lease share is released with the lease', () => {
 //    lease is cleared by the next turn on the box rather than by the next turn on that account.
 //
 //    A SECOND DEFECT, FOUND IN THE SAME LEDGERS, AND NOW FIXED: egpt-sbx-08 and -13 named
-//    ...\Favel Konefka-2608141626 while -03, -04 and -10 named ...\Favel Elena
-//    Konefka-2608141626 — the SAME conversation (identical -2608141626 id), renamed slug. NTFS
+//    ...\Fiona Ejemplar-2608141626 while -03, -04 and -10 named ...\Fiona Elena
+//    Ejemplar-2608141626 — the SAME conversation (identical -2608141626 id), renamed slug. NTFS
 //    carries a DACL through a rename, so those two ledgers pointed at nothing while the ACEs they
 //    were written to revoke were alive at the new name. The revoke called that 'missing' and both
 //    callers treated it as resolved — three pool accounts left holding Modify on a conversation

@@ -110,6 +110,7 @@ export function createIdentity({ formatLine = formatDispatchLine, now = () => Da
       const kind = f.isReaction ? 'reaction' : f.isStageDirection ? 'edit' : 'text';
       const ts = f.ts ?? now();
       const senderName = f.senderName ?? f.firstName ?? null;
+      const canary = typeof rawBody === 'string' ? decodeChatCanary(rawBody) : null;
       const ev = {
         surface, node,
         chatId: f.chatId, chatName: f.chatName,
@@ -133,6 +134,8 @@ export function createIdentity({ formatLine = formatDispatchLine, now = () => Da
         // The spine transcript-logs it (backfill) but NEVER dispatches it (operator
         // 2026-07-08: a waking node backfills, never re-answers stale traffic).
         backlog: !!f.backlog,
+        // The mode THIS line is gated by, when it is not its conversation's (the chatbox's support line: accum) — gating.decide.
+        lineMode: f.lineMode ?? null,
         authorized: !!f.authorized, isSender: !!f.isSender, isVoice: !!f.isTranscriptFromVoice,
         // A voice note is TWO lines (operator 2026-10-16): 'arrival' (recorded, prompts nobody) and
         // 'outcome' (its transcription or failure, answering the arrival). null = any other message.
@@ -164,10 +167,14 @@ export function createIdentity({ formatLine = formatDispatchLine, now = () => Da
         fromNode: signed ? (decodeNodeSignature(rawBody) ?? '') : (f.fromNode ?? null),
         // WHICH BEING authored this, off the SAME frame (`<node>/<being>`) — the per-being echo
         // gate reads it to suppress a wake of the AUTHOR only (spine.mjs). null = a node-only frame
-        // or an unsigned message. A synthetic may hand it over as f.fromBeing (none today → null).
+        // or an unsigned message. A synthetic may hand it over as f.fromBeing (the Telegram limb's echo,
+        // which carries no frame to read it off).
         fromBeing: signed ? decodeBeingSignature(rawBody) : (f.fromBeing ?? null),
+        // ALREADY ON THE RECORD (the Telegram limb's echo of a being's own post): the ingestion point
+        // skips it (spine.mjs handleFast). false on every genuine inbound.
+        recorded: !!f.recorded,
         // A side group's opener: the ids its creator stamped (commands.postOpener, linkSideGroup). null otherwise.
-        canary: typeof rawBody === 'string' ? decodeChatCanary(rawBody) : null,
+        canary,
         // WHERE THIS MESSAGE ACTUALLY ARRIVED, when that is not where it is being dispatched:
         // { surface, chatId, chatName } of the ORIGIN conversation. Carried exactly as fromMember
         // and fromNode are, and for the same reason — a synthetic that RE-ADDRESSES an already-built

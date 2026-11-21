@@ -365,15 +365,15 @@ describe('mesh service — a relayed reply is stamped with the being\'s NAME, ne
 // same day, *"E on the radio and E on acim MUST BE DIFFERENT THREADS!"*.
 //
 // meshEv used to hand brain.turn the RELAY CHANNEL as the conversation, so every group reached
-// through egpt-mesh-do-kg answered on ONE thread, one warm CLI and one access_level — Radio WnL
+// through egpt-mesh-do-kg answered on ONE thread, one warm CLI and one access_level — Radio EFM
 // and "perrito traducciones" both landing in the transport's conversation, with their real
 // origin present only as text inside the prompt. It also defeated a569ada: a chat listed as a
 // `wa-group` member of a room resolves to that room's identity, but a group reached through the
 // relay never presented its own address, so the membership rule could never fire for it.
 //
 // THE HARD PART, and why this is not `chatId: <the requester's chat id>`: Beeper chat ids do NOT
-// cross accounts. The same WhatsApp group is `!6ljZJkx0OaY9ZVhEzFgi` on anrodz42 and
-// `!HuXFQeZSY1X4khNDWTzz` on dolly.egpt (measured on these two machines, 2026-08-31), so the
+// cross accounts. The same WhatsApp group is `!FakeRoomId0000000004` on anaprueba42 and
+// `!FakeRoomId0000000003` on mouth.acct (measured on these two machines, 2026-08-31), so the
 // requester's id is meaningless here — rooms.yaml on THIS node lists members by THIS node's ids.
 // The chat NAME is what crosses (a WhatsApp group's title is the same on both accounts) and the
 // tail has carried it as `from:` since the first envelope. So the responder resolves that name
@@ -382,14 +382,14 @@ describe('mesh service — the RESPONDER answers in the ORIGIN conversation, not
   const persona = { e: { configuration: 'egpt', name: 'e' } };
   const CHANNEL = 'egpt-mesh-do-kg';
   // The responder's OWN ids for the two groups (its account's, not the requester's).
-  const chatIds = { 'Radio WnL': 'do-radio-wnl', 'perrito traducciones': 'do-perrito' };
+  const chatIds = { 'Radio EFM': 'do-radio-efm', 'perrito traducciones': 'do-perrito' };
   const req = (from, body, post_id) => encodeMesh({ by: 'An', body, from, from_node: 'kg', to: 'e.do', post_id });
 
   it('THE ASK: two origin chats relayed through ONE channel run in TWO conversations', async () => {
     const brain = fakeBrain({ reply: 'ok' });
     const { mesh } = svc({ node: 'do', agents: persona, brain, chatIds });
 
-    await mesh.handle({ surface: 'whatsapp', chatId: CHANNEL, msgId: 'm1', body: req('Radio WnL', '@e pon musica', 'p1') });
+    await mesh.handle({ surface: 'whatsapp', chatId: CHANNEL, msgId: 'm1', body: req('Radio EFM', '@e pon musica', 'p1') });
     await flush();
     await mesh.handle({ surface: 'whatsapp', chatId: CHANNEL, msgId: 'm2', body: req('perrito traducciones', '@e traduce esto', 'p2') });
     await flush();
@@ -397,11 +397,11 @@ describe('mesh service — the RESPONDER answers in the ORIGIN conversation, not
     expect(brain.calls).toHaveLength(2);
     // Radio-E and acim-E are DIFFERENT conversations — which is what makes them different
     // threads, different warm processes and different run configs downstream.
-    expect(brain.calls[0].ev.chatId).toBe('do-radio-wnl');
+    expect(brain.calls[0].ev.chatId).toBe('do-radio-efm');
     expect(brain.calls[1].ev.chatId).toBe('do-perrito');
     expect(brain.calls[0].ev.chatId).not.toBe(brain.calls[1].ev.chatId);
     // …and the being is told WHICH chat it is in by name, not by the transport's name.
-    expect(brain.calls[0].ev.chatName).toBe('Radio WnL');
+    expect(brain.calls[0].ev.chatName).toBe('Radio EFM');
     expect(brain.calls[1].ev.chatName).toBe('perrito traducciones');
   });
 
@@ -409,7 +409,7 @@ describe('mesh service — the RESPONDER answers in the ORIGIN conversation, not
     const brain = fakeBrain({ reply: 'ok' });
     const { bridge, mesh } = svc({ node: 'do', agents: persona, brain, chatIds });
 
-    await mesh.handle({ surface: 'whatsapp', chatId: CHANNEL, msgId: 'm1', body: req('Radio WnL', '@e pon musica', 'p1') });
+    await mesh.handle({ surface: 'whatsapp', chatId: CHANNEL, msgId: 'm1', body: req('Radio EFM', '@e pon musica', 'p1') });
     await flush();
     await mesh.handle({ surface: 'whatsapp', chatId: CHANNEL, msgId: 'm2', body: req('perrito traducciones', '@e traduce esto', 'p2') });
     await flush();
@@ -417,7 +417,7 @@ describe('mesh service — the RESPONDER answers in the ORIGIN conversation, not
     // Transport is transport: the envelope goes back the way it came, on the channel, with the
     // same return-address and the same post_id it arrived with.
     expect(bridge.streams.map((s) => s.chat)).toEqual([CHANNEL, CHANNEL]);
-    expect(parseMesh(bridge.streams[0].finals.at(-1))).toMatchObject({ by: 'e.do', re: 'Radio WnL.kg', post_id: 'p1', done: true });
+    expect(parseMesh(bridge.streams[0].finals.at(-1))).toMatchObject({ by: 'e.do', re: 'Radio EFM.kg', post_id: 'p1', done: true });
     expect(parseMesh(bridge.streams[1].finals.at(-1))).toMatchObject({ by: 'e.do', re: 'perrito traducciones.kg', post_id: 'p2', done: true });
   });
 
@@ -444,9 +444,9 @@ describe('mesh service — the RESPONDER answers in the ORIGIN conversation, not
     // A resolver that WOULD answer, to prove it is never asked: resolveChatId's `!` branch hands
     // a full-form id straight back UNVERIFIED, which is exactly how a foreign account's id would
     // become this node's thread key.
-    const { bridge, mesh } = svc({ node: 'do', agents: persona, brain, chatIds: { '!6ljZJkx0OaY9ZVhEzFgi': 'do-would-be-wrong' }, logs });
+    const { bridge, mesh } = svc({ node: 'do', agents: persona, brain, chatIds: { '!FakeRoomId0000000004': 'do-would-be-wrong' }, logs });
 
-    await mesh.handle({ surface: 'whatsapp', chatId: CHANNEL, msgId: 'm1', body: req('!6ljZJkx0OaY9ZVhEzFgi', '@e hola', 'p1') });
+    await mesh.handle({ surface: 'whatsapp', chatId: CHANNEL, msgId: 'm1', body: req('!FakeRoomId0000000004', '@e hola', 'p1') });
     await flush();
 
     expect(brain.calls[0].ev.chatId).toBe(CHANNEL);
@@ -460,7 +460,7 @@ describe('mesh service — the RESPONDER answers in the ORIGIN conversation, not
     delete bridge.resolveChatId;
     const mesh = createMeshService({ bridge, brain, getConfig: () => ({ node_name: 'do', agents: persona }), bodyEmojiOf });
 
-    await mesh.handle({ surface: 'whatsapp', chatId: CHANNEL, msgId: 'm1', body: req('Radio WnL', '@e hola', 'p1'), isSender: true });
+    await mesh.handle({ surface: 'whatsapp', chatId: CHANNEL, msgId: 'm1', body: req('Radio EFM', '@e hola', 'p1'), isSender: true });
     await flush();
 
     expect(brain.calls[0].ev.chatId).toBe(CHANNEL);
@@ -1078,7 +1078,9 @@ describe('spine seam — handleInbound ↔ mesh', () => {
 //    dangerousDenial, meta-engineer.yaml — "i think the 'dangerous' key is mistake"). UNLIKE
 //    router.mjs's silent drop, this file's own convention is NEVER SILENCE: the requester here is
 //    a different, already-trusted node peer (it reached this node at all), so it gets an explicit
-//    reason. ──
+//    reason. Since 2026-11-07 the lists JOIN (the node's owners always pass; the being's and the
+//    conversation's lists only add people), so a stranger here is sent with isSender: false —
+//    svc() posts every envelope as the account's own, an owner of this node. ──
 describe('mesh service — allowed_users gate (operator 2026-08-15)', () => {
   const agents = { wren: { configuration: 'sonnet-high', name: 'wren', conversation_defaults: { allowed_users: ['boss'] } } };
 
@@ -1087,7 +1089,7 @@ describe('mesh service — allowed_users gate (operator 2026-08-15)', () => {
     const { bridge, mesh } = svc({ node: 'do', agents, brain });
     const req = encodeMesh({ by: 'Stranger', body: '@wren do X', from: 'HFM', from_node: 'kg', to: 'wren.do', post_id: 'p1' });
     // no `senderId` on the ev handed to mesh.handle → route.ev.senderId is undefined, off the list
-    await mesh.handle({ surface: 'whatsapp', chatId: 'RELAY', msgId: 'm1', body: req, senderId: 'stranger' });
+    await mesh.handle({ surface: 'whatsapp', chatId: 'RELAY', msgId: 'm1', body: req, senderId: 'stranger', isSender: false });
     await flush();
     expect(brain.calls).toHaveLength(0);
     expect(bridge.streams).toHaveLength(0);          // denied before the placeholder stream ever opened
@@ -1147,51 +1149,60 @@ describe('mesh service — allowed_users gate (operator 2026-08-15)', () => {
   // mean the opposite of what it says.
   //
   //   absent  -> inherit, and with nothing to inherit, permit (the test above)
-  //   []      -> deny everyone (these two)
+  //   []      -> names nobody: it adds no one (and, since 2026-11-07, shuts no owner out)
   //   ['*']   -> permit everyone (the test above that)
-  it('REPRODUCE-FIRST: allowed_users: [] is DENY — no mesh requester reaches the being', async () => {
+  it('REPRODUCE-FIRST: allowed_users: [] adds nobody — an unlisted mesh requester does not reach the being, the node\'s owner does', async () => {
     const shutAgents = { wren: { configuration: 'sonnet-high', name: 'wren', conversation_defaults: { allowed_users: [] } } };
     const brain = fakeBrain({ reply: 'ok' });
     const { bridge, mesh } = svc({ node: 'do', agents: shutAgents, brain });
     const req = encodeMesh({ by: 'Anyone', body: '@wren do X', from: 'HFM', from_node: 'kg', to: 'wren.do', post_id: 'p1' });
-    await mesh.handle({ surface: 'whatsapp', chatId: 'RELAY', msgId: 'm1', body: req, senderId: 'totally-unlisted' });
+    await mesh.handle({ surface: 'whatsapp', chatId: 'RELAY', msgId: 'm1', body: req, senderId: 'totally-unlisted', isSender: false });
     await flush();
     expect(brain.calls).toHaveLength(0);
+    const req2 = encodeMesh({ by: 'An', body: '@wren do Y', from: 'HFM', from_node: 'kg', to: 'wren.do', post_id: 'p2' });
+    await mesh.handle({ surface: 'whatsapp', chatId: 'RELAY', msgId: 'm2', body: req2, senderId: 'totally-unlisted' });   // the account's own post: an owner
+    await flush();
+    expect(brain.calls).toHaveLength(1);
   });
 
-  it('REPRODUCE-FIRST: a per-conversation allowed_users: [] SHUTS a being the global default would have allowed', async () => {
-    // The nearest rung wins for deny exactly as it does for allow: 'boss' is on the global list
-    // and is still refused, because this conversation set the list to nothing.
+  it('a per-conversation allowed_users: [] shuts nobody out: the global list still reaches the being', async () => {
+    // [] adds nobody and takes nobody away: 'boss' is on the global list and is still admitted.
     const state = { contacts: { whatsapp: { RELAY: { slug: 'chat', agents: { wren: { allowed_users: [] } } } } } };
     const brain = fakeBrain({ reply: 'ok' });
     const { bridge, mesh } = svc({ node: 'do', agents, brain, loadState: async () => state });
     const req = encodeMesh({ by: 'Boss', body: '@wren do X', from: 'HFM', from_node: 'kg', to: 'wren.do', post_id: 'p1' });
-    await mesh.handle({ surface: 'whatsapp', chatId: 'RELAY', msgId: 'm1', body: req, senderId: 'boss' });
+    await mesh.handle({ surface: 'whatsapp', chatId: 'RELAY', msgId: 'm1', body: req, senderId: 'boss', isSender: false });
     await flush();
-    expect(brain.calls).toHaveLength(0);
+    expect(brain.calls).toHaveLength(1);
   });
 
-  it('a PER-CONVERSATION allowed_users override REPLACES (never merges with) the global default via the mesh path too', async () => {
+  it('a PER-CONVERSATION allowed_users list JOINS the global default via the mesh path too', async () => {
     // surface/chatId keys mirror the RESPONDER's own resolution (route.limb/route.room_id — the
     // arriving envelope's ev.surface/ev.chatId): 'whatsapp'/'RELAY', same as mesh.handle below.
     const state = { contacts: { whatsapp: { RELAY: { slug: 'chat', agents: { wren: { allowed_users: ['other'] } } } } } };
     const brain = fakeBrain({ reply: 'ok' });
     const { bridge, mesh } = svc({ node: 'do', agents, brain, loadState: async () => state });
 
-    // 'boss' is on the GLOBAL list, but this conversation's override REPLACED it — not merged.
+    // 'boss' is on the GLOBAL list, and this conversation's list only ADDED 'other' — not replaced.
     const req1 = encodeMesh({ by: 'Boss', body: '@wren do X', from: 'HFM', from_node: 'kg', to: 'wren.do', post_id: 'p1' });
-    await mesh.handle({ surface: 'whatsapp', chatId: 'RELAY', msgId: 'm1', body: req1, senderId: 'boss' });
-    await flush();
-    expect(brain.calls).toHaveLength(0);
-
-    // 'other' is on the per-conversation override list (body differs so the engine's own replay
-    // guard, keyed on being+from+body, does not itself explain a second miss).
-    const req2 = encodeMesh({ by: 'Other', body: '@wren do Y', from: 'HFM', from_node: 'kg', to: 'wren.do', post_id: 'p2' });
-    await mesh.handle({ surface: 'whatsapp', chatId: 'RELAY', msgId: 'm2', body: req2, senderId: 'other' });
+    await mesh.handle({ surface: 'whatsapp', chatId: 'RELAY', msgId: 'm1', body: req1, senderId: 'boss', isSender: false });
     await flush();
     expect(brain.calls).toHaveLength(1);
-    expect(brain.calls[0].being).toBe('wren');
-    expect(bridge.streams).toHaveLength(1);
+
+    // 'other' is on the per-conversation list (body differs so the engine's own replay
+    // guard, keyed on being+from+body, does not itself explain a miss).
+    const req2 = encodeMesh({ by: 'Other', body: '@wren do Y', from: 'HFM', from_node: 'kg', to: 'wren.do', post_id: 'p2' });
+    await mesh.handle({ surface: 'whatsapp', chatId: 'RELAY', msgId: 'm2', body: req2, senderId: 'other', isSender: false });
+    await flush();
+    expect(brain.calls).toHaveLength(2);
+    expect(brain.calls[1].being).toBe('wren');
+    expect(bridge.streams).toHaveLength(2);
+
+    // …and someone on neither list is still refused.
+    const req3 = encodeMesh({ by: 'Eve', body: '@wren do Z', from: 'HFM', from_node: 'kg', to: 'wren.do', post_id: 'p3' });
+    await mesh.handle({ surface: 'whatsapp', chatId: 'RELAY', msgId: 'm3', body: req3, senderId: 'eve', isSender: false });
+    await flush();
+    expect(brain.calls).toHaveLength(2);
   });
 
   it('no loadState injected (default) → the gate falls straight to the global tier — today\'s behaviour for a caller that supplies nothing', async () => {
@@ -1213,8 +1224,8 @@ describe('mesh service — allowed_users gate (operator 2026-08-15)', () => {
 //
 // WHY THAT IS NOT COSMETIC. One real chat is a DIFFERENT Matrix room per Beeper account
 // (src/bridges/beeper.mjs crossAccountChatKey; mesh.mjs's own originConv header records two pairs
-// measured live). On the kg node the mouth is `secondary` (dolly.egpt) and the ear is `primary`
-// (anrodz42), so an ear id handed to the mouth is not the wrong voice — it is a room that does not
+// measured live). On the kg node the mouth is `secondary` (mouth.acct) and the ear is `primary`
+// (anaprueba42), so an ear id handed to the mouth is not the wrong voice — it is a room that does not
 // exist, and the send is dropped. Three families of mesh send carry exactly such an id:
 //
 //   · THE ORIGIN CHAT — a human TYPED there, so it is a room on the ear by definition. The 🤔

@@ -10,6 +10,7 @@ import {
   RESTART_MAX_MS,
   REWIND_EXIT_CODE,
   UPGRADE_EXIT_CODE,
+  UPGRADE_FULL_EXIT_CODE,
   createDaemonRuntime,
   resolveProfiles,
   startProfileDaemons,
@@ -22,6 +23,7 @@ class FakeChild {
     this.handlers = {};
     this.killed = [];
     this.pid = _nextFakePid++;
+    this.stdout = { on: (event, fn) => { this.handlers[`stdout.${event}`] = fn; } };
   }
   on(event, fn) {
     this.handlers[event] = fn;
@@ -101,6 +103,7 @@ function makeRuntime(extra = {}) {
     lockFile: extra.lockFile ?? (() => 1),
     unlockFile: extra.unlockFile ?? (() => {}),
     lockHeld: extra.lockHeld ?? (() => false),
+    beeperIntervalMs: 0,   // no Beeper pass here; the Beeper worlds pass undefined for the real cadence
     createCliHost: 'createCliHost' in extra ? extra.createCliHost : null,
     peerProbe: extra.peerProbe,
     now: extra.now ?? (() => Date.UTC(2026, 5, 18, 12, 0, 0)),
@@ -359,6 +362,47 @@ describe('daemon runtime fake-world harness', () => {
     expect(children).toHaveLength(2);
   });
 
+  // What /upgrade did joins the sidecar the going-down spine wrote; boot's back-up line says it
+  // (operator 2026-11-03: "nothing happened… or you didn't show updates").
+  describe('the /upgrade outcome joins the restart-announce sidecar', () => {
+    const SPINE_SIDECAR = { chatId: 'tg:-1000000000104/3', kind: '/upgrade', preSha: 'oldsha', pid: 7 };
+    const upgradeWith = async ({ shas, pull = { status: 0 }, sidecar = SPINE_SIDECAR }) => {
+      const writes = [];
+      const base = makeSpawnSync({ shas });
+      const spawnSync = (cmd, args = [], opts = {}) => {
+        if (cmd === 'git' && args[0] === 'pull') { base.calls.push({ cmd, args, opts }); return { stdout: Buffer.from(''), stderr: Buffer.from(''), ...pull }; }
+        if (cmd === 'git' && args[0] === 'rev-list') return { status: 0, stdout: Buffer.from('3\n') };
+        return base(cmd, args, opts);
+      };
+      const { runtime, children } = makeRuntime({
+        spawnSync,
+        readFileSync: (p) => { if (sidecar && String(p).includes('restart-announce.json')) return JSON.stringify(sidecar); const e = new Error('missing'); e.code = 'ENOENT'; throw e; },
+        writeFileSync: (p, body) => writes.push({ p: String(p), body: String(body) }),
+      });
+      runtime.spawnShell();
+      await children[0].child.handlers.exit(UPGRADE_EXIT_CODE, null);
+      expect(children).toHaveLength(2);
+      return writes.filter((w) => w.p.includes('restart-announce.json')).map((w) => JSON.parse(w.body));
+    };
+
+    it('already up to date', async () => {
+      expect(await upgradeWith({ shas: ['oldsha'] })).toEqual([{ ...SPINE_SIDECAR, outcome: 'already up to date' }]);
+    });
+
+    it('pulled: the commit count and npm install', async () => {
+      expect(await upgradeWith({ shas: ['oldsha', 'newsha'] })).toEqual([{ ...SPINE_SIDECAR, outcome: 'pulled 3 commits, npm install ok' }]);
+    });
+
+    it('the pull failed: git\'s reason and the sha it stays on', async () => {
+      const pull = { status: 128, stderr: Buffer.from('fatal: Not possible to fast-forward, aborting.\n') };
+      expect(await upgradeWith({ shas: ['oldsha'], pull })).toEqual([{ ...SPINE_SIDECAR, outcome: 'git pull failed (fatal: Not possible to fast-forward, aborting.), still on oldsha' }]);
+    });
+
+    it('no sidecar from the spine: nothing is written', async () => {
+      expect(await upgradeWith({ shas: ['oldsha'], sidecar: null })).toEqual([]);
+    });
+  });
+
   // === restart-announce sidecar — the daemon writes a fallback marker for the two exit
   // paths where the dying spine never got a chance to write its own (announceAndExit's
   // graceful path is untouched/out of scope): a genuine crash, and a wedge-kill. Same
@@ -457,6 +501,33 @@ describe('daemon runtime fake-world harness', () => {
       expect(timers).toHaveLength(1);
       timers[0].fn();
       expect(children).toHaveLength(2);   // respawn still proceeds despite the resolution failure
+    });
+
+    // admin_chat_ids (operator 2026-11-03: "put An in chat_ids, btw it should be called
+    // admin_chat_ids"): the crash sidecar names the same chat boot's announceChatId does.
+    const crashChatId = async (yaml) => {
+      const writes = [];
+      const { runtime, children } = makeRuntime({
+        readFileSync: (p) => { if (String(p).includes('config.yaml')) return yaml; const e = new Error('missing'); e.code = 'ENOENT'; throw e; },
+        writeFileSync: (p, body) => writes.push({ p: String(p), body: String(body) }),
+      });
+      runtime.spawnShell();
+      await children[0].child.handlers.exit(1, null);
+      const w = writes.find((x) => x.p.includes('restart-announce.json'));
+      return w ? JSON.parse(w.body).chatId : null;
+    };
+
+    it('no whatsapp admin chat: the crash sidecar names the first telegram admin chat (nu)', async () => {
+      expect(await crashChatId('networks:\n  whatsapp:\n    admin_chat_ids: []\n  telegram:\n    admin_chat_ids:\n      - "tg:-1000000000104/3"\n')).toBe('tg:-1000000000104/3');
+    });
+
+    it('a whatsapp admin chat still wins over telegram', async () => {
+      expect(await crashChatId('networks:\n  whatsapp:\n    admin_chat_ids: ["!self:beeper.com"]\n  telegram:\n    admin_chat_ids: ["tg:-1000000000104/3"]\n')).toBe('!self:beeper.com');
+    });
+
+    it('admin_chat_ids is preferred over the legacy chat_ids; a legacy telegram chat_ids is still read', async () => {
+      expect(await crashChatId('networks:\n  whatsapp:\n    admin_chat_ids: ["!new:beeper.com"]\n    chat_ids: ["!old:beeper.com"]\n')).toBe('!new:beeper.com');
+      expect(await crashChatId('networks:\n  whatsapp:\n    chat_ids: []\n  telegram:\n    chat_ids: ["tg:-1000000000104/3"]\n')).toBe('tg:-1000000000104/3');
     });
   });
 });
@@ -1181,6 +1252,233 @@ describe('one runner across sessions', () => {
 });
 
 // =====================================================================================
+// THE PRIMARY BEEPER FOLLOWS THE RUNNER (operator 2026-11-15, GENOME 6): the daemon is its
+// supervisor. Each tick runs one PowerShell pass: in S1 setup/beeper-window.ps1 -Once (the
+// window: take the profile from the service, reopen it, wait out an update), in S0
+// setup/s0-identity-reconcile.ps1 -BeeperOnly (the services). The decisions are Pester's.
+// =====================================================================================
+describe('the daemon supervises the primary Beeper for its session', () => {
+  function beeperWorld({ session1 = false, platform = 'win32', claimedByS1 = false } = {}) {
+    const processObj = makeProcess();
+    processObj.pid = session1 ? 5001 : 5000;
+    if (session1) processObj.env.EGPT_SESSION1 = '1';
+    const intervals = [];
+    const h = makeRuntime({
+      processObj,
+      platform,
+      lockHeld: (p) => claimedByS1 && String(p).endsWith('s1.claim'),
+      beeperIntervalMs: undefined,
+      setInterval: (fn, ms) => { const t = { fn, ms, ref() { return t; }, unref() { t.unrefd = true; return t; } }; intervals.push(t); return t; },
+      clearInterval: (t) => { if (t) t.cleared = true; },
+    });
+    const passes = () => h.children.filter((c) => c.cmd === 'powershell.exe');
+    const tick = () => intervals.find((t) => t.ms === (session1 ? 15_000 : 60_000)).fn();
+    return { ...h, intervals, passes, tick };
+  }
+
+  it('S1 with no window: start runs beeper-window.ps1 -Once on this profile at once - the pass that opens it', () => {
+    const w = beeperWorld({ session1: true });
+    w.runtime.start();
+    expect(w.passes()).toHaveLength(1);
+    w.tick();                                   // still running: no second
+    expect(w.passes()).toHaveLength(1);
+    const [p] = w.passes();
+    expect(p.args.slice(0, 4)).toEqual(['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass']);
+    expect(p.args.slice(4)).toEqual(['-File', join('C:/repo/egpt', 'setup', 'beeper-window.ps1'), '-Once', '-EgptHome', 'C:/home/.egpt']);
+    expect(p.opts.windowsHide).toBe(true);
+  });
+
+  it('Beeper inherits the pass\'s environment: never EGPT_SESSION1', () => {
+    const w = beeperWorld({ session1: true });
+    w.runtime.start();
+    w.tick();
+    const [p] = w.passes();
+    expect(p.opts.env.EGPT_SESSION1).toBeUndefined();
+    expect(p.opts.env.EGPT_HOME).toBe('C:/home/.egpt');
+  });
+
+  it('the window exits: the next tick runs the pass again (it reopens); never two passes at once', async () => {
+    const w = beeperWorld({ session1: true });
+    w.runtime.start();
+    w.tick();
+    w.tick();                                   // the first pass is still running
+    expect(w.passes()).toHaveLength(1);
+    await w.passes()[0].child.handlers.exit(0, null);
+    w.tick();
+    expect(w.passes()).toHaveLength(2);
+  });
+
+  it('a failed pass is said in the daemon log and retried on the next tick', async () => {
+    const w = beeperWorld({ session1: true });
+    w.runtime.start();
+    w.tick();
+    await w.passes()[0].child.handlers.exit(1, null);
+    expect(w.logs.join('')).toMatch(/beeper-window\.ps1 -Once exited 1/);
+    w.tick();
+    expect(w.passes()).toHaveLength(2);
+  });
+
+  it('S0: its tick runs s0-identity-reconcile.ps1 -BeeperOnly - a stopped Beeper service is started there', () => {
+    const w = beeperWorld();
+    w.runtime.start();
+    w.tick();
+    const [p] = w.passes();
+    expect(p.args.slice(4)).toEqual(['-File', join('C:/repo/egpt', 'setup', 's0-identity-reconcile.ps1'), '-BeeperOnly', '-EgptHome', 'C:/home/.egpt']);
+  });
+
+  it('S0 holding off for Session 1 still runs its pass (the secondary stays up; the script leaves the primary to S1)', () => {
+    const w = beeperWorld({ claimedByS1: true });
+    expect(w.runtime.start()).toBeNull();
+    expect(w.runtime.state.holding).toMatch(/Session 1/);
+    w.tick();
+    expect(w.passes()).toHaveLength(1);
+  });
+
+  it('the timer never keeps the process up, and shutdown stops it and ends a pass in flight', () => {
+    const w = beeperWorld({ session1: true });
+    w.runtime.start();
+    const t = w.intervals.find((x) => x.ms === 15_000);
+    expect(t.unrefd).toBe(true);
+    w.tick();
+    w.runtime.shutdown('SIGTERM');
+    expect(t.cleared).toBe(true);
+    expect(w.passes()[0].child.killed).toEqual(['SIGTERM']);
+  });
+
+  it('off Windows: no Beeper pass at all', () => {
+    const w = beeperWorld({ session1: true, platform: 'linux' });
+    w.runtime.start();
+    expect(w.intervals.filter((x) => x.ms === 15_000 || x.ms === 60_000 || x.ms === 1_000)).toEqual([]);
+  });
+});
+
+// The 1 s probe (operator 2026-11-16): the pass costs ~1.1 s of PowerShell, so the daemon checks
+// the shared profile's Chromium lockfile itself every second and runs the pass only when no Beeper
+// holds it. The pass reports the profile it resolved (`profile=<dir>`); the slow pass stays.
+describe('a 1 s lockfile probe runs the Beeper pass the moment the profile is free', () => {
+  const PROFILE = 'C:\\Users\\user\\AppData\\Roaming\\BeeperTexts';
+  function probeWorld({ session1 = true } = {}) {
+    const processObj = makeProcess();
+    if (session1) processObj.env.EGPT_SESSION1 = '1';
+    const intervals = [];
+    const probe = { held: true, calls: [] };
+    const h = makeRuntime({
+      processObj,
+      beeperLockHeld: (dir) => { probe.calls.push(dir); return probe.held; },
+      beeperIntervalMs: undefined,
+      setInterval: (fn, ms) => { const t = { fn, ms, ref() { return t; }, unref() { t.unrefd = true; return t; } }; intervals.push(t); return t; },
+      clearInterval: (t) => { if (t) t.cleared = true; },
+    });
+    const passes = () => h.children.filter((c) => c.cmd === 'powershell.exe');
+    const slow = () => intervals.find((t) => t.ms === (session1 ? 15_000 : 60_000)).fn();
+    const second = (n = 1) => { for (let i = 0; i < n; i++) intervals.find((t) => t.ms === 1_000).fn(); };
+    // The running pass prints the profile it resolved, then exits.
+    const finish = async (out = `profile=${PROFILE}\r\n`, code = 0) => {
+      const p = passes().at(-1).child;
+      if (out) p.handlers['stdout.data'](Buffer.from(out));
+      await p.handlers.exit(code, null);
+    };
+    return { ...h, intervals, probe, passes, slow, second, finish };
+  }
+
+  it('S1: the window quits -> the pass runs on the next second, not 15 s later', async () => {
+    const w = probeWorld();
+    w.runtime.start();
+    w.slow();
+    await w.finish();
+    w.second(3);
+    expect(w.passes()).toHaveLength(1);           // held: nothing
+    w.probe.held = false;                          // the window exits
+    w.second();
+    expect(w.passes()).toHaveLength(2);
+    expect(w.passes()[1].args).toContain('-Once');
+    expect(w.probe.calls.at(-1)).toBe(PROFILE);
+  });
+
+  it('start runs the pass at once (S1 and S0), so the probe arms without waiting for the slow tick', async () => {
+    for (const session1 of [true, false]) {
+      const w = probeWorld({ session1 });
+      w.runtime.start();
+      expect(w.passes()).toHaveLength(1);
+      expect(w.passes()[0].args).toContain(session1 ? '-Once' : '-BeeperOnly');
+      await w.finish();
+      w.probe.held = false;
+      w.second();
+      expect(w.passes()).toHaveLength(2);
+    }
+  });
+
+  it('S0: the service dies -> its reconcile pass runs on the next second', async () => {
+    const w = probeWorld({ session1: false });
+    w.runtime.start();
+    w.slow();
+    await w.finish();
+    w.probe.held = false;
+    w.second();
+    expect(w.passes()).toHaveLength(2);
+    expect(w.passes()[1].args).toContain('-BeeperOnly');
+  });
+
+  it('held: the 1 s tick never spawns, and the slow pass still runs on its cadence', async () => {
+    const w = probeWorld();
+    w.runtime.start();
+    w.slow();
+    await w.finish();
+    w.second(30);
+    expect(w.passes()).toHaveLength(1);
+    w.slow();
+    expect(w.passes()).toHaveLength(2);
+  });
+
+  it('no storm: nothing while a pass runs, and a lock that stays free (an update) fires once until it is held again', async () => {
+    const w = probeWorld();
+    w.runtime.start();
+    w.slow();
+    w.probe.held = false;
+    w.second(5);                                    // the slow pass is still running
+    expect(w.passes()).toHaveLength(1);
+    await w.finish();
+    w.second();
+    expect(w.passes()).toHaveLength(2);             // free after it: one pass
+    await w.finish();
+    w.second(30);                                   // still free (update in progress): no more
+    expect(w.passes()).toHaveLength(2);
+    w.slow();                                       // the slow cadence keeps retrying
+    expect(w.passes()).toHaveLength(3);
+    await w.finish();
+    w.probe.held = true;
+    w.second();
+    w.probe.held = false;
+    w.second();
+    expect(w.passes()).toHaveLength(4);             // held again, then free: fires again
+  });
+
+  it('no profile reported (no shared service): no probe at all; the profile line is never logged', async () => {
+    const w = probeWorld();
+    w.runtime.start();
+    w.second(3);                                    // before any pass: nothing known
+    w.slow();
+    await w.finish('');
+    w.probe.held = false;
+    w.second(3);
+    expect(w.probe.calls).toEqual([]);
+    expect(w.passes()).toHaveLength(1);
+    w.slow();
+    await w.finish();
+    expect(w.logs.join('')).not.toMatch(/profile=/);
+  });
+
+  it('the probe timer never keeps the process up and stops on shutdown', () => {
+    const w = probeWorld();
+    w.runtime.start();
+    const t = w.intervals.find((x) => x.ms === 1_000);
+    expect(t.unrefd).toBe(true);
+    w.runtime.shutdown('SIGTERM');
+    expect(t.cleared).toBe(true);
+  });
+});
+
+// =====================================================================================
 // THE SINGLETON: one daemon per profile per session, and none beside a live spine.
 // =====================================================================================
 describe('daemon runtime: the singleton is session-scoped', () => {
@@ -1609,6 +1907,7 @@ describe('startProfileDaemons: a line from each profile lands in that profile\u2
       setInterval: () => 1,
       setTimeout: () => 1,
       livenessIntervalMs: 0,
+      beeperIntervalMs: 0,
     });
 
     expect(opened).toEqual([
@@ -1731,5 +2030,71 @@ describe('the S1 daemon holds the claude sessions', () => {
     expect(await ended(1)).toBe(0);
     expect(await ended(REWIND_EXIT_CODE)).toBe(1);
     expect(await ended(45)).toBe(0);
+  });
+});
+
+// /upgrade full (exit 46): the pull, then the daemon itself leaves, for its supervisor to respawn it on
+// the new code. Only where something does respawn it, and never for one profile of a shared process.
+describe('/upgrade full renews the daemon', () => {
+  const SIDECAR = { chatId: 'tg:-1000000000104/3', kind: '/upgrade full', preSha: 'oldsha', pid: 7 };
+  const world = (extra = {}) => {
+    const seen = [];
+    let sidecar = { ...SIDECAR };
+    const timers = [];
+    const h = makeRuntime({
+      session1: true,
+      spawnSync: makeSpawnSync({ shas: ['oldsha'] }),
+      createChromeHost: () => ({ sweepOrphans: () => {}, attach: () => {}, closeAll: (why) => seen.push(['closeAll', why]) }),
+      createCliHost: () => ({ attach: () => {}, endAll: (why) => seen.push(['endAll', why]) }),
+      readFileSync: (p) => { if (String(p).includes('restart-announce.json')) return JSON.stringify(sidecar); const e = new Error('missing'); e.code = 'ENOENT'; throw e; },
+      writeFileSync: (p, body) => { if (String(p).includes('restart-announce.json')) sidecar = JSON.parse(String(body)); },
+      setTimeout: (fn, ms) => timers.push({ fn, ms }),
+      ...extra,
+    });
+    h.runtime.start();
+    return { ...h, seen, timers, outcome: () => sidecar.outcome };
+  };
+
+  it('supervised: pulls, ends the sessions and the Chromes, and exits 46', async () => {
+    const { children, seen, timers, processObj, spawnSync, outcome } = world({ daemonRespawns: true });
+    await children[0].child.handlers.exit(UPGRADE_FULL_EXIT_CODE, null);
+    expect(spawnSync.calls.map((c) => [c.cmd, c.args?.[0]])).toContainEqual(['git', 'pull']);
+    expect(children).toHaveLength(1);                 // no new spine from this daemon
+    expect(seen.map(([w]) => w)).toEqual(['endAll', 'closeAll']);
+    timers.forEach((t) => t.fn());
+    expect(processObj.exits).toEqual([UPGRADE_FULL_EXIT_CODE]);
+    expect(outcome()).toBe('already up to date, daemon renewed');
+  });
+
+  it('nothing respawns it: only the spine renews, and the back-up line says so', async () => {
+    const { children, seen, processObj, outcome } = world({ daemonRespawns: false });
+    await children[0].child.handlers.exit(UPGRADE_FULL_EXIT_CODE, null);
+    expect(children).toHaveLength(2);
+    expect(seen).toEqual([]);
+    expect(processObj.exits).toEqual([]);
+    expect(outcome()).toContain('daemon NOT renewed: nothing respawns this daemon');
+  });
+
+  it('a process shared by several profiles never ends for one of them', async () => {
+    const { children, processObj, outcome } = world({ daemonRespawns: true, sharedProcess: true });
+    await children[0].child.handlers.exit(UPGRADE_FULL_EXIT_CODE, null);
+    expect(children).toHaveLength(2);
+    expect(processObj.exits).toEqual([]);
+    expect(outcome()).toContain('this process supervises other profiles too');
+  });
+
+  it('respawns is read from EGPT_DAEMON_RESPAWNS, or the container entrypoint on Linux', async () => {
+    const leaves = async (env, { platform = 'linux', entrypoint = false } = {}) => {
+      const processObj = makeProcess();
+      Object.assign(processObj.env, env);
+      const { children, timers } = world({ processObj, platform, existsSync: (p) => entrypoint && p === '/usr/local/bin/egpt-entrypoint' });
+      await children[0].child.handlers.exit(UPGRADE_FULL_EXIT_CODE, null);
+      timers.forEach((t) => t.fn());
+      return processObj.exits.includes(UPGRADE_FULL_EXIT_CODE);
+    };
+    expect(await leaves({ EGPT_DAEMON_RESPAWNS: '1' })).toBe(true);
+    expect(await leaves({}, { entrypoint: true })).toBe(true);
+    expect(await leaves({}, { platform: 'win32', entrypoint: true })).toBe(false);
+    expect(await leaves({})).toBe(false);
   });
 });

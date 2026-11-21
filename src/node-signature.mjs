@@ -146,9 +146,9 @@ export function decodeChatCanary(text) {
     let interior = '';
     for (const ch of f.slice(TAG_BEGIN.length, -TAG_CANCEL.length)) interior += String.fromCodePoint(ch.codePointAt(0) - TAG_BASE);
     if (!interior.startsWith(CANARY_LEAD)) continue;
-    const [group, origin, kind, transcript] = interior.slice(CANARY_LEAD.length).split(' ');
+    const [group, origin, kind, fourth] = interior.slice(CANARY_LEAD.length).split(' ');
     if (!group) return null;
-    return { group, origin: origin || null, kind: kind || (origin ? 'automatic' : null), transcript: uriDecoded(transcript) };
+    return { group, origin: origin || null, kind: kind || (origin ? 'automatic' : null), transcript: uriDecoded(fourth) };
   }
   return null;
 }

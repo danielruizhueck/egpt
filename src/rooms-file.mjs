@@ -74,6 +74,22 @@ const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 // so it is read fresh on every call and an edit needs no restart. Consumer: chrome-pool.chromeConversationOf.
 const BROWSERS = { file: 'browsers.yaml', root: 'groups' };
 export const readBrowserGroups = (deps = {}) => readRoomsFile({ reg: BROWSERS, ...deps });
+// /<handle> browser <profile>: the chat joins that group (group name = profile dir name) and leaves any other, so
+// browsers.yaml stays the one chat→group table. Edited through the Document API: comments, colors and uploads survive.
+export async function setBrowserGroup(chatName, group, { path = registryPath(BROWSERS), read = readFile, write = writeFile, ensureDir = mkdir } = {}) {
+  await ensureDir(dirname(path), { recursive: true });
+  let text = '';
+  try { text = await read(path, 'utf8'); } catch { /* new file */ }
+  const doc = YAML.parseDocument(text || `${BROWSERS.root}:\n`);
+  if (!YAML.isMap(doc.get(BROWSERS.root))) doc.set(BROWSERS.root, doc.createNode({}));
+  const name = sanitizeSlug(chatName);
+  for (const { value: seq } of doc.get(BROWSERS.root).items) {
+    if (YAML.isSeq(seq)) seq.items = seq.items.filter((m) => sanitizeSlug(String(YAML.isScalar(m) ? m.value : m)) !== name);
+  }
+  const members = doc.getIn([BROWSERS.root, group]);
+  if (YAML.isSeq(members)) members.add(chatName); else doc.setIn([BROWSERS.root, group], [chatName]);
+  await write(path, String(doc), 'utf8');
+}
 // Its optional `colors: { <group>: "#RRGGBB" }` (chrome-launcher.groupColor). {} when absent. Never throws.
 export async function readBrowserColors({ path = registryPath(BROWSERS), read = readFile } = {}) {
   try { const c = YAML.parse(await read(path, 'utf8'))?.colors; return isPlainObject(c) ? c : {}; } catch { return {}; }
@@ -122,7 +138,7 @@ export async function setRoomConfigBlock(ns, key, value, { reg = registryOf(ns),
 
 /**
  * Set a DOTTED key inside one room's row: setRoomConfigKey('room/dj-son',
- * 'radio_service.wildnloyal.enabled', false).
+ * 'radio_service.examplefm.enabled', false).
  *
  * `ns` is treated as ONE key, never split: a slug legitimately contains spaces
  * and can contain dots ("HFM - high frequency masturbation-2606300017"), so
@@ -145,6 +161,19 @@ export async function removeRoomRow(ns, { reg = registryOf(ns), path = registryP
   const doc = YAML.parseDocument(text || '');
   doc.deleteIn([reg.root, String(ns)]);
   await write(path, String(doc), 'utf8');
+}
+
+/** Re-key one row in place (its folder was renamed), comments kept. Never onto an existing row. */
+export async function renameRoomRow(fromNs, toNs, { reg = registryOf(fromNs), path = registryPath(reg), read = readFile, write = writeFile } = {}) {
+  let text = '';
+  try { text = await read(path, 'utf8'); } catch { return false; }
+  const doc = YAML.parseDocument(text || '');
+  const rows = doc.get(reg.root) ?? doc.contents;   // the wrapped `rooms:` map, or a bare one
+  if (!YAML.isMap(rows) || !rows.has(String(fromNs)) || rows.has(String(toNs))) return false;
+  const pair = rows.items.find((p) => String(YAML.isScalar(p.key) ? p.key.value : p.key) === String(fromNs));
+  if (YAML.isScalar(pair.key)) pair.key.value = String(toNs); else pair.key = String(toNs);
+  await write(path, String(doc), 'utf8');
+  return true;
 }
 
 /** Drop ONE block from one room's row, leaving the row and its siblings alone. */

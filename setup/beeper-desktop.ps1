@@ -167,8 +167,8 @@ function Get-BeeperPreStartHook([string] $ServiceName) {
 # Does this service share its profile with the desktop user's window? It runs the window's default
 # profile, or its own --user-data-dir behind the conversion's Start/Pre hook.
 function Test-BeeperSharedProfile([string] $AppParameters, [string] $AppData = $env:APPDATA, [string] $PreHook = '') {
-  if (Test-BeeperRunsProfile $AppParameters (Get-BeeperDefaultProfile $AppData)) { return $true }
-  return [bool](Get-BeeperUserDataDir $AppParameters) -and $PreHook -match $BeeperPreStartHook
+  if ((Get-BeeperUserDataDir $AppParameters) -and $PreHook -match $BeeperPreStartHook) { return $true }
+  return Test-BeeperRunsProfile $AppParameters (Get-BeeperDefaultProfile $AppData)
 }
 
 # The arguments that open the window on $Profile: none for the default profile.
@@ -197,6 +197,10 @@ function Open-BeeperClaim([string] $Path) {
   try { return New-Object IO.FileStream($Path, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None, 1, [IO.FileOptions]::DeleteOnClose) }
   catch [IO.IOException] { return $null }
 }
+
+# beeper-update.ps1 holds it (Open-BeeperClaim) while Beeper must stay closed: closing the app,
+# stopping, installing, starting the services. beeper-window.ps1 reopens nothing while it is held.
+function Get-BeeperUpdateLockPath([string] $LocalAppData) { return Join-Path $LocalAppData 'Programs\BeeperTexts.egpt-update' }
 
 # Held? Probed with an exclusive open that lets go at once.
 function Test-BeeperClaimHeld([string] $Path) {
@@ -401,7 +405,7 @@ function Get-BeeperLogonVerdict([int] $Code) {
   return $v
 }
 
-# '.\an' / 'reve\an' / 'an' -> @{ domain; user; account ('.\an' for this machine) }
+# '.\user' / 'reve\user' / 'user' -> @{ domain; user; account ('.\user' for this machine) }
 function Split-BeeperAccount([string] $Name) {
   if ($Name -match '^(.+?)\\(.+)$') { $d = $Matches[1]; $u = $Matches[2] } else { $d = '.'; $u = $Name }
   if ($d -ieq $env:COMPUTERNAME) { $d = '.' }

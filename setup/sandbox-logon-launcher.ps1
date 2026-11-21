@@ -34,7 +34,9 @@
 #      any were passed: Modify for a -SharePath entry, ReadAndExecute for a
 #      -SharePathReadOnly one, because a path a being declared read-only must be
 #      read-only to the KERNEL and not only to Claude Code's own deny rules.
-#      Still never broader: each is one named path.
+#      Still never broader: each is one named path. The folders ABOVE them, up
+#      to the operator profile, get the pool group's traverse-only ACE (d3):
+#      walk through, never list or read.
 #      THE DACL IS THEN READ BACK (see Assert-SandboxPathReachable): icacls
 #      can exit 0 and write no ACE at all, and a grant nobody read back is a
 #      promise, not a fact. A TargetFolder the leased SID cannot reach ends the
@@ -1215,7 +1217,7 @@ function New-SandboxEnvironmentBlock {
     # junction. The leak is one layer up - CLAUDE CODE RESOLVES ITS OWN CWD AT
     # STARTUP and hands its Bash tool the resolved path - so a being asked to run
     # `pwd` in a group chat answered with the ROOM,
-    # /c/Users/an/.egpt/conversations/whatsapp/<slug>, naming the operator and,
+    # /c/Users/user/.egpt/conversations/whatsapp/<slug>, naming the operator and,
     # in the slug, the person the conversation is with. An INHERITED PWD
     # overrides that resolution and is the only lever that does.
     #
@@ -1552,7 +1554,7 @@ function Clear-SandboxProfileContents {
   #  - RE-PLANT THE JUNCTIONS (operator 2026-09-20), see the WHY below.
   # Keep this SHORT: the whole command line must fit in 1024 characters, see
   # Invoke-AsLeasedAccount's BUDGET note. MEASURED 2026-09-20 with the real
-  # values (profile C:\Users\egpt-sbx-07, target C:\Users\an\src): 677-character
+  # values (profile C:\Users\egpt-sbx-07, target C:\Users\user\src): 677-character
   # script, 775-character command line with ONE junction. Every link rides a
   # single `foreach` statement for that reason - see
   # Get-SandboxProfileJunctionStatement, which owns the budget note and is the
@@ -1560,7 +1562,7 @@ function Clear-SandboxProfileContents {
   # table row back out of this payload, which is about 34 characters of a margin
   # that was measured at roughly 40 with an 80-character conversation slug. The
   # only part that varies by node is the junction target, so a node whose
-  # operator home is much longer than C:\Users\an is the one thing that could eat
+  # operator home is much longer than C:\Users\user is the one thing that could eat
   # what is left.
   #
   # `src` IS THE eGPT CHECKOUT, ~\src\egpt, READ-ONLY (operator 2026-09-23:
@@ -1581,7 +1583,7 @@ function Clear-SandboxProfileContents {
   # A sandboxed being's argv carries no `--add-dir` and no permission mode but
   # bypass, so there is no second gate to teach about this mount - see
   # src/claude-args.mjs, which holds that tier and the reasoning for it. Until
-  # then the being needed `C:/Users/an/src` in its own `allowed_paths`, which put
+  # then the being needed `C:/Users/user/src` in its own `allowed_paths`, which put
   # the operator's username into every sandboxed being's argv; that is the leak
   # this ruling closed, and it closed it by removing the gate rather than by
   # renaming the path.
@@ -2134,6 +2136,15 @@ try {
         Log "WARNING: could not grant $shareGrant to $leasedLabel on shared path $sp  - $($_.Exception.Message) (continuing: the other share paths and the launch are unaffected)"
       }
     }
+  }
+
+  # ---- (d3) TRAVERSE ON EVERY FOLDER ABOVE THIS TURN'S LEAVES, up to the
+  # operator profile, for the pool group (Grant-SandboxTraverseChain). The
+  # leaves are what the being's config declares, so a new conversation or
+  # allowed_path needs no re-provisioning. Converged: Get-Acl only. Not fatal:
+  # without it Claude Code's file tools refuse the path, the shell does not.
+  foreach ($rec in @(Grant-SandboxTraverseChain -Paths (@($TargetFolder) + @($SharePathList) + @($SharePathReadOnlyList) + @($PinSharePathList) + @($PinSharePathReadOnlyList)))) {
+    if ($rec.Status -eq 'failed') { Log "WARNING: could not grant Traverse to $SandboxPoolGroup on $($rec.Path)  - $($rec.Message) (Claude Code's file tools will refuse paths under it)" }
   }
 
   # ---- (e) give this turn its own desktop and the window-station access to

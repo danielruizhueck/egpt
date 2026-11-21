@@ -37,7 +37,19 @@ const FAIL_SUFFIX = '… ❌ Sending failed.';
 // "⚠️ …" marker; distinct from FAIL_SUFFIX (a SEND fault). It still flows through the
 // port's wrapPersona, so a configured agent_signature_close layer still appends — the
 // marker no longer carries a signature itself.
-const noReplyMark = () => `⚠️ no reply (turn failed/empty)`;
+// It is THE failure line, and names the failure (operator 2026-11-04: "if there's a failure it has to be
+// loud"): the API's refusal or error, a timeout, the engine's reason, else an empty reply.
+function failureName({ failed = false, error = '', failReason = null } = {}) {
+  if (!failed) return 'empty reply';
+  const e = String(error ?? '');
+  if (/safeguards/i.test(e)) return 'API error (safeguards)';
+  const api = /API Error:?\s*(\d{3})?/i.exec(e);
+  if (api) return `API error${api[1] ? ` ${api[1]}` : ''}`;
+  const ms = /^turn timeout after (\d+)ms/.exec(e)?.[1];
+  if (ms) return `timed out after ${elapsed(Number(ms))}`;
+  return String(failReason ?? '').replace(/^is_error\b\s*/, '').split('\n')[0].slice(0, 80).trim() || 'engine error';
+}
+const noReplyMark = (reply) => `⚠️ the turn failed — ${failureName(reply ?? {})}; not answered`;
 // '…' is the MODEL's word (40-rules.md). The bridge must never fabricate it:
 // a silence the bridge invented is indistinguishable from one the being chose.
 // When the bridge has nothing from the model, it says so in its OWN voice.
@@ -292,12 +304,28 @@ export function makeOutbound({ bridge, bridgeOf = null, peerMouth = null, onLog 
       bridge: bridgeOf ? (bridgeOf(being, chatId) ?? bridge) : bridge,
       route: () => (peerMouth ? Promise.resolve().then(() => peerMouth.route(chatId, being)).catch((e) => { onLog(`mouth: could not decide the route for ${chatId} — posting locally: ${e?.message ?? e}`); return null; }) : null),
       // May a being react here? A mouth, or a limb whose account is the being's own (a bot: `beingAccount`).
-      reacts: () => !!peerMouth || out.bridge?.beingAccount === true,
-      async react(msgId, emoji, keyOf, what = 'react', { remove = false, temporary = false } = {}) {
+      // A chat a limb owns is the limb's to answer (boot makeLimbAwareBridge `reactsAsBeing`, 2026-11-03):
+      // the chatbox and the console have no reactions, whatever else this node holds.
+      reacts: () => out.bridge?.reactsAsBeing?.(chatId) ?? (!!peerMouth || out.bridge?.beingAccount === true),
+      // CAN A TEMPORARY MARK GO ON A MESSAGE HERE AND COME BACK OFF — react()'s own branches for
+      // `temporary`, nothing placed (the emoji train, 2026-11-03): the mouth's own room, or the holder
+      // when it is the mouth; never a peer link (no verb takes one back), never a chat the mouth is not in.
+      async canMark() {
+        if (!out.reacts()) return false;
+        const says = out.route();
+        const mouthChat = says ? await says : null;
+        if (mouthChat) return !!mouthChat.bridge;
+        if (peerMouth?.mouthIsElsewhere?.(chatId, being)) return false;
+        return typeof out.bridge?.react === 'function';
+      },
+      // `wait`: how long a local mouth waits for its own copy to arrive (the emoji train's 👾, 2026-11-03).
+      // `here`: by the account holding the chat, by its own id — the train at first byte (operator 2026-11-04).
+      async react(msgId, emoji, keyOf, what = 'react', { remove = false, temporary = false, wait = null, here = false } = {}) {
         // NO MOUTH ON THIS NODE — one account, the operator's (operator 2026-10-18): a reaction from
         // it is his own, so none is placed (taking one off still works: a stale 🎧 from before).
         // The /react limb says it as a quoted line instead.
         if (!out.reacts() && !remove) { onLog(`${what} ${being}/${chatId}: no mouth account on this node — no ${emoji} placed`); return false; }
+        if (here) return remove ? out.bridge.unreact?.(chatId, msgId, emoji) : out.bridge.react?.(chatId, msgId, emoji);
         const says = out.route();
         const mouthChat = says ? await says : null;
         // A being reacts ONLY through its mouth (operator 2026-10-18): where the mouth is a different
@@ -320,11 +348,23 @@ export function makeOutbound({ bridge, bridgeOf = null, peerMouth = null, onLog 
         let r = null;
         try {
           const { msgKey, timestamp } = await keyOf();
-          r = await peerMouth.react?.(mouthChat, { msgKey, timestamp, emoji, ...(remove ? { remove } : {}) });
+          r = await peerMouth.react?.(mouthChat, { msgKey, timestamp, emoji, ...(remove ? { remove } : {}), ...(wait ? { wait } : {}) });
         } catch (e) { onLog(`${what} ${being}/${chatId}: asking ${who} to react threw — ${e?.message ?? e}`); }
         if (remove) onLog(r?.ok ? `${what} ${being}/${chatId}: ${who} took the ${emoji} off its own copy (its chat ${r.chatId})` : `${what} ${being}/${chatId}: ${who} could not take the ${emoji} off its own copy (${r?.reason ?? 'no answer'}${r?.detail ? `: ${r.detail}` : ''})`);
         else if (r?.ok) onLog(`${what} ${being}/${chatId}: ${who} is saying this reply and placed the ${emoji} on its own copy (its chat ${r.chatId})`);
         else onLog(`${what} ${being}/${chatId}: ${who} is saying this reply but could not place the ${emoji} (${r?.reason ?? 'no answer'}${r?.detail ? `: ${r.detail}` : ''}) — no reaction from this account either, it is not the one answering`);
+        return r?.ok === true;
+      },
+      // Does a local mouth on another account hold its own copy of the message `keyOf` names, within
+      // `wait` (the train's handover, 2026-11-04)? false: none, or no such mouth.
+      async mouthHas(keyOf, wait = null, what = 'react') {
+        const says = out.route();
+        const mouthChat = says ? await says : null;
+        if (!mouthChat?.bridge || !peerMouth?.quote) return false;
+        let r = null;
+        try { r = await peerMouth.quote(mouthChat, { ...(await keyOf()), ...(wait ? { wait } : {}) }); }
+        catch (e) { r = { reason: 'threw', detail: e?.message ?? String(e) }; }
+        if (!r?.ok) onLog(`${what} ${being}/${chatId}: '${mouthChat.connection}' has no copy of its own (${r?.reason ?? 'no answer'}${r?.detail ? `: ${r.detail}` : ''}) — the mark stays on this account`);
         return r?.ok === true;
       },
       keyOf(msgId, what = 'reply', at = null) {
@@ -376,14 +416,20 @@ const QUOTE_MEMO_MAX = 200;
 
 // publicOf(being) / noticeAdmin({ being, chatId, text }) (2026-10-15): a PUBLIC being
 // (agents.<name>.public) takes the plain branch below, and its error lines go to noticeAdmin
-// (boot: the admin channel) instead of the chat.
+// (boot: the log channel, log_to_group else admin_channel) instead of the chat.
 export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null, labelOf = () => null, agentSignatureOpenOf = () => '', agentSignatureCloseOf = () => '', peerMouth = null, publicOf = () => false, noticeAdmin = async () => {}, onUndeliverable = () => {}, onLog = () => {}, now = () => Date.now() } = {}) {
   if (!bridge) throw new Error('createSender: bridge is required');
   const textOf = (v) => (typeof v === 'string' ? v : v?.text ?? '');
+  // A being's stamp, as every message it says carries it. The per-AGENT signature WRAP (operator
+  // 2026-07-12): agent_signature_open/close bracket the stamped reply as the INNER layer (the bridge
+  // does the concentric wrap in beeper-port). Resolved per-being here (agent → node → ''); default
+  // empty → nothing added. agent_signature_close is the SOLE agent close now — the historical inline
+  // signature end-marker was removed 2026-07-12.
+  const stampOf = (being) => ({ bodyEmoji: bodyEmojiOf(being), label: labelOf(being), agentSigOpen: agentSignatureOpenOf(being), agentSigClose: agentSignatureCloseOf(being), persona: being });
   const outbound = makeOutbound({ bridge, bridgeOf, peerMouth, onLog });
   const copies = new Map();   // one lookup per message and mouth room, shared by concurrent opens; misses are dropped
   // `chatId` a function → a room made only once the reply has something to post (a side group not made
-  // yet, gating.decide): asked at the first real text or a finish with a reply, at once for a status. A
+  // yet, gating.decide): asked at the first real text or a surfaced finish (a reply, or a failure: 2026-11-04), at once for a status. A
   // silence asks nothing. The reply then opens there like any other.
   const later = (room, opts) => {
     let asked = null, out = null;
@@ -403,7 +449,7 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
       pulse(ms, label) { return out ? out.pulse(ms, label) : true; },
       async end(text) { if (asked) await onOpen((o) => o.end(text)); },
       async finish(reply, o = {}) {
-        if (asked || (o.surface !== false && textOf(reply).trim())) return onOpen((x) => x.finish(reply, o));
+        if (asked || o.surface !== false) return onOpen((x) => x.finish(reply, o));   // a reply, or its failure line
         onLog(`sender: ${opts.being ?? '?'} turn withheld before its room was made — nothing posted`);
       },
       async fail(e) { if (asked) await onOpen((o) => o.fail(e)); },
@@ -474,22 +520,14 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
             if (surface && isPublic && reply?.failed) { await notice(`model error: ${String(reply.error ?? '').trim().slice(0, 300)}`); return; }   // the CLI's error, not the being's words
             if (surface && t.trim()) { sendResult = await deliverHere(t, isPublic ? { replyTo, persona: being } : { replyTo }); return; }   // plain text: no bodyEmoji/label, no end-marker
             // withheld / empty → post nothing; a public being's empty turn is an admin notice
-            if (surface) await notice(noReplyMark());
+            if (surface) await notice(noReplyMark(reply));
             else if (!t.trim() && !commands?.length) await notice(BRIDGE_SILENCE);
           },
           async fail(e) { await notice(`turn failed: ${e?.message ?? e}`); },   // a human doesn't post a failure scaffold
           get confirmedId() { return sendResult?.confirmedId ?? null; },
         };
       }
-      const bodyEmoji = bodyEmojiOf(being);
-      const label = labelOf(being);
-      // The per-AGENT signature WRAP (operator 2026-07-12): agent_signature_open/close bracket the
-      // stamped reply as the INNER layer (the bridge does the concentric wrap in beeper-port). Resolved
-      // per-being here (agent → node → ''); default empty → nothing added. agent_signature_close is the
-      // SOLE agent close now — the historical inline signature end-marker was removed 2026-07-12.
-      const agentSigOpen = agentSignatureOpenOf(being);
-      const agentSigClose = agentSignatureCloseOf(being);
-      const tag = { bodyEmoji, label, replyTo, agentSigOpen, agentSigClose, persona: being };   // the bridge enforces the persona stamp (emoji + label) + wraps the layers from these; `persona` names the being in the invisible frame (persona-wrap.mjs)
+      const tag = { ...stampOf(being), replyTo };   // the bridge enforces the persona stamp (emoji + label) + wraps the layers from these; `persona` names the being in the invisible frame (persona-wrap.mjs)
       // WHOSE STAMP A PEER-SAID REPLY CARRIES: THIS node's, the BRAIN's (operator 2026-09-05, "if
       // an receives 'e hi' if Rodz is present let him reply as the king"). A routed reply used to
       // cross the wire as bare text and be posted bare, because the mouth posts VERBATIM by
@@ -700,7 +738,7 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
           const peerChat = route ? await route : null;
           const t = textOf(reply);
           // Gate-withheld ('on'-mode silence / not surfaced). NOTHING IS EVER
-          // DELETED (operator 2026-08-24; An 2026-10-27: "nadie borra nunca nada, ningún
+          // DELETED (operator 2026-08-24; 2026-10-27: "nadie borra nunca nada, ningún
           // bot, ni el spine"). The placeholder resolves to the
           // silence mark instead of vanishing. 40-rules.md already names it —
           // "A polite silence is '...' or '…'" — so the withheld turn reads as
@@ -752,7 +790,7 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
           // not silently deleted / left stuck). A settled reply already present in what was
           // read is a RESTATEMENT, not a divergence (see alreadyRead): settle on the stream so
           // the answer is not doubled; anything new still absorbs (seam, both kept).
-          const settled = t.trim() ? t : noReplyMark();
+          const settled = t.trim() ? t : noReplyMark(reply);
           // Past the edit window the placeholder stays on its last frame; the reply is a fresh message
           // from the same mouth, and the §7 fallback only if that did not deliver.
           if (stream && !editable()) {
@@ -805,6 +843,22 @@ export function createSender({ bridge, bridgeOf = null, bodyEmojiOf = () => null
         get confirmedId() { return fallbackResult ? (fallbackResult?.confirmedId ?? null) : (stream?.confirmedId ?? null); },
         get confirmedIn() { return fallbackResult ? null : streamMouth; },
       };
+    },
+    // A background status (src/spine/liveness.mjs): said ONCE, whole — no placeholder, never edited
+    // (operator 2026-10-30: "en lugar de editar los mensajes, puedes solo publicar el estatus"). Stamped
+    // as `being`, through the one placement for a line said in one go (makeOutbound `say`), replying to
+    // `replyTo` as the voice attach does: its key read off the room it lives in (`replyIn`: a local
+    // mouth's, else this chat's own connection). A being on the plain path (auto, public) shows no
+    // status, as it shows no placeholder. Returns whether it landed.
+    async post(chatId, text, { being = null, replyTo = null, replyIn = null, auto = false } = {}) {
+      if (auto || publicOf(being) === true) return false;
+      const room = typeof chatId === 'function' ? await chatId() : chatId;
+      if (!room) { onLog(`sender: ${being ?? '?'} — its room could not be made, no status posted`); return false; }
+      const tag = stampOf(being);
+      const o = outbound(being, room);
+      const ok = await o.say(async (on, at, id) => { const r = await on.send?.(at, text, { ...tag, replyTo: id }); return !(r?.blocked || r == null); }, { msgId: replyIn ? null : replyTo, keyOf: replyTo == null ? null : o.keyOf(replyTo, 'status', replyIn), text, tag, what: 'status' });
+      if (!ok) onLog(`status ${being ?? '?'}/${room}: not delivered`);
+      return ok;
     },
   };
   return sender;

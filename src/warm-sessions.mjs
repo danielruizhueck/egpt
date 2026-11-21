@@ -4,10 +4,8 @@
 // stable key (one per conversation-e thread, system-e, or sibling). Policy
 // (operator 2026-06-10):
 //   - LAZY: a key warms on its FIRST turn; reused (warm) thereafter.
-//   - IDLE-EVICT: after `idleTtl` with no turn, the session is closed — freeing
-//     the Node process + context RAM. Never keep every conversation-e warm.
-//     Per-class TTL: system=persistent (-1), conversation=short follow-up window,
-//     sibling=medium. HOUSE DIALECT (operator 2026-07-26, as posts_back_delay_ms
+//   - IDLE-EVICT (opt-in; every class -1 by default, operator 2026-11-08): after `idleTtl` with
+//     no turn, the session is closed. Per class, or per run. HOUSE DIALECT (operator 2026-07-26, as posts_back_delay_ms
 //     and loop_guard.inbound.turns): -1 = never idle-evict, 0 = always evict (at turn end), N ms.
 //     PER-RUN OVERRIDE (operator 2026-07-02: "keep any conversation as a
 //     background agent 15m after the last message, configurable … honor override
@@ -16,8 +14,7 @@
 //     re-stamped on every run that specifies one, so a changed per-conversation
 //     config takes effect on the next turn; a run that OMITS it leaves the stamp
 //     as-is (so the compactor's own pool.run never clobbers the last real turn's).
-//   - maxWarm: hard ceiling → LRU-evict the least-recently-used. Memory is
-//     bounded by `max`, NOT by total conversations.
+//   - max (optional; unset = no cap): a backstop on live sessions.
 //   - TIMEOUT: a turn with no result within `dispatchTimeoutMs` fails AND evicts
 //     the session, so a hung/slow resume can never wedge the message queue.
 //   - One turn at a time per key (the warm primitive requires it); turns on the
@@ -30,6 +27,11 @@
 //     LRU-evicted, the same holds as background work; a stop, re-pin, reconfigure or failure still ends it.
 //   - ADOPT (2026-10-16): a process the daemon held across a spine restart (src/cli-host.mjs) is
 //     put back as its key's entry — adopt(), no spawn.
+//   - MEMORY (operator 2026-11-08: the eviction, always on, no knobs): a spawn with available memory
+//     under the reserve first evicts one idle session, and tick() (the spine's) evicts one per call
+//     while under it or over the PSI limit. One at a time: close() frees the memory after it
+//     returns, so the next read is the recheck.
+//   - VICTIM ORDER (memory or max): lowest EVICT_TIER first, least recently used within it.
 //
 // Brain-agnostic over the warm primitive: the session factory is INJECTED. egpt
 // wires `createWarmCliSession` — a resident `claude` CLI background agent (no
@@ -37,8 +39,29 @@
 // `stream()` path.
 
 import { isDeepStrictEqual } from 'node:util';
+import { readFileSync } from 'node:fs';
+import { totalmem } from 'node:os';
 
 const BACKGROUND_RECHECK_MS = 60_000;   // re-check for an always-evict (ttl 0) session held for background work
+const MB = 2 ** 20;
+const RESERVE_SHARE = 0.15, RESERVE_MIN = 500 * MB;   // memory reserve: max(15% of total, 500 MB)
+const PSI_LIMIT = 10;                                 // Linux PSI memory `some avg10` over this = pressure
+const EVICT_TIER = { chatbox: 0, resident: 2, system: 2 };   // victim order, lowest first; conversation, sibling, unknown: 1
+
+// The memory this process may use: its cgroup limit when one is set below the host's, else the host's.
+function memoryTotal() {
+  const host = totalmem(), limit = process.constrainedMemory();
+  return limit > 0 && limit < host ? limit : host;
+}
+
+// Available bytes (cgroup-aware) and, on Linux, PSI memory `some avg10` — null where there is none.
+export function memoryNow({ platform = process.platform, read = readFileSync } = {}) {
+  let psi = null;
+  if (platform === 'linux') {
+    try { psi = Number(/^some avg10=([\d.]+)/m.exec(read('/proc/pressure/memory', 'utf8'))?.[1] ?? NaN); } catch { /* no PSI on this kernel */ }
+  }
+  return { available: process.availableMemory(), psi: Number.isFinite(psi) ? psi : null };
+}
 
 // The options a session keeps from its spawn: all but the session id (its own guard) and the being
 // link (minted per turn). Only these three are logged with their values — the rest may hold a secret.
@@ -49,12 +72,14 @@ const pick = (o, keys) => Object.fromEntries(keys.map((k) => [k, o[k]]));
 const _describe = (changes, opened) => Object.keys(changes).map((k) => (SHOWN.has(k) ? `${k} ${opened[k] ?? 'unset'}→${changes[k]}` : k)).join(', ');
 
 export function createWarmPool({
-  max = 6,
-  idleTtlMs = 180_000,               // fallback for an unlisted class — absent NEVER means 0
+  max = Infinity,                    // warm.max, a backstop; unset = no cap
+  memory = memoryNow,                // () => { available: bytes, psi: avg10 | null }
+  total = memoryTotal(),             // bytes the reserve is a share of
+  idleTtlMs = -1,                    // fallback for an unlisted class: never idle-evict — absent NEVER means 0
   idleTtlByClass = {},
   dispatchTimeoutMs = 600_000,
   injectWhileBusy = true,            // master switch for steer() — weave a mid-turn message into the live turn
-  onBackgroundDone = null,           // (key, { summaries }) — a session's background task finished with no turn in flight
+  onBackgroundDone = null,           // (key, { summaries, reply? }) — a session's background task finished with no turn in flight
   keepWarm = () => false,            // (key) → true: never idle- or LRU-evicted (warm.keep)
   onLog = () => {},
   makeSession,                       // REQUIRED: the warm-session factory (injected)
@@ -63,6 +88,8 @@ export function createWarmPool({
     throw new Error('createWarmPool: makeSession factory is required (e.g. createWarmCliSession)');
   }
   const _s = new Map();   // key -> { session, klass, lastUsed, idleTimer, busy, errored, chain }
+  const reserve = Math.max(RESERVE_SHARE * total, RESERVE_MIN);
+  const _size = () => (Number.isFinite(max) ? `${_s.size}/${max}` : `${_s.size}`);   // size=N, or N/M under a max
 
   const _ttlFor = (klass) => {
     const v = idleTtlByClass?.[klass];
@@ -75,7 +102,7 @@ export function createWarmPool({
     _s.delete(key);
     if (e.idleTimer) clearTimeout(e.idleTimer);
     try { e.session.close(); } catch { /* already closing */ }
-    onLog(`warm: evicted ${key} (${why}); size=${_s.size}/${max}`);
+    onLog(`warm: evicted ${key} (${why}); size=${_size()}`);
   }
 
   // WHY THE ENTRY IS BEING THROWN AWAY, and it is NOT always "the turn failed" (operator
@@ -110,7 +137,7 @@ export function createWarmPool({
 
   function _backgroundDone(key, info) {
     if (!_s.has(key)) return;
-    onLog(`warm: ${(info?.reply ?? info?.lost) != null ? 'an adopted turn' : 'background work'} finished on ${key} with no turn in flight`);
+    onLog(`warm: ${!info?.summaries && (info?.reply ?? info?.lost) != null ? 'an adopted turn' : 'background work'} finished on ${key} with no turn in flight`);
     try { Promise.resolve(onBackgroundDone(key, info)).catch((err) => onLog(`warm: background wake ${key} failed: ${err?.message ?? err}`)); }
     catch (err) { onLog(`warm: background wake ${key} failed: ${err?.message ?? err}`); }
   }
@@ -125,16 +152,49 @@ export function createWarmPool({
     e.idleTimer = setTimeout(() => _idleOut(key, ttl), ttl); e.idleTimer.unref?.();
   }
 
+  // The session that goes first: the lowest EVICT_TIER, least recently used within it. Never a busy
+  // one, one with background work running, or a kept one.
+  function _lruIdle(exceptKey) {
+    let victim = null, tier = Infinity, oldest = Infinity;
+    for (const [k, e] of _s) {
+      if (k === exceptKey || e.busy || e.session.background > 0 || keepWarm(k)) continue;
+      const t = EVICT_TIER[e.klass] ?? 1;
+      if (t < tier || (t === tier && e.lastUsed < oldest)) { victim = k; tier = t; oldest = e.lastUsed; }
+    }
+    return victim;
+  }
+
   function _lruEvictIfFull(exceptKey) {
     while (_s.size >= max) {
-      let victim = null, oldest = Infinity;
-      for (const [k, e] of _s) {
-        if (k === exceptKey || e.busy || e.session.background > 0 || keepWarm(k)) continue;
-        if (e.lastUsed < oldest) { oldest = e.lastUsed; victim = k; }
-      }
+      const victim = _lruIdle(exceptKey);
       if (!victim) break;   // everything is busy or kept — let it grow over `max`
       _evict(victim, 'maxWarm LRU');
     }
+  }
+
+  // Why memory asks for an eviction, or null. `psi` false: the reserve alone (a spawn's admission).
+  function _memoryShort({ psi = true } = {}) {
+    const m = memory();
+    if (m.available < reserve) return `${Math.round(m.available / MB)}MB available < reserve ${Math.round(reserve / MB)}MB`;
+    if (psi && m.psi != null && m.psi > PSI_LIMIT) return `PSI some avg10 ${m.psi} > ${PSI_LIMIT}`;
+    return null;
+  }
+
+  // Before a spawn: the optional max, then the memory reserve. Never refuses.
+  function _admit(key) {
+    _lruEvictIfFull(key);
+    const why = _memoryShort({ psi: false });
+    if (!why) return;
+    const victim = _lruIdle(key);
+    if (victim) _evict(victim, `memory ${why}, opening ${key}`);
+    else onLog(`warm: memory ${why} — nothing idle to evict, opening ${key} anyway`);
+  }
+
+  // On the spine's tick: one LRU idle session per call while memory is short.
+  function tick() {
+    const why = _memoryShort();
+    const victim = why && _lruIdle();
+    if (victim) _evict(victim, `memory pressure: ${why}`);
   }
 
   async function _doTurn(key, message, onUpdate, _limit) {
@@ -241,7 +301,7 @@ export function createWarmPool({
     // getting `{text:null}` back as its own answer. Weaving is now something a caller ASKS
     // for, by name, once policy (conversation_defaults.allow_new_input) has said it may.
     if (!e) {
-      _lruEvictIfFull(key);
+      _admit(key);
       // `opened` is what the CONFIGURATION GUARD above compares against: the options this
       // process was spawned with, kept on the entry because not every session exposes its own.
       const seam = onBackgroundDone ? { onBackgroundDone: (info) => _backgroundDone(key, info) } : {};
@@ -249,7 +309,7 @@ export function createWarmPool({
       // `pool`: what a daemon-held process needs to be adopted back into an entry like this one (boot).
       e = { session: makeSession({ ...brainOptions, onLog, ...seam, pool: { key, klass, idleTtlMs, opened } }), klass, lastUsed: Date.now(), idleTimer: null, busy: false, errored: false, chain: Promise.resolve(), idleTtlMs: undefined, opened };
       _s.set(key, e);
-      onLog(`warm: opened ${key} (klass=${klass}); size=${_s.size}/${max}`);
+      onLog(`warm: opened ${key} (klass=${klass}); size=${_size()}`);
     }
     // Stamp the per-run idle override whenever the caller SPECIFIES one (undefined =
     // "leave as stamped", so the compactor's own pool.run, which omits it, never
@@ -291,7 +351,7 @@ export function createWarmPool({
   // branching anywhere above.
   //
   // AND EVERY REFUSAL IS SAID OUT LOUD, AND NONE OF THEM IS A SUCCESS (operator 2026-09-09,
-  // after `Joyce Vicente-2606301852` swallowed ~90 minutes of messages behind four confident
+  // after `Julia Demo-2606301852` swallowed ~90 minutes of messages behind four confident
   // 👀s). `e.busy` is A FLAG THIS FILE SETS, not liveness, and `inject`'s old `true` was a
   // successful WRITE to a live pipe, not a read — so this function could report a weave into a
   // turn that had already ended and nothing anywhere disagreed. It now returns `false` (nothing
@@ -356,7 +416,7 @@ export function createWarmPool({
     const e = { session: makeSession({ ...brainOptions, onLog, ...seam, pool: { key, klass, idleTtlMs, opened: o } }), klass, lastUsed: Date.now(), idleTimer: null, busy: false, errored: false, chain: Promise.resolve(), idleTtlMs, opened: o };
     _s.set(key, e);
     const orphan = e.session.orphan;
-    onLog(`warm: adopted ${key} (klass=${klass}${orphan ? ', a turn still running' : ''}); size=${_s.size}/${max}`);
+    onLog(`warm: adopted ${key} (klass=${klass}${orphan ? ', a turn still running' : ''}); size=${_size()}`);
     if (!orphan) { _armIdle(key); return true; }
     e.busy = true;
     e.chain = Promise.resolve(orphan).then(() => {}, () => {}).then(() => { e.busy = false; if (_s.get(key) === e) _armIdle(key); });
@@ -365,6 +425,8 @@ export function createWarmPool({
 
   function has(key) { return _s.has(key); }
   function background(key) { return _s.get(key)?.session.backgroundTasks ?? []; }
+  // How `key`'s finished background task `taskId` ended, as its CLI said it (src/warm-cli-session.mjs), or null.
+  function outcome(key, taskId) { return _s.get(key)?.session.backgroundOutcome?.(taskId) ?? null; }
   function busy(key) { return _s.get(key)?.busy === true; }
   // Runs on `key` not yet settled (in flight + queued). A run's caller resumes already uncounted.
   function pending(key) { return _s.get(key)?.runs ?? 0; }
@@ -372,5 +434,5 @@ export function createWarmPool({
   function close() { for (const k of [..._s.keys()]) _evict(k, 'pool close'); }
   function stats() { return { size: _s.size, max, keys: [..._s.keys()] }; }
 
-  return { run, adopt, steer, interrupt, has, busy, pending, background, evict, close, stats };
+  return { run, adopt, steer, interrupt, has, busy, pending, background, outcome, evict, close, stats, tick };
 }

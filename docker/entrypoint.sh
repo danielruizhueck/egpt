@@ -4,8 +4,18 @@
 set -u
 log() { echo "[entrypoint] $*"; }
 
+keep_running() {  # name, command...
+  local name=$1; shift
+  while true; do
+    "$@"; log "$name exited ($?), restarting in 5s"; sleep 5
+  done
+}
+
 REPO=$HOME/src/egpt
 REPO_URL=${EGPT_REPO_URL:-https://github.com/siran/egpt.git}
+
+# Dotfiles kept on the volume ($EGPT_HOME/home/.gitconfig, ...) are linked into $HOME, so they outlive the image.
+for f in "$EGPT_HOME"/home/.[!.]*; do if [ -e "$f" ]; then ln -sfn "$f" "$HOME/${f##*/}"; fi; done
 
 # Virtual screen + a minimal window manager so Beeper's windows behave.
 rm -f /tmp/.X99-lock
@@ -34,6 +44,41 @@ else
   log "VNC disabled (no VNC_PASSWORD and no readable $VNC_FILE)"
 fi
 
+# SSH (EGPT_SSH_PORT): sshd as egpt, keys only. Host key (made once) and authorized_keys in secrets/ssh/.
+if [ -n "${EGPT_SSH_PORT:-}" ]; then
+  SSH_DIR=$EGPT_HOME/secrets/ssh
+  (umask 077 && mkdir -p "$SSH_DIR")
+  if [ ! -s "$SSH_DIR/ssh_host_ed25519_key" ]; then
+    ssh-keygen -q -t ed25519 -N '' -f "$SSH_DIR/ssh_host_ed25519_key" </dev/null \
+      && log "generated $SSH_DIR/ssh_host_ed25519_key"
+  fi
+  [ -s "$SSH_DIR/authorized_keys" ] || log "ssh: no keys yet; put public keys in $SSH_DIR/authorized_keys"
+  # EGPT_SSH_PERMIT_LISTEN: remote forwards too, listening only on those host:port (GatewayPorts no: loopback).
+  FWD=local
+  [ -z "${EGPT_SSH_PERMIT_LISTEN:-}" ] || FWD="yes"$'\n'"PermitListen $EGPT_SSH_PERMIT_LISTEN"
+  (umask 077 && cat >/tmp/sshd_config <<CFG
+Port $EGPT_SSH_PORT
+HostKey $SSH_DIR/ssh_host_ed25519_key
+AuthorizedKeysFile $SSH_DIR/authorized_keys
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+UsePAM no
+AllowUsers egpt
+X11Forwarding no
+AllowAgentForwarding no
+AllowTcpForwarding $FWD
+PermitTunnel no
+PidFile /tmp/sshd.pid
+ClientAliveInterval 60
+SetEnv EGPT_HOME=$EGPT_HOME CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR DISPLAY=$DISPLAY
+Subsystem sftp internal-sftp
+CFG
+  )
+  keep_running sshd /usr/sbin/sshd -D -e -f /tmp/sshd_config >/tmp/sshd.log 2>&1 &
+  log "sshd on :$EGPT_SSH_PORT (log /tmp/sshd.log)"
+fi
+
 # A new container is a new pid namespace: pid files left by the previous one name other processes.
 rm -f "$EGPT_HOME"/state/daemon-s0.pid "$EGPT_HOME"/state/daemon-s1.pid "$EGPT_HOME"/state/spine.pid
 
@@ -57,19 +102,65 @@ if [ ! -f "$EGPT_HOME/config/config.yaml" ]; then
   log "seeded $EGPT_HOME/config/config.yaml - fill in beeper.main.token"
 fi
 
-keep_running() {  # name, command...
-  local name=$1; shift
-  while true; do
-    "$@"; log "$name exited ($?), restarting in 5s"; sleep 5
+# The Beeper to launch: the highest version among the image's and the ones unpacked on the
+# volume ($EGPT_HOME/beeper/<version>/, put there by the Beeper update: src/tools/beeper-update.mjs), so a
+# rebuilt image with a newer Beeper wins over an old volume copy; a tie is the image's. Asked on every
+# relaunch, so a Beeper killed for an update comes back on the newest. readInstalledLinux
+# (beeper-update.mjs) is the same rule.
+beeper_bin() {
+  local image=/opt/beeper f v best vbest
+  best=$image/beepertexts
+  vbest=$(sed -n 's/^X-AppImage-Version=//p' "$image/beepertexts.desktop" 2>/dev/null | head -n 1)
+  for f in "$EGPT_HOME"/beeper/*/beepertexts; do
+    [ -x "$f" ] || continue
+    v=${f%/beepertexts}; v=${v##*/}
+    [[ $v =~ ^[0-9]+(\.[0-9]+)*$ ]] || continue
+    if [ -z "$vbest" ] || { [ "$v" != "$vbest" ] && [ "$(printf '%s\n%s\n' "$vbest" "$v" | sort -V | tail -n 1)" = "$v" ]; }; then
+      best=$f vbest=$v
+    fi
+  done
+  echo "$best"
+}
+
+# EGPT_BEEPER=primary,secondary: one Beeper Desktop per account, all on the same screen.
+# The first keeps the default profile, the others use ~/.config/BeeperTexts-<name> (Beeper's own
+# BEEPER_PROFILE naming). Instance i serves its Desktop API on 23373+i, inside egpt's token lookup.
+beeper_run() {  # index profile-dir
+  env BEEPER_USER_DATA_DIR="$2" "$(beeper_bin)" --no-sandbox --password-store=basic \
+    --disable-gpu --pas-port=$((23373 + $1)) &
+  local pid=$!
+  # Beeper centres every new window on the same spot; give each instance its own.
+  timeout 300 xdotool search --sync --all --onlyvisible --pid $pid --class Beeper \
+    windowmove %@ $((20 + $1 % 3 * 480)) $((20 + 60 * ($1 / 3))) >/dev/null 2>&1 &
+  wait $pid
+}
+
+start_beepers() {  # list
+  local names name dir out i=0 seen=' '
+  IFS=', ' read -r -a names <<<"$1"
+  for name in "${names[@]}"; do
+    if [[ ! $name =~ ^[A-Za-z0-9_-]+$ || $seen == *" $name "* || $i -ge 10 ]]; then
+      log "beeper: skipping '$name'"; continue
+    fi
+    seen+="$name "
+    dir=$HOME/.config/BeeperTexts; [ $i = 0 ] || dir+=-$name
+    out=/tmp/beeper-$name.log
+    mkdir -p "$dir"
+    mountpoint -q "$dir" || log "beeper $name: $dir is not a mounted volume; its login goes with the container"
+    log "beeper $name: profile $dir, Desktop API 127.0.0.1:$((23373 + i)), log $out"
+    keep_running "beeper $name" beeper_run $i "$dir" >"$out" 2>&1 &
+    i=$((i + 1))
   done
 }
 
 if [ "${EGPT_BEEPER:-on}" = off ]; then
   log "Beeper off (EGPT_BEEPER=off)"
-else
+elif [ "${EGPT_BEEPER:-on}" = on ]; then
   # --password-store=basic: no desktop keyring in the container.
-  keep_running beeper /opt/beeper/beepertexts --no-sandbox --password-store=basic \
-    --disable-gpu >/tmp/beeper.log 2>&1 &
+  beeper_single() { "$(beeper_bin)" --no-sandbox --password-store=basic --disable-gpu; }
+  keep_running beeper beeper_single >/tmp/beeper.log 2>&1 &
+else
+  start_beepers "$EGPT_BEEPER"
 fi
 
 # One long-lived Claude token (claude setup-token) for every being, kept on the data volume so it
@@ -82,5 +173,6 @@ if [ -s "$EGPT_HOME/secrets/claude-oauth.token" ]; then
 fi
 
 cd "$REPO"
+export EGPT_DAEMON_RESPAWNS=1   # keep_running brings the daemon back: /upgrade full may end it
 keep_running egpt node egpt-daemon.mjs &
 wait

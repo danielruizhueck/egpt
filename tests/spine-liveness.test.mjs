@@ -3,16 +3,19 @@
 // model if they're still necessary. if unresponsiveness then post in egpt logging group."
 //
 // The chat shows a being is alive: its running turn's ⏳ placeholder is re-edited with the elapsed
-// time; while background work runs with no turn in flight ONE status message per being per chat
-// does the same, ended ✓ when the wake starts (the wake posts its own placeholder). WhatsApp refuses
-// edits ~15 min after the post, so nothing is edited past LIVE_EDIT_MS: a fresh status takes over
-// the animation and a late reply is sent fresh. All of it rides the spine's tick (STOP-first) and
-// THE reply path (sender.open), with the real sender over a fake bridge here.
+// time. WhatsApp refuses edits ~15 min after the post, so nothing is edited past LIVE_EDIT_MS: a
+// fresh status takes over the animation and a late reply is sent fresh. While background work runs,
+// ONE status per chat is POSTED — a new message when its task list changes, else every
+// liveness.background_every_ms — never edited; a finished task is marked as its session's CLI said it
+// ended (operator 2026-10-31): ✓ ✗ ⏹, ◦ not known. All of it rides the spine's tick (STOP-first) and
+// THE reply path (sender.open / sender.post), with the real sender over a fake bridge here.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createSpine } from '../src/spine/spine.mjs';
 import { createSender, THINKING, LIVE_EDIT_MS } from '../src/spine/sender.mjs';
-import { ASK_AFTER_MS, ASK_ANSWER_MS, LIVENESS_EVERY_MS } from '../src/spine/liveness.mjs';
+import { ASK_AFTER_MS, ASK_ANSWER_MS, LIVENESS_EVERY_MS, LIVENESS_BACKGROUND_EVERY_MS, LIVENESS_BACKGROUND_CHANGE_MS } from '../src/spine/liveness.mjs';
 import { editAction, isLiveStreamFrame } from '../src/dispatch-line.mjs';
+import { createWarmCliSession } from '../src/warm-cli-session.mjs';
+import { EventEmitter } from 'node:events';
 
 const T0 = Date.UTC(2026, 9, 15, 12, 0, 0);
 const CHAT = 'chat-A@g.us';
@@ -33,7 +36,7 @@ function fakeBridge() {
   };
 }
 
-// A brain whose turns stay open until released; `tasks` is what its warm session reports running.
+// A brain whose turns stay open until released; `tasks` is what its warm sessions report running.
 function heldBrain() {
   const calls = [];
   const brain = {
@@ -44,40 +47,47 @@ function heldBrain() {
       calls.push({ being, ev, onPartial, release: (text = `reply-${calls.length}`) => release({ text, sessionId: 's1' }) });
       return p;
     },
-    background: () => brain.tasks,
   };
   return brain;
 }
 
 // `mouth`: the chat is said by a second connection on this node (boot's local mouth): every reply,
 // placeholder and status goes out from ITS bridge in ITS room — never from the ear (`bridge`).
-function build({ stop = { present: false }, mouth = null, livenessEveryMs, publicOf } = {}) {
+function build({ stop = { present: false }, mouth = null, timeZone = undefined, livenessEveryMs, livenessBackgroundEveryMs, livenessBackgroundChangeMs, publicOf, backgroundOutcome = () => ({ status: 'completed', message: null }) } = {}) {
   const bridge = fakeBridge();
   const brain = heldBrain();
   const peerMouth = mouth ? { route: async () => ({ bridge: mouth, chatId: 'mouth-room', connection: 'rodz' }) } : null;
-  const logged = [], streamed = [], notes = [], group = [];
+  const logged = [], streamed = [], notes = [], group = [], said = [];
   const spine = createSpine({
-    bridge, brain, livenessEveryMs,
+    bridge, brain, timeZone, livenessEveryMs, livenessBackgroundEveryMs, livenessBackgroundChangeMs,
+    // every warm session's live tasks with the conversation each would wake in (boot: the pool's)
+    allBackground: () => brain.tasks.map((t) => ({ being: 'egpt', surface: 'whatsapp', chatId: CHAT, ...t })),
+    // how a finished one ended, as its session's CLI said it (boot: the pool's) — completed, unless a test says otherwise
+    backgroundOutcome,
+    say: async (o) => { said.push(o); return true; },
     identity: { build: (m) => ({ ...m, line: m.body }), spineEvent: async (surface, chatId) => ({ surface, chatId }) },
-    router: { resolve: () => ({ being: 'egpt', mention: { atEStart: true, atEAnywhere: true } }) },
+    router: { resolve: (ev) => ({ being: /^@leo\b/.test(ev.body) ? 'leo' : 'egpt', mention: { atEStart: true, atEAnywhere: true } }) },
     gating: { async decide() { return { mode: 'mention', receives: true, mayReply: true, sendToEgpt: 'mode' }; }, surfaces: (d) => d.mayReply },
     sender: createSender({ bridge, peerMouth, publicOf, bodyEmojiOf: () => '🐶', labelOf: () => 'E' }),
     transcript: { async log(ev, reply) { logged.push(reply ? reply.text : ev.body); }, logStream(ev, before, after) { streamed.push(after); } },
     heartbeats: { runDue() {} },
     stopSwitch: { present: () => stop.present, pull: async () => {} },
     logToGroup: async (text) => { group.push(text); return true; },
-    labelOf: () => 'E',
+    labelOf: (being) => (being === 'leo' ? 'leo' : 'E'),
     clock: { now: () => Date.now() },
     turnTimeoutMs: 0,
     log: { line: (s) => notes.push(s) },
   });
   spine.start();
-  return { spine, bridge, brain, logged, streamed, notes, group };
+  return { spine, bridge, brain, logged, streamed, notes, group, said };
 }
 
 const mention = (body, msgId = 'm1') => ({ surface: 'whatsapp', node: 'wa', chatId: CHAT, chatName: 'fam', senderId: 'u', senderName: 'An', msgId, ts: T0, body, kind: 'text', raw: {} });
 const at = (ms) => vi.setSystemTime(T0 + ms);
 const sec = 1000, min = 60 * sec;
+const posts = (b) => b.bridge.sent.map((s) => s.text);
+const NO_HOLD = () => 0;   // a change posted at the next pulse: for tests of what a status says, not when
+const ticks = async (b, from, until, step = 15 * sec) => { for (let t = from; t <= until; t += step) { at(t); b.spine.tick(); } await flush(); };
 
 beforeEach(() => { vi.useFakeTimers({ toFake: ['Date'] }); at(0); });
 afterEach(() => { vi.useRealTimers(); });
@@ -109,6 +119,16 @@ describe('liveness — a running turn', () => {
     expect(ph.finals).toEqual(['Let me check, done']);
     at(10 * min); b.spine.tick();
     expect(ph.frames).toHaveLength(6);                               // nothing after the turn ended
+  });
+
+  it("(a) a multi-line reply's frame keeps the ⏳ and the tick at its end", async () => {
+    const b = build();
+    b.bridge.emit(mention('@e long job'));
+    await flush();
+    const ph = b.bridge.streams[0];
+    b.brain.calls[0].onPartial('Two things:\n• the audit\n• the crawl');
+    at(15 * sec); b.spine.tick();
+    expect(ph.frames).toEqual(['Two things:\n• the audit\n• the crawl ⏳', 'Two things:\n• the audit\n• the crawl ⏳ ⤴️ 15s']);
   });
 
   it('(a) the cadence is config-driven (liveness.every_ms → livenessEveryMs)', async () => {
@@ -205,7 +225,7 @@ describe('liveness — a running turn', () => {
     expect(mouth.sent).toEqual([]);
   });
 
-  it('(d) in a MOUTH chat a background status and its replacement come from the mouth too', async () => {
+  it('(d) in a MOUTH chat every background status is posted by the mouth, in its room — never from the ear', async () => {
     const mouth = fakeBridge();
     const b = build({ mouth });
     const done = b.bridge.emit(mention('@e run the audit in the background'));
@@ -214,11 +234,11 @@ describe('liveness — a running turn', () => {
     b.brain.calls[0].release('started it');
     await done;
     await flush();
-    for (let t = 30 * sec; t <= 14 * min; t += 30 * sec) { at(t); b.spine.tick(); }
+    for (let t = 30 * sec; t <= 11 * min; t += 30 * sec) { at(t); b.spine.tick(); }
     await flush();
-    const statuses = mouth.streams.filter((s) => s.init.startsWith('⚙️'));
-    expect(statuses).toHaveLength(2);
-    expect(statuses.map((s) => s.chat)).toEqual(['mouth-room', 'mouth-room']);
+    expect(mouth.sent.map((s) => [s.chat, s.text])).toEqual([['mouth-room', '⚙️ background work (1):\n• running: Run the audit · <1 min'], ['mouth-room', '⚙️ background work (1):\n• running: Run the audit · 10 min']]);
+    expect(mouth.sent.map((s) => s.opts.persona)).toEqual(['egpt', 'egpt']);
+    expect(mouth.streams).toHaveLength(1);                            // the reply's own: a status is no stream
     expect(b.bridge.streams).toEqual([]);
     expect(b.bridge.sent).toEqual([]);
   });
@@ -270,119 +290,160 @@ describe('liveness — a running turn', () => {
     b.brain.tasks = [{ description: 'Run the audit', since: T0 }];
     b.brain.calls[0].release('started');
     await done;
-    expect(b.bridge.streams.filter((s) => s.init.startsWith('⚙️'))).toEqual([]);
+    expect(b.bridge.sent).toEqual([]);
   });
 });
 
-describe('liveness — background work with no turn in flight', () => {
-  async function dispatchBackground(b) {
+// A CHAT'S BACKGROUND STATUS IS POSTED, NOT EDITED (operator 2026-10-30, #2735: "en lugar de editar los
+// mensajes, puedes solo publicar el estatus de todas las tareas en un mensaje cada cierto tiempo"; #2384:
+// "puedes dar updates cada minuto, o cuando terminen"). A fresh message when the chat's task list changes,
+// else every liveness.background_every_ms; each task with its elapsed time, the finished ones ✓.
+describe('liveness — background work is POSTED, never edited', () => {
+  async function dispatchBackground(b, endAt = 0) {
     const done = b.bridge.emit(mention('@e run the audit in the background'));
     await flush();
-    b.brain.tasks = [{ description: 'Run the audit', since: T0 + 5 * sec }];
+    b.brain.tasks = [{ description: 'Run the audit', since: T0 }];
+    at(endAt);
     b.brain.calls[0].release('started it');
     await done;
     await flush();
   }
 
-  it('(b) ONE status message opens when the dispatching turn ends and animates; the wake ends it ✓ and posts its own placeholder', async () => {
+  it("(b) the dispatching turn's end POSTS the chat's status: one send, a reply to its own message, as its being, the task timed", async () => {
     const b = build();
-    await dispatchBackground(b);
-    expect(b.bridge.streams).toHaveLength(2);
-    const st = b.bridge.streams[1];
-    expect(st.chat).toBe(CHAT);
-    expect(st.init).toBe('⚙️ working in background: Run the audit ⏳');
-    expect(st.opts).toMatchObject({ bodyEmoji: '🐶', persona: 'egpt', replyTo: b.bridge.streams[0].confirmedId });
-
-    at(4 * min + 5 * sec); b.spine.tick();
-    expect(st.frames).toEqual(['⚙️ working in background: Run the audit ⏳ ⤴️ 4m00s']);
-
-    b.brain.tasks = [];
-    const woke = b.spine.wakeOnBackground({ being: 'egpt', surface: 'whatsapp', chatId: CHAT, summaries: ['Run the audit — completed'] });
-    await flush();
-    expect(st.finals).toEqual(['✓ background work done: Run the audit — completed']);
-    expect(b.bridge.streams).toHaveLength(3);                         // the wake's own fresh placeholder, at the bottom
-    const wake = b.bridge.streams[2];
-    expect(wake.init).toBe(THINKING);
-    b.brain.calls[1].release('the audit is clean');
-    await woke;
-    expect(wake.finals).toEqual(['the audit is clean']);
-    expect(st.finals).toHaveLength(1);
+    await dispatchBackground(b, 1 * min + 4 * sec);
+    expect(posts(b)).toEqual(['⚙️ background work (1):\n• running: Run the audit · 1 min']);
+    expect(b.bridge.sent[0]).toMatchObject({ chat: CHAT, opts: { bodyEmoji: '🐶', label: 'E', persona: 'egpt', replyTo: b.bridge.streams[0].confirmedId } });
+    expect(b.bridge.streams).toHaveLength(1);                         // the turn's own placeholder: a status is no stream
+    expect(b.notes.join('\n')).toContain('egpt/chat-A@g.us — background task(s) Run the audit still running, status posted');
   });
 
-  it('(b) background work gone with no wake: the status is ended ✓ (after one quiet tick); a later wake posts its own placeholder', async () => {
-    const b = build();
-    await dispatchBackground(b);
-    const st = b.bridge.streams[1];
-    b.brain.tasks = [];
-    at(1 * min); b.spine.tick();
-    expect(st.finals).toEqual([]);                                    // one quiet tick: a wake may be on its way
-    at(2 * min); b.spine.tick();
-    await flush();
-    expect(st.finals).toEqual(['✓ background work ended: Run the audit']);
-    b.spine.wakeOnBackground({ being: 'egpt', surface: 'whatsapp', chatId: CHAT, summaries: ['x'] });
-    await flush();
-    expect(b.bridge.streams).toHaveLength(3);                         // a fresh placeholder, not the ended status
-  });
 
-  it('(b) on a 5 s tick the background status pulses every 15 s, alternating ⤴️ / ↪️, with one quiet interval', async () => {
-    const b = build();
-    await dispatchBackground(b);
-    const st = b.bridge.streams[1];
-    for (let t = 5 * sec; t <= 60 * sec; t += 5 * sec) { at(t); b.spine.tick(); }
-    expect(st.frames).toEqual([
-      '⚙️ working in background: Run the audit ⏳ ⤴️ 10s',
-      '⚙️ working in background: Run the audit ⏳ ↪️ 25s',
-      '⚙️ working in background: Run the audit ⏳ ⤴️ 40s',
-      '⚙️ working in background: Run the audit ⏳ ↪️ 55s',
-    ]);
-    b.brain.tasks = [];
-    for (let t = 65 * sec; t <= 85 * sec; t += 5 * sec) { at(t); b.spine.tick(); }
-    expect(st.finals).toEqual([]);                                    // quiet at 1m15s: a wake may be on its way
-    at(90 * sec); b.spine.tick();
-    await flush();
-    expect(st.finals).toEqual(['✓ background work ended: Run the audit']);
+  // operator 2026-11-20: "instead of 'since 12:17' better to show elapsed time" — the clock time it started is gone, whatever the zone.
+  it('a running task shows how long it has run as of the post, not the clock time it started', async () => {
+    const b = build({ timeZone: 'America/New_York' });   // T0 = 12:00 UTC = 08:00 there (EDT): neither shows
+    await dispatchBackground(b, 1 * min + 4 * sec);
+    expect(posts(b)).toEqual(['⚙️ background work (1):\n• running: Run the audit · 1 min']);
+    expect(posts(b)[0]).not.toMatch(/since|08:00|12:00/);
   });
-
-  it('(b) config liveness.every_ms sets the background cadence too', async () => {
-    const b = build({ livenessEveryMs: () => 20 * sec });
-    await dispatchBackground(b);
-    const st = b.bridge.streams[1];
-    for (let t = 5 * sec; t <= 60 * sec; t += 5 * sec) { at(t); b.spine.tick(); }
-    expect(st.frames).toEqual([
-      '⚙️ working in background: Run the audit ⏳ ⤴️ 15s',
-      '⚙️ working in background: Run the audit ⏳ ↪️ 35s',
-      '⚙️ working in background: Run the audit ⏳ ⤴️ 55s',
-    ]);
-  });
-
-  it('(c) animation frames are never recorded: no transcript line, no stream bytes, and each one is a live frame the bridge drops before the spine', async () => {
+  // operator 2026-11-01: "por qué los mensajes se están viendo así? … se van así" — a background Bash described
+  // by its whole command was posted as a heredoc, line by line. Its session keeps it one line (warm-cli-session).
+  it("(b) a task the CLI described by a whole heredoc command is ONE line in the status, as its session keeps it", async () => {
+    const proc = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), stdin: { write() {}, end() {} }, kill() {} });
+    const session = createWarmCliSession({ adopt: { proc, background: [{ task_id: 'b1', description: "cd /srv/e4; python3 - <<'PY'\np='aws/job-boleta.ps1'; s=open(p).read()\nPY", since: T0 }] } });
     const b = build();
     const done = b.bridge.emit(mention('@e run the audit in the background'));
     await flush();
-    at(30 * sec); b.spine.tick();
-    b.brain.tasks = [{ description: 'Run the audit', since: T0 }];
+    b.brain.tasks = session.backgroundTasks.map(({ description, since }) => ({ description, since }));
     b.brain.calls[0].release('started it');
     await done;
     await flush();
-    at(90 * sec); b.spine.tick();
-    const frames = b.bridge.streams.flatMap((s) => s.frames.map((f) => [s.init, f]));
-    expect(frames).toHaveLength(2);
-    for (const [init, f] of frames) expect(isLiveStreamFrame(editAction({ targetId: '1', oldText: init, newText: f }))).toBe(true);
-    expect(b.logged).toEqual(['@e run the audit in the background', 'started it']);
-    expect(b.streamed).toEqual([]);
+    expect(posts(b)).toEqual(["⚙️ background work (1):\n• running: cd /srv/e4; python3 - <<'PY'… · <1 min"]);
+    session.close();
   });
 
-  it("(i) the status is a REPLY to the dispatching turn's own message; its rolled replacement replies to the same one", async () => {
+  it('(b) a change — a task appears or finishes — is posted at the first pulse liveness.background_change_ms after the last post; several make ONE message, the finished ones ✓', async () => {
     const b = build();
     await dispatchBackground(b);
-    const reply = b.bridge.streams[0];
-    expect(reply.finals).toEqual(['started it']);
-    for (let t = 30 * sec; t <= 14 * min; t += 30 * sec) { at(t); b.spine.tick(); }
+    await ticks(b, 15 * sec, 2 * min + 15 * sec);                     // nothing changed: nothing posted
+    expect(posts(b)).toHaveLength(1);
+    b.brain.tasks = [...b.brain.tasks, { being: 'leo', description: 'Crawl the site', since: T0 + 2 * min + 20 * sec }, { being: 'leo', description: 'Lint the repo', since: T0 + 2 * min + 20 * sec }];
+    at(2 * min + 25 * sec); b.spine.tick();                           // between pulses: not yet
+    expect(posts(b)).toHaveLength(1);
+    at(2 * min + 30 * sec); b.spine.tick();
     await flush();
-    const statuses = b.bridge.streams.filter((s) => s.init.startsWith('⚙️'));
-    expect(statuses).toHaveLength(2);
-    expect(statuses.map((s) => s.opts.replyTo)).toEqual([reply.confirmedId, reply.confirmedId]);
-    expect(statuses.map((s) => s.opts.replyTo)).not.toContain('m1');   // never the human's trigger
+    expect(posts(b).slice(1)).toEqual(['⚙️ background work (3):\n• running: E — Run the audit · 3 min\n• running: leo — Crawl the site · <1 min\n• running: leo — Lint the repo · <1 min']);
+    b.brain.tasks = b.brain.tasks.filter((t) => t.description !== 'Lint the repo');              // one finishes…
+    b.brain.tasks.push({ description: 'Queue 07: Factuwin office test', since: T0 + 2 * min + 40 * sec });  // …one appears, same pulse
+    await ticks(b, 2 * min + 45 * sec, 4 * min + 15 * sec);
+    expect(posts(b)).toHaveLength(2);                                 // held: 2 min after the last post
+    at(4 * min + 30 * sec); b.spine.tick();
+    await flush();
+    expect(posts(b).slice(2)).toEqual(['⚙️ background work (3):\n• running: E — Run the audit · 5 min\n• running: leo — Crawl the site · 2 min\n• running: E — Queue 07: Factuwin office test · 2 min\n✓ done: leo — Lint the repo · <1 min']);
+  });
+
+  it('(b) liveness.every_ms paces the check: a change is posted at the next pulse of that cadence', async () => {
+    const b = build({ livenessEveryMs: () => 20 * sec });
+    await dispatchBackground(b);
+    await ticks(b, 5 * sec, 2 * min, 5 * sec);                        // pulses at 20 s, 40 s … 2 min
+    b.brain.tasks.push({ description: 'Crawl the site', since: T0 + 2 * min + 5 * sec });
+    for (const t of [125, 130, 135]) { at(t * sec); b.spine.tick(); }
+    expect(posts(b)).toHaveLength(1);                                 // not on the 15 s default
+    at(140 * sec); b.spine.tick();
+    await flush();
+    expect(posts(b).slice(1)).toEqual(['⚙️ background work (2):\n• running: Run the audit · 2 min\n• running: Crawl the site · <1 min']);
+  });
+
+  it('(b) nothing changed: posted again every liveness.background_every_ms — 10 min by default — never in between, each a reply to the same message', async () => {
+    expect(LIVENESS_BACKGROUND_EVERY_MS).toBe(10 * min);
+    const b = build();
+    await dispatchBackground(b);
+    await ticks(b, 15 * sec, 25 * min);
+    expect(posts(b)).toEqual([
+      '⚙️ background work (1):\n• running: Run the audit · <1 min',
+      '⚙️ background work (1):\n• running: Run the audit · 10 min',
+      '⚙️ background work (1):\n• running: Run the audit · 20 min',
+    ]);
+    expect(b.bridge.sent.map((s) => s.opts.replyTo)).toEqual(Array(3).fill(b.bridge.streams[0].confirmedId));
+    expect(b.bridge.sent.map((s) => s.opts.replyTo)).not.toContain('m1');   // never the human's trigger
+  });
+
+  it('(b) liveness.background_every_ms is read each pulse: a changed value reaches the next one, no restart', async () => {
+    let every = 5 * min;
+    const b = build({ livenessBackgroundEveryMs: () => every });
+    await dispatchBackground(b);
+    await ticks(b, 15 * sec, 6 * min);
+    expect(posts(b)).toHaveLength(2);   // the first, then 5 min later
+    every = 2 * min;
+    await ticks(b, 6 * min + 15 * sec, 9 * min);
+    expect(posts(b)).toHaveLength(4);   // then every 2 min: 7, 9
+  });
+
+  it('(b) the last task finishes: after one quiet pulse a last post lists it ✓; nothing follows, and a later wake posts its own placeholder', async () => {
+    const b = build();
+    await dispatchBackground(b);
+    b.brain.tasks = [];
+    at(1 * min); b.spine.tick();
+    await flush();
+    expect(posts(b)).toHaveLength(1);                                 // one quiet pulse: a wake may be on its way
+    at(2 * min); b.spine.tick();
+    await flush();
+    expect(posts(b).slice(1)).toEqual(['✓ background work done:\n✓ done: Run the audit · 1 min']);
+    await ticks(b, 3 * min, 30 * min);
+    expect(posts(b)).toHaveLength(2);
+    b.spine.wakeOnBackground({ being: 'egpt', surface: 'whatsapp', chatId: CHAT, summaries: ['x'] });
+    await flush();
+    expect(b.bridge.streams.map((s) => s.init)).toEqual([THINKING, THINKING]);   // the wake's own placeholder
+  });
+
+  it("(b) a finished task's wake posts its own placeholder, and the last post waits for it: a turn running there may start more", async () => {
+    const b = build();
+    await dispatchBackground(b);
+    b.brain.tasks = [];
+    const woke = b.spine.wakeOnBackground({ being: 'egpt', surface: 'whatsapp', chatId: CHAT, summaries: ['Run the audit — completed'] });
+    await flush();
+    expect(b.bridge.streams.at(-1).init).toBe(THINKING);
+    await ticks(b, 1 * min, 3 * min, 1 * min);
+    expect(posts(b)).toHaveLength(1);
+    b.brain.calls[1].release('the audit is clean');
+    await woke;
+    at(4 * min); b.spine.tick();
+    await flush();
+    expect(posts(b).slice(1)).toEqual(['✓ background work done:\n✓ done: Run the audit · 1 min']);
+  });
+
+  it('(c) nothing is edited and the spine records none of it: every status is ONE send; the record holds the turn only', async () => {
+    const b = build();
+    await dispatchBackground(b);
+    b.brain.tasks.push({ being: 'leo', description: 'Crawl the site', since: T0 + 10 * sec });
+    await ticks(b, 15 * sec, 12 * min);                               // a change, then the 10-min post
+    b.brain.tasks = [];
+    await ticks(b, 12 * min + 15 * sec, 13 * min);                    // the last post
+    expect(posts(b)).toHaveLength(4);
+    expect(b.bridge.streams).toHaveLength(1);
+    expect(b.bridge.streams[0]).toMatchObject({ frames: [], finals: ['started it'] });
+    expect(b.logged).toEqual(['@e run the audit in the background', 'started it']);
+    expect(b.streamed).toEqual([]);
   });
 
   it("(i) the dispatching turn's reply id is unknown: the status posts unquoted, as before", async () => {
@@ -394,9 +455,7 @@ describe('liveness — background work with no turn in flight', () => {
     b.brain.calls[0].release('started it');
     await done;
     await flush();
-    const st = b.bridge.streams[1];
-    expect(st.init).toBe('⚙️ working in background: Run the audit ⏳');
-    expect(st.opts.replyTo).toBeNull();
+    expect(b.bridge.sent).toMatchObject([{ text: '⚙️ background work (1):\n• running: Run the audit · <1 min', opts: { replyTo: null } }]);
   });
 
   it("(i) work launched by an earlier turn with no status yet: the status replies to the MOST RECENT turn's message", async () => {
@@ -408,44 +467,448 @@ describe('liveness — background work with no turn in flight', () => {
     b.brain.calls[0].release('started it');
     await first;
     await flush();
-    expect(b.bridge.streams.filter((s) => s.init.startsWith('⚙️'))).toEqual([]);   // STOP: no status opened
+    expect(b.bridge.sent).toEqual([]);                                // STOP: no status posted
     stop.present = false;
     const second = b.bridge.emit(mention('@e and the crawl too', 'm2'));
     await flush();
     b.brain.calls[1].release('crawl started too');
     await second;
     await flush();
-    const st = b.bridge.streams.find((s) => s.init.startsWith('⚙️'));
-    expect(st.opts.replyTo).toBe(b.bridge.streams[1].confirmedId);
+    expect(b.bridge.sent.map((s) => s.opts.replyTo)).toEqual([b.bridge.streams[1].confirmedId]);
     expect(b.bridge.streams[1].finals).toEqual(['crawl started too']);
   });
 
-  it("(i) in a MOUTH chat the status quotes the mouth's own reply, by its id in the mouth's room — never an ear-side id", async () => {
-    const mouth = fakeBridge();
-    const b = build({ mouth });
-    const done = b.bridge.emit(mention('@e run the audit in the background'));
-    await flush();
-    b.brain.tasks = [{ description: 'Run the audit', since: T0 }];
-    b.brain.calls[0].release('started it');
-    await done;
-    await flush();
-    for (let t = 30 * sec; t <= 14 * min; t += 30 * sec) { at(t); b.spine.tick(); }
-    await flush();
-    const reply = mouth.streams[0];
-    expect(reply).toMatchObject({ chat: 'mouth-room', finals: ['started it'] });
-    const statuses = mouth.streams.filter((s) => s.init.startsWith('⚙️'));
-    expect(statuses).toHaveLength(2);
-    expect(statuses.map((s) => [s.chat, s.opts.replyTo])).toEqual([['mouth-room', reply.confirmedId], ['mouth-room', reply.confirmedId]]);
-    expect(b.bridge.streams).toEqual([]);
-  });
-
-  it('(e) STOP: the status is not animated while the STOP file exists', async () => {
+  it('(e) STOP: nothing is posted while the STOP file exists', async () => {
     const stop = { present: false };
     const b = build({ stop });
     await dispatchBackground(b);
     stop.present = true;
+    b.brain.tasks = [];
+    await ticks(b, 1 * min, 15 * min, 1 * min);
+    expect(posts(b)).toHaveLength(1);
+  });
+});
+
+// ONE STATUS PER CHAT (operator 2026-10-30: "Background jobs suddenly post update messages... each
+// one its own message. Wouldn't it be better to group these jobs by chat? Updates every minute, or
+// when they finish."). Every finished task's wake used to end the status ✓ and the next turn opened a
+// new one; two beings in a chat had two. Now the chat has one status, posted as the being whose turn
+// opened it, across wakes.
+describe('liveness — ONE background status per chat, kept across wakes', () => {
+  async function dispatch(b, body, msgId, task, n, endAt) {
+    const done = b.bridge.emit(mention(body, msgId));
+    await flush();
+    b.brain.tasks = [...b.brain.tasks, task];
+    at(endAt);
+    b.brain.calls[n].release(`started ${task.description}`);
+    await done;
+    await flush();
+  }
+  async function twoBeings(b) {
+    await dispatch(b, '@e run the audit in the background', 'm1', { description: 'Run the audit', since: T0 }, 0, 0);
+    await dispatch(b, '@leo crawl the site', 'm2', { being: 'leo', description: 'Crawl the site', since: T0 + 5 * sec }, 1, 5 * sec);
+  }
+  const wake = (b, being, summary) => b.spine.wakeOnBackground({ being, surface: 'whatsapp', chatId: CHAT, summaries: [summary] });
+
+  it("two beings with background work in one chat → ONE status, posted as the being whose turn opened it, each task labelled by its being", async () => {
+    const b = build({ livenessBackgroundChangeMs: NO_HOLD });
+    await twoBeings(b);
+    expect(posts(b)).toEqual(['⚙️ background work (1):\n• running: Run the audit · <1 min']);   // E's turn, as E: its own work needs no label; leo's turn ending posts nothing
+    at(15 * sec); b.spine.tick();
+    await flush();
+    expect(posts(b).slice(1)).toEqual(['⚙️ background work (2):\n• running: E — Run the audit · <1 min\n• running: leo — Crawl the site · <1 min']);
+    expect(b.bridge.sent.map((s) => [s.opts.persona, s.opts.replyTo])).toEqual(Array(2).fill(['egpt', b.bridge.streams[0].confirmedId]));
+  });
+
+  // operator 2026-10-30: "una por línea, con su bullet"; "cada minuto, o cuando terminen"
+  it("the operator's format: one task per line — • running, ✓ finished since the last post — timed, and labelled when not all the poster's", async () => {
+    const b = build();
+    const done = b.bridge.emit(mention('@e run the queue, and leo the lint'));
+    await flush();
+    b.brain.tasks = [{ description: 'Queue 07: Factuwin office test', since: T0 + 2 * min + 56 * sec }, { being: 'leo', description: 'Lint the repo', since: T0 + 7 * min }];
+    at(7 * min);
+    b.brain.calls[0].release('both started');
+    await done;
+    await flush();
+    await ticks(b, 7 * min + 15 * sec, 14 * min + 45 * sec);
+    b.brain.tasks = [b.brain.tasks[0], { being: 'leo', description: 'Crawl the site', since: T0 + 11 * min + 50 * sec }];   // the lint ends as the crawl starts
+    at(15 * min); b.spine.tick();
+    b.brain.tasks = [];
+    await ticks(b, 15 * min + 15 * sec, 16 * min);
+    expect(posts(b)).toEqual([
+      '⚙️ background work (2):\n• running: E — Queue 07: Factuwin office test · 4 min\n• running: leo — Lint the repo · <1 min',
+      '⚙️ background work (2):\n• running: E — Queue 07: Factuwin office test · 12 min\n• running: leo — Crawl the site · 3 min\n✓ done: leo — Lint the repo · 8 min',
+      '✓ background work done:\n✓ done: E — Queue 07: Factuwin office test · 12 min\n✓ done: leo — Crawl the site · 3 min',
+    ]);
+    expect(b.notes.join('\n')).toContain('background task(s) E — Queue 07: Factuwin office test; leo — Lint the repo still running, status posted');   // the log line stays one line
+  });
+
+  it("a queue: a finished task's wake answers in its own placeholder; the next pulse posts the next task with the finished one ✓", async () => {
+    const b = build();
+    await dispatch(b, '@e run the queue in the background', 'm1', { description: 'Queue 07: Factuwin office test', since: T0 }, 0, 0);
+    b.brain.tasks = [];
+    at(1 * min);
+    const woke = wake(b, 'egpt', 'Queue 07: Factuwin office test — completed');
+    await flush();
+    expect(b.bridge.streams.at(-1).init).toBe(THINKING);              // the wake's own placeholder
+    at(1 * min); b.spine.tick();
+    at(2 * min); b.spine.tick();                                      // quiet, but the wake turn is still running here
+    b.brain.tasks = [{ description: 'Queue 08: Factuwin home test', since: T0 + 2 * min }];   // the wake starts the next one
+    b.brain.calls[1].release('07 passed; 08 started');
+    await woke;
+    await flush();
+    at(3 * min); b.spine.tick();
+    await flush();
+    expect(posts(b).slice(1)).toEqual(['⚙️ background work (1):\n• running: Queue 08: Factuwin home test · 1 min\n✓ done: Queue 07: Factuwin office test · 1 min']);
+    b.brain.tasks = [];
+    const last = wake(b, 'egpt', 'Queue 08: Factuwin home test — completed');
+    await flush();
+    b.brain.calls[2].release('08 passed');
+    await last;
+    at(4 * min); b.spine.tick();                                      // one quiet pulse
     at(5 * min); b.spine.tick();
-    expect(b.bridge.streams[1].frames).toEqual([]);
+    await flush();
+    expect(posts(b).slice(2)).toEqual(['✓ background work done:\n✓ done: Queue 08: Factuwin home test · 2 min']);
+    expect(b.bridge.streams.map((s) => s.init)).toEqual([THINKING, THINKING, THINKING]);   // the turn and the two wakes: nothing edited for the status
+  });
+
+  it("one being's task finishes: the status runs on while another being's work remains, and the last post comes when it is gone", async () => {
+    const b = build({ livenessBackgroundChangeMs: NO_HOLD });
+    await twoBeings(b);
+    at(15 * sec); b.spine.tick();
+    b.brain.tasks = b.brain.tasks.filter((t) => t.being === 'leo');
+    const woke = wake(b, 'egpt', 'Run the audit — completed');
+    await flush();
+    b.brain.calls[2].release('the audit is clean');
+    await woke;
+    at(1 * min); b.spine.tick();
+    await flush();
+    expect(posts(b).slice(2)).toEqual(['⚙️ background work (1):\n• running: leo — Crawl the site · 1 min\n✓ done: E — Run the audit · 1 min']);   // still E's: leo's work is labelled
+    b.brain.tasks = [];
+    const woke2 = wake(b, 'leo', 'Crawl the site — completed');
+    await flush();
+    b.brain.calls[3].release('crawled: 40 pages');
+    await woke2;
+    at(2 * min); b.spine.tick();
+    at(3 * min); b.spine.tick();
+    await flush();
+    expect(posts(b).slice(3)).toEqual(['✓ background work done:\n✓ done: leo — Crawl the site · 2 min']);
+    expect(b.bridge.sent.every((s) => s.opts.persona === 'egpt')).toBe(true);
+  });
+
+  it("a finished task the CLI's own turn answered with a bare '…': nobody is woken, and the last post comes as after any wake", async () => {
+    const b = build();
+    await dispatch(b, '@e run the audit in the background', 'm1', { description: 'Run the audit', since: T0 }, 0, 0);
+    b.brain.tasks = [];
+    expect(await b.spine.wakeOnBackground({ being: 'egpt', surface: 'whatsapp', chatId: CHAT, summaries: ['Run the audit — completed'], reply: '…' })).toBe(true);
+    await flush();
+    expect(b.brain.calls).toHaveLength(1);                            // no wake turn
+    expect(b.bridge.streams).toHaveLength(1);                         // no wake placeholder
+    at(1 * min); b.spine.tick();
+    at(2 * min); b.spine.tick();
+    await flush();
+    expect(posts(b).slice(1)).toEqual(['✓ background work done:\n✓ done: Run the audit · 1 min']);
+  });
+
+  it("/standdown: the chat's line is posted as its status was, naming every being's stopped work; nothing follows it", async () => {
+    const b = build();
+    await twoBeings(b);
+    await b.spine.noteStoppedBackground();
+    await flush();
+    expect(b.bridge.sent.at(-1)).toMatchObject({ chat: CHAT, text: '⏹ background work stopped: E — Run the audit; leo — Crawl the site — eGPT moved to the logged-in session. Ask again if you still need it.', opts: { persona: 'egpt', replyTo: b.bridge.streams[0].confirmedId } });
+    expect(b.said).toEqual([]);
+    await ticks(b, 15 * sec, 15 * min);
+    expect(posts(b)).toHaveLength(2);                                 // the first status and the line
+  });
+
+  it('/standdown in a chat with no status: the line is said ONCE for the chat', async () => {
+    const b = build({ stop: { present: true } });                    // STOP when the work started: no status posted
+    await twoBeings(b);
+    expect(b.bridge.sent).toEqual([]);
+    await b.spine.noteStoppedBackground();
+    expect(b.said).toEqual([{ being: 'egpt', chatId: CHAT, what: 'standdown', text: '⏹ background work stopped: E — Run the audit; leo — Crawl the site — eGPT moved to the logged-in session. Ask again if you still need it.' }]);
+  });
+});
+
+// operator 2026-10-31: "si termina en error (muy raro) debería mostrar una X y el mensaje de error? esto
+// debe ser estructural, no pongas al SI a determinar el error cuando falla el proceso".
+describe('liveness — a finished task is marked as its session\'s CLI said it ended', () => {
+  const FAILED = { status: 'failed', message: 'Background command "npm run lint" failed (exit code 1)' };
+  // E's audit (b1) and leo's lint (b2) running; `ended`: taskId → how the CLI said it ended. `asked` gets each lookup.
+  async function auditAndLint(ended, asked = []) {
+    const b = build({ backgroundOutcome: (t) => { asked.push(t); return ended[t.taskId] ?? null; }, livenessBackgroundChangeMs: NO_HOLD });
+    const done = b.bridge.emit(mention('@e run the audit, and leo the lint'));
+    await flush();
+    b.brain.tasks = [{ taskId: 'b1', description: 'Run the audit', since: T0 }, { being: 'leo', taskId: 'b2', description: 'Lint the repo', since: T0 + 20 * sec }];
+    b.brain.calls[0].release('both started');
+    await done;
+    await flush();
+    return b;
+  }
+  const finish = async (b, taskIds, t) => { b.brain.tasks = b.brain.tasks.filter((x) => !taskIds.includes(x.taskId)); at(t); b.spine.tick(); await flush(); };
+
+  it("a failed task is ✗ with the CLI's own message, beside the running ones — read once, as it leaves the list", async () => {
+    const asked = [];
+    const b = await auditAndLint({ b2: FAILED }, asked);
+    await finish(b, ['b2'], 1 * min);
+    expect(posts(b).slice(1)).toEqual(['⚙️ background work (1):\n• running: E — Run the audit · 1 min\n✗ failed: leo — Lint the repo · 1 min — Background command "npm run lint" failed (exit code 1)']);
+    expect(asked).toEqual([{ being: 'leo', chatId: CHAT, taskId: 'b2' }]);
+    await ticks(b, 1 * min + 15 * sec, 2 * min);
+    expect(asked).toHaveLength(1);
+  });
+
+  it('the last post: "✓ … done" only if all it lists completed; a failure among them → "⚠️ background work ended:"', async () => {
+    const b = await auditAndLint({ b1: { status: 'completed', message: null }, b2: FAILED });
+    await finish(b, ['b1', 'b2'], 1 * min);                           // one quiet pulse
+    await finish(b, [], 2 * min);
+    expect(posts(b).slice(1)).toEqual(['⚠️ background work ended:\n✓ done: E — Run the audit · 1 min\n✗ failed: leo — Lint the repo · 1 min — Background command "npm run lint" failed (exit code 1)']);
+    const ok = await auditAndLint({ b1: { status: 'completed', message: null }, b2: { status: 'completed', message: null } });
+    await finish(ok, ['b1', 'b2'], 3 * min);
+    await finish(ok, [], 4 * min);
+    expect(posts(ok).slice(1)).toEqual(['✓ background work done:\n✓ done: E — Run the audit · 3 min\n✓ done: leo — Lint the repo · 3 min']);
+  });
+
+  it('a stopped task is ⏹ "stopped" — no error, no ⚠️, and not "done"', async () => {
+    const b = await auditAndLint({ b1: { status: 'completed', message: null }, b2: { status: 'stopped', message: 'Lint the repo' } });
+    await finish(b, ['b1', 'b2'], 1 * min);
+    await finish(b, [], 2 * min);
+    expect(posts(b).slice(1)).toEqual(['background work ended:\n✓ done: E — Run the audit · 1 min\n⏹ stopped: leo — Lint the repo · 1 min']);
+  });
+
+  it('how it ended is not known (its session is gone, or none wired) → ◦, never a ✓ it cannot see', async () => {
+    const b = await auditAndLint({ b1: { status: 'completed', message: null } });
+    await finish(b, ['b2'], 1 * min);
+    expect(posts(b).at(-1)).toBe('⚙️ background work (1):\n• running: E — Run the audit · 1 min\n◦ ended: leo — Lint the repo · 1 min');
+    const none = build({ backgroundOutcome: null });
+    const done = none.bridge.emit(mention('@e run the audit in the background'));
+    await flush();
+    none.brain.tasks = [{ taskId: 'b1', description: 'Run the audit', since: T0 + 2 * min }];
+    at(2 * min);
+    none.brain.calls[0].release('started it');
+    await done;
+    await flush();
+    await finish(none, ['b1'], 3 * min);
+    await finish(none, [], 4 * min);
+    expect(posts(none)).toEqual(['⚙️ background work (1):\n• running: Run the audit · <1 min', 'background work ended:\n◦ ended: Run the audit · 1 min']);
+  });
+});
+
+// operator 2026-10-31: "the task list is confusing: are you listing parent and child process in the same
+// level? in that case why not nest?". The live case: ED's background agent and the two background Bash tasks
+// it ran, listed flat. claude 2.1.309 names the live agent that launched a task (parent_task_id), and marks
+// the tasks that are not activity (ambient: "hosts should exclude them from activity indicators").
+describe('liveness — a task a background agent launched is listed under it', () => {
+  const AGENT = { taskId: 'ae02d2d4edb413bc7', description: 'Factuwin tests on AWS Windows', since: T0 - 72 * min };
+  const QUEUE = { taskId: 'bbsv9o3jx', parentTaskId: AGENT.taskId, description: 'Queue menu calibration job', since: T0 - 9 * min };
+  const WAIT = { taskId: 'bs2650ese', parentTaskId: AGENT.taskId, description: 'Wait for E2-a job completion', since: T0 - 40 * sec };
+  // The turn that launched `tasks` ends; `ended`: taskId → how the CLI said it ended (else completed).
+  async function launched(tasks, ended = {}) {
+    const b = build({ backgroundOutcome: (t) => ended[t.taskId] ?? { status: 'completed', message: null }, livenessBackgroundChangeMs: NO_HOLD });
+    const done = b.bridge.emit(mention('@e run the Factuwin tests on AWS'));
+    await flush();
+    b.brain.tasks = tasks;
+    b.brain.calls[0].release('started them');
+    await done;
+    await flush();
+    return b;
+  }
+  const finish = async (b, taskIds, t) => { b.brain.tasks = b.brain.tasks.filter((x) => !taskIds.includes(x.taskId)); at(t); b.spine.tick(); await flush(); };
+
+  it('THE LIVE CASE: the agent\'s two Bash tasks are listed under it, └, each timed; the count is every running task', async () => {
+    const b = await launched([AGENT, QUEUE, WAIT]);
+    expect(posts(b)).toEqual(['⚙️ background work (3):\n• running: Factuwin tests on AWS Windows · 1 h 12 min\n  └ running: Queue menu calibration job · 9 min\n  └ running: Wait for E2-a job completion · 1 min']);
+  });
+
+  it('a finished task stays under its running agent, marked as its CLI said it ended', async () => {
+    const b = await launched([AGENT, QUEUE, WAIT], { [WAIT.taskId]: { status: 'failed', message: 'job E2-a: exit code 2' } });
+    await finish(b, [QUEUE.taskId], 1 * min);
+    await finish(b, [WAIT.taskId], 2 * min);
+    expect(posts(b).slice(1)).toEqual([
+      '⚙️ background work (2):\n• running: Factuwin tests on AWS Windows · 1 h 13 min\n  └ running: Wait for E2-a job completion · 2 min\n  └ ✓ done: Queue menu calibration job · 10 min',
+      '⚙️ background work (1):\n• running: Factuwin tests on AWS Windows · 1 h 14 min\n  └ ✗ failed: Wait for E2-a job completion · 3 min — job E2-a: exit code 2',
+    ]);
+  });
+
+  it('the last post nests what finished together', async () => {
+    const b = await launched([AGENT, QUEUE, WAIT]);
+    await finish(b, [AGENT.taskId, QUEUE.taskId, WAIT.taskId], 3 * min);   // one quiet pulse
+    await finish(b, [], 3 * min + 15 * sec);
+    expect(posts(b).slice(1)).toEqual(['✓ background work done:\n✓ done: Factuwin tests on AWS Windows · 1 h 15 min\n  └ ✓ done: Queue menu calibration job · 12 min\n  └ ✓ done: Wait for E2-a job completion · 4 min']);
+  });
+
+  it('a task whose agent is not in the post stands on its own: an agent not listed at all, or one that finished in an earlier post', async () => {
+    const STRAY = { taskId: 'bx1', parentTaskId: 'a-gone', description: 'Tail the build log', since: T0 - 5 * min };
+    const b = await launched([AGENT, QUEUE, WAIT, STRAY]);
+    await finish(b, [AGENT.taskId], 1 * min);                         // the agent ends in this post: its tasks still under it
+    await finish(b, [QUEUE.taskId], 2 * min);                         // …and is gone from the next one
+    expect(posts(b)).toEqual([
+      '⚙️ background work (4):\n• running: Factuwin tests on AWS Windows · 1 h 12 min\n  └ running: Queue menu calibration job · 9 min\n  └ running: Wait for E2-a job completion · 1 min\n• running: Tail the build log · 5 min',
+      '⚙️ background work (3):\n• running: Tail the build log · 6 min\n✓ done: Factuwin tests on AWS Windows · 1 h 13 min\n  └ running: Queue menu calibration job · 10 min\n  └ running: Wait for E2-a job completion · 2 min',
+      '⚙️ background work (2):\n• running: Wait for E2-a job completion · 3 min\n• running: Tail the build log · 7 min\n✓ done: Queue menu calibration job · 11 min',
+    ]);
+  });
+
+  it('an agent an agent launched: two levels, in whatever order the CLI lists them — labelled line by line when not all the poster\'s', async () => {
+    const BUILD = { taskId: 'a2', parentTaskId: AGENT.taskId, description: 'Build the installer', since: T0 - 30 * min };
+    const UPLOAD = { taskId: 'b9', parentTaskId: 'a2', description: 'Upload to S3', since: T0 - 2 * min };
+    const LINT = { being: 'leo', taskId: 'b7', description: 'Lint the repo', since: T0 - 1 * min };
+    const b = await launched([UPLOAD, LINT, AGENT, BUILD]);
+    await finish(b, [UPLOAD.taskId], 1 * min);
+    expect(posts(b)).toEqual([
+      '⚙️ background work (4):\n• running: leo — Lint the repo · 1 min\n• running: E — Factuwin tests on AWS Windows · 1 h 12 min\n  └ running: E — Build the installer · 30 min\n    └ running: E — Upload to S3 · 2 min',
+      '⚙️ background work (3):\n• running: leo — Lint the repo · 2 min\n• running: E — Factuwin tests on AWS Windows · 1 h 13 min\n  └ running: E — Build the installer · 31 min\n    └ ✓ done: E — Upload to S3 · 3 min',
+    ]);
+  });
+
+  it('the CLI\'s ambient tasks are in no status: not listed, not counted, and they keep none going', async () => {
+    const WATCH = { taskId: 'w1', parentTaskId: AGENT.taskId, description: 'Watch the job log', since: T0 - 9 * min, ambient: true };
+    const INBOX = { taskId: 'm1', description: 'Monitor the inbox', since: T0 - 3 * min, ambient: true };
+    const b = await launched([AGENT, WATCH, INBOX]);
+    await finish(b, [AGENT.taskId], 1 * min);                         // the watchers run on: one quiet pulse…
+    await finish(b, [], 1 * min + 15 * sec);                          // …and the last post
+    expect(posts(b)).toEqual(['⚙️ background work (1):\n• running: Factuwin tests on AWS Windows · 1 h 12 min', '✓ background work done:\n✓ done: Factuwin tests on AWS Windows · 1 h 13 min']);
+    const quiet = await launched([INBOX]);
+    await ticks(quiet, 2 * min, 3 * min);
+    expect(posts(quiet)).toEqual([]);                                 // a turn leaving only ambient tasks posts nothing
+  });
+});
+
+// 2026-11-02 10:03–10:08, "eGPT Rodz Lola An", An: "this is probably too much :)". Each change was posted at the
+// next pulse: ten statuses in five minutes, up to 13 lines, mostly E's own background shell waits ("checkpoint
+// for ChatGPT progress"), not nested. Now a change waits liveness.background_change_ms (2 min) after a post;
+// the first status and the last are not held. A level's shell commands (the CLI's local_bash), more than 2
+// alike, are one line; agents, and tasks of no known kind, are listed as before.
+describe('liveness — changes are coalesced, shell commands rolled up', () => {
+  const AUDIT = { taskId: 'a1', taskType: 'local_agent', description: 'Run the audit', since: T0 - 10 * min };
+  const CRAWL = { taskId: 'a2', taskType: 'local_agent', description: 'Crawl the site', since: T0 - 1 * min };
+  const step = (n, at) => ({ taskId: `s${n}`, description: `Step ${n}`, since: T0 + at });
+  const sh = (n, at, parentTaskId) => ({ taskId: `b${n}`, taskType: 'local_bash', description: `checkpoint ${n}`, since: T0 + at, ...(parentTaskId ? { parentTaskId } : {}) });
+  async function launched(tasks, opts = {}) {
+    const b = build(opts);
+    const done = b.bridge.emit(mention('@e ask ChatGPT, and build the sheet'));
+    await flush();
+    b.brain.tasks = tasks;
+    b.brain.calls[0].release('started them');
+    await done;
+    await flush();
+    return b;
+  }
+
+  it('a burst of 8 changes within 2 min of the first status is ONE post, at 2 min, carrying the state then — not 8', async () => {
+    expect(LIVENESS_BACKGROUND_CHANGE_MS).toBe(2 * min);
+    const b = await launched([{ description: 'Run the audit', since: T0 }]);
+    const burst = [
+      [10, (x) => [...x, step(1, 10 * sec)]], [25, (x) => [...x, step(2, 25 * sec)]], [40, (x) => [...x, step(3, 40 * sec)]],
+      [55, (x) => x.filter((t) => t.taskId !== 's1')], [70, (x) => [...x, step(4, 70 * sec)]], [85, (x) => x.filter((t) => t.taskId !== 's2')],
+      [100, (x) => [...x, step(5, 100 * sec)]], [115, (x) => [...x, step(6, 115 * sec)]],
+    ];
+    for (const [s, change] of burst) { b.brain.tasks = change(b.brain.tasks); await ticks(b, (s + 5) * sec, (s + 5) * sec); }   // each in its own pulse
+    await ticks(b, 135 * sec, 5 * min);
+    expect(posts(b)).toEqual([
+      '⚙️ background work (1):\n• running: Run the audit · <1 min',
+      '⚙️ background work (5):\n• running: Run the audit · 2 min\n• running: Step 3 · 1 min\n• running: Step 4 · 1 min\n• running: Step 5 · <1 min\n• running: Step 6 · <1 min\n✓ done: Step 1 · 1 min\n✓ done: Step 2 · 1 min',
+    ]);
+    b.brain.tasks = [...b.brain.tasks, step(7, 5 * min + 10 * sec)];   // past the hold: the next pulse
+    await ticks(b, 5 * min + 15 * sec, 5 * min + 15 * sec);
+    expect(posts(b)).toHaveLength(3);
+    expect(posts(b)[2]).toMatch(/\n• running: Step 7 · <1 min$/);
+  });
+
+  it('the last post is not held, and a new turn\'s first status is posted at once, however soon after', async () => {
+    const b = await launched([{ description: 'Run the audit', since: T0 }]);
+    b.brain.tasks = [...b.brain.tasks, step(1, 10 * sec)];
+    await ticks(b, 15 * sec, 30 * sec);                               // a change: held
+    b.brain.tasks = [];
+    await ticks(b, 45 * sec, 60 * sec);                               // one quiet pulse, then the last post — at 1 min, not 2
+    expect(posts(b)).toEqual(['⚙️ background work (1):\n• running: Run the audit · <1 min', '✓ background work done:\n✓ done: Run the audit · 1 min\n✓ done: Step 1 · 1 min']);
+    const done = b.bridge.emit(mention('@e and the crawl', 'm2'));
+    await flush();
+    b.brain.tasks = [{ description: 'Crawl the site', since: T0 + 70 * sec }];
+    at(70 * sec);
+    b.brain.calls[1].release('crawl started');
+    await done;
+    await flush();
+    expect(posts(b).slice(2)).toEqual(['⚙️ background work (1):\n• running: Crawl the site · <1 min']);
+  });
+
+  it('liveness.background_change_ms sets the hold, read each pulse', async () => {
+    let hold = 30 * sec;
+    const b = await launched([{ description: 'Run the audit', since: T0 }], { livenessBackgroundChangeMs: () => hold });
+    b.brain.tasks = [...b.brain.tasks, step(1, 10 * sec)];
+    await ticks(b, 15 * sec, 30 * sec);
+    expect(posts(b)).toHaveLength(2);                                 // seen at 15 s, posted at 30 s
+    hold = 90 * sec;
+    b.brain.tasks = [...b.brain.tasks, step(2, 40 * sec)];
+    await ticks(b, 45 * sec, 105 * sec);
+    expect(posts(b)).toHaveLength(2);
+    await ticks(b, 120 * sec, 120 * sec);
+    expect(posts(b)).toHaveLength(3);
+  });
+
+  it('5 shell commands at one level are ONE line — • N background commands · the oldest\'s time; the agents stay listed; the count is every task', async () => {
+    const b = await launched([AUDIT, CRAWL, sh(1, -5 * min), sh(2, -4 * min), sh(3, -3 * min), sh(4, -2 * min), sh(5, -1 * min)]);
+    expect(posts(b)).toEqual(['⚙️ background work (7):\n• running: Run the audit · 10 min\n• running: Crawl the site · 1 min\n• running: 5 background commands · 5 min']);
+  });
+
+  it('even 1 or 2 shell commands are their count, never the command; tasks of no known kind (an adopted task from an older cli-host) are listed as before', async () => {
+    const b = await launched([AUDIT, sh(1, -2 * min), sh(2, -1 * min), step(1, -3 * min), step(2, -2 * min), step(3, -1 * min)]);
+    expect(posts(b)).toEqual(['⚙️ background work (6):\n• running: Run the audit · 10 min\n• running: 2 background commands · 2 min\n• running: Step 1 · 3 min\n• running: Step 2 · 2 min\n• running: Step 3 · 1 min']);
+    const one = await launched([AUDIT, sh(1, -1 * min, 'a1')]);
+    expect(posts(one)).toEqual(['⚙️ background work (2):\n• running: Run the audit · 10 min\n  └ running: 1 background command · 1 min']);
+  });
+
+  it('under an agent its shell commands roll up the same way, counted per level', async () => {
+    const b = await launched([AUDIT, sh(1, -3 * min, 'a1'), sh(2, -2 * min, 'a1'), sh(3, -1 * min, 'a1'), sh(4, -2 * min), sh(5, -1 * min)]);
+    expect(posts(b)).toEqual(['⚙️ background work (6):\n• running: Run the audit · 10 min\n  └ running: 3 background commands · 3 min\n• running: 2 background commands · 2 min']);
+  });
+
+  it('while work runs, a failed command is listed with the CLI\'s message and the rest wait for the last post — ✓ N commands, ⏹ N commands', async () => {
+    const ended = { b4: { status: 'failed', message: 'exit code 1' }, b5: { status: 'stopped' }, b6: { status: 'stopped' }, b7: { status: 'stopped' } };
+    const b = await launched([AUDIT, ...[1, 2, 3, 4, 5, 6, 7].map((n) => sh(n, -n * sec))], { backgroundOutcome: (t) => ended[t.taskId] ?? { status: 'completed', message: null } });
+    b.brain.tasks = [AUDIT];
+    await ticks(b, 15 * sec, 2 * min);
+    b.brain.tasks = [];
+    await ticks(b, 2 * min + 15 * sec, 3 * min);
+    expect(posts(b)).toEqual([
+      '⚙️ background work (8):\n• running: Run the audit · 10 min\n• running: 7 background commands · <1 min',
+      '⚙️ background work (1):\n• running: Run the audit · 12 min\n✗ failed: checkpoint 4 · <1 min — exit code 1',
+      'background work ended:\n✓ done: 3 commands\n⏹ stopped: 3 commands\n✓ done: Run the audit · 12 min',
+    ]);
+  });
+
+  it('a shell command that starts or ends well is no reason to post', async () => {
+    const b = await launched([AUDIT, sh(1, -1 * sec)]);
+    b.brain.tasks = [AUDIT, sh(2, 0)];
+    await ticks(b, 15 * sec, 2 * min);
+    b.brain.tasks = [AUDIT];
+    await ticks(b, 2 * min + 15 * sec, 4 * min);
+    expect(posts(b)).toHaveLength(1);
+  });
+
+  it('two beings\' commands roll up each under its own label', async () => {
+    const leo = (n) => ({ ...sh(n, -n * sec), being: 'leo' });
+    const b = await launched([AUDIT, sh(1, -1 * sec), sh(2, -2 * sec), sh(3, -3 * sec), leo(4), leo(5), leo(6)]);
+    expect(posts(b)).toEqual(['⚙️ background work (7):\n• running: E — Run the audit · 10 min\n• running: E — 3 background commands · <1 min\n• running: leo — 3 background commands · <1 min']);
+  });
+
+  it('the CLI\'s task_type reaches the status: a background_tasks_changed of 2 agents and 5 shell commands, through the session', async () => {
+    const proc = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), stdin: { write() {}, end() {} }, kill() {} });
+    const session = createWarmCliSession({ adopt: { proc, background: [] } });
+    const tasks = [
+      { task_id: 'a1', task_type: 'local_agent', description: 'FHEPS-to-Move fact sheet research' },
+      { task_id: 'a2', task_type: 'local_agent', description: 'Ask ChatGPT about FHEPS ETP route' },
+      ...['two-minute checkpoint', 'four-minute checkpoint', 'checkpoint', 'checkpoint', 'wait for ask script'].map((d, i) => ({ task_id: `b${i}`, task_type: 'local_bash', description: d })),
+    ];
+    proc.stdout.emit('data', `${JSON.stringify({ type: 'system', subtype: 'background_tasks_changed', tasks })}\n`);
+    const b = build();
+    const done = b.bridge.emit(mention('@e ask ChatGPT, and build the sheet'));
+    await flush();
+    b.brain.tasks = session.backgroundTasks;
+    b.brain.calls[0].release('started them');
+    await done;
+    await flush();
+    expect(posts(b)).toEqual(['⚙️ background work (7):\n• running: FHEPS-to-Move fact sheet research · <1 min\n• running: Ask ChatGPT about FHEPS ETP route · <1 min\n• running: 5 background commands · <1 min']);
+    session.close();
   });
 });
 
@@ -470,8 +933,7 @@ describe('liveness — long background work is ASKED about, never evicted', () =
     const ask = b.brain.calls[1].ev.line;
     expect(ask).toBe('[egpt] Your background task(s) Crawl the site have been running for 2h00m. Are they still necessary? Stop any that aren\'t, and report.');
     expect(b.bridge.streams.at(-1).init).toBe(THINKING);            // the ask has its own placeholder…
-    const status = b.bridge.streams.filter((s) => s.init.startsWith('⚙️')).at(-1);
-    expect(status.finals).toEqual([]);                                // …and the work's status runs on: it is not done
+    expect(posts(b).filter((p) => p.startsWith('✓'))).toEqual([]);  // …and the work's status runs on: it is not done
     b.brain.calls[1].release('still needed: 40% done');
     await flush();
     ticks(b, ASK_AFTER_MS + 30 * sec, 2 * ASK_AFTER_MS - 30 * sec);

@@ -58,7 +58,7 @@ function recordingSender() {
       return {
         activate() { ph.activated = true; },
         update(p) { ph.updates.push(p); },
-        async finish(reply, { surface = true } = {}) { ph.finished = { text: typeof reply === 'string' ? reply : reply?.text, surface }; },
+        async finish(reply, { surface = true } = {}) { ph.finished = { text: typeof reply === 'string' ? reply : reply?.text, surface }; if (reply?.failed) ph.failed = reply.error; },   // the failure line (2026-11-04)
         async fail(e) { ph.failed = e?.message ?? String(e); },
         confirmedId: Promise.resolve(null),
       };
@@ -177,7 +177,7 @@ describe('spine — allow_new_input steers the live turn (operator 2026-08-30)',
   //
   // TWO REACTIONS SINCE 2026-09-09, in this order and for two different reasons: ✍️ the bridge
   // has it (placed on arrival, true by construction) and 👍 the model took it (placed only once
-  // the session's ack says so). See tests/steer-ack.test.mjs for the Joyce fault behind the split.
+  // the session's ack says so). See tests/steer-ack.test.mjs for the Julia fault behind the split.
   it('a successful steer ACKs the steered message with a reaction (not a new placeholder/reply)', async () => {
     const { bridge, sender, brain } = build({ allow: 'any' });
     const p1 = bridge.emit(msg('one', 'm1', 'an'));

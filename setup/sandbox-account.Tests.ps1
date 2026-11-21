@@ -720,9 +720,9 @@ Describe "Grant-SandboxPoolAce -Grant 'Traverse' (walk through the directory, do
 
 # ---------------------------------------------------------------------------
 # THE TRAVERSE GRANT CARRIES SYNCHRONIZE (2026-09-27, measured on do as a real
-# pool account). A boxed being ran `node C:\Users\an\src\egpt\src\tools\ask-spine.mjs`
+# pool account). A boxed being ran `node C:\Users\user\src\egpt\src\tools\ask-spine.mjs`
 # and Node's module loader died before the client's first line: EPERM, syscall
-# 'lstat', path 'C:\Users\an\src'. The pool's ACE there was (Rc,X,RA) - exactly
+# 'lstat', path 'C:\Users\user\src'. The pool's ACE there was (Rc,X,RA) - exactly
 # what this table's old (X,RA,RC) lands as - and adding S by hand made every probe
 # pass. So an S-less traverse ACE is NOT "the same grant" as the (Rc,S,X,RA) the
 # older ancestors carry, which is what SANDBOX.md used to say.
@@ -1254,8 +1254,8 @@ Describe 'Clear-SandboxAbandonedLeases (the repair path for leases nothing will 
 
   It 'a ledger path that VANISHED is reported as such, not as clean, and the lock still releases' {
     # THE RENAME HOLE, found in the live ledgers on 2026-09-23 (two locks named
-    # ...\Favel Konefka-2608141626 while three named ...\Favel Elena
-    # Konefka-2608141626 - one conversation, renamed slug). NTFS carries a DACL
+    # ...\Fiona Ejemplar-2608141626 while three named ...\Fiona Elena
+    # Ejemplar-2608141626 - one conversation, renamed slug). NTFS carries a DACL
     # through a rename, so the ACE outlives the name. This cannot follow it; what
     # it must not do is call the outcome clean.
     $script:SandboxPoolPrefix = $script:MeUser
@@ -1397,16 +1397,16 @@ Describe 'Revoke-SandboxPathAces -FileId (the rename hole, closed)' {
 
   It 'REPRODUCE: today''s revoke LOSES the ACE when the folder is renamed, and the id-carrying one FOLLOWS it' {
     # This is the kg failure, reproduced end to end on a throwaway directory:
-    #   egpt-sbx-03/-04/-10 -> ...\Favel Elena Konefka-2608141626
-    #   egpt-sbx-08/-13     -> ...\Favel Konefka-2608141626
+    #   egpt-sbx-03/-04/-10 -> ...\Fiona Elena Ejemplar-2608141626
+    #   egpt-sbx-08/-13     -> ...\Fiona Ejemplar-2608141626
     # one conversation, renamed slug, and the ACEs alive at the new name while
     # the ledger pointed at nothing.
     $parent = New-LedgerTempDir
-    $conv = Join-Path $parent 'Favel Elena Konefka-2608141626'
+    $conv = Join-Path $parent 'Fiona Elena Ejemplar-2608141626'
     New-Item -ItemType Directory -Path $conv -Force | Out-Null
     Grant-TestModify $conv
     $id = Get-SandboxPathFileId -Path $conv
-    $renamed = Join-Path $parent 'Favel Konefka-2608141626'
+    $renamed = Join-Path $parent 'Fiona Ejemplar-2608141626'
     Rename-Item -LiteralPath $conv -NewName (Split-Path $renamed -Leaf)
 
     # WITHOUT the id - today's behaviour, and the loss itself: reported missing,
@@ -1528,8 +1528,8 @@ Describe 'the ledger line format (new ids, old ledgers, same file)' {
   }
 
   It 'BACK-COMPAT: an OLD-SHAPE line - a bare path, as every lock on a live node holds today - reads as a path with no id' {
-    $e = ConvertFrom-SandboxLeaseLedgerLine -Line 'C:\Users\an\.egpt\conversations\whatsapp\Favel Konefka-2608141626'
-    $e.Path | Should Be 'C:\Users\an\.egpt\conversations\whatsapp\Favel Konefka-2608141626'
+    $e = ConvertFrom-SandboxLeaseLedgerLine -Line 'C:\Users\user\.egpt\conversations\whatsapp\Fiona Ejemplar-2608141626'
+    $e.Path | Should Be 'C:\Users\user\.egpt\conversations\whatsapp\Fiona Ejemplar-2608141626'
     $e.FileId | Should Be ''
   }
 
@@ -1654,18 +1654,18 @@ Describe 'the reclaim and the sweep, with ids on the ledger' {
   }
 
   It 'ACCEPTANCE: the kg case - two ledgers, two names, ONE conversation, and nothing left granted' {
-    # egpt-sbx-08/-13 named ...\Favel Konefka-2608141626 while -03/-04/-10 named
-    # ...\Favel Elena Konefka-2608141626 - the same folder, before and after a
+    # egpt-sbx-08/-13 named ...\Fiona Ejemplar-2608141626 while -03/-04/-10 named
+    # ...\Fiona Elena Ejemplar-2608141626 - the same folder, before and after a
     # rename. Two leases, two spellings, one object. The sweep must clear BOTH
     # ledgers' ACEs off the folder that exists now, and release both locks.
     $script:SandboxPoolPrefix = ''
     $parent = New-LedgerTempDir
-    $oldName = Join-Path $parent 'Favel Elena Konefka-2608141626'
+    $oldName = Join-Path $parent 'Fiona Elena Ejemplar-2608141626'
     New-Item -ItemType Directory -Path $oldName -Force | Out-Null
     $two = @($script:MeUser, 'Everyone')
     foreach ($a in $two) { Grant-TestModifyTo $oldName $a }
     $id = Get-SandboxPathFileId -Path $oldName
-    $newName = Join-Path $parent 'Favel Konefka-2608141626'
+    $newName = Join-Path $parent 'Fiona Ejemplar-2608141626'
     Rename-Item -LiteralPath $oldName -NewName (Split-Path $newName -Leaf)
 
     # One lock naming the OLD slug (its turn ran before the rename), one naming
@@ -2786,7 +2786,7 @@ Describe 'Protect-SandboxSecretFile (the .env carve-out, on a real throwaway fil
     $script:IcaclsSpy = New-Object System.Collections.Generic.List[object]
     Protect-SandboxSecretFile -Path $file -AccountNames @('BUILTIN\Guests') | Out-Null
     $script:IcaclsSpy.Count | Should Be 1
-    (@($script:IcaclsSpy[0]) -join ' ') | Should Be "$file /remove:g *$($script:SecGuests.Value) /C"
+    (@($script:IcaclsSpy[0]) -join ' ') | Should Be "$file /remove:g *$($script:SecGuests.Value) /C /L"
   }
 }
 
@@ -2884,9 +2884,9 @@ Describe 'Get-SandboxGlobalReadPaths (the provisioner''s list, read by node from
   }
 
   It 'kg''s entry comes back as one mount; an invalid one is skipped and NAMED' {
-    Set-FixtureConfig @('node_name: kg', 'global_read_paths:', '  - repos: C:/Users/an/src/siran', '  - src: C:/x', '  - notes: /d/notes')
+    Set-FixtureConfig @('node_name: kg', 'global_read_paths:', '  - repos: C:/Users/user/src/siran', '  - src: C:/x', '  - notes: /d/notes')
     $got = Get-SandboxGlobalReadPaths
-    (@($got.mounts | ForEach-Object { "$($_.name)=$($_.path)" }) -join ';') | Should Be 'repos=C:/Users/an/src/siran;notes=D:/notes'
+    (@($got.mounts | ForEach-Object { "$($_.name)=$($_.path)" }) -join ';') | Should Be 'repos=C:/Users/user/src/siran;notes=D:/notes'
     @($got.skipped).Count | Should Be 1
     @($got.skipped)[0] | Should Match 'entry 2 .*reserved'
   }
@@ -3250,5 +3250,261 @@ Describe 'the pin lifecycle (Test-SandboxPinAllows, Sync-SandboxPin, Remove-Sand
   It 'a key no pin carries is absent, not an error' {
     $d = New-PinTestDirs
     (Remove-SandboxPin -Key 'egpt:whatsapp:nobody' -PinsDir $d.Pins -LocksDir $d.Locks).Status | Should Be 'absent'
+  }
+}
+
+# THE TRAVERSE CHAIN FOLLOWS THE DECLARED PATHS (2026-11-12). kg's room being
+# (~\.egpt\rooms\acim) and every non-whatsapp surface had no Traverse ACE on a
+# folder above them, so Claude Code's file tools refused every path under them.
+# The chain now comes from the leaves each turn grants. BUILTIN\Guests stands in
+# for the pool group: nothing under $env:TEMP inherits an Allow for it, so every
+# ACE seen here was written here. Throwaway profile dirs, no live ACL.
+Describe 'the traverse chain follows the declared paths (Get-/Grant-SandboxTraverseChain)' {
+  $guests = (New-Object System.Security.Principal.NTAccount('BUILTIN\Guests')).Translate([System.Security.Principal.SecurityIdentifier])
+  function New-FakeProfile([string[]]$Make) {
+    $p = New-LedgerTempDir
+    foreach ($m in $Make) { New-Item -ItemType Directory -Force -Path (Join-Path $p $m) | Out-Null }
+    return $p
+  }
+  function Test-GuestsTraverse([string]$Path) {
+    return (@((Get-Acl -LiteralPath $Path).GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]) | Where-Object {
+          $_.IdentityReference.Value -eq $guests.Value -and [int]$_.FileSystemRights -eq $script:TraverseRights -and $_.InheritanceFlags.ToString() -eq 'None'
+        }).Count -eq 1)
+  }
+  # The launcher's own step (d3), extracted and run with the fake profile as ~.
+  function Invoke-LauncherTraverseStep([string]$ProfileDir) {
+    function Log([string]$msg) { }
+    $saved = $env:USERPROFILE
+    try {
+      $env:USERPROFILE = $ProfileDir
+      Invoke-Expression (Get-LauncherStatementBlock '^\s*foreach \(\$rec in @\(Grant-SandboxTraverseChain ')
+    } finally {
+      $env:USERPROFILE = $saved
+    }
+  }
+
+  BeforeEach {
+    $script:TraverseSavedGroup = $SandboxPoolGroup
+    $script:SandboxPoolGroup = 'BUILTIN\Guests'
+  }
+
+  AfterEach {
+    $script:SandboxPoolGroup = $script:TraverseSavedGroup
+    $script:IcaclsSpy = $null
+  }
+
+  It 'REPRODUCE (kg 2026-11-12): one turn walks every folder above its room and its allowed_paths, up to ~ and no further' {
+    $p = New-FakeProfile @('.egpt\rooms\acim', '.egpt-jsonl\t1', 'notes\shared')
+    $TargetFolder = Join-Path $p '.egpt\rooms\acim'
+    $SharePathList = @(Join-Path $p '.egpt-jsonl\t1')
+    $SharePathReadOnlyList = @((Join-Path $p 'notes\shared') -replace '\\', '/')
+    $PinSharePathList = @()
+    $PinSharePathReadOnlyList = @()
+
+    Invoke-LauncherTraverseStep $p
+
+    foreach ($rel in @('.egpt\rooms', '.egpt', '.egpt-jsonl', 'notes')) {
+      (Test-GuestsTraverse (Join-Path $p $rel)) | Should Be $true
+    }
+    (Test-GuestsTraverse $p) | Should Be $true
+    foreach ($leaf in @('.egpt\rooms\acim', '.egpt-jsonl\t1', 'notes\shared')) {
+      (Test-GuestsTraverse (Join-Path $p $leaf)) | Should Be $false
+    }
+    (Test-GuestsTraverse (Split-Path -Parent $p)) | Should Be $false
+  }
+
+  It 'converged, a turn only reads: the second one writes nothing' {
+    $p = New-FakeProfile @('.egpt\conversations\telegram\si-contoso')
+    $TargetFolder = Join-Path $p '.egpt\conversations\telegram\si-contoso'
+    $SharePathList = @(); $SharePathReadOnlyList = @(); $PinSharePathList = @(); $PinSharePathReadOnlyList = @()
+    Invoke-LauncherTraverseStep $p
+    $script:IcaclsSpy = New-Object System.Collections.Generic.List[object]
+
+    Invoke-LauncherTraverseStep $p
+
+    $script:IcaclsSpy.Count | Should Be 0
+    $recs = @(Grant-SandboxTraverseChain -Paths @($TargetFolder) -ProfileDir $p)
+    $recs.Count | Should Be 4
+    (@($recs | Where-Object { $_.Status -ne 'already granted' }).Count) | Should Be 0
+  }
+
+  It 'a folder the group can already read (~\src\egpt, explicit or inherited) is covered, not written' {
+    $p = New-FakeProfile @('src\egpt\docs\notes')
+    Grant-SandboxPoolAce -Path (Join-Path $p 'src\egpt') -Grant 'Read' | Out-Null
+    $script:IcaclsSpy = New-Object System.Collections.Generic.List[object]
+
+    $recs = @(Grant-SandboxTraverseChain -Paths @(Join-Path $p 'src\egpt\docs\notes') -ProfileDir $p)
+
+    (@($recs | ForEach-Object { "$(Split-Path -Leaf $_.Path)=$($_.Status)" }) -join ',') | Should Be "docs=covered,egpt=covered,src=granted,$(Split-Path -Leaf $p)=granted"
+    (@($script:IcaclsSpy | ForEach-Object { $_[0] }) -join ',') | Should Be "$(Join-Path $p 'src'),$p"
+  }
+
+  It 'a leaf inside another leaf adds nothing - the outer grant covers the way down' {
+    $p = New-FakeProfile @('.egpt\conversations\whatsapp\x\desktop\sub')
+    $script:IcaclsSpy = New-Object System.Collections.Generic.List[object]
+
+    $recs = @(Grant-SandboxTraverseChain -Paths @((Join-Path $p '.egpt\conversations\whatsapp\x\desktop\sub'), (Join-Path $p '.egpt\conversations\whatsapp\x')) -ProfileDir $p)
+
+    (@($recs | ForEach-Object { $_.Path }) -join ',') | Should Be ((@('.egpt\conversations\whatsapp', '.egpt\conversations', '.egpt') | ForEach-Object { Join-Path $p $_ }) + @($p) -join ',')
+  }
+
+  It 'the chain stops at the profile, and is empty outside it' {
+    $p = New-FakeProfile @()
+    (@(Get-SandboxTraverseChain -Path "$p/.egpt/rooms/acim/" -ProfileDir $p) -join ',') | Should Be ((@('.egpt\rooms', '.egpt') | ForEach-Object { Join-Path $p $_ }) + @($p) -join ',')
+    @(Get-SandboxTraverseChain -Path $p -ProfileDir $p).Count | Should Be 0
+    @(Get-SandboxTraverseChain -Path "$p-other\x" -ProfileDir $p).Count | Should Be 0
+    @(Get-SandboxTraverseChain -Path 'D:\shares\team' -ProfileDir $p).Count | Should Be 0
+  }
+
+  It 'missing and blank leaves are skipped, and a failure is a record, never a throw' {
+    $p = New-FakeProfile @('a\b')
+    @(Grant-SandboxTraverseChain -Paths @('', $null, (Join-Path $p 'no-such\x')) -ProfileDir $p).Count | Should Be 0
+    $script:SandboxPoolGroup = 'egpt-no-such-group-zzz'
+    $recs = @(Grant-SandboxTraverseChain -Paths @(Join-Path $p 'a\b') -ProfileDir $p)
+    (@($recs | Where-Object { $_.Status -eq 'failed' -and $_.Message }).Count) | Should Be 2
+  }
+
+  It 'the provisioner walks the chain above its own standing leaves, plus ~ - no guessed folder list' {
+    (Get-Command Get-SandboxAncestorDirs -ErrorAction SilentlyContinue) | Should BeNullOrEmpty
+    $p = New-FakeProfile @('src\egpt', 'Documents\shared\notes')
+    $readPaths = [pscustomobject]@{ mounts = @([pscustomobject]@{ name = 'notes'; path = (Join-Path $p 'Documents\shared\notes') -replace '\\', '/' }) }
+    $saved = $env:USERPROFILE
+    try {
+      $env:USERPROFILE = $p
+      Invoke-Expression (Get-ProvisionStatement '^\s*\$traverseLeaves = ')
+      Invoke-Expression (Get-ProvisionStatement '^\s*\$chain = @\(Grant-SandboxTraverseChain -Paths \$traverseLeaves\)')
+    } finally {
+      $env:USERPROFILE = $saved
+    }
+    foreach ($rel in @('src', 'Documents\shared', 'Documents')) { (Test-GuestsTraverse (Join-Path $p $rel)) | Should Be $true }
+    (Test-GuestsTraverse $p) | Should Be $true
+    (@($chain | Where-Object { $_.Status -eq 'granted' }).Count) | Should Be 4
+    (Get-ProvisionStatement 'Grant-PoolOn -Targets \(\[ordered\]@\{ ''the operator home'' = \$env:USERPROFILE \}\) -Grant ''Traverse''') | Should Match 'homeTally'
+  }
+}
+
+# LINK TRICKS (2026-11-12). icacls without /L follows a link on some builds, and
+# a being that can plant a junction in a folder it owns must not be able to make
+# the launcher write a grant onto what the junction points at. Real links are
+# made, but only under $LedgerTempRoot (%TEMP%); the icacls spy keeps every
+# write off them.
+Describe 'Grant-SandboxPoolAce never goes through a link' {
+  BeforeEach {
+    $script:TraverseSavedGroup = $SandboxPoolGroup
+    $script:SandboxPoolGroup = $script:MeName
+    $script:IcaclsSpy = New-Object System.Collections.Generic.List[object]
+  }
+
+  AfterEach {
+    $script:SandboxPoolGroup = $script:TraverseSavedGroup
+    $script:IcaclsSpy = $null
+  }
+
+  function New-TestJunction([string]$Link, [string]$Target) {
+    & cmd.exe /c mklink /J "$Link" "$Target" | Out-Null
+  }
+
+  It 'REPRODUCE-FIRST: the icacls grant carries /L, so it acts on a link itself and never its target' {
+    $d = New-LedgerTempDir
+    (Grant-SandboxPoolAce -Path $d -Grant 'Modify') | Should Be 'granted'
+    $script:IcaclsSpy.Count | Should Be 1
+    (@($script:IcaclsSpy[0]) -contains '/L') | Should Be $true
+  }
+
+  It 'REPRODUCE-FIRST: the revoke carries /L too' {
+    $d = New-LedgerTempDir
+    $script:IcaclsSpy = $null
+    Grant-SandboxPoolAce -Path $d -Grant 'Modify' | Out-Null
+    $script:IcaclsSpy = New-Object System.Collections.Generic.List[object]
+    Revoke-SandboxPathAces -Path $d -AccountNames @($script:MeName) | Out-Null
+    $script:IcaclsSpy.Count | Should Be 1
+    (@($script:IcaclsSpy[0]) -contains '/L') | Should Be $true
+  }
+
+  It 'REPRODUCE-FIRST: a junction as the leaf is refused, with the path in the reason, and icacls never runs' {
+    $target = New-LedgerTempDir
+    $link = Join-Path $script:LedgerTempRoot ([guid]::NewGuid().ToString('N'))
+    New-TestJunction $link $target
+    $msg = ''
+    try { Grant-SandboxPoolAce -Path $link -Grant 'Modify' | Out-Null } catch { $msg = $_.Exception.Message }
+    $msg | Should Match 'reparse point'
+    $msg.Contains($link) | Should Be $true
+    $script:IcaclsSpy.Count | Should Be 0
+    (Get-TestExplicitAceCount $target) | Should Be 0
+  }
+
+  It 'REPRODUCE-FIRST: a junction ABOVE the leaf is refused too, naming the junction' {
+    $target = New-LedgerTempDir
+    $leaf = Join-Path $target 'inside'
+    New-Item -ItemType Directory -Path $leaf | Out-Null
+    $link = Join-Path $script:LedgerTempRoot ([guid]::NewGuid().ToString('N'))
+    New-TestJunction $link $target
+    $viaLink = Join-Path $link 'inside'
+    $msg = ''
+    try { Grant-SandboxPoolAce -Path $viaLink -Grant 'Modify' | Out-Null } catch { $msg = $_.Exception.Message }
+    $msg | Should Match 'reparse point'
+    $msg.Contains($link) | Should Be $true
+    $script:IcaclsSpy.Count | Should Be 0
+  }
+
+  It 'a normal folder is still granted' {
+    $d = New-LedgerTempDir
+    (Grant-SandboxPoolAce -Path $d -Grant 'Modify') | Should Be 'granted'
+    $script:IcaclsSpy.Count | Should Be 1
+  }
+}
+
+Describe 'Find-SandboxHardlinks and the Modify grant report a hardlink inside a writable leaf' {
+  BeforeEach {
+    $script:TraverseSavedGroup = $SandboxPoolGroup
+    $script:SandboxPoolGroup = $script:MeName
+  }
+
+  AfterEach {
+    $script:SandboxPoolGroup = $script:TraverseSavedGroup
+    $script:IcaclsSpy = $null
+  }
+
+  It 'finds a file with more than one link, and only that one' {
+    $d = New-LedgerTempDir
+    $outside = Join-Path $script:LedgerTempRoot ([guid]::NewGuid().ToString('N') + '.txt')
+    Set-Content -LiteralPath $outside -Value 'x'
+    Set-Content -LiteralPath (Join-Path $d 'plain.txt') -Value 'y'
+    New-Item -ItemType Directory -Path (Join-Path $d 'sub') | Out-Null
+    & cmd.exe /c mklink /H (Join-Path $d 'sub\linked.txt') $outside | Out-Null
+    $found = @(Find-SandboxHardlinks -Path $d)
+    $found.Count | Should Be 1
+    $found[0].Path | Should Be (Join-Path $d 'sub\linked.txt')
+    $found[0].Links | Should Be 2
+  }
+
+  It 'finds nothing in a folder of single-link files' {
+    $d = New-LedgerTempDir
+    Set-Content -LiteralPath (Join-Path $d 'a.txt') -Value 'a'
+    @(Find-SandboxHardlinks -Path $d).Count | Should Be 0
+  }
+
+  It 'stops at the file cap instead of walking on' {
+    $d = New-LedgerTempDir
+    foreach ($i in 1..5) { Set-Content -LiteralPath (Join-Path $d "f$i.txt") -Value 'a' }
+    $outside = Join-Path $script:LedgerTempRoot ([guid]::NewGuid().ToString('N') + '.txt')
+    Set-Content -LiteralPath $outside -Value 'x'
+    & cmd.exe /c mklink /H (Join-Path $d 'zz-linked.txt') $outside | Out-Null
+    @(Find-SandboxHardlinks -Path $d -MaxFiles 3).Count | Should Be 0
+  }
+
+  It 'the Modify grant logs it loudly and still grants (warn, not refuse)' {
+    $d = New-LedgerTempDir
+    $outside = Join-Path $script:LedgerTempRoot ([guid]::NewGuid().ToString('N') + '.txt')
+    Set-Content -LiteralPath $outside -Value 'x'
+    & cmd.exe /c mklink /H (Join-Path $d 'linked.txt') $outside | Out-Null
+    $script:IcaclsSpy = New-Object System.Collections.Generic.List[object]
+    $sw = New-Object System.IO.StringWriter
+    $oldErr = [Console]::Error
+    [Console]::SetError($sw)
+    try { $r = Grant-SandboxPoolAce -Path $d -Grant 'Modify' } finally { [Console]::SetError($oldErr) }
+    $r | Should Be 'granted'
+    $sw.ToString() | Should Match 'hardlink'
+    $sw.ToString().Contains((Join-Path $d 'linked.txt')) | Should Be $true
   }
 }

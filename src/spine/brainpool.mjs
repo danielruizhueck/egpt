@@ -27,6 +27,7 @@
 // its own `personality:` (see wrapFresh below), and its thread persists in a per-agent
 // NESTED block (recordThread(..., being)).
 import { slugDir, getBeing, getContact, forkKeyOf, recordThread, patchBeing, readIdentityFeed, seedIdentityLayers, readAutoModeLayer, appendThreadStat, recordAgentTurn, turnUser, mutateState, nowIsoString, rollTranscript, stampThreadId, DETERMINISTIC_MODEL, DETERMINISTIC_EFFORT, DEFAULT_ALLOWED_TOOLS } from '../conversations-state.mjs';
+import { backgroundAgentEnvOf } from '../background-agents.mjs';
 // THE wake vocabulary, imported — not re-read here. `handles:` (else the map key) plus the
 // CONDITIONAL fallback_handle, exactly as the mention matcher resolves them, so what the card
 // tells an agent it answers to can never drift from what actually wakes it (feedConfig below).
@@ -45,6 +46,7 @@ import { resolveOutboxTarget } from '../room-outbox.mjs';
 import { isContextOverflowError, isDeadSessionError } from '../brain-errors.mjs';
 import { parseFrequency } from './heartbeat-loader.mjs';
 import { WRITE_TOOLS } from '../claude-args.mjs';
+import { verboseOf } from '../warm-cli-session.mjs';
 import { loadPermissionLevel, isAccessLevel, isDeskOnly } from './permission-levels.mjs';
 import { readSecret, CLAUDE_OAUTH_TOKEN_FILE } from '../secrets.mjs';
 import { isSandboxPin, sandboxPinKeyOf } from './sandbox-pins.mjs';
@@ -168,7 +170,7 @@ function allowedPathsFor(def, onLog = () => {}) {
 //
 // WHY THE ROOT HAD TO GO, measured live 2026-09-23. The `egpt` mount landed and a sandboxed being
 // asked `pwd` still answered
-//   /c/Users/an/.egpt/conversations/whatsapp/Reencuentro CRC 1991-2026-2607161314
+//   /c/Users/user/.egpt/conversations/whatsapp/Reencuentro amigos 1990-2607161314
 // The process cwd really WAS the junction; the leak was the ARGV. `confineToDirs: [cwd]` carried
 // the Room's real path, claude-args unions every confine root into `--add-dir`, and the CLI
 // reports the spelling it was TOLD about. So the being was handed the operator's username and a
@@ -277,11 +279,15 @@ export function parseWarmBlock(doc) {
   const w = (doc && typeof doc === 'object' && doc.warm && typeof doc.warm === 'object' && !Array.isArray(doc.warm))
     ? doc.warm : {};
   const keep = w.keep === true;                        // warm.keep: never idle- or LRU-evicted (keepsWarm)
-  const v = w.idle_ttl;
-  if (v === undefined || v === null) return { idleTtlMs: null, keep };
-  if (v === 0) return { idleTtlMs: 0, keep };               // 0 = always evict (parseFrequency rejects it)
-  if (typeof v === 'number' && v < 0) return { idleTtlMs: v, keep };   // any negative = never evict (matches _armIdle's `ttl < 0`; parseFrequency also rejects negatives)
-  return { idleTtlMs: parseFrequency(v) ?? null, keep };    // garbage → null
+  return { idleTtlMs: parseIdleTtl(w.idle_ttl), keep };
+}
+
+// One warm idle TTL value (a conversation's idle_ttl, a class's idle_ttl_by_class entry) → ms, or null.
+export function parseIdleTtl(v) {
+  if (v === undefined || v === null) return null;
+  if (v === 0) return 0;                                    // 0 = always evict (parseFrequency rejects it)
+  if (typeof v === 'number' && v < 0) return v;             // any negative = never evict (matches _armIdle's `ttl < 0`; parseFrequency also rejects negatives)
+  return parseFrequency(v) ?? null;                         // garbage → null
 }
 
 // Default identity manifest: the shipped e_identity.md (honoring a config
@@ -399,7 +405,7 @@ function shapeDef(name, def, agent = {}, brainType = 'ccode') {
     // controlled from config.yaml rather than the agent.yaml"): that added two config.yaml tiers
     // ABOVE this one (see resolveConv), it did not retire it — this carry IS the bottom tier, and
     // wren's live egpt-xhigh.yaml sets verbose_thinking here and in neither config.yaml tier.
-    verbose_thinking: def?.verbose_thinking === true,
+    verbose_thinking: verboseOf(def?.verbose_thinking),
     chrome: def?.chrome === true,   // Claude in Chrome (--chrome); read by baseOpts, honoured only on the full-access tier
     // connectors (operator 2026-11-12, SI Admin #62860 «opción B»): this ONE being may load the operator's MCP
     // servers and claude.ai connectors (no --strict-mcp-config). Default stays off for every being (2026-10-26).
@@ -411,7 +417,7 @@ function shapeDef(name, def, agent = {}, brainType = 'ccode') {
 // "all agents see an src/ directory, it is actually interesting to have a my-code/ pointing to
 // src/egpt, we can 'leak' my own src/ to the agent (read-only for now)".
 //
-// THE PATH THAT ASK PRODUCED — `C:/Users/an/src` — WAS RETIRED ON 2026-09-23 (operator: "dismiss
+// THE PATH THAT ASK PRODUCED — `C:/Users/user/src` — WAS RETIRED ON 2026-09-23 (operator: "dismiss
 // mounting ~/src always, that was a faux-pas"). A sandboxed being now reaches the eGPT checkout
 // through the `src` junction in its own pool profile, backed by a STANDING group ACE on
 // ~\src\egpt, so it needs no allowed_paths entry to see its own code. THE MECHANISM BELOW IS
@@ -419,7 +425,7 @@ function shapeDef(name, def, agent = {}, brainType = 'ccode') {
 // that went, and it goes from config, not from here (setup/migrations owns that).
 //
 // A read grant used to be per TYPE FILE: config/agents/sonnet-default.yaml carried E's
-// `allowed_paths: { C:/Users/an/src/egpt: { allowed_tools: [Read, Glob, Grep] } }`, and granting
+// `allowed_paths: { C:/Users/user/src/egpt: { allowed_tools: [Read, Glob, Grep] } }`, and granting
 // the same folder to a second being meant writing that block into a second file. That is the
 // drift this repo keeps paying for — and REVOKING it meant finding every copy. config.yaml's own
 // top-level `allowed_paths:` is the one place to grant and the one place to revoke: it is merged
@@ -432,8 +438,8 @@ function shapeDef(name, def, agent = {}, brainType = 'ccode') {
 // THE DEF WINS. A being that names the SAME path keeps its own entry, whatever its class: the
 // node grant sits UNDER the def's own, so a narrower per-being grant is never widened by a
 // node-wide one written later. Paths are compared EXACTLY AS allowedPathsFor will read them
-// (trimmed, normalizeCwd'd), so a def writing `/c/Users/an/src` and a node writing
-// `C:/Users/an/src` are ONE path, not two — two spellings of one folder landing in two grant
+// (trimmed, normalizeCwd'd), so a def writing `/c/Users/user/src` and a node writing
+// `C:/Users/user/src` are ONE path, not two — two spellings of one folder landing in two grant
 // classes is exactly the double-ACE the launcher must never be handed. It is the walk's own
 // reading and nothing more: a config that spells one folder two ways in CASE (`c:/users` vs
 // `C:/Users`) still declares two paths here, exactly as it already does inside a single
@@ -702,7 +708,7 @@ export function createBrainPool({
   writeCard = writeConfigCard,      // (room, being, block, {io, onLog}) -> <room>/directives/config.readonly.yaml when it changed
   loadAutoLayer = readAutoModeLayer,// () -> the `mode: auto` operator-role instruction layer (appended to an auto conversation's kickoff)
   loadManifest = null,              // () -> e_identity.md fallback (default below)
-  afterTurn = null,                 // ({key, sessionId, model, cwd, allowedTools, compaction, outbox, armIdentityRefresh, noticeCompacted, noticeWarn}) — THE post-turn hook (auto-compaction AND the room-outbox drain ride this one, never a second). `armIdentityRefresh` is a CALLBACK the service invokes after a compact that succeeded — see the arming block at the end of turn(); `noticeWarn` ({text}) is the PRE-compaction admin notice (the primary one, said at the warn threshold) and `noticeCompacted` ({tokens}) the post-hoc confirmation, both null unless noticeTo is wired; `outbox` is {target:{key,to,unknown}, surface, slug, being, chatId} or null (src/room-outbox.mjs)
+  afterTurn = null,                 // ({key, klass, sessionId, model, cwd, allowedTools, compaction, outbox, armIdentityRefresh, noticeCompacted, noticeWarn}) — THE post-turn hook (auto-compaction AND the room-outbox drain ride this one, never a second). `armIdentityRefresh` is a CALLBACK the service invokes after a compact that succeeded — see the arming block at the end of turn(); `noticeWarn` ({text}) is the PRE-compaction admin notice (the primary one, said at the warn threshold) and `noticeCompacted` ({tokens}) the post-hoc confirmation, both null unless noticeTo is wired; `outbox` is {target:{key,to,unknown}, surface, slug, being, chatId} or null (src/room-outbox.mjs)
   loadPermission = loadPermissionLevel,  // (level) -> {dangerouslySkipPermissions, allowedTools}|null — config/permissions/<level>.md for /agents ... access_level; injectable (tests), NO caching in the real implementation (see permission-levels.mjs)
   // THE PLATFORM THIS NODE RUNS ON, injected rather than read off the global, so a test can
   // drive win32 AND posix in one run without redefining process.platform (same options-DI
@@ -890,6 +896,9 @@ export function createBrainPool({
     }
     const box = resolveSandboxedRung({ accessLevel, conversationValue: convSandboxed, agentDefaultValue: cd.sandboxed ?? null, platform });
     const tierOf = (conv, agent) => (conv != null ? 'conversation' : agent != null ? 'agent' : 'default');
+    // allowed_users_inheritance: false (operator 2026-11-09) makes a level's list final: what the card shows is what router.mayWake joins.
+    const convFinal = b?.allowedUsersInheritance === false, agentFinal = cd.allowed_users_inheritance === false;
+    const joinedUsers = (convFinal ? [b?.allowedUsers] : [cd.allowed_users, b?.allowedUsers]).filter(Array.isArray);
     return {
       scope,
       slug,
@@ -897,7 +906,7 @@ export function createBrainPool({
       sessionId: b?.threadId ?? null,
       sources: {
         accessLevel: tierOf(b?.accessLevel, cd.access_level),
-        allowedUsers: tierOf(b?.allowedUsers, cd.allowed_users),
+        allowedUsers: convFinal && b?.allowedUsers != null ? 'final' : b?.allowedUsers != null && cd.allowed_users != null ? (agentFinal ? 'joinedFinal' : 'joined') : agentFinal && cd.allowed_users != null ? 'agentFinal' : tierOf(b?.allowedUsers, cd.allowed_users),
         verboseThinking: tierOf(b0?.verboseThinking ?? b?.verboseThinking, cd.verbose_thinking),
         compaction: tierOf(b?.compaction, cd.compaction),
         outboxTo: tierOf(b?.outboxTo, cd.outbox_to),
@@ -962,9 +971,9 @@ export function createBrainPool({
       // `allowed_users` that gates WHO may wake the being (router.mjs/mesh.mjs's reachability
       // check; no list at either tier = only the node's owners) — and room/acim already carries one.
       accessLevel,
-      // ALLOWED_USERS, same two-tier resolution as accessLevel just above — for the room's config
-      // card (being-config-card.mjs). null = no list: only the owners (router.mjs mayWake).
-      allowedUsers: b?.allowedUsers ?? getConfig()?.agents?.[being]?.conversation_defaults?.allowed_users ?? null,
+      // ALLOWED_USERS, for the room's config card (being-config-card.mjs): the agent's list and the
+      // conversation's JOINED, as router.mjs mayWake reads them (2026-11-07). null = no list: only the owners.
+      allowedUsers: joinedUsers.length ? joinedUsers.flat() : null,
       // SANDBOXED — the whole precedence is resolveSandboxed (above), which is the ONE thing that
       // answers this field for every caller. Rungs 2 and 3 are the same two-tier read
       // accessLevel/allowedUsers use above; rung 1 is the level, rung 4 this node's OS.
@@ -1172,7 +1181,13 @@ export function createBrainPool({
             const granted = new Set(perm.allowedTools.map((t) => toolBase(t).toLowerCase()));
             narrowedTools = own.filter((t) => granted.has(toolBase(t).toLowerCase()));
           }
-          def = { ...def, dangerously_skip_permissions: perm.dangerouslySkipPermissions, allowed_tools: narrowedTools ?? perm.allowedTools };
+          // A `sandbox` being whose TYPE lists its own tools does not take the level's bypass flag
+          // (2026-11-09): the list is enforced by the CLI (dontAsk, claude-args.mjs) and the box is
+          // still the OS boundary. confinementFor then sends `osConfined`, which is what claude-args
+          // reads. Without this the level's flag made every `sandbox` being a bypass turn and the
+          // type's scoped `Bash(<bin>:*)` an inert rule. `all` is unchanged: unconfined by definition.
+          const listedInBox = narrowedTools != null && accessLevel === 'sandbox';
+          def = { ...def, dangerously_skip_permissions: perm.dangerouslySkipPermissions && !listedInBox, allowed_tools: narrowedTools ?? perm.allowedTools };
         } else if (isDeskOnly(accessLevel)) {
           throw new Error(`brainpool: ${being} is access_level 'reader' but config/permissions/reader.md is missing or unparseable — refusing the turn`);
         }
@@ -1216,14 +1231,16 @@ export function createBrainPool({
       // ./directives/config.readonly.yaml, rendered from the values THIS turn runs with and written
       // only when it changed — see being-config-card.mjs. Before the spawn, so a fresh thread's
       // first turn already finds it. Best-effort by contract (writeConfigCard never throws).
-      // `verbose` is the one reading of verbose_thinking, shared with baseOpts below.
+      // `verboseMode` (true | 'text' | false) is the one reading of verbose_thinking, shared with
+      // baseOpts below; `verbose` is its on/off, carried out on the reply.
       // A 'reader' gets none: the card names the node, handles and allowed_users.
-      const verbose = (verboseThinking ?? def.verbose_thinking) === true;
+      const verboseMode = verboseOf(verboseThinking ?? def.verbose_thinking);
+      const verbose = verboseMode !== false;
       if (!desk) await writeCard(Room.forChat(scope.surface, slug), being, renderConfigBlock({
         being, config: getConfig() ?? {}, scoped: scope.scoped, configuration, def, engine,
         model: runModel, effort: runEffort, accessLevel, sandboxed, sandboxedRung,
         mode: resolveMode({ mode }, being, getConfig() ?? {}),
-        verboseThinking: verbose,
+        verboseThinking: verboseMode,
         verboseSource: verboseThinking != null ? sources.verboseThinking : (def.verbose_thinking != null ? 'type' : 'default'),
         allowedUsers, compaction: compactionOver, sources, outboxTarget, threadId: sessionId,
       }), { io, onLog });
@@ -1275,6 +1292,8 @@ export function createBrainPool({
       // unboxed turn runs as the operator in his own. Read per turn like the credential above, so
       // an invalid entry is named in this turn's log.
       const sandboxReadMounts = sandboxed === true ? globalReadPathsOf(getConfig()?.global_read_paths, onLog) : [];
+      const cfgNow = getConfig();
+      const backgroundAgentEnv = ccode ? backgroundAgentEnvOf(cfgNow?.background_agents, cfgNow?.agents?.[being]?.background_agents, onLog) : [];
       // THE PIN (sandbox_pin): this being's own pool account in this conversation, and its standing paths
       // through the same allowed_paths walk — the launcher's -PinKey / -PinSharePath[ReadOnly].
       const sandboxPin = sandboxed === true && pin ? { key: pin.key, ...sandboxSharePathsFor({ allowed_paths: pin.paths }) } : null;
@@ -1327,9 +1346,9 @@ export function createBrainPool({
         // false. `??` (not ||) throughout, so an explicit `verbose_thinking: false` at a HIGHER
         // tier is a real opt-out that stops the walk rather than falling through to a lower
         // tier's `true` — the whole point of adding the config.yaml tiers over a type file one
-        // conversation can't otherwise escape. The `=== true` keeps a hand-typed non-boolean
-        // (`verbose_thinking: "yes"`) from reaching warm-cli-session as anything but a boolean.
-        verboseThinking: verbose,
+        // conversation can't otherwise escape. verboseOf keeps a hand-typed other value
+        // (`verbose_thinking: "yes"`) from reaching warm-cli-session as anything but false.
+        verboseThinking: verboseMode,
         // Plain passthrough (operator 2026-08-20) — boot.mjs's makeSession reads this to pick
         // createSandboxCliSession over createBrainSession.
         sandboxed: sandboxed === true,
@@ -1354,6 +1373,8 @@ export function createBrainPool({
         // argv it had.
         ...(sandboxReadMounts.length ? { sandboxReadMounts } : {}),
         ...(sandboxPin ? { sandboxPin } : {}),
+        // Sub-agent model/effort (config background_agents): env for the spawn, boxed or not. Applies when a process spawns.
+        ...(backgroundAgentEnv.length ? { backgroundAgentEnv } : {}),
         // ...and the one way a being can ask its spine for anything (operator 2026-09-26: "for now
         // only the browser"): a handle that mints a per-session credential for THIS being in THIS
         // room, revoked at close (src/spine/being-link.mjs) — -SetEnv entries for a boxed session
@@ -1435,7 +1456,8 @@ export function createBrainPool({
       // same warm entry but OMITS idleTtlMs, so it keeps the ttl stamped here — no
       // need to thread the override through it.)
       const idleTtlMs = readWarmTtl(convDir);
-      const run = (msg, opts) => pool.run(key, msg, onPartial, { brainOptions: opts, klass: 'conversation', idleTtlMs });
+      const klass = scope.surface === 'http' ? 'chatbox' : 'conversation';   // the chatbox limb: its own warm class, evicted first
+      const run = (msg, opts) => pool.run(key, msg, onPartial, { brainOptions: opts, klass, idleTtlMs });
 
       let r, overflow = false, deadSession = false;
       try { r = await run(firstMsg, baseOpts); }
@@ -1580,7 +1602,7 @@ export function createBrainPool({
           text,
         }), being)
         : null;
-      try { afterTurn?.({ key, sessionId: newSession ?? sessionId ?? null, model: def.model, cwd, allowedTools: baseOpts.allowedTools, compaction: compactionOver, outbox, armIdentityRefresh, noticeCompacted, noticeWarn }); } catch { /* non-fatal */ }
+      try { afterTurn?.({ key, klass, sessionId: newSession ?? sessionId ?? null, model: def.model, cwd, allowedTools: baseOpts.allowedTools, compaction: compactionOver, outbox, armIdentityRefresh, noticeCompacted, noticeWarn }); } catch { /* non-fatal */ }
       // `verbose` (the one reading of verbose_thinking resolved above) rides out on the reply so the
       // spine can gate the limb-only commandMark on it without a second config read (src/spine/sender.mjs).
       return { text, sessionId: newSession ?? sessionId ?? null, being, verbose, ...(r?.failed ? { failed: true, failReason: r.failReason ?? null } : {}) };
@@ -1632,15 +1654,6 @@ export function createBrainPool({
     keepsWarm(key) {
       const [, , surface, slug] = String(key).split(':');   // a fork's key adds :<fork>
       return parseWarmBlock(resolveConfig(slugDir(surface, slug))).keep;
-    },
-
-    // The background tasks still running on this conversation's warm session ([{ description, since }]),
-    // and only where a finished one would wake (convOfKey) — so one being's work shows in one chat.
-    background(being, ev) {
-      const conv = `${being}:${ev?.surface}:${ev?.chatId}`;
-      const k = lastKeyByConv.get(conv);
-      if (!k || newestConvOf(k) !== conv) return [];
-      return pool.background?.(k) ?? [];
     },
 
     // /agents compact|stop — the same lookup evict() uses. warmKey: null when it never ran here.
@@ -1698,7 +1711,7 @@ export function createBrainPool({
     //
     // WHAT IT RETURNS IS EVIDENCE OR NOTHING (operator 2026-09-09). `false` still means nothing
     // happened; anything else is the pool's `{ ack }` — a promise that later says whether the
-    // MODEL took the line, not whether a write to a pipe succeeded. That is the whole Joyce fix,
+    // MODEL took the line, not whether a write to a pipe succeeded. That is the whole Julia fix,
     // and it is passed straight through rather than collapsed to a boolean here, because the
     // spine is the layer that owns what a chat is shown (turns.mjs: 📩 for the bridge's receipt,
     // 👀 only once this ack says ok).

@@ -4,8 +4,8 @@
 // mode→decision LOGIC is the kept, test-locked auto-mode.mjs; this service only
 // resolves WHICH mode/policy applies and packages the per-message decision:
 //
-//   decide(being, ev, mention?, { denied? }) -> { mode, receives, mayReply }   (ONE conv-state read)
-//   surfaces(decision, replyText)-> boolean    POST-brain: mayReply + the 'on'-'...' silence cosmetic
+//   decide(being, ev, mention?, { denied?, bot? }) -> { mode, receives, mayReply, quiet? }   (ONE conv-state read)
+//   surfaces(decision, replyText, { failed? })-> boolean    POST-brain: mayReply + the 'on'/quiet '...' silence cosmetic; a failure always surfaces
 //
 // `mode` resolves down ONE chain, most specific first (operator 2026-07-25):
 //   config.yaml         closed_chats.<surface>.<id>   'off' for every being (closed-chats.mjs)
@@ -68,7 +68,8 @@ export async function superChannelAlive(chatId, { chatRaw, config = {} }) {
 
 // sideGroupFor(ev, { create }) → the chat a reply here goes to instead (a chat id, or a function that
 // makes it, for sender.open to call), false = withhold it, null = in place (commands.autoSideGroup:
-// reply_in_side_group, operator 2026-10-18). Absent → always in place.
+// reply_in_side_group, operator 2026-10-18). Absent → always in place. A /split takes no reply of its
+// parent's: it is another thread (operator 2026-11-20; the 2026-10-31 tunnel is gone).
 // seedOf(ev) → { agents: { <being>: block }, … } a brand-new conversation is seeded with (boot: the stranger rule), or null.
 export function createGating({ getConfig = () => ({}), loadState = null, seedOf = null, sideGroupFor = null } = {}) {
   const cfg = () => getConfig() ?? {};
@@ -76,38 +77,63 @@ export function createGating({ getConfig = () => ({}), loadState = null, seedOf 
   // The single per-target decision. ONE conversations.yaml read resolves the being's mode here. `mention` is passed
   // explicitly by the loop (it's the ROUTED being's mention — a sibling routed by its own @name
   // is mentioned for ITS gate, not @e's); default to ev.mention for direct callers.
+  // `side`: this one turn replies in the chat's side group (/side), whatever reply_in_side_group says.
   // `denied` is the router's allowed_users answer for this target (router.resolve): a denied
-  // sender is recorded but runs no turn, in any mode.
-  async function decide(being, ev, mention = ev.mention, { denied = false } = {}) {
+  // sender is recorded but runs no turn, in any mode. So is a reaction to a bot's post — one this account
+  // sent, or any node signed (the bridge's replyToBot/replyToNode) (operator 2026-11-01).
+  // `bot`: the line is not a human's (the spine's isHumanTurn). With dispatch.bot_quiet (default on) its
+  // turn is `quiet`: no ⏳ train, posted once whole, its '…' never shown, in any mode (operator 2026-10-31).
+  // So is a human's 'on' line that does not address the being (operator 2026-11-02): `unaddressed`.
+  // `emoji`: dispatch.thinking_train is not 'bubble' AND the chat's mouth can mark a line here
+  // (operator 2026-11-03): no ⏳ in any mode, the line carries 👾/🤔 instead. Else the turn is bubble's.
+  // `reacts`: () => Promise<boolean>, the spine's answer for this chat (turns.canMark), asked only then.
+  // `addressed`, with it: a human's line addresses the being (a wake is no line).
+  async function decide(being, ev, mention = ev.mention, { denied = false, bot = false, reacts = null, side = false } = {}) {
     const c = cfg();
     let state = null;
     if (loadState) { try { state = await loadState(); } catch { state = null; } }
     let bv = null;
     if (state) { try { bv = getBeing(state, ev.surface, ev.chatId, being); } catch { bv = null; } }
     if (!bv) bv = seedOf?.(ev)?.agents?.[being] ?? null;   // no entry yet: the block its seed will write
-    const { mode } = resolveMode(bv, being, c);
+    let { mode } = resolveMode(bv, being, c);
+    // A line may bring its own mode (ev.lineMode: a chatbox's support line is accum while the visitor's lines stay as the
+    // conversation has them). The same modes and gates: it never opens what the conversation closes (off, mute).
+    if (ev.lineMode && isAutoMode(ev.lineMode) && mode !== 'off' && mode !== 'mute') mode = ev.lineMode;
     const paused = !!(c.dispatch?.auto_paused ?? c.whatsapp?.auto_e_paused);
     const allowed = replyAllowed(mode, mention ?? {});
-    let mayReply = !denied && mayEmitChat({ paused, mode, replyAllowed: allowed, isReaction: ev.kind === 'reaction' });
+    const addressed = replyAllowed('mention', mention ?? {});
+    const onBotPost = ev.kind === 'reaction' && (!!ev.mention?.replyToBot || ev.replyToNode != null);
+    let mayReply = !denied && !onBotPost && mayEmitChat({ paused, mode, replyAllowed: allowed, isReaction: ev.kind === 'reaction' });
     // Not asked for a backlog read or the operator's own line in an auto chat: no reply follows either.
     let replyChatId = null;
     if (mayReply && sideGroupFor && !ev.backlog && !(mode === 'auto' && ev.isSender)) {
       let at = null;
       // An addressed reply makes the group now; an unaddressed one (on/auto) once it has something to post.
-      try { at = await sideGroupFor(ev, { create: replyAllowed('mention', mention ?? {}) }); } catch { at = false; }
+      try { at = await sideGroupFor(ev, { create: addressed, once: side }); } catch { at = false; }
       if (at === false) mayReply = false;
       else if (at) replyChatId = at;
     }
-    return { mode, receives: receives(mode), mayReply, ...(replyChatId ? { replyChatId } : {}) };
+    const unaddressed = !bot && mode === 'on' && !addressed;
+    const quiet = bot ? c.dispatch?.bot_quiet !== false : unaddressed;
+    let emoji = c.dispatch?.thinking_train !== 'bubble' && mayReply && !!reacts;
+    if (emoji) { try { emoji = (await reacts()) === true; } catch { emoji = false; } }
+    const direct = emoji && !bot && addressed && ev.msgId != null;
+    return { mode, receives: receives(mode), mayReply, ...(replyChatId ? { replyChatId } : {}), ...(quiet ? { quiet } : {}), ...(unaddressed ? { unaddressed } : {}), ...(emoji ? { emoji } : {}), ...(direct ? { addressed: true } : {}) };
   }
 
   // POST-brain surfacing: the reply surfaces when mayReply held AND it isn't an
   // 'on'-mode '...' silence (E free to post but declining to add noise — recorded,
   // not surfaced). Every other mode is already fully decided by mayReply.
-  function surfaces(decision, replyText) {
+  // With the emoji train a silence to a human who addressed the being is posted (operator 2026-11-03),
+  // except in auto (the operator's own silence).
+  // A FAILED turn always surfaces, in every mode (operator 2026-11-04: "if there's a failure it has to be loud"):
+  // the engine's flag, or no text at all. Only a '…' is a silence.
+  function surfaces(decision, replyText, { failed = false } = {}) {
     if (!decision?.mayReply) return false;
-    // 'auto' gates like 'on' — its free-post silence ('…') is likewise recorded, not surfaced.
-    return !((decision.mode === 'on' || decision.mode === 'auto') && isSilenceReply(replyText));
+    if (failed || !String(replyText ?? '').trim()) return true;
+    if (decision.emoji && decision.addressed && decision.mode !== 'auto' && !decision.quiet) return true;
+    // 'auto' gates like 'on' — its free-post silence ('…') is likewise recorded, not surfaced. So is a quiet turn's, in any mode.
+    return !((decision.mode === 'on' || decision.mode === 'auto' || decision.quiet) && isSilenceReply(replyText));
   }
 
   return { decide, surfaces };

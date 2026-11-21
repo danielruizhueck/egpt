@@ -234,6 +234,11 @@ const PORTABLE_BY_DESIGN = [
     code: "? ['powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', LAUNCHER_PATH, ...params]]",
     why: 'THE LAUNCHER PER PLATFORM (EDW 2026-10-24; was debt since 2026-09-04): the win32 branch of launchCommand. Linux runs docker/egpt-box through sudo with the same parameters; any other platform is refused by boxUnavailable before this is reached.',
   },
+  {
+    file: 'src/daemon-runtime.mjs',
+    code: "spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', join(root, 'setup', script)",
+    why: 'THE DAEMON SUPERVISES THE PRIMARY BEEPER (operator 2026-11-15, GENOME 6): one pass of setup/beeper-window.ps1 -Once (S1) or s0-identity-reconcile.ps1 -BeeperOnly (S0) per tick. Its timer starts only when platform === \'win32\' (start()), where the Beeper services and the S0/S1 split exist; the decisions stay in setup/*.ps1.',
+  },
 ];
 
 // Group 2: genuine platform coupling in the scanned tree. NOT excused — recorded, so the suite
@@ -274,7 +279,7 @@ describe('the spine stays OS-agnostic (src/**, src/tools/** excluded)', () => {
     // is what stands between them and this repo's very chatty Windows prose.
     const asCode = [
       'const isMain = import.meta.url === `file:///${process.argv[1]}`;',
-      "const p = 'C:\\\\Users\\\\an\\\\bin\\\\whisper.exe';",
+      "const p = 'C:\\\\Users\\\\user\\\\bin\\\\whisper.exe';",
       "spawnSync('powershell.exe', a); spawnSync('nssm', b); spawnSync('schtasks', c);",
       "join(root, 'venv', 'Scripts', 'python.exe');",
     ].join('\n');
@@ -520,7 +525,6 @@ describe('the retired Beeper Desktop service names are gone from the tree', () =
   const MAY_NAME_THE_OLD_SERVICES = new Set([
     'setup/beeper-s0-naming.ps1',            // the old -> new map the detection reads
     'setup/rename-beeper-s0-service.ps1',    // the tool that performs the rename
-    'OPERATIONS.md',                         // the runbook that tells the operator to run it
     'tests/integrity.test.mjs',              // this scan
     // The Pester suite for the naming module. It ASSERTS the old -> new mapping, so it must
     // spell both sides. It was missed when this scan landed because the scan walks

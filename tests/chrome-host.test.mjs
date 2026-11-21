@@ -14,7 +14,7 @@ import { createCommands, CHROME_BRAIN_PROFILE } from '../src/spine/commands.mjs'
 import { fakeChromeChild } from './fake-pipe-chrome.mjs';
 
 const MB = 1024 * 1024;
-const SHARED = { key: 'Reinie-2607150057', name: 'Reinie', group: 'shared' };
+const SHARED = { key: 'Renata-2607150057', name: 'Renata', group: 'shared' };
 const ROOT = dirname(CHROME_BRAIN_PROFILE);
 // What the spine sends for group `g` (commands.mjs ensureGroupChrome).
 const launchOf = (group, bin = 'chrome') => ({ group, profileDir: join(ROOT, group), bin, argv: chromePipeArgs({ userDataDir: join(ROOT, group), windowName: group }) });
@@ -141,7 +141,7 @@ describe('no daemon IPC → no browser', () => {
     expect(r).toMatchObject({ ok: false, reason: 'no-browser' });
     expect(r.detail).toMatch(/no daemon chrome-host/);
     expect(logs).toHaveLength(1);
-    expect(logs[0]).toMatch(/no browser for "Reinie"/);
+    expect(logs[0]).toMatch(/no browser for "Renata"/);
   });
 
   // Operator 2026-10-22: the Session 0 service runs the node while nobody is logged in; the browser
@@ -387,5 +387,28 @@ describe('a refresh while the daemon still holds an earlier sign-in window', () 
     expect(w.spawns).toHaveLength(1);
     expect(w.spawns[0].child.killed).toBe(false);
     pair.drop();
+  });
+});
+
+// A browser group's own virtual screen (plans/2611022204-BROWSER-SCREENS.md): the spine names the display, the
+// daemon runs that Chrome with DISPLAY set to it and says so; no display → the daemon's own environment.
+describe('the daemon launches on the group\'s screen', () => {
+  it('a pipe and a plain Chrome get DISPLAY=<display>; without one the env is the daemon\'s own', async () => {
+    const w = world();
+    const { chromeHost } = w.connect();
+    expect(await chromeHost.launch({ ...launchOf('g'), display: ':101' })).toMatchObject({ pid: 4000, display: ':101' });
+    expect(w.spawns[0].opts.env.DISPLAY).toBe(':101');
+    chromeHost.kill('g');
+    await until(() => w.spawns[0].child.killed);
+    expect(await chromeHost.launchPlain({ group: 'h', profileDir: join(ROOT, 'h'), bin: 'chrome', argv: chromePlainArgs({ userDataDir: join(ROOT, 'h') }), display: ':102' })).toEqual({ pid: 4001, display: ':102' });
+    expect(w.spawns[1].opts.env.DISPLAY).toBe(':102');
+    expect(await chromeHost.launch(launchOf('k'))).not.toHaveProperty('display');
+    expect(w.spawns[2].opts.env).toBeUndefined();
+  });
+
+  it('refuses a display that is not ":<n>"', async () => {
+    const w = world();
+    await expect(w.connect().chromeHost.launch({ ...launchOf('g'), display: 'evil:1; x' })).rejects.toThrow(/is not ":<n>"/);
+    expect(w.spawns).toHaveLength(0);
   });
 });

@@ -10,6 +10,8 @@
 // No invisible characters go out (visibleOnly; Telegram reads hidden text as spam, 2026-10-24): the
 // port's wrap adds no structural frame, and send/edit/caption strip what is left. So the bot's own
 // message is known by its sender, and the being who wrote it by its visible stamp (stampedBeing).
+// A bot never receives its own posts: a being's settled line that names a handle is handed in as the
+// echo Beeper would deliver (echo, below), so the spine wakes the being it addresses.
 // A being's Markdown goes out as Telegram HTML (md-to-tg-html.mjs); text Telegram cannot parse goes
 // once more as plain text.
 import { readFile, writeFile, mkdir, unlink } from 'node:fs/promises';
@@ -26,7 +28,7 @@ import { mediaKind, MIME_BY_EXT } from '../media-kind.mjs';
 import { shouldDownload } from '../media-save.mjs';
 import { POSTS_BACK_DELAY_MS } from '../incoming-media.mjs';
 import { transcribeAudioFile } from '../tools/transcribe.mjs';
-import { makeWrapPersona, stampedBeing } from './persona-wrap.mjs';
+import { makeWrapPersona, stampedBeing, BEING_STAMP } from './persona-wrap.mjs';
 import { makeSerialByKey } from '../serial-by-key.mjs';
 import { startVoiceNote, readBack, savedEntry, withMediaLines, VOICE_NOTE_PLACEHOLDER } from './limb-intake.mjs';
 
@@ -107,6 +109,7 @@ export function startTelegramBridge({
   connection = 'main',
   isAllowedUser = () => false,
   wakeWords,
+  wakeWordsIn = async () => null,   // (network, chatId) => that chat's sets when it overrides a being's handles (boot)
   addressWithoutAt = true,
   nodeName = '',
   personaStamps = () => [],  // [{ being, bodyEmoji, label }]: reads a being off its stamp (stampedBeing)
@@ -274,6 +277,29 @@ export function startTelegramBridge({
   const stale = (dateS) => (Number(dateS) || 0) * 1000 < Math.max(startedAt, resumedAt?.() ?? 0) - WAKE_WINDOW_MS;
   const hand = (body, from, what) => Promise.resolve().then(() => onIncoming?.(body, from)).catch((e) => log(`${what} onIncoming threw — ${e?.message ?? e}`));
 
+  // OUR OWN POST, AS BEEPER'S ECHO WOULD BRING IT BACK (the Bot API never does): a being's settled line
+  // that names a handle (read past its stamp, as the router reads it), signed with this node and that
+  // being. The spine decides the rest — only a being it addresses wakes, never its author or a being on
+  // by mode, and the wake counts toward the loop guard. `recorded`: the being's reply line is already
+  // the record. A line naming nobody (a status, a ✓) and a line no being stamped are never handed.
+  async function echo(chatId, msgKey, text) {
+    const fromBeing = stampedBeing(text, personaStamps());
+    if (!fromBeing || msgKey == null) return;
+    const words = (await wakeWordsIn('telegram', chatId))?.wakeWords ?? wakeWords;
+    const st = mentionStatus(String(text).trimStart().replace(BEING_STAMP, ''), words, { addressWithoutAt });
+    if (!st.atEAnywhere) return;
+    log(`echo [${titles.get(chatId) ?? chatId}] ${fromBeing}: ${JSON.stringify(String(text).slice(0, 60))}`);
+    hand(text, {
+      chatId, chatName: titles.get(chatId) ?? null, chatType: apiChatId(chatId).startsWith('-') ? 'group' : 'private', network: 'telegram',
+      userId: String(me?.id ?? ''), username: me?.username, firstName: me?.first_name, senderName: nameOf(me, String(nodeName)),
+      isSender: true, authorized: true,   // the bot is this node's own account, as Beeper's echo arrives on it
+      atEStart: st.atEStart, atEAnywhere: st.atEAnywhere,
+      isReaction: false, isTranscriptFromVoice: false,
+      msgKey, msgTs: now(),
+      fromNode: String(nodeName).trim(), fromBeing, recorded: true,
+    }, 'echo');
+  }
+
   // A HUMAN REACTION is input, as on Beeper (dispatch-line reactionAction; the chat's mode decides).
   // Telegram never reports the bot's own reactions, and in groups reports them only to an admin bot.
   function reacted(r) {
@@ -392,7 +418,7 @@ export function startTelegramBridge({
     let path = null, isVoice = false, pending = null, listening = false;
     if (md && (md.voice || shouldDownload(policy, md.kind))) path = await download(md, title);
     const meta = md && shouldDownload(policy, md.kind) && typeof onMedia === 'function'
-      ? { chatID: chatId, chatName: title, chatType, network: 'telegram', msgId: msgKey, senderName, isSender: false, ts: tsMs, kind: md.kind, mime: md.mime, fileName: md.fileName, isVoiceNote: !!md.isVoiceNote }
+      ? { chatID: chatId, chatName: title, chatType, network: 'telegram', msgId: msgKey, senderName, isSender: false, ts: tsMs, kind: md.kind, mime: md.mime, fileName: md.fileName, isVoiceNote: !!md.isVoiceNote, backlog }
       : null;
     if (md?.voice) {
       isVoice = true;
@@ -400,7 +426,7 @@ export function startTelegramBridge({
         const svc = await resolveTranscriptionService(chatId);
         ({ text, pending, listening } = await startVoiceNote({
           path, chatId, title, msgId: msgKey, tsMs, durationSec: md.duration, author: senderName,
-          operatorSent: () => authorized,
+          operatorSent: () => authorized, backlog,
           svc, echoPlan, echoMaxAgeMs, echoTimeoutMs, postsBackDelayMs, audioCfg, transcribe, outboundFor, scheduler,
           reply: (t) => echoGate(() => send(wrapEcho(echoTag, t), { chatId, replyToMessageID: msgKey })),
           serial: transcribing,
@@ -409,11 +435,11 @@ export function startTelegramBridge({
       } else text = VOICE_NOTE_PLACEHOLDER;
       if (caption) text = `${text}\n${caption}`;
     }
-    // Saved through the host's onMedia and announced (the voice note's own line already says it).
+    // Saved through the host's onMedia and announced (a transcribed voice note's own line already says it).
     const withMedia = async (body, voiceCaption) => {
       if (!meta || !path) return body;
       let saved = [];
-      try { saved = [savedEntry(await onMedia({ ...meta, localPath: path, caption: isVoice ? voiceCaption : caption }), { kind: md.kind, localPath: path, fileName: md.fileName, isVoiceNote: !!md.isVoiceNote, inText: isVoice })]; }
+      try { saved = [savedEntry(await onMedia({ ...meta, localPath: path, caption: isVoice ? voiceCaption : caption }), { kind: md.kind, localPath: path, fileName: md.fileName, inText: isVoice && !backlog })]; }
       catch (e) { log(`onMedia threw — ${e?.message ?? e}`); }
       return withMediaLines(body, saved);
     };
@@ -708,6 +734,7 @@ export function startTelegramBridge({
       if (await applyEdit(head)) {
         handle.delivered = true;
         for (const part of rest) await send(part, { chatId });
+        echo(chatId, realId, latest).catch((e) => log(`echo threw — ${e?.message ?? e}`));
         return;
       }
       handle.lastError = handle.lastError || 'final edit failed';
@@ -734,6 +761,9 @@ export function startTelegramBridge({
     wasSentByUs,
     sendFailure: (chatId) => failures.get(current(chatId)) ?? null,
     getChatName: (chatId) => titles.get(chatId) ?? null,
+    // A config-named channel (admin_channel, log_to_group) given as a tg: id is that chat, a topic included (boot
+    // resolveConfiguredChat; nu's admin channel is a topic, 2026-11-02). A bot cannot list its chats: a name is none.
+    resolveChatId: (id) => (isTelegramChatId(id) ? current(String(id)) : null),
     isAlive: () => alive,
     stop: () => {
       stopped = true;

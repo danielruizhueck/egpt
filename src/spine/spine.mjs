@@ -24,7 +24,7 @@ import { randomBytes } from 'node:crypto';
 import { createTurns } from './turns.mjs';
 import { makeSerialByKey } from '../serial-by-key.mjs';
 import { INTAKE_LANES } from './lag-probe.mjs';
-import { createLiveness } from './liveness.mjs';
+import { createLiveness, workOf } from './liveness.mjs';
 // WHICH CONNECTION AN OUTBOUND GOES OUT ON — the ONE resolver (sender.mjs makeOutbound), not a
 // fourth local copy of `bridgeOf(being) ?? bridge`.
 import { makeOutbound, elapsed } from './sender.mjs';
@@ -32,7 +32,7 @@ import { isBrainFailureResult } from '../brain-errors.mjs';
 import { replyLine, contextSinceLastTurn, promptWithRecentContext, bodyForMessageId, promptWithQuotedMessage, RECENT_CONTEXT_MAX_CHARS } from '../transcript-log.mjs';
 import { isHumanTurn, turnKind, parseStopWord, pauseNotice, isStopPhrase, STOP_PHRASE } from '../stop-guard.mjs';
 import { SHELL_SURFACE } from './identity.mjs';
-import { mentionHits, withoutAddress, isDeliberateSilence } from '../auto-mode.mjs';
+import { mentionHits, withoutAddress, isDeliberateSilence, isSilenceReply } from '../auto-mode.mjs';
 import { lifecycleExit } from './ingest.mjs';
 import { cleanForSpeech } from '../speech-clean.mjs';
 
@@ -81,6 +81,7 @@ import { cleanForSpeech } from '../speech-clean.mjs';
  * @property {'text'|'reaction'|'edit'} kind   an utterance, or a stage-direction (reaction/edit: bracket-wrapped, references its own target in the body)
  * @property {{atEStart: boolean, atEAnywhere: boolean, replyToBot: boolean}} mention  mention status the bridge already computed — the gating service's input
  * @property {boolean} backlog  older than bridge start (a woken node's replay): transcript-logged as backfill, NEVER dispatched
+ * @property {string|null} lineMode  the mode THIS line is gated by when it is not its conversation's (a chatbox's support line: 'accum'); gating.decide reads it, null on every other inbound
  * @property {boolean} authorized  sender is an allowed_user on this surface — on a shared account every own-account send reads true, so this is NOT a provenance test
  * @property {boolean} isSender    arrived on OUR OWN account (the operator, a peer node, or our own echo)
  * @property {boolean} isVoice     the body is a voice-note transcription
@@ -88,6 +89,7 @@ import { cleanForSpeech } from '../speech-clean.mjs';
  * @property {string|null} fromNode   WHICH NODE's spine committed this text. null = UNSIGNED (a human, the ordinary case); '' = SIGNED BY A NODE WE CANNOT NAME; otherwise the node name. Read by the guard (isHumanTurn: OUR OWN output is not a human turn) and by the room relay. A signed line wakes only a being it explicitly addresses (@mention or a quote of its post), never by fall-through or mode (handleFast, operator 2026-10-18)
  * @property {{surface: string, chatId: string, chatName?: string}|null} origin  WHERE this message ACTUALLY ARRIVED, when a synthetic re-addressed it elsewhere (the room relay's wa-group tunnel). The address above is its IDENTITY (thread/warm process/queue/access_level); this is its PROVENANCE, read ONLY by the gates that ask "where did this arrive" (router.mjs's surface pin + fallback_handle roster question). null on every genuine inbound ⇒ those gates read ev itself
  * @property {string|null} via   'ingest' when the ingest box's `/to` typed it (the line's entry point renders as `.ingest`); null on every limb's inbound
+ * @property {boolean} recorded  ALREADY ON THE RECORD: a limb's stand-in for the echo its surface never delivers (Telegram: a bot never receives its own posts). The being's reply line is the record, so the ingestion point skips it; everything else runs as for any echo. false on every genuine inbound
  * @property {string} [line]    the formatted dispatch line every brain sees, built once here (C7.6e)
  * @property {any}    raw       the bridge's original `from` payload
  */
@@ -114,6 +116,14 @@ const gateAs = (t, fallback) => t?.being ?? t?.mesh?.being ?? fallback;
 
 // An ambient 'on' turn still running this long opens its ⏳ train (operator 2026-10-18).
 const AMBIENT_OPEN_MS = 10_000;
+// A turn that never opens its ⏳ and posts its reply whole at finish: a quiet one, and every one with
+// the emoji train (dispatch.thinking_train, operator 2026-11-03).
+const whole = (d) => !!(d.quiet || d.emoji);
+// …except an emoji turn's first tool use opens it, as an ambient bubble turn's does (operator 2026-11-04). A bot's line is
+// not opened by a bare tool use. Any turn's first real text opens it, under the final reply's gate (operator 2026-11-11).
+const opensOnTool = (d) => !!d.emoji && (!d.quiet || !!d.unaddressed);
+// Text that is still only a polite silence, or the start of one ('.', '..'), opens nothing: a silence stays unseen.
+const silentSoFar = (t) => isSilenceReply(t) || isSilenceReply(`${String(t ?? '').trim()}...`);
 
 /**
  * Build the spine. Nothing starts until start(). All deps are injected so the
@@ -148,11 +158,11 @@ export function createSpine({
   mesh,                                // optional §2c mesh service (Phase 4b cross-node relay)
   actions,                             // optional §2c reply-actions service (E's limbs: react/reply/media/edit/delete emitted in a reply)
   advice,                              // optional §2c advice service (mode: auto — /ask + operator-answer routing)
-  ingestAsk = null,                    // optional { isAnswer(ev), answer(ev) } — an owner's yes/no to the ingest box's question (boot)
+  ingestAsk = null,                    // optional { isAnswer(ev), answer(ev), ask(ev, [{ being, target }]), tick(now) } — the open yes/no questions (boot): the ingest box's (an owner answers) and a refused mention's (its being's allowed_users, or an owner, answer); tick(now) counts their time down and expires them, on this pulse
   guard = null,                        // optional §2c stop-guard: the per-channel loop-breaker + RESUME (createStopGuard, boot-wired). Null = pipe runs unguarded (tests).
   stopSwitch = null,                   // optional §2c KILL SWITCH (boot-wired): { present(): does EGPT_HOME/STOP exist, async pull(why): warn in why.chatId (capped, best-effort) + write the file + take the SERVICE down }. Two call sites, both on paths that already exist — tick() (the operator touched the file; no chatId, so nothing to warn) and classify() (the chat safe word, which carries its chat). Null = no kill switch (tests).
   stopPhrase = () => STOP_PHRASE,      // () => the kill phrase (boot: config stop_phrase; unset → STOP_PHRASE, '' → off)
-  isSelfChat = () => false,            // (ev) => is this message in THE SELF CHAT — the operator's own command channel (boot: networks.whatsapp.chat_ids[0]). The ONLY chat the safe word is honoured in (operator 2026-07-26). Default false = FAIL-CLOSED: an un-wired spine has no chat kill switch at all, which is the safe direction for a switch that takes the service down.
+  isSelfChat = () => false,            // (ev) => is this message in THE SELF CHAT — the operator's own command channel (boot: networks.whatsapp.admin_chat_ids[0]). The ONLY chat the safe word is honoured in (operator 2026-07-26). Default false = FAIL-CLOSED: an un-wired spine has no chat kill switch at all, which is the safe direction for a switch that takes the service down.
   // A RELAY CHANNEL IS TRANSIT, NOT A CONVERSATION (operator 2026-08-31: "when a message arrived
   // to a 'egpt-mesh-*' channel, it must be treated as a transit message. the log if required is in
   // beeper itself"). OPTIONAL (ev) => boolean, boot-wired to src/spine/node-names.mjs's
@@ -163,13 +173,16 @@ export function createSpine({
   isTransit = () => false,
   // A BEING DOES NOT WAKE ON A FRAME ANOTHER NODE'S SPINE COMMITTED (operator 2026-08-31).
   guardOverride = null,                // optional (surface, chatId) => { turns?, window? } | null — the conversation's per-channel guard override (conversations.yaml). Null = node defaults only.
-  fromThisNode = () => false,          // (ev) => did THIS node's own spine commit this text? boot: `ev.fromNode != null && !fromOtherNode(getConfig(), ev)` — the SAME ownNodeNamesOf set every other "who are we" question reads. The guard's third bucket (stop-guard turnKind 'echo'): our own ⏳ placeholder coming back through Beeper is bookkeeping, so it neither counts toward the loop cap nor resets it (kg 2026-09-20, "🌴FAMILIA PALMA🌴"). Default false = never our own frame, byte-identical to before.
+  fromThisNode = () => false,          // (ev) => did THIS node's own spine commit this text? boot: `ev.fromNode != null && !fromOtherNode(getConfig(), ev)` — the SAME ownNodeNamesOf set every other "who are we" question reads. The guard's third bucket (stop-guard turnKind 'echo'): our own ⏳ placeholder coming back through Beeper is bookkeeping, so it neither counts toward the loop cap nor resets it (kg 2026-09-20, "🌴FAMILIA MUESTRA🌴"). Default false = never our own frame, byte-identical to before.
   logToGroup = null,                   // optional (text) => Promise — boot's log_to_group poster (node-prefixed there). Liveness reports a being that did not answer whether its long background work is still needed. Null ⇒ the note is all there is.
   backgroundWork = null,               // optional () => [{ being, chatId, description, since }] — every warm session's live background tasks (boot: the pool's); the restart drain waits for them
   allBackground = null,                // optional, same shape — every live background task whoever holds the process (boot: the pool's); what a /standdown ends
+  backgroundOutcome = null,            // optional ({ being, chatId, taskId }) => { status, message } | null — how a finished background task ended, as its session's CLI said it (boot: the pool's); the chat's status marks it. Null ⇒ not known (◦)
   background = null,                   // optional registry (src/spine/background.mjs): pending voice notes at the ingestion point, agents mirrored on the tick
   beeperUpdate = null,                 // optional (src/tools/beeper-update.mjs): its 6-hourly Beeper check rides the tick
+  egptUpdate = null,                   // optional (src/tools/egpt-update.mjs): its 6-hourly look at the checkout's upstream rides the tick
   sandboxPins = null,                  // optional (src/spine/sandbox-pins.mjs): releasing pins whose conversations.yaml sandbox_pin is gone rides the tick
+  warmPool = null,                     // optional (src/warm-sessions.mjs): its memory-pressure eviction rides the tick
   remindClosed = null,                 // optional (ev) => Promise — closed_chats' reminder (src/spine/closed-chats.mjs remind)
   say = null,                          // optional ({ chatId, text, what }) => Promise<boolean> — boot's sayOnce, i.e. THE outbound placement (sender.mjs makeOutbound `say`), the same one the STOP confirmation and the lifecycle lines go through. The ONE thing the spine says on its own account: the loop guard's pause notice (operator 2026-09-20: "if the bridge pauses, it must emit warning in the channel with instructions on how to recover, instead of leaving everybody hanging"). Null (tests, a bare pipe) ⇒ a pause is logged and nothing is posted.
   // RECENT CONTEXT read seam (operator 2026-07-26) — `(chatId, {chatName, network}) =>
@@ -178,6 +191,10 @@ export function createSpine({
   // rather than re-derived: one resolver, so this can never read a different chat's file.
   // Null (every existing pipe path) = the option cannot engage — byte-identical to before.
   readTranscript = null,
+  // ONE ACCUM FROM A CHAT AND ITS SI+ SIDE GROUP (operator 2026-11-20) — `(chatId, {chatName, network, being}) =>
+  // Promise<string|null>`: the text mode:accum reads when the chat has a side group (src/spine/accum.mjs; their
+  // transcripts joined in time order), null when it has none. Null / absent = readTranscript's text, as before.
+  readAccum = null,
   // CONFIG REFRESH ON MESSAGE ARRIVAL (2026-08, replacing the old tick-based hot reload):
   // optional () => Promise<void>, called at the top of handleFast for every inbound message —
   // boot.mjs wires it to re-scan the config resolver + reload the heartbeat set (see
@@ -201,6 +218,8 @@ export function createSpine({
   log = {},
   tickMs = 0,
   livenessEveryMs,                     // () => ms — every live message's pulse (config liveness.every_ms, read each tick); undefined → liveness.mjs default
+  livenessBackgroundEveryMs,           // () => ms — a chat's unchanged background status, posted again (config liveness.background_every_ms, read each tick); undefined → liveness.mjs default
+  livenessBackgroundChangeMs,          // () => ms — a change to it waits this long after the last status (config liveness.background_change_ms, read each tick); undefined → liveness.mjs default
   // Per-turn timeout, opt-in (config turn_timeout_ms). ≤0/absent = none (operator 2026-10-26).
   // On expiry the turn fails visibly and its warm entry is evicted.
   turnTimeoutMs = 0,
@@ -234,9 +253,9 @@ export function createSpine({
   const inCommandOrder = makeSerialByKey();
   const ordered = (fn) => (...a) => inCommandOrder('commands', () => fn(...a));
   if (commands) commands = new Proxy(commands, { get: (t, k) => (k === 'run' && typeof t[k] === 'function' ? ordered(t[k].bind(t)) : Reflect.get(t, k)) });
-  // LIVENESS (src/spine/liveness.mjs): a running turn and a being's background work stay visibly
+  // LIVENESS (src/spine/liveness.mjs): a running turn and a chat's background work stay visibly
   // alive in the chat; long background work is asked about through the wake path below.
-  const liveness = createLiveness({ sender, brain, now: () => clock.now(), everyMs: livenessEveryMs, stopped: () => !!stopSwitch?.present(), labelOf, note, ask: (o) => wakeOnBackground(o), report: logToGroup });
+  const liveness = createLiveness({ sender, allBackground, outcomeOf: backgroundOutcome, now: () => clock.now(), everyMs: livenessEveryMs, backgroundEveryMs: livenessBackgroundEveryMs, backgroundChangeMs: livenessBackgroundChangeMs, stopped: () => !!stopSwitch?.present(), timeZone, labelOf, note, ask: (o) => wakeOnBackground(o), report: logToGroup });
 
   // --- GUARD (C7.7): the SINGLE per-channel loop-breaker + human STOP/RESUME, wired at
   //     THIS chokepoint (handleFast) through which every inbound turn flows. Injected, so
@@ -288,7 +307,7 @@ export function createSpine({
     // refuses it, so it could only ever log a stop that never happened.
     if (channel == null) return;
     // OUR OWN ECHO IS NOT A TURN (operator 2026-09-20). E's ⏳ placeholders, posted through the
-    // mouth account and re-entering on the ear, filled PALMA's cap in five seconds. Bookkeeping
+    // mouth account and re-entering on the ear, filled MUESTRA's cap in five seconds. Bookkeeping
     // neither counts nor resets. EXCEPT a same-node CROSS-BEING wake (E→E+): it IS real chatter and
     // must count exactly as a cross-node one does, or a runaway E↔E+ never auto-STOPs (2026-10-13).
     if (kindOf(ev) === 'echo' && !crossBeingWake) return;
@@ -428,8 +447,9 @@ export function createSpine({
   // Pending dwells, keyed by turnKey. Each holds the LATEST triggering ev (what the fired
   // turn quotes/records) + firstAt (the CAP anchor). The burst content itself lives in the
   // cycle (cycleBy), so a fired dwell just drains it — no separate message buffer.
+  // `marks`: each burst line's emoji train (markOf), carried to the one turn that answers them all.
   const dwellBy = new Map();
-  function armDwell(turnKey, ctx) {
+  function armDwell(turnKey, { marks = [], ...ctx }) {
     const existing = dwellBy.get(turnKey);
     const firstAt = existing?.firstAt ?? clock.now();
     if (existing?.timer) clearTimeoutFn(existing.timer);
@@ -437,7 +457,7 @@ export function createSpine({
     const wait = Math.min(dwellDuration(), remaining);
     const timer = setTimeoutFn(() => { fireDwell(turnKey).catch((e) => note(`dwell ${turnKey}: ${e?.message ?? e}`)); }, wait);
     timer?.unref?.();
-    dwellBy.set(turnKey, { ...ctx, timer, firstAt });
+    dwellBy.set(turnKey, { ...ctx, marks: [...(existing?.marks ?? []), ...marks], timer, firstAt });
   }
   // A message arriving mid-dwell (incl. the operator's own accumulated line) re-arms the
   // timer, keeping the SAME trigger — no-op when no dwell is pending. `trigger` rides with the
@@ -457,11 +477,12 @@ export function createSpine({
     const entry = dwellBy.get(turnKey);
     if (!entry) return;
     dwellBy.delete(turnKey);
-    const { to, ev, mention, pinned, trigger = null } = entry;
+    const { to, ev, mention, pinned, trigger = null, marks = [] } = entry;
     let d;
-    try { d = await gating.decide(to, ev, mention); }
-    catch (e) { note(`dwell ${turnKey}: re-decide failed — ${e?.message ?? e}`); return; }
-    if (d.mode !== 'auto' || !d.mayReply) { note(`dwell ${turnKey}: mode ${d.mode} — dwell dropped (no auto reply)`); return; }
+    const drop = () => { for (const m of marks) m.off(); };
+    try { d = await gating.decide(to, ev, mention, { reacts: marksHere(to, ev) }); }
+    catch (e) { drop(); note(`dwell ${turnKey}: re-decide failed — ${e?.message ?? e}`); return; }
+    if (d.mode !== 'auto' || !d.mayReply) { drop(); note(`dwell ${turnKey}: mode ${d.mode} — dwell dropped (no auto reply)`); return; }
     const at = d.replyChatId ?? null;                 // the chat's automatic SI+ group (see openAndRunReply)
     const replyTo = at ? null : (ev.msgId ?? null);   // quote UNIFORMLY — including auto (see openAndRunReply)
     const ahead = bumpTrain(turnKey);
@@ -470,7 +491,7 @@ export function createSpine({
     // armed this dwell. It is the BASE only when the drained cycle came back empty (a burst with
     // lines prompts with those verbatim), and each of those lines was already stripped on its way
     // into the cycle; this closes the one case that is not.
-    turnBy(turnKey, () => runReplyTurn({ to, ev, d, out, replyTo, turnKey, queued: ahead > 0, burst: true, pinned, trigger }));
+    turnBy(turnKey, () => runReplyTurn({ to, ev, d, out, replyTo, turnKey, queued: ahead > 0, burst: true, pinned, trigger, marks }));
   }
 
   // enqueue resolves when THIS message's turn (if any) completes, so a caller — and
@@ -528,7 +549,7 @@ export function createSpine({
   //     progress"). ---
   //
   //     THE INCIDENT. kg, 16:10 that day: a deploy (setup/upgrade.ps1 drops /upgrade into the ingest
-  //     box) bounced the spine while being Ken had a live turn in chat delen4 — the operator's
+  //     box) bounced the spine while being Ken had a live turn in chat user4 — the operator's
   //     steered message had just been taken (`[warm] … the model ACKNOWLEDGED the steered message`)
   //     and Ken was running a WebSearch. /upgrade left the moment it was read, the turn died with
   //     the process, and the operator's question was never answered.
@@ -561,7 +582,7 @@ export function createSpine({
   const RESTART_DRAIN_NOTICE_MS = 30 * 60_000;   // a long wait is told to the logging group this often
   const RESTART_DRAIN_POLL_MS = 1_000;
   const RESTART_DRAIN_LOG_MS = 30_000;
-  const RESTART_DRAIN_BG_SETTLE_MS = 10_000;   // quiet after background work ends: its wake turn starts within warm-cli's SELF_TURN_START_MS (5 s)
+  const RESTART_DRAIN_BG_SETTLE_MS = 10_000;   // quiet after background work ends: its wake turn starts once the CLI's own turn on it ends (warm-cli; 2-3 s measured 2026-10-30)
   let restartDrain = null;   // { since, lastLog, timer, done, onWait, background, purpose, noticeAt, bgSeenAt } while an /upgrade or /restart waits
   function inFlightTurns() {
     const busy = turns.busy();
@@ -642,20 +663,19 @@ export function createSpine({
   }
 
   // /standdown (operator 2026-10-22): background work is not waited for; it ends with this node's
-  // daemon. Each being whose work ends says so once where it ran: its live status becomes the line,
-  // or the line is posted when it has no status.
+  // daemon. Each chat whose work ends says so once: the line is posted as its status was, or said for
+  // the chat when it has none.
   async function noteStoppedBackground() {
     const byChat = new Map();
     for (const b of allBackground?.() ?? []) {
-      const k = `${b.being} ${b.chatId}`;
-      if (!byChat.has(k)) byChat.set(k, []);
-      byChat.get(k).push(b);
+      if (!byChat.has(b.chatId)) byChat.set(b.chatId, []);
+      byChat.get(b.chatId).push(b);
     }
     await Promise.all([...byChat.values()].map(async (tasks) => {
       const { being, chatId } = tasks[0];
-      const text = `⏹ background work stopped: ${tasks.map((t) => t.description).join('; ')} — eGPT moved to the logged-in session. Ask again if you still need it.`;
+      const text = `⏹ background work stopped: ${workOf(tasks, being, labelOf).join('; ')} — eGPT moved to the logged-in session. Ask again if you still need it.`;
       note(`standdown: ${being}/${chatId} — ${text}`);
-      if (liveness.endStatus(being, chatId, text)) return;
+      if (await liveness.endStatus(chatId, text)) return;
       try { await say?.({ being, chatId, text, what: 'standdown' }); }
       catch (e) { note(`standdown: could not tell ${being}/${chatId} — ${e?.message ?? e}`); }
     }));
@@ -776,7 +796,10 @@ export function createSpine({
     // isEnvelope into it would be unreachable — and hoisting the widened test above the envelope
     // branch would kill mesh routing outright. That ordering is what keeps "skipping the record"
     // from ever becoming "skipping the routing".
-    if (!isTransit(ev) && !isEnvelope(ev)) await timed('transcript', ev, () => transcript.log(ev));   // ←── THE INGESTION POINT (C1.2). The only one.
+    //
+    // …and a limb's stand-in echo (ev.recorded, the Telegram limb's) is not recorded twice: the
+    // being's reply line written when it was said is its record.
+    if (!isTransit(ev) && !isEnvelope(ev) && !ev.recorded) await timed('transcript', ev, () => transcript.log(ev));   // ←── THE INGESTION POINT (C1.2). The only one.
     background?.noteVoice(ev);
     // Radio relay: a genuine inbound voice note, in a room joined to a radio, airs on the
     // station (createRadioNoteRelay owns the rest of the gate — joined+enabled, sender→speaker,
@@ -799,13 +822,15 @@ export function createSpine({
     const routed = await router.resolve(ev);
     const targets = Array.isArray(routed?.targets) ? routed.targets
       : [typeof routed === 'string' ? { being: routed } : { being: routed?.being, mesh: routed?.mesh ?? null, mention: routed?.mention }];
-    return { targets, receives: routed?.receives };
+    return { targets, receives: routed?.receives, refused: routed?.refused ?? [] };
   }
   async function gateOf(target, ev) {
     const to = gateAs(target, null);
     const mention = target.mention ?? ev.mention;
-    return { target, meshTarget: target.mesh ?? null, to, mention, d: await gating.decide(to, ev, mention, { denied: !!target.denied }) };
+    return { target, meshTarget: target.mesh ?? null, to, mention, d: await gating.decide(to, ev, mention, { denied: !!target.denied, bot: !humanTurn(ev), reacts: target.mesh ? null : marksHere(to, ev) }) };
   }
+  // Would this gate let its being run on the line? (the operator's own line in an auto chat runs none)
+  const reaches = (ev) => ({ d }) => d.mayReply && !(d.mode === 'auto' && ev.isSender);
   // The targets whose gate receives the line, and whether the line is RECORDED at all: the router's
   // answer for the beings here, or any target receiving it ('off' for all → not received, C4).
   async function gatesOf(targets, ev, receives) {
@@ -825,7 +850,7 @@ export function createSpine({
     const cmd = commands?.commandOf?.(ev, await router.agentsIn?.(ev)) ?? ev;
     if (cmd.commandElsewhere || await commands?.isCommand?.(cmd) || isEnvelope(ev) || isTransit(ev) || advice?.isAnswer?.(ev)) return false;
     const { gated } = await gatesOf((await routeOf(ev)).targets, ev);
-    return gated.some(({ d }) => d.mayReply && !(d.mode === 'auto' && ev.isSender));
+    return gated.some(reaches(ev));
   }
 
   // THE KILL SWITCH, pulled from a chat (the STOP safe word, the kill phrase).
@@ -907,7 +932,7 @@ export function createSpine({
       // case insensitive"). It used to fire from ANY chat on ANY surface — one stray "stop"
       // in a group, or anyone with the operator console, took the whole service down. Now
       // the word is scoped to the ONE chat that is the operator addressing his own node:
-      // isSelfChat (boot: networks.whatsapp.chat_ids[0], the same Self-DM the restart
+      // isSelfChat (boot: networks.whatsapp.admin_chat_ids[0], the same Self-DM the restart
       // announce posts to). ANYWHERE ELSE — another Beeper chat, a group, the shell console
       // (which hardcodes authorized:true, so scoping is what actually closes it) — "stop" is
       // ORDINARY TEXT and flows on to the normal dispatch.
@@ -920,8 +945,8 @@ export function createSpine({
       if (guard && (word === 'resume' || word === 'resume_all')) return () => { guard.applyControl(word, channel); note(`guard: '${word}' @ ${channel}`); };
     }
 
-    // The owner's yes/no to the ingest box's question: recorded, consumed here, routed to no being.
-    if (humanTurn(ev) && ingestAsk?.isAnswer?.(ev)) return async () => { await ingestAsk.answer(ev); };
+    // The yes/no to an open question (the ingest box's, a refused mention's): recorded, consumed here, routed to no being.
+    if (humanTurn(ev) && await ingestAsk?.isAnswer?.(ev)) return () => ingestAsk.answer(ev);
 
     // operator slash command (Self DM / authorized) → handled here, NEVER routed
     // to the brain. Recorded like any inbound, then executed (lifecycle exits the
@@ -956,12 +981,13 @@ export function createSpine({
       // type one past the stop) when a HUMAN typed it: what the 2026-07-25 flood re-entered was
       // authorized-looking machine output, and that stays suppressed. It does NOT lift the stop —
       // only RESUME does; the command runs and the beings stay paused.
+      // A signed line that runs a command (a being's /super) counts as a cross-being wake does.
       if (guard) {
         if (guard.blocked(channel) && !humanTurn(ev)) return () => { note(`guard: ${channel} stopped — command suppressed`); };
         if (humanTurn(ev)) guard.noteHuman(channel);
-        else await guardCountNonHuman(ev, channel);
+        else await guardCountNonHuman(ev, channel, ev.fromNode != null);
       }
-      return async () => { await commands.run(cmd); };
+      return () => commands.run(cmd);   // a command's own turn (/super) comes back as { turn }
     }
 
     // Inbound mesh envelope: a message carrying a provenance tail is relay traffic,
@@ -1008,7 +1034,22 @@ export function createSpine({
     // 2026-07-25: one matcher over the node's whole addressable set — `@e and @don you here?`
     // addresses BOTH), then every being whose mode here is on/auto (operator 2026-10-22/23: no
     // default being). Every target takes the SAME per-target path (dispatchTarget).
-    let { targets, receives } = await routeOf(ev);
+    let { targets, receives, refused } = await routeOf(ev);
+
+    // A BEING'S LINE THAT NAMES A BEING allowed_users TURNED AWAY IS ASKED ABOUT (operator 2026-11-07): the chat gets
+    // one question per being (boot askMention), and whoever may wake that being (the Operator, or its lists) may let the line through
+    // (dispatchApproved). Only this node's own output with its author set (the echo below): a person not on the
+    // list stays ignored, as before. Only what would have run — a being taken by its mode is never in `refused`,
+    // one whose gate ignores the line is no question, a stopped channel is not asked. After the record,
+    // fire-and-forget as remindClosed is; the exits below that dispatch or record wrap their action in it.
+    const asking = (act) => !(refused.length && ingestAsk?.ask) ? act : async () => {
+      Promise.resolve().then(async () => {
+        if (guard?.blocked(channel)) return;
+        const asked = (await gatesOf(refused, ev, receives)).gated.filter(reaches(ev));
+        if (asked.length) await ingestAsk.ask(ev, asked.map((g) => ({ being: g.to, target: g.target })));
+      }).catch((e) => note(`ask: ${guardChannel(ev)} — ${e?.message ?? e}`));
+      return act();
+    };
 
     // A SIGNED LINE (our own output, or any node's frame) wakes ONLY a being it EXPLICITLY addresses
     // (@mention/quote of its post) — never a being taken by its mode (operator 2026-10-13 own output,
@@ -1019,14 +1060,16 @@ export function createSpine({
     const echo = kindOf(ev) === 'echo';
     if (echo || ev.fromNode != null) {
       const author = echo && fromThisNode(ev) && ev.fromBeing ? String(ev.fromBeing).toLowerCase() : null;
-      const woke = (author || !echo) ? targets.filter((t) => !t.fallthrough && String(gateAs(t, '')).toLowerCase() !== author) : [];
+      const wakes = (t) => !t.fallthrough && String(gateAs(t, '')).toLowerCase() !== author;
+      const woke = (author || !echo) ? targets.filter(wakes) : [];
+      refused = author ? refused.filter(wakes) : [];
       if (!woke.length) {
         if (!echo && !(await gatesOf(targets, { ...ev, backlog: true }, receives)).received) return null;
-        return () => { note(echo ? `echo: ${guardChannel(ev)} — this node's own output re-entered; recorded, prompts nobody` : `signed: ${guardChannel(ev)} — node <${ev.fromNode}>'s line addresses no being; recorded, prompts nobody`); };
+        return asking(() => { note(echo ? `echo: ${guardChannel(ev)} — this node's own output re-entered; recorded, prompts nobody` : `signed: ${guardChannel(ev)} — node <${ev.fromNode}>'s line addresses no being; recorded, prompts nobody`); });
       }
       targets = woke;
       crossBeingWake = true;
-    }
+    } else refused = [];
 
     // META ENGINEERS ARE BEYOND THE GUARD (operator 2026-09-16; isMetaEngineer above). The routed
     // targets ARE the addressees, known here and nowhere earlier, so this is where it is decided —
@@ -1082,7 +1125,7 @@ export function createSpine({
     // rides on from here as a normal dispatch. The old wholesale `kindOf==='echo'` return lived
     // here; it is gone because it suppressed a DIFFERENT being's wake too (the same-node sibling).
 
-    return () => dispatchChat({ ev, gated, channel });
+    return asking(() => dispatchChat({ ev, gated, channel }));
   }
 
   // Ordinary chat, ALREADY on the record: every gated target takes the per-target path
@@ -1119,6 +1162,20 @@ export function createSpine({
     const turn = first ? (await dispatchTarget(ev, first))?.turn : undefined;
     if (!sideTurn) return turn === undefined ? undefined : { turn };
     return { turn: turn ? Promise.all([turn, sideTurn]).then(() => {}) : sideTurn };
+  }
+
+  // A BEING'S LINE AN allowed_users MEMBER APPROVED FOR ONE BEING (boot answerIngest): it was recorded when it
+  // arrived and the chat was asked, so it is neither recorded nor routed again. The being's gate, the loop
+  // guard (it counts as the cross-being wake it is) and its per-target path (dispatchTarget) run it as
+  // classify's tail does. `target`: the router's refused target, kept with the question.
+  async function dispatchApproved({ ev, target }) {
+    const channel = guard ? guardChannel(ev) : null;
+    if (guard) {
+      if (guard.blocked(channel)) { note(`guard: ${channel} stopped — approved line suppressed`); return null; }
+      await guardCountNonHuman(ev, channel, true);
+    }
+    const [g] = (await gatesOf([target], ev, true)).gated;
+    return g ? dispatchTarget(ev, g) : null;
   }
 
   // ONE TARGET'S PATH (operator 2026-10-23: every target, primary or not, runs THIS — the auto +
@@ -1227,7 +1284,7 @@ export function createSpine({
     // no reply to delay).
     if (d.mayReply && d.mode === 'auto') {
       pushCycle(turnKey, cycleLine);
-      armDwell(turnKey, { to, ev, mention, pinned, trigger });
+      armDwell(turnKey, { to, ev, mention, pinned, trigger, marks: markOf(to, d, ev) });
       return;
     }
 
@@ -1271,7 +1328,7 @@ export function createSpine({
       // written rather than the event: warm-cli-session.inject records `rec.text` as the exact
       // string it puts on stdin and matches the `--replay-user-messages` echo against THAT, so it
       // acks the stripped line without knowing anything changed.
-      if (await steerLiveTurn({ to, ev: trigger == null ? ev : { ...ev, line: trigger }, turnKey, human: humanTurn(ev) })) return;
+      if (await steerLiveTurn({ to, ev: trigger == null ? ev : { ...ev, line: trigger }, turnKey, human: humanTurn(ev) && !whole(d), ack: !d.quiet })) return;
       // Reply branch (the reply train). Open THIS message's OWN placeholder NOW, on
       // arrival — the per-message ack + streaming target, quoting the triggering message
       // (operator: "mentions should always be replied to the message" — now EVERY reply,
@@ -1390,7 +1447,7 @@ export function createSpine({
   // exist. Quoting from the START is also what removes the delete+repost churn for the common
   // case: E's /reply at the message it is answering is now GENUINELY redundant, so it strips
   // instead of tearing the placeholder down and posting a fresh quote in its place.
-  function openAndRunReply({ to, ev, d, turnKey, pinned = false, trigger = null }) {
+  function openAndRunReply({ to, ev, d, turnKey, pinned = false, trigger = null, answer = null }) {
     // d.replyChatId: the chat's side group (gating.decide; a function when it is made only once the reply
     // has something to post) — the reply goes there, unquoted, and never falls back to ev's chat. The
     // transcript stays keyed to ev.
@@ -1399,45 +1456,89 @@ export function createSpine({
     const ahead = bumpTrain(turnKey);
     // replyIn null: replyTo is this chat's own id — a local mouth quotes its own copy (sender quoteIn).
     // ambient: an 'on' turn on a non-human line opens no ⏳ — a silence then posts nothing. A human's
-    // opens at arrival, addressed or not (operator 2026-10-18).
-    const ambient = d.mode === 'on' && !humanTurn(ev);
+    // opens at arrival when it addresses the being, else it is quiet (operator 2026-11-02). A quiet turn (a bot's line, dispatch.bot_quiet) is
+    // ambient in any mode and never opens before it ends: no timer, tool use or partial opens it (operator 2026-10-31).
+    // So is every turn with the emoji train (2026-11-03).
+    const ambient = whole(d) || (d.mode === 'on' && !humanTurn(ev));
     const out = sender.open(at ?? ev.chatId, { being: to, replyTo, replyIn: null, replyKey: { msgKey: ev.msgHash, timestamp: ev.msgTs }, queued: ahead > 0, queuedAhead: ahead, auto: d.mode === 'auto', ambient, hideSilence: d.mode === 'on', origin: at ? null : ev.chatId });
-    return turnBy(turnKey, () => runReplyTurn({ to, ev, d, out, replyTo, turnKey, queued: ahead > 0, pinned, trigger, ambient }));
+    const marks = markOf(to, d, ev);
+    return turnBy(turnKey, () => runReplyTurn({ to, ev, d, out, replyTo, turnKey, queued: ahead > 0, pinned, trigger, ambient, marks, answer }));
+  }
+
+  // THE MARK ON THE LINE A TURN ANSWERS, placed at arrival (turns.receipt). The emoji train (2026-11-03):
+  // 👾 → 🤔 → off on a human's line. Else dd2c11b7's ✍️ on a human's unaddressed 'on' line. Not where the
+  // reply goes elsewhere (side group), nor on a reaction: its msgId is the message reacted to.
+  // …and whether this chat can carry it at all (turns.canMark: the mouth's room, or the being's own
+  // account), the fact gating.decide sets `emoji` on. Not: the turn runs as bubble does.
+  const marksHere = (to, ev) => () => turns.canMark?.(to, ev) ?? false;
+  function markOf(to, d, ev) {
+    if (d.replyChatId != null || ev.kind === 'reaction') return [];
+    const m = !d.emoji ? (d.unaddressed ? turns.receipt?.(to, ev) : null)
+      : humanTurn(ev) && ev.msgId != null ? turns.train?.(to, ev) : null;
+    return m ? [m] : [];
   }
 
   // A BACKGROUND TASK THE BEING STARTED HAS FINISHED with no turn in flight (operator 2026-10-15:
-  // "the result of the bg agent must wake up E rather than being dropped"). Its warm session stopped
-  // the CLI's own turn on it and reported up (boot: warm onBackgroundDone → brain.convOfKey → here).
+  // "the result of the bg agent must wake up E rather than being dropped"). Its warm session lets
+  // the CLI's own turn on it run, and reports up (boot: warm onBackgroundDone → brain.convOfKey → here).
   // Woken as a turn like any other: STOP, the loop guard (where it counts) and the gate, then the
   // conversation's FIFO and the reply path. false = not woken; else the turn, true when it answered.
   // `line`: liveness's "are they still necessary?" ask rides this same path. A finished task's wake
-  // ends the being's status message ✓ and posts its own placeholder at the bottom.
+  // posts its own placeholder at the bottom; the chat's status posts the change on its next pulse.
   // `reply`: a turn the daemon held across a spine restart finished after it (src/cli-host.mjs) — its
   // answer never reached the chat, so the being is handed it to send. `lost`: that turn's process
   // ended before it answered (`why`), so the being is handed the message to answer again.
+  // `summaries` WITH a `reply` (ED, live 2026-10-30): that CLI's own turn on a finished task answered it,
+  // and the answer reached no chat. It is no longer stopped — stopping it killed the being's other
+  // background agents — so the being is handed its answer to send, as an adopted turn's is.
   async function wakeOnBackground({ being, surface, chatId, summaries = [], reply = null, lost = null, why = null, line = null }) {
-    const what = reply != null ? 'a reply written across a restart' : lost != null ? 'a turn cut off across a restart' : summaries.length ? summaries.join('; ') : 'a background task';
-    const finished = line == null && reply == null && lost == null;
-    line ??= reply != null
+    const restarted = reply != null && !summaries.length;
+    const what = restarted ? 'a reply written across a restart' : lost != null ? 'a turn cut off across a restart' : summaries.length ? summaries.join('; ') : 'a background task';
+    // That CLI's own answer is a bare polite silence ('…', live 2026-10-30): there is nothing to send, so
+    // no turn is spent sending it — answered, the status left to its pulse as after any finished wake.
+    if (summaries.length && reply != null && isDeliberateSilence(reply)) { note(`wake ${being}/${chatId}: ${what} — its own turn answered it with silence — not woken`); return true; }
+    // THE CLI'S OWN ANSWER IS SENT AS IT IS, through the reply path below (`answer`), to the chat the task
+    // ran in — the being is not asked to type it again (live 2026-11-20, every time: the first answer was
+    // discarded and only the re-prompt's resend reached the chat). The re-prompt stays as the fallback.
+    const direct = summaries.length && reply != null && line == null;
+    line ??= restarted
       ? `[egpt] Your last reply was written while the bridge restarted and never reached the chat. It was:\n\n${reply}\n\nSend it to the chat now.`
       : lost != null
         ? `[egpt] The bridge restarted while you were answering, and that process ended before you replied (${why}) — nothing reached the chat. The message was:\n\n${lost}\n\nAnswer it now.`
-        : `[egpt] A background task you started has finished: ${what}. Verify its result and report to the chat.`;
+        : reply != null
+          ? `[egpt] A background task you started has finished: ${what}. You answered its notification, but that answer never reached the chat. It was:\n\n${reply}\n\nSend it to the chat now.`
+          : `[egpt] A background task you started has finished: ${what}. Verify its result and report to the chat.`;
     const ev = { ...(await identity.spineEvent(surface, chatId)), body: line, line, cause: 'background' };   // cause: agent stats' system bucket
     const where = `${being}/${chatId}`;
     if (stopSwitch?.present()) { note(`wake ${where}: STOP file present — not woken`); return false; }
     const channel = guard ? guardChannel(ev) : null;
     if (guard?.blocked(channel)) { note(`guard: ${channel} stopped — background wake suppressed`); return false; }
-    const d = await gating.decide(being, ev, WAKE_MENTION);
+    const d = await gating.decide(being, ev, WAKE_MENTION, { reacts: marksHere(being, ev) });
     if (!d.mayReply) { note(`wake ${where}: mode ${d.mode} — not woken`); return false; }
     if (guard) await guardCountNonHuman(ev, channel, true);
     const { key: turnKey, pinned } = await turns.keyOf(being, ev);
     note(`wake ${where}: ${what}`);
-    if (finished) liveness.endStatus(being, chatId, `✓ background work done: ${what}`);
+    if (direct) {
+      const sent = await openAndRunReply({ to: being, ev: { ...ev, body: `[egpt] A background task you started has finished: ${what}.`, line: `[egpt] A background task you started has finished: ${what}.` }, d, turnKey, pinned, answer: reply });
+      if (sent) return true;
+      note(`wake ${where}: FALLBACK — the CLI's own answer to ${what} was not delivered (see the turn note above); the being is asked to send it`);
+    }
     return openAndRunReply({ to: being, ev, d, turnKey, pinned });
   }
   // The being's own thread continuing — gated as a reply to it, so mute/off/paused still hold.
   const WAKE_MENTION = { replyToBot: true };
+
+  // A COMMAND'S TURN (/<handle> super, commands.mjs): the being answers the command's own line in its chat,
+  // through the reply path. The command decided who may; classify counted it for the loop guard.
+  // `trigger`: the line the being is prompted with, when it is not the command's own (/side: the prompt).
+  // `side`: its reply goes to the chat's side group (gating.decide).
+  async function commandTurn({ being, ev, trigger = null, side = false }) {
+    const d = await gating.decide(being, ev, COMMAND_MENTION, { bot: !humanTurn(ev), reacts: marksHere(being, ev), side });
+    if (!d.mayReply) { note(`command ${being}/${ev.chatId}: mode ${d.mode} — no turn`); return null; }
+    const { key: turnKey, pinned } = await turns.keyOf(being, ev);
+    return { turn: openAndRunReply({ to: being, ev, d, turnKey, pinned, trigger }) };
+  }
+  const COMMAND_MENTION = { atEStart: true, atEAnywhere: true };
 
   // The reply train's turn body (DEFECT 1 + accumulation FEATURE). Fully guarded: from
   // the moment the placeholder opened, EVERY exit resolves it VISIBLY — the reply, the
@@ -1452,8 +1553,10 @@ export function createSpine({
   // `burst` (the auto-dwell fire): this turn answers a whole accumulated burst, so it prompts
   // with the drained cycle verbatim instead of appending its own trigger line. A PROMPT
   // concern only — it says nothing about the record.
-  async function runReplyTurn({ to, ev, d, out, replyTo = null, turnKey, queued, burst = false, pinned = false, trigger = null, ambient = false }) {
-    let live = null, opening = null;
+  // `answer` (wakeOnBackground): the reply is already written, so it takes this same path — gate, FIFO, record, delivery — with no model call.
+  // `marks` (markOf): 🤔 as the line goes to the model; off after the reply, before the limbs, and in the finally.
+  async function runReplyTurn({ to, ev, d, out, replyTo = null, turnKey, queued, burst = false, pinned = false, trigger = null, ambient = false, marks = [], answer = null }) {
+    let live = null, opening = null, answered = false;
     try {
       // THIS turn is now the live one on this key, and this is whose message it answers —
       // the identity the same_sender tier of allow_new_input compares against (2026-08-30) —
@@ -1464,7 +1567,7 @@ export function createSpine({
       turns.setLive(turnKey, { senderId: ev.senderId ?? null, chatId: ev.chatId ?? null, out });
       out.activate?.();                                 // queued → live the moment its turn starts
       live = liveness.turnStarted({ out, being: to, ev, chat: d.replyChatId ?? ev.chatId, auto: d.mode === 'auto' });
-      if (ambient) opening = setTimeoutFn(() => out.begin?.(), AMBIENT_OPEN_MS);   // the train opens if the turn runs this long
+      if (ambient && !whole(d)) opening = setTimeoutFn(() => out.begin?.(), AMBIENT_OPEN_MS);   // the train opens if the turn runs this long
       // Drain the accumulated cycle. A QUEUED turn prompts with it (ending with its own
       // mention line); an IMMEDIATE turn discards it and keeps the single dispatch line —
       // draining either way advances the baseline the next turn's cycle starts from.
@@ -1504,11 +1607,22 @@ export function createSpine({
       if (readTranscript && (d.mode === 'accum' || ev.replyToId != null)) {
         try {
           const text = await readTranscript(ev.chatId, { chatName: ev.chatName, network: ev.surface });
-          if (text && d.mode === 'accum') {
-            // BOTH of this being's labels: the NAME its lines carry since 2026-08-28 and the map
-            // KEY every older line carries. transcript.md is append-only, so a live file holds
-            // both and either one is a valid boundary (transcript-log.beingReplyRe).
-            const got = contextSinceLastTurn(text, { being: [labelOf(to), to], maxChars: RECENT_CONTEXT_MAX_CHARS, exclude: ev.line ?? ev.body });
+          // BOTH of this being's labels: the NAME its lines carry since 2026-08-28 and the map
+          // KEY every older line carries. transcript.md is append-only, so a live file holds
+          // both and either one is a valid boundary (transcript-log.beingReplyRe).
+          const labels = [labelOf(to), to];
+          // A chat and its SI+ side group are one conversation in two groups (operator 2026-11-20: "E's
+          // accum should grow from original group and the side group; it's a same thread but replying in
+          // other group"): a turn woken in either reads both transcripts, so its boundary — its last
+          // reply, logged in whichever group woke that turn — and everything said since are found in
+          // the joined text. A /split or a /join room has none to join: its own file, as ever.
+          let said = text;
+          if (d.mode === 'accum' && readAccum) {
+            try { said = (await readAccum(ev.chatId, { chatName: ev.chatName, network: ev.surface, being: labels })) ?? text; }
+            catch (e) { note(`accum ${to}/${ev.chatId}: ${e?.message ?? e}`); }   // a file unreadable: this chat's own
+          }
+          if (said && d.mode === 'accum') {
+            const got = contextSinceLastTurn(said, { being: labels, maxChars: RECENT_CONTEXT_MAX_CHARS, exclude: ev.line ?? ev.body });
             if (got.blocks.length) recent = got;
           }
           if (text && ev.replyToId != null) {
@@ -1571,17 +1685,34 @@ export function createSpine({
       // carries only the FINAL answer (warm-cli resolves with `result`, codex replaces
       // `text` on item/completed), so before this the earlier output was simply gone.
       // Fire-and-forget — a token delta must not wait on fs; logStream serializes.
-      let streamed = '';
+      let streamed = '', working = false;
+      const prose = (partial) => (actions?.partialProse ? actions.partialProse(partial, ev, { quotedId: replyTo }) : partial);
+      const show = (partial) => out.update(prose(partial));
+      // The emoji train's first tool use or first text: the bubble, with the text so far, replaces the mark.
+      const open = (partial) => {
+        working = true;
+        for (const m of marks) m.off(true);            // off for every turn on the line
+        show(partial);
+        return out.begin?.();
+      };
       const onPartial = (partial, use) => {
-        if (use?.tool) return out.begin?.();           // the being used a tool: an ambient turn opens its train
+        if (use?.tool) {
+          if (!whole(d)) return out.begin?.();         // the being used a tool: an ambient turn opens its train
+          if (working || !opensOnTool(d)) return;
+          return open(partial);
+        }
         const raw = typeof partial === 'string' ? partial : (partial?.text ?? '');
         transcript.logStream?.(ev, streamed, raw, { being: to });
         streamed = raw;
-        return out.update(actions?.partialProse ? actions.partialProse(partial, ev, { quotedId: replyTo }) : partial);
+        // A silence so far: recorded, not shown. Any other text opens the bubble, a bot's line too.
+        if (whole(d) && !working) return silentSoFar(prose(raw)) ? undefined : open(partial);
+        return show(partial);
       };
-      const reply = await runTurnWithTimeout(to, ev, promptEv, onPartial);
+      for (const m of marks) m.started();              // 🤔: the line goes to the model now
+      const reply = answer != null ? { text: answer } : await runTurnWithTimeout(to, ev, promptEv, onPartial);   // `answer`: already written (a CLI's own turn on a finished task) — delivered, no model call
+      answered = true;
       const rawText = reply?.text ?? '';
-      const surfaced = gating.surfaces(d, rawText);
+      const surfaced = gating.surfaces(d, rawText, { failed: isBrainFailureResult(reply) });
       // A turn the ENGINE reported failed (isBrainFailureResult — the structural flag, never the
       // text; the brainpool self-heals only overflow/dead-session, not this): do NOT deliver it as
       // a reply. Blank it so the placeholder resolves to the no-reply marker, and record the raw
@@ -1641,7 +1772,7 @@ export function createSpine({
       // model" — for a turn whose limbs were about to fire, and (the message being append-only)
       // it landed under a seam beneath prose the human had already read. The verbs go down, the
       // sender says it is processing them, and the transcript records what each one did below.
-      await out.finish(turnFailed ? { text: '', failed: true, error: rawText } : { ...reply, text: proseText }, {
+      await out.finish(turnFailed ? { text: '', failed: true, error: rawText, failReason: reply.failReason } : { ...reply, text: proseText }, {
         surface: actionOnly ? false : surfaced,
         commands: actionOnly ? parsed.run.map((a) => a.type) : null,
         // verbose_thinking, resolved once by brainpool's resolveConv and carried out on the reply
@@ -1649,6 +1780,12 @@ export function createSpine({
         // "processing (/react)" record; OFF (the system default) → the quiet reaction-only resolution.
         verbose: reply?.verbose === true,
       });
+      // Off before the limbs: one reaction per account per message (WhatsApp, a Telegram bot), so a /react
+      // would replace the mark and the mark's removal would take the /react. Awaited only then: a 👾
+      // still waiting for the mouth's copy must not hold the turn. With limbs, off for every turn on the line.
+      const limbs = !!parsed?.run.length;
+      const off = Promise.all(marks.map((m) => m.off(limbs)));
+      if (limbs) await off;
       // …and to the conversation's chat members seated for its replies (room-relay.mjs fanOutReply).
       if (deliverable && !isDeliberateSilence(proseText)) await roomRelay?.fanOutReply?.(ev, to, proseText);
       // VOICE-OUT (chunk 2, operator 2026-08-09; redesigned operator 2026-08-10 — the
@@ -1714,10 +1851,12 @@ export function createSpine({
       // append here: it was recorded at ingestion, so C1.2 already holds whatever this
       // turn does (that rescue used to double-record the auto-dwell burst, which had
       // been logged at arrival but was invisible to the flag this branch checked).
-      try { await out.fail?.(e); } catch { /* best effort */ }
+      // The brain threw or timed out: the one failure line, naming it (operator 2026-11-04). A fault delivering the reply: ❌.
+      const why = e?.message ?? String(e);
+      try { await (answered ? out.fail?.(e) : out.finish({ text: '', failed: true, error: why, failReason: why })); } catch { /* best effort */ }
       note(`turn ${to}/${ev.chatId}: ${e?.message ?? e}`);
       return false;
-    } finally { if (opening) clearTimeoutFn(opening); dropTrain(turnKey); turns.clearLive(turnKey); liveness.turnEnded(live); }
+    } finally { if (opening) clearTimeoutFn(opening); for (const m of marks) m.off(); dropTrain(turnKey); turns.clearLive(turnKey); liveness.turnEnded(live); }
   }
 
   // --- the time-driven half: due heartbeats + accum flush. ---
@@ -1734,7 +1873,10 @@ export function createSpine({
     liveness.tick();
     background?.sync();
     beeperUpdate?.tick(clock.now());
+    egptUpdate?.tick(clock.now());
     sandboxPins?.tick(clock.now());
+    ingestAsk?.tick?.(clock.now());
+    warmPool?.tick();
     heartbeats.runDue(clock.now());
   }
 
@@ -1812,7 +1954,7 @@ export function createSpine({
   // sleep a chat can have been talking to a being all night and hear nothing back. After a wake the
   // node says so, ONCE, in each chat whose backlog WOULD HAVE REACHED A BEING had it been live
   // (wouldReachABeing, above) — never in a chat whose backlog was chatter nobody was going to answer.
-  // Only what was written WHILE the node slept counts (stamped after `wake.sleptAt`): a restart's
+  // Only what was written WHILE the node slept counts (stamped between `wake.sleptAt` and the wake): a restart's
   // replay of older traffic is backlog too, but it is not this wake's news. The line waits until the
   // chat's backlog has SETTLED — BACKLOG_SETTLE_MS after its last arrival; Beeper hands a night over
   // within seconds, but not in one frame — and goes out through `say`, the placement the loop guard's
@@ -1823,7 +1965,7 @@ export function createSpine({
   const BACKLOG_SETTLE_MS = 5_000;
   const backlogBy = new Map();   // conversation (guardChannel) -> { chatId, messages: [{ sender, ts, body }], reaches, told, timer }
   async function noteWakeBacklog(ev) {
-    if (!wake || ev.msgTs == null || ev.msgTs < wake.sleptAt) return;
+    if (!wake || ev.msgTs == null || ev.msgTs < wake.sleptAt || ev.msgTs > wake.at) return;   // after the wake: a held new chat (bridge new-chat burst), not this wake's news
     const key = guardChannel(ev);
     let b = backlogBy.get(key);
     if (!b) backlogBy.set(key, (b = { chatId: ev.chatId, messages: [], reaches: false, told: false, timer: null }));
@@ -1861,5 +2003,5 @@ export function createSpine({
     note('spine: stopped');
   }
 
-  return { start, stop, tick, handleInbound, stats, drainForRestart, noteStoppedBackground, resumedAt, backlogOf, wakeOnBackground };
+  return { start, stop, tick, handleInbound, stats, drainForRestart, noteStoppedBackground, resumedAt, backlogOf, wakeOnBackground, commandTurn, dispatchApproved };
 }

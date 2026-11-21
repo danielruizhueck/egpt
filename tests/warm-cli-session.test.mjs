@@ -120,7 +120,7 @@ describe('warm-cli-session — resident multi-turn', () => {
 // it NEVER throws: every "nothing was handed over" is a plain `false`, because a false NEGATIVE
 // only costs a queued turn while a false POSITIVE silently swallows the message.
 //
-// WHAT A NON-FALSE ANSWER MEANS CHANGED ON 2026-09-09 (operator, after the Joyce fault): it is
+// WHAT A NON-FALSE ANSWER MEANS CHANGED ON 2026-09-09 (operator, after the Julia fault): it is
 // `{ ack }`, not `true` — the bytes are on their way, and `ack` is what later says whether the
 // MODEL took them. The evidence itself is covered in tests/steer-ack.test.mjs; the cases below
 // only care that something/nothing was handed over, so they assert truthiness.
@@ -341,7 +341,41 @@ describe('warm-cli-session — verboseThinking (operator 2026-08-29, wren\'s "fu
   });
 });
 
-// ── THE MESSAGE BOUNDARY (operator 2026-09-01) ──────────────────────────────────────────
+// verboseThinking 'text': `true` without the tool lines.
+describe("warm-cli-session — verboseThinking 'text'", () => {
+  const VERBOSE = 'THINK1: let me check the directory\n\nBash(ls -la)\n\nTHINK2: now I can answer\n\nHello';
+  const TEXT = 'THINK1: let me check the directory\n\nTHINK2: now I can answer\n\nHello';
+
+  it('thinking and text as true shows them, no tool line, in the reply or any update', async () => {
+    const s = createWarmCliSession({ spawn: fakeClaudeAgentic().spawn, verboseThinking: 'text' });
+    const updates = [];
+    const r = await s.turn('what is in the dir?', (t) => updates.push(t));
+    s.close();
+    expect(r.text).toBe(TEXT);
+    expect(updates.length).toBeGreaterThan(0);
+    for (const u of updates) expect(u).not.toContain('Bash(');
+    expect(updates[updates.length - 1]).toBe(TEXT);
+  });
+
+  it('true and false are unchanged on the same turn', async () => {
+    const on = createWarmCliSession({ spawn: fakeClaudeAgentic().spawn, verboseThinking: true });
+    const off = createWarmCliSession({ spawn: fakeClaudeAgentic().spawn, verboseThinking: false });
+    expect((await on.turn('x')).text).toBe(VERBOSE);
+    expect((await off.turn('x')).text).toBe('Hello');
+    on.close(); off.close();
+  });
+
+  it('reconfigure switches a live session between true and text', async () => {
+    const s = createWarmCliSession({ spawn: fakeClaudeAgentic().spawn, verboseThinking: true });
+    await s.reconfigure({ verboseThinking: 'text' });
+    expect((await s.turn('x')).text).toBe(TEXT);
+    await s.reconfigure({ verboseThinking: true });
+    expect((await s.turn('x')).text).toBe(VERBOSE);
+    s.close();
+  });
+});
+
+// ── THE MESSAGE BOUNDARY (operator 2026-09-01)──────────────────────────────────────────
 //
 // The LIVE failure, twice that morning in the SPOILER chat: a being's reply reached the
 // humans as "...a simple affirmation doesn't need a reply from me./react #563 🤝". The model
@@ -592,7 +626,7 @@ describe('redactSecrets — every pattern (a leaked stub cannot be unposted)', (
       'git clone https://***@github.com/siran/x.git');
     gone('curl http://admin:admin@speaker.local/play', 'admin:admin', 'curl http://***@speaker.local/play');
     // a bare username (no ':') is not a credential — keep it readable
-    expect(redactSecrets('ssh://an@dolly')).toBe('ssh://an@dolly');
+    expect(redactSecrets('ssh://user@dolly')).toBe('ssh://user@dolly');
   });
 
   it('self-identifying key shapes with nothing to anchor on', () => {
@@ -760,6 +794,9 @@ describe('warm-cli-session — interrupt (the CLI own stop)', () => {
 // task_notification, background_tasks_changed [] — then the CLI STARTS A TURN OF ITS OWN (init …
 // result with origin.kind 'task-notification'). With a turn in flight the notification is instead
 // absorbed at a tool boundary, replayed as a user line carrying that origin.
+// Measured 2026-10-30 on claude 2.1.309 (ED's "every time one reports it finished, the others are
+// cut"): an `interrupt` kills every background AGENT still running — task_updated killed, a
+// task_notification 'stopped', background_tasks_changed without it — before its control_response.
 describe('warm-cli-session — a background task finishes', () => {
   const ORIGIN = { kind: 'task-notification', producer: 'session-task', runId: 'r1' };
   function backgroundClaude() {
@@ -768,18 +805,20 @@ describe('warm-cli-session — a background task finishes', () => {
     let proc = null;
     let inSelf = false;          // the CLI's own turn is running…
     let owed = false;            // …or queued ahead of any line written now (the CLI keeps FIFO order)
+    let running = [];            // the background tasks the CLI lists
     const queued = [];
     const out = (o) => proc.stdout.emit('data', JSON.stringify(o) + '\n');
-    const tasks = (list) => out({ type: 'system', subtype: 'background_tasks_changed', tasks: list });
+    const tasks = (list) => { running = list; out({ type: 'system', subtype: 'background_tasks_changed', tasks: list }); };
     const completed = () => {
       out({ type: 'system', subtype: 'task_updated', task_id: 'b1', patch: { status: 'completed' } });
       out({ type: 'system', subtype: 'task_notification', task_id: 'b1', tool_use_id: 't1', status: 'completed', output_file: 'b1.output', summary: 'Background command "Run delayed echo" completed (exit code 0)' });
-      tasks([]);
+      tasks(running.filter((t) => t.task_id !== 'b1'));
     };
     const answer = (text) => {
       out({ type: 'system', subtype: 'init', session_id: 'sess-1' });
       out({ type: 'user', isReplay: true, message: { role: 'user', content: [{ type: 'text', text }] } });
       if (text === 'START BG') tasks([{ task_id: 'b1', task_type: 'local_bash', description: 'Run delayed echo' }]);
+      if (text === 'START TWO') tasks([{ task_id: 'b1', task_type: 'local_bash', description: 'Run delayed echo' }, { task_id: 'b2', task_type: 'local_agent', description: 'Crawl the site' }]);
       if (text === 'ABSORB') {
         completed();
         out({ type: 'user', isReplay: true, origin: ORIGIN, message: { role: 'user', content: '<task-notification>…</task-notification>' } });
@@ -800,6 +839,11 @@ describe('warm-cli-session — a background task finishes', () => {
           lines.push(o);
           if (o.type === 'control_request') {
             setImmediate(() => {
+              for (const t of running.filter((x) => x.task_type === 'local_agent')) {
+                out({ type: 'system', subtype: 'task_updated', task_id: t.task_id, patch: { status: 'killed' } });
+                out({ type: 'system', subtype: 'task_notification', task_id: t.task_id, status: 'stopped', summary: t.description });
+                tasks(running.filter((x) => x !== t));
+              }
               out({ type: 'control_response', response: { subtype: 'success', request_id: o.request_id, response: { still_queued: queued } } });
               if (!inSelf) return;
               out({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: '[Request interrupted by user]' }] } });
@@ -817,20 +861,25 @@ describe('warm-cli-session — a background task finishes', () => {
     };
     // The task completes with no turn in flight. `initLater`: the CLI's own turn starts a tick
     // after the notification, leaving the gap a new message can land in (measured ~50-100ms).
-    const finishBg = ({ initLater = false } = {}) => {
+    // `hold`: that turn runs until the returned function ends it. `text`: its answer ('' — the
+    // 0-turn result a notification queued behind another gets, measured 2.1.309).
+    const finishBg = ({ initLater = false, hold = false, text = 'self report' } = {}) => {
       completed();
       owed = true;
+      let release = null;
       const start = () => {
         owed = false;
         inSelf = true;
         out({ type: 'system', subtype: 'init', session_id: 'sess-1' });
-        setImmediate(() => {
+        release = () => {
           if (!inSelf) return;
-          out({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'self report' } } });
-          endSelf({ type: 'result', subtype: 'success', result: 'self report', origin: ORIGIN, session_id: 'sess-1' });
-        });
+          if (text) out({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text } } });
+          endSelf({ type: 'result', subtype: 'success', result: text, origin: ORIGIN, session_id: 'sess-1' });
+        };
+        if (!hold) setImmediate(release);
       };
       if (initLater) setImmediate(start); else start();
+      return () => release?.();
     };
     // The task completes inside the CLI (its own turn now queued ahead of any new line), but the
     // notification reaches stdout only after the next line is written.
@@ -845,11 +894,11 @@ describe('warm-cli-session — a background task finishes', () => {
         endSelf({ type: 'result', subtype: 'success', result: 'self report', origin: ORIGIN, session_id: 'sess-1' });
       };
     };
-    return { spawn, lines, written, finishBg, finishBgUnseen, tasks };
+    return { spawn, lines, written, finishBg, finishBgUnseen, tasks, out };
   }
   const settle = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); };
 
-  it('THE LIVE FAILURE: no turn in flight — the CLI\'s own turn is stopped and the completion is reported up (not dropped)', async () => {
+  it('THE LIVE FAILURE: no turn in flight — the completion is reported up (not dropped), with the CLI\'s own answer on it', async () => {
     const f = backgroundClaude();
     const done = [];
     const s = createWarmCliSession({ spawn: f.spawn, onBackgroundDone: (i) => done.push(i) });
@@ -857,10 +906,59 @@ describe('warm-cli-session — a background task finishes', () => {
     expect(s.background).toBe(1);
     f.finishBg();
     await settle();
-    expect(done).toEqual([{ summaries: ['Run delayed echo — completed'] }]);
-    expect(f.lines.at(-1)).toMatchObject({ type: 'control_request', request: { subtype: 'interrupt' } });
+    expect(done).toEqual([{ summaries: ['Run delayed echo — completed'], reply: 'self report' }]);
+    expect(f.lines.some((o) => o.type === 'control_request')).toBe(false);
     expect(s.background).toBe(0);
     expect(await s.turn('next')).toEqual({ text: 'echo:next', sessionId: 'sess-1' });
+    s.close();
+  });
+
+  it('ED, live 2026-10-30: one of two background tasks finishes with no turn in flight — nothing is interrupted, the other runs on, the report goes up', async () => {
+    const f = backgroundClaude();
+    const done = [];
+    const s = createWarmCliSession({ spawn: f.spawn, onBackgroundDone: (i) => done.push(i) });
+    await s.turn('START TWO');
+    expect(s.background).toBe(2);
+    f.finishBg();
+    await settle();
+    expect(f.lines.filter((o) => o.type === 'control_request')).toEqual([]);
+    expect(s.backgroundTasks.map((t) => t.description)).toEqual(['Crawl the site']);
+    expect(s.background).toBe(1);
+    expect(done).toEqual([{ summaries: ['Run delayed echo — completed'], reply: 'self report' }]);
+    expect(await s.turn('next')).toEqual({ text: 'echo:next', sessionId: 'sess-1' });
+    expect(s.backgroundTasks.map((t) => t.description)).toEqual(['Crawl the site']);
+    s.close();
+  });
+
+  it('a turn asked for WHILE the CLI\'s own turn runs waits for its end, then gets its OWN answer — the report still goes up', async () => {
+    const f = backgroundClaude();
+    const done = [];
+    const s = createWarmCliSession({ spawn: f.spawn, onBackgroundDone: (i) => done.push(i) });
+    await s.turn('START TWO');
+    const release = f.finishBg({ hold: true });
+    await settle();
+    expect(s.background).toBe(2);                     // the other task, and the CLI's own turn: neither is evictable
+    const q = s.turn('Q');
+    await settle();
+    expect(f.written).toEqual(['START TWO']);          // not written into the CLI's own turn
+    expect(done).toEqual([]);
+    release();
+    expect((await q).text).toBe('echo:Q');
+    expect(f.written).toEqual(['START TWO', 'Q']);
+    expect(done).toEqual([{ summaries: ['Run delayed echo — completed'], reply: 'self report' }]);
+    expect(f.lines.some((o) => o.type === 'control_request')).toBe(false);
+    expect(s.background).toBe(1);
+    s.close();
+  });
+
+  it('the CLI\'s own turn with no answer (an empty result) reports the completion alone', async () => {
+    const f = backgroundClaude();
+    const done = [];
+    const s = createWarmCliSession({ spawn: f.spawn, onBackgroundDone: (i) => done.push(i) });
+    await s.turn('START BG');
+    f.finishBg({ text: '' });
+    await settle();
+    expect(done).toEqual([{ summaries: ['Run delayed echo — completed'] }]);
     s.close();
   });
 
@@ -869,7 +967,7 @@ describe('warm-cli-session — a background task finishes', () => {
     const s = createWarmCliSession({ spawn: f.spawn });
     const t0 = Date.now();
     await s.turn('START BG');
-    expect(s.backgroundTasks).toEqual([{ taskId: 'b1', description: 'Run delayed echo', since: expect.any(Number) }]);
+    expect(s.backgroundTasks).toEqual([{ taskId: 'b1', taskType: 'local_bash', description: 'Run delayed echo', since: expect.any(Number) }]);
     const since = s.backgroundTasks[0].since;
     expect(since).toBeGreaterThanOrEqual(t0);
     await new Promise((r) => setTimeout(r, 5));
@@ -877,6 +975,83 @@ describe('warm-cli-session — a background task finishes', () => {
     expect(s.backgroundTasks.map((t) => t.description)).toEqual(['Run delayed echo', 'Crawl']);
     expect(s.backgroundTasks[0].since).toBe(since);
     expect(s.backgroundTasks[1].since).toBeGreaterThan(since);
+    s.close();
+  });
+
+  // operator 2026-10-31: "are you listing parent and child process in the same level? in that case why not
+  // nest?". claude 2.1.309: parent_task_id — the live background agent that launched the task; ambient — "not
+  // activity … hosts should exclude them from activity indicators" (liveness does; this session keeps them).
+  it('keeps the agent that launched each task and the CLI\'s ambient mark — an ambient task is still its task: counted, ended with an outcome', async () => {
+    const f = backgroundClaude();
+    const s = createWarmCliSession({ spawn: f.spawn });
+    await s.turn('hi');
+    f.tasks([
+      { task_id: 'a1', task_type: 'local_agent', description: 'Factuwin tests on AWS Windows' },
+      { task_id: 'b1', task_type: 'local_bash', description: 'Queue menu calibration job', parent_task_id: 'a1' },
+      { task_id: 'w1', task_type: 'monitor_mcp', description: 'Watch the job log', parent_task_id: 'a1', ambient: true },
+    ]);
+    expect(s.backgroundTasks).toEqual([
+      { taskId: 'a1', taskType: 'local_agent', description: 'Factuwin tests on AWS Windows', since: expect.any(Number) },
+      { taskId: 'b1', taskType: 'local_bash', description: 'Queue menu calibration job', since: expect.any(Number), parentTaskId: 'a1' },
+      { taskId: 'w1', taskType: 'monitor_mcp', description: 'Watch the job log', since: expect.any(Number), parentTaskId: 'a1', ambient: true },
+    ]);
+    expect(s.background).toBe(3);                     // not evictable while the watcher runs: closing it would kill it
+    f.out({ type: 'system', subtype: 'task_updated', task_id: 'w1', patch: { status: 'completed' } });
+    f.tasks([{ task_id: 'a1', task_type: 'local_agent', description: 'Factuwin tests on AWS Windows' }, { task_id: 'b1', task_type: 'local_bash', description: 'Queue menu calibration job', parent_task_id: 'a1' }]);
+    expect(s.backgroundOutcome('w1')).toMatchObject({ status: 'completed' });
+    expect(s.background).toBe(2);
+    s.close();
+  });
+
+  // 2026-11-02, "this is probably too much :)": the status rolls background shell commands into one line;
+  // it tells them from agents by the CLI's task_type, kept here. None given (an older cli-host's adoption): none kept.
+  it('keeps the CLI\'s task_type on each task — from the event, and on adoption', async () => {
+    const f = backgroundClaude();
+    const s = createWarmCliSession({ spawn: f.spawn });
+    await s.turn('hi');
+    f.tasks([{ task_id: 'a1', task_type: 'local_agent', description: 'Ask ChatGPT' }, { task_id: 'b1', task_type: 'local_bash', description: 'checkpoint', parent_task_id: 'a1' }, { task_id: 'x1', description: 'no type' }]);
+    expect(s.backgroundTasks).toEqual([
+      { taskId: 'a1', taskType: 'local_agent', description: 'Ask ChatGPT', since: expect.any(Number) },
+      { taskId: 'b1', taskType: 'local_bash', description: 'checkpoint', since: expect.any(Number), parentTaskId: 'a1' },
+      { taskId: 'x1', description: 'no type', since: expect.any(Number) },
+    ]);
+    s.close();
+    const adopted = createWarmCliSession({ adopt: { proc: f.spawn(), sessionId: 'sess-1', background: [{ task_id: 'b1', task_type: 'local_bash', description: 'checkpoint', since: 1234 }, { task_id: 'b2', description: 'from an older cli-host', since: 1235 }] } });
+    expect(adopted.backgroundTasks).toEqual([{ taskId: 'b1', taskType: 'local_bash', description: 'checkpoint', since: 1234 }, { taskId: 'b2', description: 'from an older cli-host', since: 1235 }]);
+    adopted.close();
+  });
+
+  // operator 2026-11-01: "por qué los mensajes se están viendo así? … se van así". A background Bash with no
+  // `description` is described by the CLI as its whole command: the status posted a heredoc, line by line.
+  const HEREDOC = `\n  cd /home/egpt/.egpt/conversations/telegram/Contoso-2610240312/desktop/gestion-docente/e4;  python3 - <<'PY'\np='aws/job-boleta.ps1'; s=open(p,encoding='utf-8').read()\nold="Foto 'boleta-1' | Out-Null"\nPY`;
+  const HEREDOC_LINE = 'cd /home/egpt/.egpt/conversations/telegram/Contoso-2610240312/desktop/gestion-d…';
+  it('a task\'s description is ONE short line — its first, collapsed, redacted, cut at 80 with … — or its id; a finished one\'s summary too', async () => {
+    const f = backgroundClaude();
+    const done = [];
+    const s = createWarmCliSession({ spawn: f.spawn, onBackgroundDone: (i) => done.push(i) });
+    await s.turn('hi');
+    f.tasks([
+      { task_id: 'b1', task_type: 'local_bash', description: HEREDOC },
+      { task_id: 'b2', task_type: 'local_bash', description: 'curl -u leo:hunter2 https://radio.test/api\necho ok' },
+      { task_id: 'b3', task_type: 'local_bash', description: ' \n\t' },
+      { task_id: 'b4', task_type: 'local_bash' },
+      { task_id: 'a1', task_type: 'local_agent', description: 'Crawl the site' },
+    ]);
+    expect(s.backgroundTasks.map((t) => t.description)).toEqual([HEREDOC_LINE, 'curl -u *** https://radio.test/api…', 'b3', 'b4', 'Crawl the site']);
+    expect(HEREDOC_LINE).toHaveLength(80);
+    f.finishBg();
+    await settle();
+    expect(done).toEqual([{ summaries: [`${HEREDOC_LINE} — completed`], reply: 'self report' }]);
+    s.close();
+  });
+
+  it('…and an adopted session\'s (the daemon held it across a spine restart, its tasks as the CLI listed them)', () => {
+    const f = backgroundClaude();
+    const s = createWarmCliSession({ adopt: { proc: f.spawn(), sessionId: 'sess-1', background: [{ task_id: 'b1', description: HEREDOC, since: 1234 }, { task_id: 'b2', description: 'export GH_TOKEN=ghp_abcdefgh12345678\ngh pr list', parent_task_id: 'b1', since: 1235 }] } });
+    expect(s.backgroundTasks).toEqual([
+      { taskId: 'b1', description: HEREDOC_LINE, since: 1234 },
+      { taskId: 'b2', description: 'export GH_TOKEN=***…', since: 1235, parentTaskId: 'b1' },
+    ]);
     s.close();
   });
 
@@ -900,9 +1075,9 @@ describe('warm-cli-session — a background task finishes', () => {
     f.finishBg({ initLater: true });
     const r = await s.turn('Q');
     expect(r.text).toBe('echo:Q');
-    expect(done).toHaveLength(1);
+    expect(done).toEqual([{ summaries: ['Run delayed echo — completed'], reply: 'self report' }]);
     const types = f.lines.map((o) => (o.type === 'control_request' ? 'interrupt' : o.message.content[0].text));
-    expect(types).toEqual(['START BG', 'interrupt', 'Q']);
+    expect(types).toEqual(['START BG', 'Q']);
     s.close();
   });
 
@@ -928,6 +1103,53 @@ describe('warm-cli-session — a background task finishes', () => {
     f.finishBg({ initLater: true });
     expect((await s.turn('Q')).text).toBe('echo:Q');
     expect(f.lines.some((o) => o.type === 'control_request')).toBe(false);
+    s.close();
+  });
+
+  // operator 2026-10-31: "si termina en error (muy raro) debería mostrar una X y el mensaje de error? esto
+  // debe ser estructural, no pongas al SI a determinar el error cuando falla el proceso". Shapes from
+  // claude 2.1.309: task_notification { status completed|failed|stopped, summary, reason? }; task_updated
+  // { patch: { status completed|failed|killed, error? } } just before it.
+  it('how a finished task ended is the CLI\'s own verdict: completed bare; failed with its reason, else its summary — one line, redacted, capped', async () => {
+    const f = backgroundClaude();
+    const s = createWarmCliSession({ spawn: f.spawn, onBackgroundDone: () => {} });
+    await s.turn('START TWO');
+    expect(s.backgroundOutcome('b1')).toBe(null);
+    f.finishBg();
+    await settle();
+    expect(s.backgroundOutcome('b1')).toEqual({ status: 'completed', message: null, at: expect.any(Number) });
+    f.tasks([{ task_id: 'b2', task_type: 'local_agent', description: 'Crawl the site' }, { task_id: 'b3', task_type: 'local_bash', description: 'Run the lint' }]);
+    f.out({ type: 'system', subtype: 'task_updated', task_id: 'b3', patch: { status: 'failed' } });
+    f.out({ type: 'system', subtype: 'task_notification', task_id: 'b3', status: 'failed', summary: `Background command "Run the lint"\n  failed (exit code 1): API_TOKEN=s3cr3t ${'x'.repeat(300)}` });
+    f.out({ type: 'system', subtype: 'task_notification', task_id: 'b2', status: 'failed', summary: 'Agent failed', reason: 'API Error: 529 overloaded' });
+    f.tasks([]);
+    const lint = s.backgroundOutcome('b3');
+    expect(lint.status).toBe('failed');
+    expect(lint.message).toMatch(/^Background command "Run the lint" failed \(exit code 1\): API_TOKEN=\*\*\* x+…$/);
+    expect(lint.message).toHaveLength(200);
+    expect(lint.message).not.toContain('s3cr3t');
+    expect(s.backgroundOutcome('b2')).toMatchObject({ status: 'failed', message: 'API Error: 529 overloaded' });
+    expect(s.backgroundTasks).toEqual([]);
+    s.close();
+  });
+
+  it('no notification follows: the task_updated status stands — killed is stopped, failed keeps its error; the last 50 are kept', async () => {
+    const f = backgroundClaude();
+    const s = createWarmCliSession({ spawn: f.spawn });
+    await s.turn('START TWO');
+    f.out({ type: 'system', subtype: 'task_updated', task_id: 'b1', patch: { status: 'failed', error: 'spawn ENOENT' } });
+    f.out({ type: 'system', subtype: 'task_updated', task_id: 'b2', patch: { status: 'killed' } });
+    f.tasks([]);
+    expect(s.backgroundOutcome('b1')).toMatchObject({ status: 'failed', message: 'spawn ENOENT' });
+    expect(s.backgroundOutcome('b2')).toMatchObject({ status: 'stopped', message: null });
+    const many = Array.from({ length: 50 }, (_, i) => ({ task_id: `m${i}`, task_type: 'local_bash', description: `job ${i}` }));
+    f.tasks(many);
+    for (const t of many) f.out({ type: 'system', subtype: 'task_updated', task_id: t.task_id, patch: { status: 'completed' } });
+    f.tasks([]);
+    expect(s.backgroundOutcome('b1')).toBe(null);
+    expect(s.backgroundOutcome('b2')).toBe(null);
+    expect(s.backgroundOutcome('m0')).toMatchObject({ status: 'completed' });
+    expect(s.backgroundOutcome('m49')).toMatchObject({ status: 'completed' });
     s.close();
   });
 });
@@ -1001,6 +1223,7 @@ describe('warm-cli-session — a background subagent\'s text never reaches the r
       out({ type: 'system', subtype: 'background_tasks_changed', tasks: [] });
       out({ type: 'system', subtype: 'init', session_id: 'sess-1' });
       out(sub('SUBAGENT_IN_SELF_TURN'));
+      setImmediate(() => { out(top([{ type: 'text', text: 'SELF_REPORT' }])); out({ type: 'result', subtype: 'success', result: 'SELF_REPORT', origin: ORIGIN, session_id: 'sess-1' }); });
     };
     return { spawn, lines, subagentDone };
   }
@@ -1035,13 +1258,13 @@ describe('warm-cli-session — a background subagent\'s text never reaches the r
     const s = createWarmCliSession({ spawn: f.spawn, onBackgroundDone: (i) => done.push(i) });
     const r1 = await s.turn('START');
     expect(r1.bgStarted).toBe(1);
-    expect(s.backgroundTasks).toEqual([{ taskId: 'a1', description: 'counter', since: expect.any(Number) }]);
+    expect(s.backgroundTasks).toEqual([{ taskId: 'a1', taskType: 'local_agent', description: 'counter', since: expect.any(Number) }]);
     await s.turn('SEND');
     expect(s.background).toBe(1);
     f.subagentDone();
     await settle();
-    expect(done).toEqual([{ summaries: ['counter — completed'] }]);
-    expect(f.lines.at(-1)).toMatchObject({ type: 'control_request', request: { subtype: 'interrupt' } });
+    expect(done).toEqual([{ summaries: ['counter — completed'], reply: 'SELF_REPORT' }]);
+    expect(f.lines.some((o) => o.type === 'control_request')).toBe(false);
     expect(s.background).toBe(0);
     const u = [];
     expect(await s.turn('NEXT', (t) => u.push(t))).toEqual({ text: 'echo:NEXT', sessionId: 'sess-1' });

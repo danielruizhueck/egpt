@@ -142,7 +142,7 @@ export function chromePipeArgs({ userDataDir, extensionDir, url = 'about:blank',
   const args = [
     '--remote-debugging-pipe',
     // The pipe alone sets navigator.webdriver = true for every site, so captchas and bot filters
-    // refuse the operator's own browsing (NYSCEF, ticket sites; measured 2026-10-27).
+    // refuse the operator's own browsing (LOGIN_PORTAL, ticket sites; measured 2026-10-27).
     '--disable-blink-features=AutomationControlled',
     `--user-data-dir=${userDataDir}`,
     '--no-first-run',
@@ -234,6 +234,19 @@ export function profileHolder(userDataDir) {
   let pid;
   try { pid = Number(/-(\d+)$/.exec(readlinkSync(join(userDataDir, 'SingletonLock')))?.[1]); } catch { return null; }
   try { process.kill(pid, 0); return `pid ${pid}`; } catch (e) { return e.code === 'EPERM' ? `pid ${pid}` : null; }
+}
+
+// Does this Chrome command line run on EXACTLY this --user-data-dir? The one place that is decided (never a substring:
+// /p/work must not match /p/work2). The value is quoted ("--user-data-dir=a b", --user-data-dir="a b") or bare (to whitespace);
+// compared path-normalized: Windows ignores case and \ vs /, Linux/macOS is exact. A trailing slash is ignored.
+export function cmdUsesProfile(cmd, profileDir, platform = process.platform) {
+  if (!cmd || !profileDir) return false;
+  const norm = (p) => { const t = String(p).replace(/[\\/]+$/, ''); return platform === 'win32' ? t.replace(/\\/g, '/').toLowerCase() : t; };
+  const want = norm(profileDir);
+  for (const m of String(cmd).matchAll(/(?:^|\s)(?:"--user-data-dir=([^"]*)"|--user-data-dir=(?:"([^"]*)"|(\S+)))/g)) {
+    if (norm(m[1] ?? m[2] ?? m[3]) === want) return true;
+  }
+  return false;
 }
 
 // Every running chrome.exe as { pid, cmd } (its command line) — the daemon's orphan sweep (src/chrome-host.mjs).

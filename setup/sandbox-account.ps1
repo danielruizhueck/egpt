@@ -324,12 +324,12 @@ function Ensure-SandboxPoolGroup {
 #
 # THE S IN THE TRAVERSE ROW IS LOAD-BEARING (2026-09-27, measured on do as a real
 # pool account, egpt-sbx-13). The row was (X,RA,RC) until then. A boxed being ran
-# `node C:\Users\an\src\egpt\src\tools\ask-spine.mjs` and Node's module loader
+# `node C:\Users\user\src\egpt\src\tools\ask-spine.mjs` and Node's module loader
 # died before the client's first line: EPERM, syscall 'lstat', path
-# 'C:\Users\an\src'. fs.realpathSync lstats every component, lstat opens each one
+# 'C:\Users\user\src'. fs.realpathSync lstats every component, lstat opens each one
 # for FILE_READ_ATTRIBUTES, and CreateFileW adds SYNCHRONIZE to any synchronous
 # open. The pool's ACE on ~\src was (Rc,X,RA) - no S - so that open was refused:
-# `lstat C:/Users/an` ok, `lstat C:/Users/an/src` EPERM, `lstat .../src/egpt` ok,
+# `lstat C:/Users/user` ok, `lstat C:/Users/user/src` EPERM, `lstat .../src/egpt` ok,
 # realpathSync on the client EPERM, realpathSync.native and a plain read ok.
 # Granting S on ~\src by hand made every one of them pass.
 #
@@ -367,7 +367,7 @@ $SandboxPoolGrants = @{
 # a container makes Windows re-run inheritance propagation over the whole
 # subtree, so re-issuing a grant that is already correct is not free - ~\src
 # measured 307 s for ONE pass on reve, and Set-Acl HUNG twice against
-# C:\Users\an and had to be killed. All five ancestors and ~\src were already
+# C:\Users\user and had to be killed. All five ancestors and ~\src were already
 # correct before the run the operator watched, so it should have been seconds.
 #
 # icacls, NEVER Set-Acl, for the write (measured 2026-09-13): Set-Acl persists
@@ -479,21 +479,101 @@ function Grant-SandboxPoolAce {
   if (-not (Test-Path -LiteralPath $Path)) {
     throw "sandbox-logon-launcher: cannot grant $Grant to $Principal -- path does not exist: $Path"
   }
+  # NEVER THROUGH A LINK. A being that owns a folder can plant a junction or
+  # symlink in it; an ACE written through that lands on whatever it points at.
+  # The path itself and every folder above it up to the profile (the same walk
+  # as the traverse chain) must be real directories or files. Fail loud, write
+  # nothing; callers already catch a throw per path.
+  foreach ($p in @($Path) + @(Get-SandboxTraverseChain -Path $Path)) {
+    if (Test-SandboxReparsePoint -Path $p) {
+      throw "sandbox-logon-launcher: refused to grant $Grant to $Principal on $Path -- '$p' is a reparse point (junction or symlink); a grant must never go through a link"
+    }
+  }
   $spec = (Get-SandboxPoolGrantShape -Path $Path -Grant $Grant).Spec
   if (Test-SandboxPoolAcePresent -Path $Path -Grant $Grant -Sid $Sid) {
     Log "already granted $Grant $spec to $Principal on $Path  - nothing written"
+    Write-SandboxHardlinkReport -Path $Path -Grant $Grant
     return 'already granted'
   }
   # No 2>&1: PS 5.1 turns a redirected native stderr into NativeCommandError
   # records, which under the provisioner's $ErrorActionPreference='Stop' throws
   # something unrelated to what went wrong. icacls's own reason goes to the
   # console; the exit code is what this branches on.
-  $out = & icacls.exe $Path '/grant' "*$($Sid.Value):$spec"
+  # /L: act on a symbolic link itself, never its target (the check above only
+  # covers what is there now; /L covers a link swapped in after it).
+  $out = & icacls.exe $Path '/grant' "*$($Sid.Value):$spec" '/L'
   if ($LASTEXITCODE -ne 0) {
     throw "sandbox-logon-launcher: icacls could not grant $Grant $spec to $Principal on $Path  - exit $LASTEXITCODE ($($out -join ' '))"
   }
   Log "granted $Grant $spec to $Principal on $Path"
+  Write-SandboxHardlinkReport -Path $Path -Grant $Grant
   return 'granted'
+}
+
+# FILES IN A WRITABLE FOLDER THAT HAVE MORE THAN ONE NAME. A hardlink to an
+# outside file shares that file's security descriptor, so the folder's
+# inherited (OI)(CI)(M) ACE lands on the outside file. Creating one needs
+# FILE_WRITE_ATTRIBUTES on the source, so the risk is low; this only finds them.
+# BOUNDED, because the leaf can be a big tree: at most $MaxFiles files looked at
+# and $MaxDepth levels down; anything past either is not examined. Reparse-point
+# folders are not entered. Returns { Path; Links } per hit.
+function Find-SandboxHardlinks {
+  param([Parameter(Mandatory = $true)][string]$Path, [int]$MaxDepth = 6, [int]$MaxFiles = 5000)
+  if (-not ('SandboxLinkCount' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class SandboxLinkCount {
+  [StructLayout(LayoutKind.Sequential)]
+  struct FILETIME { public uint Lo; public uint Hi; }
+  [StructLayout(LayoutKind.Sequential)]
+  struct BY_HANDLE_FILE_INFORMATION {
+    public uint Attributes; public FILETIME Created, Accessed, Written;
+    public uint VolumeSerial, SizeHigh, SizeLow, NumberOfLinks, IndexHigh, IndexLow;
+  }
+  [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+  static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr sec, uint disp, uint flags, IntPtr tmpl);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern bool GetFileInformationByHandle(SafeFileHandle h, out BY_HANDLE_FILE_INFORMATION i);
+  // 0 when the file cannot be opened. Attribute-only access, share all, no follow.
+  public static uint Of(string path) {
+    using (SafeFileHandle h = CreateFileW(path, 0, 7, IntPtr.Zero, 3, 0x00200000, IntPtr.Zero)) {
+      if (h.IsInvalid) return 0;
+      BY_HANDLE_FILE_INFORMATION i;
+      return GetFileInformationByHandle(h, out i) ? i.NumberOfLinks : 0;
+    }
+  }
+}
+'@
+  }
+  $seen = 0
+  $queue = New-Object System.Collections.Generic.Queue[object]
+  $queue.Enqueue(@{ Dir = $Path; Depth = 0 })
+  while ($queue.Count -gt 0) {
+    $cur = $queue.Dequeue()
+    foreach ($e in @(Get-ChildItem -LiteralPath $cur.Dir -Force -ErrorAction SilentlyContinue)) {
+      if ($e.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { continue }
+      if ($e.PSIsContainer) {
+        if ($cur.Depth -lt $MaxDepth) { $queue.Enqueue(@{ Dir = $e.FullName; Depth = $cur.Depth + 1 }) }
+        continue
+      }
+      if ($seen -ge $MaxFiles) { return }
+      $seen++
+      $n = [SandboxLinkCount]::Of($e.FullName)
+      if ($n -gt 1) { [pscustomobject]@{ Path = $e.FullName; Links = [int]$n } }
+    }
+  }
+}
+
+# Warn, never refuse: a being's own hardlinks inside its folder are legitimate,
+# and the grant is already made. Only a writable leaf (Modify) matters.
+function Write-SandboxHardlinkReport {
+  param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Grant)
+  if ($Grant -ne 'Modify') { return }
+  foreach ($h in @(Find-SandboxHardlinks -Path $Path)) {
+    Log "WARNING hardlink in writable folder $Path : '$($h.Path)' has $($h.Links) links - it shares its security descriptor with the other name(s), so they carry this folder's grant"
+  }
 }
 
 # IS THIS PATH ALREADY READABLE BY THE WHOLE POOL? (operator 2026-09-20: "~/src
@@ -528,7 +608,8 @@ function Grant-SandboxPoolAce {
 function Test-SandboxPoolReadCovered {
   param(
     [Parameter(Mandatory = $true)][string]$Path,
-    [Parameter(Mandatory = $true)][System.Security.Principal.SecurityIdentifier]$LeasedSid
+    # Optional: Grant-SandboxTraverseChain asks for the group alone.
+    [System.Security.Principal.SecurityIdentifier]$LeasedSid
   )
   try {
     $groupSid = (New-Object System.Security.Principal.NTAccount($SandboxPoolGroup)).Translate([System.Security.Principal.SecurityIdentifier])
@@ -538,7 +619,7 @@ function Test-SandboxPoolReadCovered {
     $rules = @((Get-Acl -LiteralPath $Path -ErrorAction Stop).GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
     foreach ($rule in $rules) {
       if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Deny) { continue }
-      if ($rule.IdentityReference.Value -eq $groupSid.Value -or $rule.IdentityReference.Value -eq $LeasedSid.Value) { return $false }
+      if ($rule.IdentityReference.Value -eq $groupSid.Value -or ($LeasedSid -and $rule.IdentityReference.Value -eq $LeasedSid.Value)) { return $false }
     }
     $readAndExecute = [int][System.Security.AccessControl.FileSystemRights]::ReadAndExecute
     foreach ($rule in $rules) {
@@ -965,6 +1046,65 @@ function Protect-SandboxSecretFile {
   }
 }
 
+# THE TRAVERSE CHAIN OF ONE GRANTED PATH: every folder from its parent up to and
+# including the operator profile, nearest first (operator 2026-11-12: the folders
+# a being sees are the ones its config declares, and the sandbox permissions
+# follow from them). NOTHING OUTSIDE THE PROFILE: C:\Users and other drives
+# already let BUILTIN\Users (every pool account) walk them, and a DACL write on
+# a drive root re-propagates over the volume, if the unelevated launcher may
+# write it at all.
+function Get-SandboxTraverseChain {
+  param([Parameter(Mandatory = $true)][string]$Path, [string]$ProfileDir = $env:USERPROFILE)
+  $root = [System.IO.Path]::GetFullPath($ProfileDir).TrimEnd('\')
+  $dir = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+  if (-not $dir.StartsWith("$root\", [System.StringComparison]::OrdinalIgnoreCase)) { return }
+  while ($dir.Length -gt $root.Length) {
+    $dir = [System.IO.Path]::GetDirectoryName($dir)
+    $dir
+  }
+}
+
+# TRAVERSE FOR THE POOL GROUP ON EVERY ANCESTOR OF THESE LEAVES, standing, never
+# revoked. Claude Code's Read/Edit/Write lstat each component and refuse a path
+# with an ancestor the box cannot open (kg 2026-11-12: room/acim under an
+# ungranted .egpt\rooms); the shell never asks. The launcher passes the leaves it
+# grants each turn, the provisioner its standing ones.
+# CHECK-FIRST: an ancestor already carrying the traverse ACE, or a group read
+# grant explicit or inherited (~\src\egpt and below), is only read. A write is
+# one icacls pass that re-propagates over the folder's subtree even though
+# Traverse is not inheritable (~0.1 ms per item, measured 2026-11-12), once.
+# A leaf inside another leaf adds nothing: the outer one's (OI)(CI) ACE covers it.
+# Never throws. One record per ancestor: { Path; Status = already granted |
+# covered | granted | failed; Message }.
+function Grant-SandboxTraverseChain {
+  param([string[]]$Paths, [string]$ProfileDir = $env:USERPROFILE)
+  $leaves = New-Object System.Collections.Generic.List[string]
+  foreach ($p in @($Paths)) {
+    if ([string]::IsNullOrWhiteSpace($p)) { continue }
+    try {
+      if (Test-Path -LiteralPath $p.Trim()) { $leaves.Add([System.IO.Path]::GetFullPath($p.Trim()).TrimEnd('\')) }
+    } catch { }
+  }
+  $seen = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList ([System.StringComparer]::OrdinalIgnoreCase)
+  $groupSid = $null
+  foreach ($leaf in $leaves) {
+    if (@($leaves | Where-Object { $leaf.StartsWith("$_\", [System.StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) { continue }
+    foreach ($dir in @(Get-SandboxTraverseChain -Path $leaf -ProfileDir $ProfileDir)) {
+      if (-not $seen.Add($dir)) { continue }
+      $rec = [pscustomobject]@{ Path = $dir; Status = 'failed'; Message = '' }
+      try {
+        if (-not $groupSid) { $groupSid = Get-SandboxPoolGroupSid }
+        if (Test-SandboxPoolAcePresent -Path $dir -Grant 'Traverse' -Sid $groupSid) { $rec.Status = 'already granted' }
+        elseif (Test-SandboxPoolReadCovered -Path $dir) { $rec.Status = 'covered' }
+        else { $rec.Status = Grant-SandboxPoolAce -Path $dir -Grant 'Traverse' -Sid $groupSid -Principal $SandboxPoolGroup }
+      } catch {
+        $rec.Message = $_.Exception.Message
+      }
+      $rec
+    }
+  }
+}
+
 # THE FOLDERS THE CARVE AND THE STANDING READ GRANT ARE FOR: this node's
 # config.yaml global_read_paths (operator 2026-09-28: "please frame this in
 # config.yaml as global_read_paths list"), for provision-sandbox-account.ps1.
@@ -1080,9 +1220,9 @@ function Get-SandboxGlobalReadPaths {
 # ---- `egpt` IS THE THIRD LINK, AND IT IS NOT A CONVENIENCE (operator ruling
 # 2026-09-23). It is THE BEING'S WORKING DIRECTORY, and the reason it exists is
 # privacy of the path itself. A sandboxed being's cwd used to be the durable
-# Room, `C:\Users\an\.egpt\conversations\whatsapp\<slug>`, and it QUOTED that
+# Room, `C:\Users\user\.egpt\conversations\whatsapp\<slug>`, and it QUOTED that
 # path into group chats all day - verbose tool lines read
-#   Bash(cd "C:/Users/an/.egpt/conversations/whatsapp/Reencuentro CR...")
+#   Bash(cd "C:/Users/user/.egpt/conversations/whatsapp/Reencuentro CR...")
 # which discloses two things to everyone in the room: the OPERATOR's username
 # and profile layout, and - because a slug is usually a PERSON'S NAME - a third
 # party's private conversation name. Through the junction the same line reads
@@ -1121,7 +1261,7 @@ function Get-SandboxGlobalReadPaths {
 # this is a conversation-history shredder - stop rather than adjust it.
 #
 # ---- THE READ MOUNTS ARE THE OPTIONAL ROWS (operator ruling 2026-09-28:
-# "sandboxed beings should have access to my 'C:\Users\an\src\siran', we can call
+# "sandboxed beings should have access to my 'C:\Users\user\src\siran', we can call
 # it repos/", then "please frame this in config.yaml as global_read_paths list").
 # Each entry of the node's config.yaml global_read_paths - kg's is `repos`, the
 # operator's own repositories - mounted beside `src`, READ-ONLY, through the same
@@ -1148,7 +1288,7 @@ function Get-SandboxGlobalReadPaths {
 # for src and egpt: with no read mount the payload is exactly what it was.
 function Get-SandboxProfileJunctionStatement {
   param(
-    # THE REPO, not the operator's ~\src: C:\Users\an\src\egpt. Named -RepoRoot
+    # THE REPO, not the operator's ~\src: C:\Users\user\src\egpt. Named -RepoRoot
     # rather than -OperatorSrc so that a caller still passing the old, wider
     # target fails to bind instead of silently re-mounting all of ~\src.
     [Parameter(Mandatory = $true)][string]$RepoRoot,
@@ -1247,8 +1387,8 @@ function Get-SandboxLaunchSummary {
 # PATH IS A NAME, and NTFS carries a DACL through a rename - so renaming the
 # folder leaves the ACE alive at the new name while the only record of it points
 # at nothing:
-#   egpt-sbx-08, -13 -> ...\conversations\whatsapp\Favel Konefka-2608141626
-#   egpt-sbx-03, -04, -10 -> ...\conversations\whatsapp\Favel Elena Konefka-2608141626
+#   egpt-sbx-08, -13 -> ...\conversations\whatsapp\Fiona Ejemplar-2608141626
+#   egpt-sbx-03, -04, -10 -> ...\conversations\whatsapp\Fiona Elena Ejemplar-2608141626
 # One conversation (the -2608141626 id is identical), renamed slug. The revoke
 # reported 'missing', both callers read 'missing' as resolved, dropped the line
 # and released the lock, and three pool accounts were left holding Modify on a
@@ -1344,11 +1484,17 @@ function Get-SandboxVolumeSerial {
 # resolve reads as 'unknown', which is 'failed', which KEEPS THE LOCK FOR EVER.
 # Recording nothing leaves such a path on the revoke-by-name path it has always
 # been on, which is the honest answer rather than a permanent retry.
+# Is this path itself a junction or symlink? Throws when it cannot be read.
+function Test-SandboxReparsePoint {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+  return [bool]($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+}
+
 function Get-SandboxPathFileId {
   param([Parameter(Mandatory = $true)][string]$Path)
   try {
-    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
-    if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { return $null }
+    if (Test-SandboxReparsePoint -Path $Path) { return $null }
     if ([System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($Path)) -notmatch '^[A-Za-z]:\\$') { return $null }
     # No 2>&1, for the reason Grant-SandboxPoolAce and Revoke-SandboxPathAces
     # both carry: PS 5.1 turns a redirected native stderr into NativeCommandError
@@ -1491,8 +1637,8 @@ $SandboxLeaseLedgerHeader = '# egpt sandbox lease ledger - one granted path per 
 
 # ---- THE LINE FORMAT, AND THE OLD LEDGERS IT MUST NOT BREAK (2026-09-23).
 #
-#   C:\Users\an\.egpt\conversations\whatsapp\Favel Konefka-2608141626
-#   C:\Users\an\.egpt\conversations\whatsapp\Favel Konefka-2608141626|fid=54118918:0000000000000000002900000008f38a
+#   C:\Users\user\.egpt\conversations\whatsapp\Fiona Ejemplar-2608141626
+#   C:\Users\user\.egpt\conversations\whatsapp\Fiona Ejemplar-2608141626|fid=54118918:0000000000000000002900000008f38a
 #
 # THE PATH IS STILL FIRST AND STILL WHOLE, so what an operator reads in a lock
 # file is what it always was. Everything after the first '|' is machinery.
@@ -1705,8 +1851,8 @@ function Add-SandboxLeaseLedgerPath {
 # callers then treat 'missing' as resolved, drop the line and release the lock,
 # and the ACE becomes UNFINDABLE: nothing on the box still names it.
 # MEASURED on kg 2026-09-23, straight out of the live lock ledgers:
-#   egpt-sbx-08.lock, egpt-sbx-13.lock -> ...\conversations\whatsapp\Favel Konefka-2608141626
-#   egpt-sbx-03/-04/-10.lock           -> ...\conversations\whatsapp\Favel Elena Konefka-2608141626
+#   egpt-sbx-08.lock, egpt-sbx-13.lock -> ...\conversations\whatsapp\Fiona Ejemplar-2608141626
+#   egpt-sbx-03/-04/-10.lock           -> ...\conversations\whatsapp\Fiona Elena Ejemplar-2608141626
 # Same conversation (the -2608141626 id is identical), renamed display slug. Two
 # of those five ledgers name a folder that is not there any more, and the ACEs
 # they were written to revoke rode the rename.
@@ -1816,7 +1962,7 @@ function Revoke-SandboxPathAces {
     # something unrelated to what went wrong (the same note Grant-SandboxPoolAce
     # carries). Capturing stdout also keeps icacls's chatter off the launcher's
     # stdout, which is the inner process's stream-json pipe.
-    $icaclsArgs = @($target, '/remove:g') + @($targets | ForEach-Object { "*$($sids[$_].Value)" }) + @('/C')
+    $icaclsArgs = @($target, '/remove:g') + @($targets | ForEach-Object { "*$($sids[$_].Value)" }) + @('/C', '/L')
     $out = & icacls.exe @icaclsArgs
     $code = $LASTEXITCODE
     $after = @((Get-Acl -LiteralPath $target -ErrorAction Stop).GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object { $_.IdentityReference.Value })
@@ -2194,8 +2340,8 @@ function Clear-SandboxAbandonedLeases {
 # STANDING grants: ACEs for that account's own SID, never the group, kept across
 # leases (the lease ledger's are per turn).
 #
-#   key=egpt:whatsapp:89xiqJ8w1iDuKtD4a5BY
-#   C:\Users\an\Documents|fid=<volume serial>:<id>|grant=Read
+#   key=egpt:whatsapp:FakeRoomId0000000008
+#   C:\Users\user\Documents|fid=<volume serial>:<id>|grant=Read
 #
 # Written only while holding that account's lease lock, and always by atomic
 # replace: a torn pin could lose its key line and hand its standing grants to

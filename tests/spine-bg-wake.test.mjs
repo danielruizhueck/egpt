@@ -4,8 +4,9 @@
 //
 // Live failure: E handed a long job to a background agent and ended its turn. When the agent
 // finished, the CLI started a turn of its own about it — with no turn in flight the warm session
-// was not listening, and the result never reached the chat. Now the session stops that turn and
-// reports the completion up (warm-sessions onBackgroundDone); the spine wakes the being with a
+// was not listening, and the result never reached the chat. Now the session lets that turn run
+// (stopping it killed the being's other background agents — ED, live 2026-10-30) and reports the
+// completion up with its answer (warm-sessions onBackgroundDone); the spine wakes the being with a
 // turn like any other: STOP, the loop guard and the gate first, then the conversation's FIFO and
 // THE reply path (placeholder, transcript, delivery).
 import { describe, it, expect, vi } from 'vitest';
@@ -78,6 +79,7 @@ function backgroundClaude() {
   const ORIGIN = { kind: 'task-notification', producer: 'session-task', runId: 'r1' };
   let proc = null, inSelf = false;
   const queued = [];
+  const lines = [];
   const out = (o) => proc.stdout.emit('data', JSON.stringify(o) + '\n');
   const answer = (text) => {
     out({ type: 'system', subtype: 'init', session_id: 'sess-1' });
@@ -94,6 +96,7 @@ function backgroundClaude() {
     proc.stdin = {
       write: (line) => {
         const o = JSON.parse(line);
+        lines.push(o);
         if (o.type === 'control_request') {
           setImmediate(() => {
             if (!inSelf) return;
@@ -118,10 +121,10 @@ function backgroundClaude() {
     setImmediate(() => {
       if (!inSelf) return;
       inSelf = false;
-      out({ type: 'result', subtype: 'success', result: 'self report nobody sees', origin: ORIGIN, session_id: 'sess-1' });
+      out({ type: 'result', subtype: 'success', result: 'the audit found 3 issues', origin: ORIGIN, session_id: 'sess-1' });
     });
   };
-  return { spawn, finishBg };
+  return { spawn, finishBg, lines };
 }
 
 describe('spine — a background task\'s result wakes the being', () => {
@@ -144,9 +147,13 @@ describe('spine — a background task\'s result wakes the being', () => {
     expect(b.sender.placeholders).toHaveLength(1);
     const ph = b.sender.placeholders[0];
     expect(ph.chatId).toBe(CHAT);
-    expect(ph.finished.text).toMatch(/^checked: /);
-    expect(ph.finished.text).not.toContain('self report');
-    expect(b.logged).toEqual([{ chatId: CHAT, reply: ph.finished.text }]);
+    // The CLI's own answer IS what the chat gets, once; the being is not re-prompted to resend it.
+    expect(ph.finished).toEqual({ text: 'the audit found 3 issues', surface: true });
+    expect(b.logged).toEqual([{ chatId: CHAT, reply: 'the audit found 3 issues' }]);
+    expect(cli.lines.some((o) => o.type === 'control_request')).toBe(false);   // the CLI's own turn ran to its end, never interrupted
+    expect(cli.lines.map((o) => o.message?.content?.[0]?.text ?? '').some((t) => /never reached the chat/.test(t))).toBe(false);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(b.sender.placeholders).toHaveLength(1);   // no duplicate
   });
 
   it('the wake prompt names the finished task and asks for a verified report; the gate sees an addressed turn', async () => {
@@ -160,6 +167,49 @@ describe('spine — a background task\'s result wakes the being', () => {
     expect(brain.calls[0].ev.line).toMatch(/verify/i);
     expect(brain.calls[0].ev.cause).toBe('background');   // agent stats: the system bucket it is counted in
     expect(b.sender.placeholders[0].finished).toEqual({ text: 'report-1', surface: true });
+  });
+
+  it('with the CLI\'s own answer on it (live 2026-11-20): posted once to the originating chat, no re-prompt, no model call', async () => {
+    const brain = stubBrain();
+    const b = build({ brain, mode: 'mention' });
+    expect(await b.spine.wakeOnBackground({ ...DONE, reply: 'The audit passed: 0 issues.' })).toBe(true);
+    expect(brain.calls).toHaveLength(0);
+    expect(b.sender.placeholders).toHaveLength(1);
+    expect(b.sender.placeholders[0].chatId).toBe(CHAT);
+    expect(b.sender.placeholders[0].finished).toEqual({ text: 'The audit passed: 0 issues.', surface: true });
+    expect(b.logged).toEqual([{ chatId: CHAT, reply: 'The audit passed: 0 issues.' }]);
+  });
+
+  it('FALLBACK: the answer could not be delivered → logged loudly, and the being is handed it to send', async () => {
+    const brain = stubBrain();
+    const b = build({ brain, mode: 'mention' });
+    const open = b.sender.open;
+    let n = 0;
+    b.sender.open = (chatId, opts) => { const o = open(chatId, opts); if (n++ === 0) o.finish = async () => { throw new Error('bridge down'); }; return o; };
+    await b.spine.wakeOnBackground({ ...DONE, reply: 'The audit passed: 0 issues.' });
+    expect(b.notes.some((m) => /FALLBACK/.test(m))).toBe(true);
+    expect(brain.calls).toHaveLength(1);
+    expect(brain.calls[0].ev.line).toMatch(/never reached the chat/);
+    expect(brain.calls[0].ev.line).toContain('The audit passed: 0 issues.');
+  });
+
+  it('the CLI\'s own answer is a bare polite silence (live 2026-10-30, 3×): the being is NOT woken — answered, nothing to send', async () => {
+    for (const reply of ['…', '...', '  … \n']) {
+      const brain = stubBrain();
+      const b = build({ brain, mode: 'mention' });
+      expect(await b.spine.wakeOnBackground({ ...DONE, reply })).toBe(true);
+      expect(brain.calls).toHaveLength(0);
+      expect(b.sender.placeholders).toHaveLength(0);
+      expect(b.notes.some((n) => /answered it with silence — not woken/.test(n))).toBe(true);
+    }
+  });
+
+  it('an adopted turn\'s reply (no task named) keeps its restart wording', async () => {
+    const brain = stubBrain();
+    const b = build({ brain, mode: 'mention' });
+    await b.spine.wakeOnBackground({ being: 'egpt', surface: 'whatsapp', chatId: CHAT, reply: 'hecho' });
+    expect(brain.calls[0].ev.line).toMatch(/written while the bridge restarted/);
+    expect(brain.calls[0].ev.line).toContain('hecho');
   });
 
   it('a turn cut off across a restart (its process died first) wakes the being with that message, through the reply path', async () => {

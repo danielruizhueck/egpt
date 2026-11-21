@@ -18,14 +18,14 @@ import { ensureContact, patchBeing } from '../src/conversations-state.mjs';
 import { voiceArrivalBody, voiceTranscriptBody } from '../src/incoming-media.mjs';
 
 const T = (hh, mm) => Date.UTC(2026, 9, 18, hh, mm);
-const CHAT = 'Diego Pérez';
+const CHAT = 'Diego Pruéba';
 const FROM = {
   chatId: '!diego:beeper.local', chatName: CHAT, network: 'whatsapp',
-  userId: 'u-diego', senderName: 'Diego Pérez', isSender: false, authorized: false,
+  userId: 'u-diego', senderName: 'Diego Pruéba', isSender: false, authorized: false,
   atEStart: false, atEAnywhere: false, replyToBot: false, isReaction: false, msgKey: '31503',
 };
-const ARRIVAL_LINE = 'Diego Pérez@[Diego Pérez].wa (16:12) #31503: (voice note, 11s — being transcribed…)';
-const CHATTER_LINE = 'Bea@[Diego Pérez].wa (16:13) #31504: jaja';
+const ARRIVAL_LINE = 'Diego Pruéba@[Diego Pruéba].wa (16:12) #31503: (voice note, 11s — being transcribed…)';
+const CHATTER_LINE = 'Bea@[Diego Pruéba].wa (16:13) #31504: jaja';
 
 const readdirOver = (files) => async (dir) => {
   const norm = (p) => String(p).replace(/\\/g, '/');
@@ -79,7 +79,7 @@ const fakeTranscriber = (text, durationSec = 11) => {
 };
 
 // The onMedia meta the bridge would hand with the outcome (beeper.mjs mediaMeta), minus the caption.
-const MEDIA = (audio) => ({ chatID: FROM.chatId, chatName: CHAT, chatType: 'private', network: 'whatsapp', msgId: '31503', senderName: 'Diego Pérez', isSender: false, ts: T(16, 12), kind: 'audio', mime: 'audio/ogg', fileName: null, localPath: audio, isVoiceNote: true });
+const MEDIA = (audio) => ({ chatID: FROM.chatId, chatName: CHAT, chatType: 'private', network: 'whatsapp', msgId: '31503', senderName: 'Diego Pruéba', isSender: false, ts: T(16, 12), kind: 'audio', mime: 'audio/ogg', fileName: null, localPath: audio, isVoiceNote: true });
 // Live before the restart: the note arrives (bridge names its audio file), chatter lands under it.
 async function arriveThenDie(dir, audio, { from = {}, mode = 'on' } = {}) {
   const files = new Map();
@@ -118,14 +118,14 @@ describe('a voice note pending across a spine restart', () => {
     expect(before).toContain(ARRIVAL_LINE);
     expect(before).toContain(CHATTER_LINE);
     expect(readReg(dir).transcriptions).toEqual([expect.objectContaining({
-      surface: 'whatsapp', chatId: FROM.chatId, chatName: CHAT, msgId: '31503', sender: 'Diego Pérez', file: audio, node: 'kg', arrivedAt: new Date(T(16, 12)).toISOString(),
+      surface: 'whatsapp', chatId: FROM.chatId, chatName: CHAT, msgId: '31503', sender: 'Diego Pruéba', file: audio, node: 'kg', arrivedAt: new Date(T(16, 12)).toISOString(),
     })]);
 
     const tx = fakeTranscriber('Mira marico…');
     const { next } = await restart(dir, files, { transcribe: tx.transcribe });
     const after = transcriptText(files);
     expect(after.startsWith(before)).toBe(true);                       // append-only: byte prefix intact
-    expect(after.slice(before.length)).toContain('Diego Pérez@[Diego Pérez].wa (16:20): [re #31503] (voice transcription, 11s) Mira marico…');
+    expect(after.slice(before.length)).toContain('Diego Pruéba@[Diego Pruéba].wa (16:20): [re #31503] (voice transcription, 11s) Mira marico…');
     expect(tx.calls).toEqual([{ path: audio, cfg: { model: 'large-v3' } }]);   // THE transcription service, the same file
     expect(readReg(dir).transcriptions).toEqual([]);
   });
@@ -136,7 +136,7 @@ describe('a voice note pending across a spine restart', () => {
     writeFileSync(audio, 'OggS');
     const { files } = await arriveThenDie(dir, audio);
     const { next } = await restart(dir, files, { transcribe: fakeTranscriber('Mira marico…').transcribe });
-    expect(next.brain.calls.map((ev) => [ev.line, ev.backlog])).toEqual([['Diego Pérez@[Diego Pérez].wa (16:20): [re #31503] (voice transcription, 11s) Mira marico…', false]]);
+    expect(next.brain.calls.map((ev) => [ev.line, ev.backlog])).toEqual([['Diego Pruéba@[Diego Pruéba].wa (16:20): [re #31503] (voice transcription, 11s) Mira marico…', false]]);
   });
 
   it('a mention-gated (accum) chat: "e, …" prompts the being once; a note that names nobody is only recorded', async () => {
@@ -151,14 +151,21 @@ describe('a voice note pending across a spine restart', () => {
     }
   });
 
-  it('a note whose ARRIVAL was already backlog (older than the last spine) stays backlog: recorded, not dispatched', async () => {
+  // BACKLOG IS NOT TRANSCRIBED (operator 2026-11-05). New code never leaves a backlog note pending;
+  // one an older spine left there is closed untranscribed, its audio still saved.
+  it('REPRODUCE: a note whose ARRIVAL was backlog is closed untranscribed — audio saved, recorded, not dispatched', async () => {
     const dir = home();
     const audio = join(dir, 'note.ogg');
     writeFileSync(audio, 'OggS');
     const { files, before } = await arriveThenDie(dir, audio, { from: { backlog: true } });
-    const { next } = await restart(dir, files, { transcribe: fakeTranscriber('e, hola').transcribe });
-    expect(transcriptText(files).slice(before.length)).toContain('[re #31503] (voice transcription, 11s) e, hola');
+    const tx = fakeTranscriber('e, hola');
+    const saved = [];
+    const { next } = await restart(dir, files, { transcribe: tx.transcribe, saveAudio: (m) => saved.push(m) });
+    expect(transcriptText(files).slice(before.length)).toContain('[re #31503] (voice note not transcribed: backlog)');
+    expect(tx.calls).toEqual([]);
+    expect(saved).toEqual([{ ...MEDIA(audio), caption: null }]);
     expect(next.brain.calls).toHaveLength(0);
+    expect(readReg(dir).transcriptions).toEqual([]);
   });
 
   // contract 8.3
@@ -231,7 +238,7 @@ describe('a voice note pending across a spine restart', () => {
     await restart(dir, files, { transcribe: tx.transcribe });
     const after = transcriptText(files);
     expect(after.startsWith(before)).toBe(true);
-    expect(after.slice(before.length)).toContain('Diego Pérez@[Diego Pérez].wa (16:20): [re #31503] (voice note not transcribed: restart)');
+    expect(after.slice(before.length)).toContain('Diego Pruéba@[Diego Pruéba].wa (16:20): [re #31503] (voice note not transcribed: restart)');
     expect(tx.calls).toEqual([]);
     expect(readReg(dir).transcriptions).toEqual([]);
   });
@@ -279,10 +286,11 @@ describe('background agents — mirrored from the warm pool', () => {
     reg.reconcile();
     await reg.flush();
     expect(readReg(dir).agents).toEqual([{ being: 'wren', surface: 'whatsapp', chatId: '!rodz', taskId: 'b1', description: 'Crawl the docs', since: new Date(T(15, 0)).toISOString() }]);
-    live = [task(), task({ taskId: 'b2', description: 'Audit', since: T(15, 30) })];
+    live = [task(), task({ taskId: 'b2', parentTaskId: 'b1', description: 'Audit', since: T(15, 30) })];
     reg.sync();
     await reg.flush();
     expect(readReg(dir).agents.map((a) => a.taskId)).toEqual(['b1', 'b2']);
+    expect(readReg(dir).agents.map((a) => a.parentTaskId)).toEqual([undefined, 'b1']);   // the agent that launched it (operator 2026-10-31)
     live = [task({ taskId: 'b2', description: 'Audit', since: T(15, 30) })];
     reg.sync();
     await reg.flush();
@@ -370,13 +378,13 @@ describe('bare /agents shows what this node is handling', () => {
     const dir = home();
     const { reg } = registry(dir, { liveAgents: () => [{ being: 'wren', surface: 'whatsapp', chatId: '!rodz', taskId: 'b1', description: 'Crawl the docs', since: Date.now() - 41 * 60_000 }] });
     await reg.load();
-    reg.noteVoice({ voiceLine: 'arrival', surface: 'whatsapp', chatId: '!diego', chatName: CHAT, msgId: '31503', senderName: 'Diego Pérez', ts: Date.now() - 3 * 60_000, raw: { ...FROM, voicePath: 'C:/a.ogg' } });
+    reg.noteVoice({ voiceLine: 'arrival', surface: 'whatsapp', chatId: '!diego', chatName: CHAT, msgId: '31503', senderName: 'Diego Pruéba', ts: Date.now() - 3 * 60_000, raw: { ...FROM, voicePath: 'C:/a.ogg' } });
     reg.reconcile();
     const { cmds, sent } = harness(reg);
     await cmds.run(op);
     expect(sent).toEqual([[
       'kg is handling:',
-      '· voice note #31503 from Diego Pérez in Diego Pérez — transcribing, 3m00s',
+      '· voice note #31503 from Diego Pruéba in Diego Pruéba — transcribing, 3m00s',
       '· wren in !rodz — Crawl the docs, 41m00s',
       '',
       AGENTS_USAGE,

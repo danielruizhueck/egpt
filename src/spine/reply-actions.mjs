@@ -35,7 +35,7 @@
 //     and fail-closed (dropped + logged) when no advice channel is configured;
 //   - a malformed action line is STRIPPED and LOGGED, never surfaced, never executed;
 //   - a /reply targeting the message THIS REPLY ALREADY QUOTES is REDUNDANT (operator
-//     2026-07-08, Zohykar rogue-twin) — the action is dropped, but its TEXT DEMOTES to
+//     2026-07-08, Zurikar rogue-twin) — the action is dropped, but its TEXT DEMOTES to
 //     prose (2026-07-15): redundant is not malformed, and discarding content is a bug;
 //   - a /media path must resolve INSIDE the conversation dir (E's confined cwd) —
 //     traversal / absolute paths are rejected at parse AND re-checked at execute;
@@ -63,8 +63,11 @@
 //   /group photo <path>        set this chat's photo from a file in this conversation's folder
 //   /group title <text>        set this chat's title
 //   /group description <text>  set this chat's description (enabled agents only, all three)
-import { resolve as resolvePath, relative as relPath, isAbsolute } from 'node:path';
+import { resolve as resolvePath, relative as relPath, isAbsolute, basename, extname, join } from 'node:path';
 import { realpathSync } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { transcodeToOpus } from '../tools/synthesizer.mjs';
 // WHICH CONNECTION AN OUTBOUND GOES OUT ON — the ONE resolver (sender.mjs makeOutbound), not a
 // fourth local copy of `bridgeOf(being) ?? bridge`.
 import { makeOutbound } from './sender.mjs';
@@ -174,7 +177,7 @@ function parseOne(verb, args, ev, opts = {}) {
         const bad = { ok: false, reason: 'reply: expected "#<id> <text>"' };
         return (raw && !/[<>]/.test(raw)) ? { ...bad, demote: raw } : bad;
       }
-      // REDUNDANCY GUARD (operator 2026-07-08, Zohykar rogue-twin; made HONEST + demoting
+      // REDUNDANCY GUARD (operator 2026-07-08, Zurikar rogue-twin; made HONEST + demoting
       // 2026-07-15). When the message E is ALREADY posting quotes the target, a /reply at that
       // same target would only duplicate the train as a second, un-stamped post — the rogue twin.
       //
@@ -465,11 +468,11 @@ export function confinedFile(convDir, path) {
 // wake = spine.wakeOnBackground, which carries the outcome back to the being as a turn.
 // onUndeliverable({ being, chatId, what, reason }) (2026-10-19): a limb that said nothing anywhere —
 // boot posts it to log_to_group, once (the sender's own hook, for the reply).
-export function createReplyActions({ bridge, bridgeOf = null, peerMouth = null, bodyEmojiOf = () => null, labelOf = () => null, resolveConvDir = async () => null, askAdvice = null, limbs = {}, actionsOf = () => null, wake = null, onUndeliverable = async () => {}, onLog = () => {} } = {}) {
+export function createReplyActions({ bridge, bridgeOf = null, peerMouth = null, bodyEmojiOf = () => null, labelOf = () => null, resolveConvDir = async () => null, askAdvice = null, limbs = {}, actionsOf = () => null, wake = null, onUndeliverable = async () => {}, ffmpegCommand = null, transcode = transcodeToOpus, onLog = () => {} } = {}) {
   if (!bridge) throw new Error('createReplyActions: bridge is required');
   const outbound = makeOutbound({ bridge, bridgeOf, peerMouth, onLog });
-  const lost = async (out, ev, being, what) => {
-    try { await onUndeliverable({ being, chatId: ev.chatId, what, reason: out.bridge.sendFailure?.(ev.chatId) ?? 'the send returned nothing' }); }
+  const lost = async (out, ev, being, what, why = null) => {
+    try { await onUndeliverable({ being, chatId: ev.chatId, what, reason: why ?? out.bridge.sendFailure?.(ev.chatId) ?? 'the send returned nothing' }); }
     catch (e) { onLog(`${what}: could not report the loss — ${e?.message ?? e}`); }
   };
   // …AND THE CHAT IS PART OF THE QUESTION (operator 2026-09-11, sharpened 2026-09-12). This site
@@ -494,15 +497,38 @@ export function createReplyActions({ bridge, bridgeOf = null, peerMouth = null, 
   // ev.chatId" invariant honest — the cross-chat send lives ONLY in the advice service.
   const _askAdvice = askAdvice ?? (async ({ question } = {}) => { onLog(`ask: no advice channel wired — dropped (fail-closed): ${JSON.stringify(String(question ?? '').slice(0, 120))}`); return false; });
 
+  // WhatsApp rejects WAV (MediaRejectedError): a .wav leaves as Opus/ogg, made in a temp dir.
+  async function asOgg(wav) {
+    if (!ffmpegCommand) return { why: 'no ffmpeg_command to convert it' };
+    const dir = await mkdtemp(join(tmpdir(), 'egpt-media-'));
+    const path = join(dir, `${basename(wav, extname(wav))}.ogg`);
+    try { await transcode(ffmpegCommand, wav, path); return { dir, path }; }
+    catch (e) {
+      await rm(dir, { recursive: true, force: true }).catch(() => {});
+      return { why: `could not convert it: ${String(e?.stderr ?? '').trim().split('\n').pop() || (e?.message ?? e)}` };
+    }
+  }
+
   async function runMedia(a, ev, being) {
     const f = confinedFile(await resolveConvDir(ev), a.path);
     if (!f.ok) { onLog(`media: ${f.reason} (${ev.surface}/${ev.chatId})`); return false; }
-    const abs = f.path;
     // No target, so nothing to key: whoever says this being's lines in this chat posts it (sender.mjs makeOutbound `say`).
     const out = outbound(being, ev.chatId);
-    const ok = await out.say((on, room) => on.sendMedia?.(room, abs, { caption: a.caption, bodyEmoji: bodyEmojiOf(being), label: labelOf(being), persona: being }), { what: 'media' });
-    if (!ok) { onLog(`media: send failed "${a.path}"`); await lost(out, ev, being, `/media ${a.path}`); }
-    return !!ok;
+    const ogg = ev.surface === 'whatsapp' && extname(f.path).toLowerCase() === '.wav' ? await asOgg(f.path) : null;
+    if (ogg?.why) {
+      const why = `WhatsApp rejects .wav; ${ogg.why}`;
+      onLog(`media: send failed "${a.path}" — ${why}`);
+      await lost(out, ev, being, `/media ${a.path}`, why);
+      return false;
+    }
+    const abs = ogg?.path ?? f.path;
+    try {
+      const ok = await out.say((on, room) => on.sendMedia?.(room, abs, { caption: a.caption, bodyEmoji: bodyEmojiOf(being), label: labelOf(being), persona: being }), { what: 'media' });
+      if (!ok) { onLog(`media: send failed "${a.path}"`); await lost(out, ev, being, `/media ${a.path}`); }
+      return !!ok;
+    } finally {
+      if (ogg) await rm(ogg.dir, { recursive: true, force: true }).catch(() => {});
+    }
   }
 
   // /book, /email, /group: refused unless enabled for this being; the outcome is recorded on the action

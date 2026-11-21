@@ -1,7 +1,7 @@
 // Conversation-E LIMBS (ROADMAP §3) — the emitted-action surface E drives from
 // inside its own reply: parse (pure) + execute (confined, fail-closed).
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseReplyActions, partialProse, createReplyActions } from '../src/spine/reply-actions.mjs';
@@ -44,7 +44,7 @@ describe('parseReplyActions — the pure split', () => {
     expect(parseReplyActions('/reply hola', EV).stripped).toHaveLength(1);
   });
 
-  // REDUNDANCY GUARD (operator 2026-07-08, Zohykar #159710): when the reply E is already
+  // REDUNDANCY GUARD (operator 2026-07-08, Zurikar #159710): when the reply E is already
   // posting QUOTES the target, a /reply at that same id only posts a second, near-duplicate
   // message (a rogue twin). Stripped like any malformed limb.
   //
@@ -62,17 +62,17 @@ describe('parseReplyActions — the pure split', () => {
   // Still no second/duplicate post, so the 2026-07-08 rogue twin stays fixed.
   it('reply: targeting the message THIS REPLY ALREADY QUOTES is REDUNDANT — DEMOTES to prose, never executed', () => {
     const ev = { ...EV, msgId: '159710' };
-    const { prose, run, stripped } = parseReplyActions('/reply #159710 Hola Zohy 👋', ev, { quotedId: '159710' });
+    const { prose, run, stripped } = parseReplyActions('/reply #159710 Hola Zuri 👋', ev, { quotedId: '159710' });
     expect(run).toEqual([]);          // never executed — no repost, no twin
     expect(stripped).toEqual([]);     // not malformed: it carries content
-    expect(prose).toBe('Hola Zohy 👋');   // …and the content survives, in the already-quoting reply
+    expect(prose).toBe('Hola Zuri 👋');   // …and the content survives, in the already-quoting reply
   });
 
   it('reply: a redundant /reply demotes ALONGSIDE prose — its words join the reply, not a second post', () => {
     const ev = { ...EV, msgId: '159710' };
-    const { prose, run } = parseReplyActions('Vale, ya lo miro.\n/reply #159710 Hola Zohy 👋', ev, { quotedId: '159710' });
+    const { prose, run } = parseReplyActions('Vale, ya lo miro.\n/reply #159710 Hola Zuri 👋', ev, { quotedId: '159710' });
     expect(run).toEqual([]);
-    expect(prose).toBe('Vale, ya lo miro.\nHola Zohy 👋');
+    expect(prose).toBe('Vale, ya lo miro.\nHola Zuri 👋');
   });
 
   // The demoted text is CONTENT, never re-parsed — otherwise a /reply carrying an action-shaped
@@ -183,9 +183,9 @@ describe('parseReplyActions — the pure split', () => {
   // posts plain), so /reply at it is E's ONLY way to quote and MUST survive the guard.
   it('reply: targeting the trigger when the reply quotes NOTHING still executes (the guard has no premise)', () => {
     const ev = { ...EV, msgId: '159710' };
-    const { run, stripped } = parseReplyActions('/reply #159710 Hola Zohy 👋', ev);
+    const { run, stripped } = parseReplyActions('/reply #159710 Hola Zuri 👋', ev);
     expect(stripped).toEqual([]);
-    expect(run).toEqual([{ type: 'reply', chatId: EV.chatId, targetId: '159710', text: 'Hola Zohy 👋' }]);
+    expect(run).toEqual([{ type: 'reply', chatId: EV.chatId, targetId: '159710', text: 'Hola Zuri 👋' }]);
   });
 
   it('reply: targeting a DIFFERENT message than the one quoted still executes (regression-lock)', () => {
@@ -361,7 +361,7 @@ describe('partialProse — what a PARTIAL may safely stream', () => {
     for (const held of ['/', '/re', '/reply', '/reply ', '/reply #', '/reply #15971', '/reply #159710'])
       expect(partialProse(held, EV, opts)).toBe('');            // id not yet terminated — target still unknown
     expect(partialProse('/reply #159710 H', EV, opts)).toBe('H');          // id fixed → the text is prose
-    expect(partialProse('/reply #159710 Hola Zohy', EV, opts)).toBe('Hola Zohy');
+    expect(partialProse('/reply #159710 Hola Zuri', EV, opts)).toBe('Hola Zuri');
   });
 
   it('keeps WITHHOLDING a /reply aimed at a DIFFERENT id — that one is a real limb, never prose', () => {
@@ -372,12 +372,12 @@ describe('partialProse — what a PARTIAL may safely stream', () => {
 
   it('demoted streaming is a monotone prefix walk that lands on the delivered prose', () => {
     const opts = { quotedId: '159710' };
-    const full = '/reply #159710 Hola Zohy';
+    const full = '/reply #159710 Hola Zuri';
     const seen = [];
     for (let i = 1; i <= full.length; i++) seen.push(partialProse(full.slice(0, i), EV, opts));
     for (const s of seen) expect(s).not.toMatch(/\//);                             // no token, ever
     for (let i = 1; i < seen.length; i++) expect(seen[i].startsWith(seen[i - 1])).toBe(true);
-    expect(seen[seen.length - 1]).toBe(parseReplyActions(full, EV, opts).prose);   // == 'Hola Zohy'
+    expect(seen[seen.length - 1]).toBe(parseReplyActions(full, EV, opts).prose);   // == 'Hola Zuri'
   });
 });
 
@@ -587,7 +587,7 @@ describe('createReplyActions.execute — bridgeOf: per-being connection routing 
 // A LIMB THE BRIDGE REFUSES BUBBLES UP (operator 2026-10-19, live: "[actions] reply: → #34523 not
 // delivered" and nothing else, anywhere): ONE onUndeliverable per lost limb, with the bridge's reason.
 describe('createReplyActions.execute — a lost limb is reported once', () => {
-  const SIDE = 'aheLwZ0u6CpjePxSdbG9';
+  const SIDE = 'FakeRoomId0000000012';
   const EV_SIDE = { chatId: SIDE, surface: 'whatsapp' };
   const refusing = () => fakeBridge({ send: () => null, sendMedia: () => false, sendFailure: () => 'POST → 404 Chat not found' });
 
@@ -685,5 +685,85 @@ describe('createReplyActions.execute — a limb rides the connection that HOLDS 
     await a.execute(a.parse('/reply #9 hola', EV).run, [], EV, { being: 'e' });
     expect(only.calls.send).toEqual([{ chat: EV.chatId, text: 'hola', opts: { replyTo: '9', bodyEmoji: '🐶', label: 'e', persona: 'e' } }]);
     expect(never.calls.send).toEqual([]);
+  });
+});
+
+// WHATSAPP REJECTS WAV (live 10-12..10-31: every /media of a .wav → 500 MediaRejectedError, on both
+// accounts). To a WhatsApp chat a .wav leaves as Opus/ogg, made in a temp dir with the node's ffmpeg.
+describe('/media of a .wav to a WhatsApp chat', () => {
+  const room = (...names) => { const dir = mkdtempSync(join(tmpdir(), 'egpt-limb-wav-')); for (const n of names) writeFileSync(join(dir, n), 'bytes'); return dir; };
+  const capture = () => {
+    const b = fakeBridge();
+    b.sendMedia = (chat, path, opts) => { b.calls.media.push({ chat, path, opts, there: existsSync(path) }); return true; };
+    return b;
+  };
+  const stub = (seen) => async (ffmpeg, input, output) => { seen.push({ ffmpeg, input, output }); writeFileSync(output, 'ogg'); };
+  const mk = (bridge, dir, over = {}) => createReplyActions({ bridge, peerMouth: MOUTH_HOLDS, resolveConvDir: async () => dir, ffmpegCommand: '/opt/ffmpeg', ...over });
+  const send = (a, line, ev = EV) => a.execute(a.parse(line, ev).run, [], ev, { being: 'e' });
+
+  it('REPRODUCE: the bridge gets an .ogg made in a temp dir, never the .wav, and the temp file is gone after', async () => {
+    const dir = room('saludo.wav');
+    const b = capture();
+    const seen = [];
+    const { ran } = await send(mk(b, dir, { transcode: stub(seen) }), '/media saludo.wav hola');
+    expect(b.calls.media).toHaveLength(1);
+    const sent = b.calls.media[0];
+    expect(sent.path).toMatch(/saludo\.ogg$/);
+    expect(sent).toMatchObject({ chat: EV.chatId, there: true, opts: { caption: 'hola' } });
+    expect(sent.path.startsWith(dir)).toBe(false);
+    expect(existsSync(sent.path)).toBe(false);
+    expect(readdirSync(dir)).toEqual(['saludo.wav']);
+    expect(seen).toEqual([{ ffmpeg: '/opt/ffmpeg', input: join(dir, 'saludo.wav'), output: sent.path }]);
+    expect(ran.map((x) => x.type)).toEqual(['media']);
+  });
+
+  it('no ffmpeg_command: nothing is sent, and the log and the loss report say why', async () => {
+    const dir = room('saludo.wav');
+    const b = capture();
+    const logs = [], lost = [];
+    const a = mk(b, dir, { ffmpegCommand: undefined, onLog: (m) => logs.push(m), onUndeliverable: async (o) => lost.push(o) });
+    const { ran } = await send(a, '/media saludo.wav');
+    expect(b.calls.media).toEqual([]);
+    expect(ran).toEqual([]);
+    expect(logs).toEqual(['media: send failed "saludo.wav" — WhatsApp rejects .wav; no ffmpeg_command to convert it']);
+    expect(lost).toEqual([{ being: 'e', chatId: EV.chatId, what: '/media saludo.wav', reason: 'WhatsApp rejects .wav; no ffmpeg_command to convert it' }]);
+  });
+
+  it('a failed transcode: nothing is sent, ffmpeg\'s reason is logged, and no temp file is left', async () => {
+    const dir = room('saludo.wav');
+    const b = capture();
+    const logs = [];
+    let made = null;
+    const transcode = async (_f, _i, output) => {
+      made = output;
+      writeFileSync(output, 'partial');
+      throw Object.assign(new Error('Command failed: ffmpeg …'), { stderr: 'saludo.wav: Invalid data found when processing input\n' });
+    };
+    const { ran } = await send(mk(b, dir, { transcode, onLog: (m) => logs.push(m) }), '/media saludo.wav');
+    expect(b.calls.media).toEqual([]);
+    expect(ran).toEqual([]);
+    expect(logs).toEqual(['media: send failed "saludo.wav" — WhatsApp rejects .wav; could not convert it: saludo.wav: Invalid data found when processing input']);
+    expect(existsSync(made)).toBe(false);
+  });
+
+  it('.ogg, .mp3, .m4a, images, video and pdf go through unchanged, with no transcode', async () => {
+    const names = ['a.ogg', 'b.mp3', 'c.m4a', 'd.png', 'e.jpg', 'f.mp4', 'g.pdf'];
+    const dir = room(...names);
+    const b = capture();
+    const seen = [];
+    const a = mk(b, dir, { transcode: stub(seen) });
+    for (const n of names) await send(a, `/media ${n}`);
+    expect(seen).toEqual([]);
+    expect(b.calls.media.map((m) => m.path)).toEqual(names.map((n) => join(dir, n)));
+  });
+
+  it('a .wav to a Telegram chat goes as it is (the rejection is WhatsApp\'s)', async () => {
+    const dir = room('saludo.wav');
+    const b = capture();
+    const seen = [];
+    const tg = { ...EV, surface: 'telegram' };
+    await send(mk(b, dir, { transcode: stub(seen) }), '/media saludo.wav', tg);
+    expect(seen).toEqual([]);
+    expect(b.calls.media.map((m) => m.path)).toEqual([join(dir, 'saludo.wav')]);
   });
 });

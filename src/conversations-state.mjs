@@ -230,7 +230,7 @@ export async function stampThreadId(surface, slug, threadId, { io = {}, key = nu
   } catch (e) { console.error(`!! stampThreadId(${surface}/${slug}): ${e?.message ?? e}`); return false; }
 }
 
-// Render a path msys-style: C:\Users\an → /c/Users/an (drive-letter lowercased,
+// Render a path msys-style: C:\Users\user → /c/Users/user (drive-letter lowercased,
 // backslashes → forward slashes). Pure; an already-posix or UNC path is left alone.
 // Used for the self-describing `home_dir` + the absolute-fallback conversation_path.
 export function toMsysPath(p) {
@@ -298,15 +298,23 @@ export async function statsPath(surface, chatId, { name, io = {}, rename = false
   return path;
 }
 
+// A chat's stats `first_seen` (ms), or null when it has none. `name` finds the file without a scan.
+export async function chatFirstSeen(surface, chatId, { name, io = {} } = {}) {
+  try {
+    const fp = await statsPath(surface, chatId, { name, io });
+    return Date.parse(YAML.parse(await (io.readFile ?? readFile)(fp, 'utf8'))?.first_seen) || null;
+  } catch { return null; }
+}
+
 // Filename-safe key for a SENDER id (the per-contact stats file's basename). A sender id
-// is a Matrix user id like "@anrodriguez:beeper.com" or "26087681749235@lid" and is NEVER
+// is a Matrix user id like "@anaprueba:beeper.com" or "10000000000011@lid" and is NEVER
 // shortened (a user can live on another homeserver) — so it can carry ':' etc., invalid in
 // a Windows filename component (< > : " / \ | ? * + control chars). NOT sanitizeSlug: that
 // collapses illegal chars + whitespace runs to a single space, so "a:b" and "a b" would
 // fuse into ONE file — lossy/colliding for a MACHINE key. Instead, a percent-style escape
 // with '~' as the sentinel: escape a literal '~' FIRST (so real input can't forge an
 // escape), then each illegal char -> '~' + its 2-hex code. Collision-free, deterministic,
-// reversible, and human-readable enough ("@anrodriguez:beeper.com" -> "@anrodriguez~3abeeper.com").
+// reversible, and human-readable enough ("@anaprueba:beeper.com" -> "@anaprueba~3abeeper.com").
 const _WIN_ILLEGAL = /[<>:"/\\|?*\x00-\x1f]/g;
 export function sanitizeStatKey(id) {
   return String(id ?? '')
@@ -733,6 +741,9 @@ export async function recordMemberStat(surface, chatId, senderId, isoTs, { io = 
       stats.members[senderId] = { ...addMetrics(stats.members[senderId], delta), ...(facts.id != null ? { last_id: facts.id } : {}) };
       if (facts.at != null && !(Date.parse(existing.last_msg?.at) > facts.at)) stats.last_msg = { sender_id: senderId, at: new Date(facts.at).toISOString() };
     }
+    // first_seen (operator 2026-11-19: "the date of first transcribes"): set by the chat's first
+    // recorded message, never moved. A file that already counts members predates it and gets none.
+    if (existing.first_seen == null && existing.members == null) stats.first_seen = isoTs;
     Object.assign(stats, mergeNameHistory(existing, chatName, isoTs, { id: chatId }));   // chat name + former_names
     const withId = { chat_id: chatId, ...stats };
     try {
@@ -921,8 +932,8 @@ export function jidMediaDir(jid) {
 //
 // Callers should treat the return as a hint, not ground truth.
 // The previous implementation hard-mapped every `-` to `/` and
-// produced paths like `C:/Users/an//egpt/conversations/premise/driven/bitcoin/e/2605211611`
-// for the cwd `C:/Users/an/.egpt/conversations/premise_driven_bitcoin_e-2605211611`
+// produced paths like `C:/Users/user//egpt/conversations/premise/driven/bitcoin/e/2605211611`
+// for the cwd `C:/Users/user/.egpt/conversations/premise_driven_bitcoin_e-2605211611`
 // — totally broken. Surface-layout migration now invalidates
 // threadIds instead of relying on this recovery path.
 export function reverseSanitizeCwd(projectDir, candidateCwds = []) {
@@ -1005,11 +1016,7 @@ export function emptyState() {
 
 // ── Slug uniqueness ────────────────────────────────────────────────────────
 
-// Operator (2026-05-20): use a local-time suffix so the slug encodes
-// the contact's creation time at a glance — '-yymmddhhmm'. Two groups
-// with the same name across time will have different suffixes and
-// won't collide.
-//   diego-2605201243  =  contact 'diego' first seen 2026-05-20 12:43 local
+// A '-yymmddhhmm' UTC stamp. Slugs carried it (firstSeen) until 2026-11-19; archives still do.
 export function slugSuffix(date = new Date()) {
   const d = date instanceof Date ? date : new Date(date);
   if (Number.isNaN(d.getTime())) return '';
@@ -1024,10 +1031,52 @@ export function slugSuffix(date = new Date()) {
 export function hasSlugSuffix(slug) {
   return /-\d{10}$/.test(String(slug ?? ''));
 }
-export function appendSlugSuffix(baseSlug, date = new Date()) {
-  const base = sanitizeSlug(baseSlug);
-  const suf = slugSuffix(date);
-  return suf ? `${base}-${suf}` : base;
+
+// A slug is the sanitized title (operator 2026-11-19). Chats are found by id, so a time suffix bought
+// no safety and named one chat differently on each node.
+const LEGACY_SUFFIX = /-\d{10}$/;
+
+// The other chat on the surface holding `slug`, as [jid, entry]: case-insensitive (NTFS/APFS folders
+// are). A legacy `<title>-<yymmddhhmm>` holds its bare title, so an established chat keeps it over a newcomer.
+function _slugHolder(state, surface, slug, jid) {
+  const want = slug.toLowerCase();
+  return Object.entries(state.contacts?.[surface] ?? {}).find(([id, e]) => id !== jid && e?.slug && !e.aliasOf && !isForkEntry(e)
+    && [e.slug, e.slug.replace(LEGACY_SUFFIX, '')].some((s) => s.toLowerCase() === want));
+}
+const _slugHeld = (state, surface, slug, jid) => !!_slugHolder(state, surface, slug, jid);
+
+// A second id of the same chat arrives seconds after the first (dual-identity inbound): within this
+// window of the holder's first sighting, a new id with its exact title is an alias of it.
+const MERGE_WINDOW_MS = 60_000;
+// When a chat was first seen (ms): what the caller knows (contacts.resolve: its own record, else
+// the chat's stats first_seen), else the stamp a legacy slug encodes. null when unknown.
+function _firstSeenMs(jid, entry, firstSeenOf) {
+  const m = /-(\d\d)(\d\d)(\d\d)(\d\d)(\d\d)$/.exec(entry.slug);
+  return firstSeenOf?.(jid) ?? (m ? Date.UTC(2000 + +m[1], m[2] - 1, +m[3], +m[4], +m[5]) : null);
+}
+
+// `base`, or when another chat holds it, `base-<tail of the chat id>`: 6 letters/digits, more while
+// taken. The tail, not the head: every Telegram supergroup id starts `tg:-100`. A server part
+// (`!room:beeper.com`, `n@s.whatsapp.net`) is the same for every chat, so it is left out.
+function _slugFor(state, surface, jid, base) {
+  if (!_slugHeld(state, surface, base, jid)) return base;
+  const own = String(jid).startsWith('!') ? String(jid).slice(1).split(':')[0] : String(jid).split('@')[0];
+  const id = own.replace(/[^A-Za-z0-9]/g, '');
+  let slug = base;
+  for (let n = Math.min(6, id.length); n <= Math.min(id.length, 20); n++) {
+    const tag = id.slice(-n);
+    slug = `${sanitizeSlug(base, 79 - tag.length)}-${tag}`;
+    if (!_slugHeld(state, surface, slug, jid)) break;
+  }
+  return slug;
+}
+
+// Point chat `jid` at `slug`, with every /split fork living in its folder (`from`).
+export function reslug(state, surface, jid, from, slug) {
+  const at = (e) => ({ ...e, slug, conversation_path: conversationPathOf(surface, slug) });
+  const bucket = Object.entries(state.contacts?.[surface] ?? {})
+    .map(([id, e]) => [id, id === jid || (isForkEntry(e) && e.slug === from) ? at(e) : e]);
+  return { ...state, contacts: { ...state.contacts, [surface]: Object.fromEntries(bucket) } };
 }
 
 // A PLACEHOLDER slug is one whose BASE (slug minus the -yymmddhhmm suffix) is
@@ -1063,17 +1112,17 @@ export { sanitizeSlug };
 //
 //   contacts:
 //     whatsapp:
-//       "26087681749235@lid":
-//         slug: diego_p_rez_koma-2605200133
+//       "10000000000011@lid":
+//         slug: diego_p_rez_kilo-2605200133
 //         personality: default
 //         threadId: …
 //         firstSeenAt: …
-//         pushedName: "Diego Pérez (Koma)"
+//         pushedName: "Diego Pruéba (Kilo)"
 //         ...
-//       "584122182178@s.whatsapp.net":
-//         aliasOf: "26087681749235@lid"
+//       "15550100006@s.whatsapp.net":
+//         aliasOf: "10000000000011@lid"
 //     telegram:
-//       "tg:user:88164392":
+//       "tg:user:100000001":
 //         slug: an-self-tg-2605211200
 //         personality: system
 //         ...
@@ -1222,10 +1271,14 @@ export function getBeing(state, surface, jid, being) {
     // brainpool.mjs resolves them fresh from config on every turn instead).
     accessLevel:        b?.access_level        ?? null,
     // Per-conversation allowed_users OVERRIDE (operator 2026-08-15) — router.mjs's being-
-    // reachability gate. Same override home/shape as access_level above: set here REPLACES
-    // (never merges with) the node's global agents.<being>.allowed_users default in config.yaml;
-    // null = this conversation states no override, fall to the global tier.
+    // reachability gate. Same home/shape as access_level above, but the list JOINS (operator
+    // 2026-11-07): it ADDS people to the node's owners and the agent's own
+    // agents.<being>.conversation_defaults.allowed_users in config.yaml, never replaces them;
+    // null = this conversation adds nobody.
     allowedUsers:       b?.allowed_users        ?? null,
+    // `false` makes allowedUsers FINAL (operator 2026-11-09): the agent's and the node's lists are not
+    // joined in. Raw here; router.mayWake owns what it means. null = joins (the default).
+    allowedUsersInheritance: b?.allowed_users_inheritance ?? null,
     // OS-level process isolation on top of access_level:'all' (operator 2026-08-20) — per-
     // conversation override, same shape/tier as accessLevel/allowedUsers above. null = no
     // override at this tier, fall to the global conversation_defaults tier (brainpool.mjs's
@@ -1306,9 +1359,9 @@ export function defaultBeingOf(entry) {
 // THREE STATES, NOT TWO (operator 2026-09-05):
 //
 //   absent   permits HERE. A being's reachability never hands it absent any more: router.mjs's
-//            mayWake answers no list at either tier with the owners (operator 2026-10-26).
-//   []       DENY EVERYONE. Somebody wrote a list and put nobody on it; that is an answer,
-//            not a silence.
+//            mayWake hands this the JOIN of every list it has, always an array.
+//   []       names nobody. Somebody wrote a list and put nobody on it; that is an answer, not a
+//            silence. mayWake asks the Operator first (isOwner), so a [] shuts out only the others.
 //   ["*"]    permit everyone. The explicit wildcard — without it, "*" would just be an entry
 //            no real sender id ever equals, denying everyone.
 //
@@ -1319,8 +1372,8 @@ export function defaultBeingOf(entry) {
 // an absent list to null and a present one to the array itself, so `convAllowed ?? globalAllowed`
 // was already handing this predicate null for absent and [] for empty. Only the fold was wrong.
 //
-// Nearest rung still wins, now in both directions: a conversation that sets [] shuts a being its
-// global default would have allowed.
+// The rungs JOIN (operator 2026-11-07): the node's lists, the agent's and the conversation's reach
+// this predicate as one array, so a [] on any of them adds nobody and removes nobody.
 //
 // NOT the same list as the per-SURFACE allowed_users (boot.mjs's isAllowedUser), which has always
 // been correctly fail-closed on empty because it tests with .includes() and nothing else.
@@ -1501,7 +1554,7 @@ export function normalizeResidents(val) {
 // so does its authority; only where its files land is a room's.
 // That makes the lobby need NO special mapping of its own: shell-port's SHELL_CHAT_ID is
 // literally this string, so the `room` rule below already gives it a fixed, suffix-less slug
-// instead of the throwaway shell-<yymmddhhmm> the name-derived path would mint.
+// instead of the one the name-derived path would mint.
 export const LOBBY_SLUG = 'lobby';
 // The fixed-slug surface: `room` (2026-08-09). An operator-named room is a
 // conversation whose chatId IS the name the operator typed, so its slug must be a PURE
@@ -1512,7 +1565,7 @@ export const LOBBY_SLUG = 'lobby';
 // /rooms delete) find the room without touching conv-state at all.
 // sanitizeName is the SAME kebab normalisation the /rooms verbs used to apply at five call
 // sites; it lives here now, as one rule, so `/rooms create Foo` and `/rooms members foo` are
-// the same room. Every other surface is untouched and keeps its timestamped slug.
+// the same room. Every other surface is untouched and keeps its title-derived slug.
 // The trailing ('shell','main') arm is the RETIRED console seat: nothing in the live path
 // produces it any more (the console is ('room','lobby') now), but a profile that has not run
 // setup/move-rooms-out-of-conversations.mjs yet still carries a contacts.shell.main row, and
@@ -1575,6 +1628,12 @@ export function ensureContact(state, surface, jid, ctx = {}) {
       patch = { ...patch, slug: fixed };
       changed = true;
     }
+    // A /split fork lives in its parent's folder: it follows the parent's slug.
+    const parentSlug = isForkEntry(cur) ? _resolveByJid(state, surface, cur.parent_chat)?.entry?.slug : null;
+    if (parentSlug && cur.slug !== parentSlug) {
+      patch = { ...patch, slug: parentSlug };
+      changed = true;
+    }
     if (!viaAlias && ctx.pushedName && cur.pushedName !== ctx.pushedName) {
       patch = { ...patch, pushedName: ctx.pushedName };
       changed = true;
@@ -1588,38 +1647,36 @@ export function ensureContact(state, surface, jid, ctx = {}) {
     if (patch.conversation_path !== _wantPath) { patch = { ...patch, conversation_path: _wantPath }; changed = true; }
     // Track the CURRENT name (operator 2026-06-14: "the slug must be updated with
     // the current contact/group name, not frozen"). Whenever the chat's title
-    // (pushedName) changes — including a 'contact-<ts>' placeholder finally
+    // (pushedName) changes — including a 'contact' placeholder finally
     // learning its name, OR a group being renamed — recompute the slug so the
-    // folder always follows the name. Driven off pushedName ONLY (the title), so
-    // it can't flap between two slug derivations. KEEP the original -yymmddhhmm
-    // suffix (encodes firstSeen → preserves ordering + keeps the slug unique).
+    // folder always follows the name. Driven off the title ONLY (this sighting's,
+    // else the stored one), so it can't flap between two slug derivations; with
+    // neither, the slug minus a legacy -yymmddhhmm stamp.
     // A rename does NOT reset the thread (operator ruling 2026-07-26: "a rename to
     // the chat group doesn't reset the thread" — it's the SAME conversation under a
     // new name). The nested per-being `entry[<being>].threadId` is untouched here;
-    // only the flat slug/conversation_path move. The on-disk transcript is moved by
-    // the caller (renameSlugDir / dispatch), which also writes a renames.log entry
-    // into the folder.
+    // only the flat slug/conversation_path move, the chat's and its forks' (reslug).
+    // The on-disk folder is moved by the caller (contacts.resolve), which also writes
+    // a renames.log entry into the folder.
     let renamedFrom = null, renamedTo = null;
-    const nameBase = sanitizeSlug(ctx.pushedName);
-    const curBase = String(cur.slug ?? '').replace(/-\d{10}$/, '');
-    if (!viaAlias && !fixed && !isForkEntry(cur) && nameBase && nameBase !== 'contact' && nameBase !== curBase) {
-      const suffix = String(cur.slug).match(/-(\d{10})$/)?.[1]
-        || slugSuffix(cur.firstSeenAt ? new Date(cur.firstSeenAt) : new Date());
-      const candidate = suffix ? `${nameBase}-${suffix}` : nameBase;
-      if (candidate !== cur.slug && !_findByslug(state, surface, candidate)) {
+    const title = sanitizeSlug(ctx.pushedName) || sanitizeSlug(cur.pushedName) || String(cur.slug ?? '').replace(LEGACY_SUFFIX, '');
+    if (!viaAlias && !fixed && !isForkEntry(cur) && title) {
+      const candidate = _slugFor(state, surface, resolved.primaryJid, title);
+      if (candidate !== cur.slug) {
         renamedFrom = cur.slug;
         renamedTo = candidate;
-        patch = { ...patch, slug: candidate, conversation_path: conversationPathOf(surface, candidate) };
         changed = true;
       }
     }
     if (changed) nextBucket[resolved.primaryJid] = patch;
+    const out = renamedTo ? reslug(next, surface, resolved.primaryJid, renamedFrom, renamedTo) : next;
+    const entry = changed ? out.contacts[surface][resolved.primaryJid] : cur;
     return {
-      state: changed ? next : state,
+      state: changed ? out : state,
       surface,
       jid: resolved.primaryJid,
-      slug: patch.slug,
-      entry: changed ? patch : cur,
+      slug: entry.slug,
+      entry,
       isNew: false,
       changed,
       renamedFrom,
@@ -1627,10 +1684,9 @@ export function ensureContact(state, surface, jid, ctx = {}) {
     };
   }
 
-  // 2. New JID. Multi-JID auto-merge: does a primary entry already exist
-  //    in this surface whose slug matches our intended slug (within the
-  //    same minute)? Same-base-slug + same suffix == same contact → alias.
-  const firstSeen = new Date();
+  // 2. New JID: an alias of the chat holding its exact title if that chat was first seen
+  //    ≤60 s ago (the same chat under a second id); otherwise a conversation of its own, even
+  //    with the same title (a later duplicate group is a different chat, never the real one).
   // pushedName (the chat TITLE) drives the slug so a fresh contact is named like
   // the contact, AND so creation agrees with the name-tracking above (no rename
   // on the 2nd message). slugHint is a fallback for callers that pass only a slug
@@ -1638,28 +1694,18 @@ export function ensureContact(state, surface, jid, ctx = {}) {
   const baseSlug = sanitizeSlug(ctx.pushedName)
     || sanitizeSlug(ctx.slugHint)
     || 'contact';
-  // A fixed-slug seat (shell 'main' → lobby) skips the -yymmddhhmm suffix so its
-  // folder is stable across restarts; every other contact keeps the timestamped slug.
-  const candidateSlug = fixed || appendSlugSuffix(baseSlug, firstSeen);
-  const slugMatch = _findByslug(state, surface, candidateSlug);
-  if (slugMatch) {
-    nextBucket[jid] = { aliasOf: slugMatch.primaryJid };
-    return {
-      state: next,
-      surface,
-      jid: slugMatch.primaryJid,
-      slug: slugMatch.entry.slug,
-      entry: slugMatch.entry,
-      isNew: false,
-      changed: true,
-    };
+  const holder = !fixed && baseSlug !== 'contact' && _slugHolder(state, surface, baseSlug, jid);   // two nameless chats are never one
+  const same = holder && holder[1].slug.replace(LEGACY_SUFFIX, '') === baseSlug ? holder[0] : null;
+  const seen = same ? _firstSeenMs(same, holder[1], ctx.firstSeenOf) : null;
+  if (seen != null && (ctx.now ?? Date.now()) - seen <= MERGE_WINDOW_MS) {
+    nextBucket[jid] = { aliasOf: holder[0] };
+    return { state: next, surface, jid: holder[0], slug: holder[1].slug, entry: holder[1], isNew: false, changed: true };
   }
+  const candidateSlug = fixed || _slugFor(state, surface, jid, baseSlug);
 
-  // 3. Brand-new contact — the SLIM shape (operator 2026-07-02). `firstSeen` still drives
-  //    the slug-suffix (never overwritten on an /agents reset), but is no longer stored as a key: the
+  // 3. Brand-new contact — the SLIM shape (operator 2026-07-02). The
   //    lifecycle timestamps (firstSeenAt/threadCreatedAt/identityInjectedAt) live in the
-  //    conversation's own stats.yaml now, and the slug's -yymmddhhmm suffix already encodes
-  //    firstSeen for the rename logic. We store `home_dir` + the (home-relative) re-based
+  //    conversation's own stats.yaml. We store `home_dir` + the (home-relative) re-based
   //    `conversation_path` so the conversation is individually relocatable. The
   //    per-conversation `personality` key is RETIRED — the identity feed is a property of
   //    the AGENT TYPE — so `ctx.personality` (still passed by legacy callers) is ignored.
@@ -1675,7 +1721,8 @@ export function ensureContact(state, surface, jid, ctx = {}) {
     ...(_obj(ctx.seed) ? ctx.seed : {}),
   };
   nextBucket[jid] = entry;
-  return { state: next, surface, jid, slug: candidateSlug, entry, isNew: true, changed: true };
+  // needsFirstSeen: a same-title holder whose first-seen time the caller may know (its stats file).
+  return { state: next, surface, jid, slug: candidateSlug, entry, isNew: true, changed: true, ...(same && seen == null ? { needsFirstSeen: same } : {}) };
 }
 
 // patchContact accepts EITHER a JID or a slug as the lookup key, scoped
@@ -1779,6 +1826,23 @@ export function aliasTargetOf(state, surface, jid) {
 export function aliasTranscriptKeyOf(state, surface, jid) {
   const entry = state.contacts?.[surface]?.[jid];
   return (entry && entry.aliasOf) ? (entry.transcript ?? null) : null;
+}
+
+// ── ONE ACCUM FOR A CHAT AND ITS SI+ SIDE GROUP (operator 2026-11-20) ─────────────────────────────
+// The side group (reply_in_side_group) is the SAME conversation replying in another group: same thread,
+// folder and files, a log of its own beside the chat's. Its entry is an alias marked `automatic: true`
+// (aliasOf → the chat); a /join room is an alias without the mark and a /split is an entry of its own
+// (parent_chat), both another log of another thread, so neither is one. Raw reads, like aliasTargetOf.
+// The chats whose transcripts one accum reads for `chatId`: itself first, then the rest — the chat
+// the side group(s) alias and each of its side groups. Only `chatId` when it has none (a plain chat, a
+// /join room, a /split, an unknown id). The chat may itself be a /split: its side group is its own.
+export function accumChatsOf(state, surface, chatId) {
+  const bucket = state?.contacts?.[surface] ?? {};
+  const own = bucket[chatId];
+  const origin = !own ? null : own.aliasOf ? (own.automatic === true ? own.aliasOf : null) : chatId;
+  if (!origin || !bucket[origin] || bucket[origin].aliasOf) return [chatId];
+  const sides = Object.keys(bucket).filter((id) => bucket[id]?.aliasOf === origin && bucket[id].automatic === true);
+  return [chatId, ...[origin, ...sides].filter((id) => id !== chatId)];
 }
 
 // ── THE PERSISTED MOUTH ROOM (operator 2026-10-12) ───────────────────────────

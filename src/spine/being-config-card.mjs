@@ -33,6 +33,10 @@ const HEADER = [
 const FROM = {
   conversation: 'this conversation',
   agent: 'agent default (config.yaml)',
+  joined: 'agent default (config.yaml) + this conversation',
+  final: 'this conversation (final)',
+  agentFinal: 'agent default (config.yaml) (final)',
+  joinedFinal: 'agent default (config.yaml) (final) + this conversation',
   node: 'node default (config.yaml)',
   default: 'built-in default',
   level: 'access_level sandbox forces it',
@@ -82,7 +86,7 @@ export function renderConfigBlock({
   out.push(scoped
     ? line(2, 'mode', 'per chat', 'each chat invited into this room sets its own')
     : line(2, 'mode', mode?.mode ?? null, FROM[mode?.source]));
-  out.push(line(2, 'verbose_thinking', verboseThinking === true, verboseSource === 'type' ? inType(true) : FROM[verboseSource]));
+  out.push(line(2, 'verbose_thinking', verboseThinking === 'text' ? 'text' : verboseThinking === true, verboseSource === 'type' ? inType(true) : FROM[verboseSource]));
   const paths = pathsOf(def.allowed_paths);
   if (paths.length) {
     out.push(line(2, 'allowed_paths', undefined, 'its type file, plus any node-wide grant'));

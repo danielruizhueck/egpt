@@ -22,7 +22,7 @@
 //      super fragile. i don't really like it. is must be a single word message in Self,
 //      'stop', case insensitive"). parseStopWord below only says WHAT was typed; WHERE it
 //      counts is the spine's gate (src/spine/spine.mjs classify → isSelfChat, wired in
-//      boot to networks.whatsapp.chat_ids[0]). In any other chat, group, or on the shell
+//      boot to networks.whatsapp.admin_chat_ids[0]). In any other chat, group, or on the shell
 //      console the same word is ordinary text. RESUME / RESUME ALL are NOT scoped that
 //      way — they only clear a loop-counter pause, so they stay usable in the channel
 //      that got paused.
@@ -32,7 +32,7 @@
 //      node, so it parses as nothing and reads as ordinary text.
 //
 //   2. THE LOOP GUARD still pauses a CHANNEL on its own. ONE guard, TWO TRIGGERS (operator
-//      2026-09-20, after the "🌴FAMILIA PALMA🌴" outage below):
+//      2026-09-20, after the "🌴FAMILIA MUESTRA🌴" outage below):
 //        · RATE — `turns` non-human turns inside `window` MINUTES. "a hard limit of turns is
 //          only effective on a rapid succession … six spread over a day is the kind of
 //          conservatism we must avoid". At two below the hard limit → warn; at it → auto-STOP.
@@ -46,7 +46,7 @@
 //      STOP ALL removal on its own merits: the guard can auto-stop SEVERAL channels
 //      independently, so clearing them one at a time is not the same job.
 //
-// THE LOOP THIS GUARD DID NOT CATCH, AND THE ONE IT CAUSED (kg, 2026-09-20). "🌴FAMILIA PALMA🌴"
+// THE LOOP THIS GUARD DID NOT CATCH, AND THE ONE IT CAUSED (kg, 2026-09-20). "🌴FAMILIA MUESTRA🌴"
 // was auto-STOPped at 00:35:50 and nobody noticed until 08:21 — eight hours of `stopped — prompt
 // suppressed`, the operator's own `@ken @don @e están?` among them. The six turns that filled the
 // cap arrived in FIVE SECONDS and were THIS NODE'S OWN BOOKKEEPING: E's `⏳ Thinking…` and
@@ -69,6 +69,7 @@ import { EGPT_HOME } from './egpt-home.mjs';
 import { hasNodeSignature, stripNodeSignature, stripRenderedNodeSignature } from './node-signature.mjs';
 import { THINKING, QUEUED, LIVE_TICK_SUFFIX } from './spine/sender.mjs';
 import { shortChatId } from './bridges/chat-id.mjs';
+import { BEING_STAMP } from './bridges/persona-wrap.mjs';
 
 // A chat paused on EVERY surface — the send-rate trip (src/loop-guard.mjs) knows the chat id,
 // not the surface. Channels are `${surface}:${chatId}`; blocked() matches either key.
@@ -206,7 +207,7 @@ export function isHumanTurn(ev, { isEnvelope = () => false, wasSentByUs = () => 
 //   'echo'  — THIS NODE'S OWN OUTPUT coming back to it: a send the bridge recognises by id
 //             (wasSentByUs) or a frame THIS node's spine committed (fromThisNode). It is
 //             bookkeeping, not an utterance — so it NEITHER counts toward the cap NOR resets
-//             it. This is the whole PALMA bug: E's own ⏳ placeholders, posted through the
+//             it. This is the whole MUESTRA bug: E's own ⏳ placeholders, posted through the
 //             mouth account and re-entering on the ear, filled the cap in five seconds.
 //   'being' — somebody else's machine turn: ANOTHER node's being, a relay envelope, a brain
 //             member's reply. That is real chatter and it counts, exactly as before.
@@ -221,13 +222,8 @@ export function turnKind(ev, { isEnvelope = () => false, wasSentByUs = () => fal
   return 'being';
 }
 
-// THE PERSONA STAMP the bridge puts at the head of a being's post (bridges/persona-wrap.mjs
-// personaStamp): "<body_emoji> <label>: ". Stripped so the SAME sentence from two different
-// beings compares equal — which is exactly the A,B,A,B case. NARROW ON PURPOSE: the leading
-// glyph must be non-letter/non-digit and the label a single bare word, so ordinary prose
-// ("nota: mañana", "Juan: dijo que sí") keeps its prefix and two genuinely different messages
-// stay different.
-const BEING_STAMP = /^\s*[^\p{L}\p{N}\s]{1,4}\s+[\p{L}\p{N}_-]{1,24}\s*[:：]\s*/u;
+// THE PERSONA STAMP (BEING_STAMP, bridges/persona-wrap.mjs) is stripped so the SAME sentence from
+// two different beings compares equal — which is exactly the A,B,A,B case.
 
 /**
  * The COMPARABLE LINE of a message body: what was said, with the machinery around it removed.
@@ -366,7 +362,7 @@ export function createStopGuard({ turns = 6, window = 2, repeats = 3, repeatWind
 
     // WHY this channel was last auto-stopped — the repeated line, or the rate with its numbers.
     // The log line and the notice the channel gets both say it: a pause nobody can explain is
-    // how PALMA stayed silent for eight hours.
+    // how MUESTRA stayed silent for eight hours.
     reasonOf(channel) { return reasons.get(channel) ?? 'a loop'; },
 
     stopChannel(channel) { if (channel != null) { stoppedChannels.add(channel); onLog(`STOP ${channel}`); } },

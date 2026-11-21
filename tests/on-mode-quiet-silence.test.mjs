@@ -1,7 +1,11 @@
 // On-mode ambient turns post nothing up front (operator 2026-10-18): "if mode is 'on' then '...'
-// should not be posted in channel, only logged." Ruled at 22:10: a HUMAN line opens its ⏳ at
-// arrival, addressed or not; only a NON-HUMAN one (another being, a node-signed line) runs with no
-// ⏳ — its silence posts nothing, a real reply posts once. Every other mode keeps the immediate ⏳.
+// should not be posted in channel, only logged." A NON-HUMAN line (another being, a node-signed
+// line) runs with no ⏳ — its silence posts nothing, a real reply posts once. So does a HUMAN line
+// that does not address the being (2026-11-02; ruled 10-18 22:10 as ⏳ at arrival, addressed or
+// not); an addressed one opens its ⏳ at arrival. Every other mode keeps the immediate ⏳.
+// A test that streams or works before a non-human line's end, or runs one in mention/accum, sets
+// dispatch.bot_quiet: false — the default quiet turn is tests/mode-bot-quiet.test.mjs's.
+// dispatch.thinking_train: bubble — this file's subject is the ⏳ bubble (the emoji train: tests/emoji-thinking-train.test.mjs).
 import { describe, it, expect } from 'vitest';
 import { createRouter } from '../src/spine/router.mjs';
 import { createGating } from '../src/spine/gating.mjs';
@@ -47,14 +51,13 @@ function fakeTimers() {
   };
 }
 
-function build({ mode = 'on', reply = 'ok', partials = [], tasks = [] } = {}) {
+function build({ mode = 'on', reply = 'ok', partials = [], tasks = [], dispatch } = {}) {
   const agents = { egpt: { configuration: 'egpt', handles: ['e', 'egpt'], default: true, mode } };
-  const config = { conversation_defaults: { allowed_users: ['u-1'] }, agents };   // An (u-1) owns the node
+  const config = { conversation_defaults: { allowed_users: ['u-1'] }, agents, dispatch: { thinking_train: 'bubble', ...dispatch } };   // An (u-1) owns the node
   const bridge = streamingBridge();
   const brain = {
     calls: [], tasks,
     async turn(being, ev, onPartial) { this.calls.push({ being, ev, open: bridge.streams.map((s) => s.init) }); for (const p of partials) (Array.isArray(p) ? onPartial?.(...p) : onPartial?.(p)); return { text: reply, sessionId: 's' }; },
-    background() { return brain.tasks; },
   };
   const transcript = { entries: [], async log(ev, r) { this.entries.push({ ev, reply: r }); } };
   const notes = [];
@@ -63,6 +66,7 @@ function build({ mode = 'on', reply = 'ok', partials = [], tasks = [] } = {}) {
   const spine = createSpine({
     ...(timers ? { setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout, turnTimeoutMs: 0 } : {}),
     bridge, brain, transcript, defaultBeing: 'egpt',
+    allBackground: () => brain.tasks.map((t) => ({ being: 'egpt', surface: 'whatsapp', chatId: '!g', ...t })),
     sender: createSender({ bridge, bodyEmojiOf: () => '🐶', labelOf: () => 'E', onLog }),
     actions: createReplyActions({ bridge, peerMouth: MOUTH_HOLDS, bodyEmojiOf: () => '🐶', labelOf: () => 'E', onLog }),
     router: createRouter({ getAgents: () => agents, getConfig: () => config, defaultBeing: 'egpt' }),
@@ -97,16 +101,15 @@ describe('on mode, a non-human line — no placeholder up front', () => {
     expect(b.quiet()).toHaveLength(1);
   });
 
-  it('an empty turn posts nothing as well (no "<received silence>")', async () => {
+  it('an empty turn is a failure: its one line, no "<received silence>" (2026-11-04)', async () => {
     const b = build({ reply: '' });
     await b.bridge.emit(msg('ok', BEING));
-    expect(b.bridge.streams).toEqual([]);
+    expect(b.bridge.streams.map((s) => [s.init, s.finals])).toEqual([['⚠️ the turn failed — empty reply; not answered', ['⚠️ the turn failed — empty reply; not answered']]]);
     expect(b.bridge.sent).toEqual([]);
-    expect(b.quiet()).toHaveLength(1);
   });
 
   it('a real reply is posted ONCE, opening on its first text — never on ⏳ Thinking…', async () => {
-    const b = build({ reply: 'Hola a todos', partials: ['Hola', 'Hola a todos'] });
+    const b = build({ reply: 'Hola a todos', partials: ['Hola', 'Hola a todos'], dispatch: { bot_quiet: false } });
     await b.bridge.emit(msg('buenas', BEING));
     expect(b.bridge.streams).toHaveLength(1);
     const [s] = b.bridge.streams;
@@ -134,11 +137,12 @@ describe('on mode, a non-human line — no placeholder up front', () => {
     expect(b.bridge.sent).toEqual([]);
   });
 
-  it('a silent turn that leaves background work still opens the ⚙️ status', async () => {
+  it('a silent turn that leaves background work still posts the ⚙️ status — unquoted: the silence posted nothing to quote', async () => {
     const b = build({ reply: '…', tasks: [{ description: 'Crawl the site', since: 1 }] });
     await b.bridge.emit(msg('alguien sabe?', BEING));
-    expect(b.bridge.streams.map((s) => s.init)).toEqual(['⚙️ working in background: Crawl the site ⏳']);
-    expect(b.bridge.sent).toEqual([]);
+    await new Promise((r) => setImmediate(r));
+    expect(b.bridge.streams).toEqual([]);
+    expect(b.bridge.sent).toMatchObject([{ chat: '!g', text: '⚙️ background work (1):\n• running: Crawl the site · <1 min', opts: { persona: 'egpt', replyTo: null } }]);
   });
 
   it("REPRODUCE: addressed makes no difference — a node-signed '@e …' silence posts nothing", async () => {
@@ -157,20 +161,21 @@ describe('on mode, a non-human line — no placeholder up front', () => {
   });
 });
 
-describe('on mode, a human line — ⏳ at arrival, addressed or not', () => {
-  it('REPRODUCE: an unaddressed line opens its ⏳ before the turn runs; the reply edits it', async () => {
+describe('on mode, a human line not addressed to the being — quiet (2026-11-02)', () => {
+  it('REPRODUCE: an unaddressed line opens no ⏳; the reply is posted once, whole', async () => {
     const b = build({ reply: 'Hola' });
     await b.bridge.emit(msg('qué calor hace hoy'));
-    expect(b.brain.calls[0].open).toEqual([THINKING]);
-    expect(b.bridge.streams.map((s) => [s.init, s.finals])).toEqual([[THINKING, ['Hola']]]);
+    expect(b.brain.calls[0].open).toEqual([]);
+    expect(b.bridge.streams.map((s) => [s.init, s.finals])).toEqual([['Hola', ['Hola']]]);
   });
 
-  it("REPRODUCE: an unaddressed '…' resolves the ⏳ to ✓, nothing withheld", async () => {
+  it("REPRODUCE: an unaddressed '…' posts nothing — no ⏳, no ✓ — and logs one line", async () => {
     const b = build({ reply: '…' });
     await b.bridge.emit(msg('jaja'));
-    expect(b.bridge.streams.map((s) => [s.init, s.finals])).toEqual([[THINKING, ['✓']]]);
+    expect(b.bridge.streams).toEqual([]);
     expect(b.bridge.sent).toEqual([]);
-    expect(b.quiet()).toEqual([]);
+    expect(b.quiet()).toHaveLength(1);
+    expect(b.replies()).toEqual([expect.objectContaining({ text: '…', surfaced: false })]);
   });
 });
 
@@ -200,7 +205,7 @@ describe('a human, addressed, or any other mode — unchanged: immediate ⏳', (
   for (const mode of ['mention', 'accum']) {
     for (const [who, extra] of [['a human', {}], ['another being', BEING]]) {
       it(`${mode} mode, @handle from ${who}: ⏳ placeholder first, a '…' is posted`, async () => {
-        const b = build({ mode, reply: '…' });
+        const b = build({ mode, reply: '…', dispatch: { bot_quiet: false } });
         await b.bridge.emit(msg('@e hola', extra));
         expect(b.bridge.streams[0].init).toBe(THINKING);
         expect(b.bridge.streams[0].finals).toEqual(['…']);
@@ -212,9 +217,9 @@ describe('a human, addressed, or any other mode — unchanged: immediate ⏳', (
 describe("on mode, a streamed '…' silence — the train keeps showing, then ✓", () => {
   const DOTS = ['.', '..', '...'];
 
-  it("REPRODUCE: a human line streaming '.', '..', '...' ends ✓; no frame ever shows dots", async () => {
+  it("REPRODUCE: an addressed human line streaming '.', '..', '...' ends ✓; no frame ever shows dots", async () => {
     const b = build({ reply: '...', partials: DOTS });
-    await b.bridge.emit(msg('jaja'));
+    await b.bridge.emit(msg('e jaja'));
     expect(b.bridge.streams.map((s) => [s.init, s.frames, s.finals])).toEqual([[THINKING, [], ['✓']]]);
     expect(b.bridge.sent).toEqual([]);
   });
@@ -226,14 +231,14 @@ describe("on mode, a streamed '…' silence — the train keeps showing, then �
   });
 
   it("REPRODUCE: a non-human line whose train opened on a tool use, then streamed dots, ends ✓", async () => {
-    const b = build({ reply: '...', partials: [['', { tool: true }], ...DOTS] });
+    const b = build({ reply: '...', partials: [['', { tool: true }], ...DOTS], dispatch: { bot_quiet: false } });
     await b.bridge.emit(msg('jaja', BEING));
     expect(b.bridge.streams.map((s) => [s.init, s.frames, s.finals])).toEqual([[THINKING, [], ['✓']]]);
   });
 
   it("REPRODUCE: a reply that starts with dots streams once other text arrives", async () => {
     const b = build({ reply: '...bueno, sí', partials: ['...', '...bueno', '...bueno, sí'] });
-    await b.bridge.emit(msg('vienes?'));
+    await b.bridge.emit(msg('e vienes?'));
     const [s] = b.bridge.streams;
     expect(s.frames).toEqual(['...bueno ⏳', '...bueno, sí ⏳']);
     expect(s.finals).toEqual(['...bueno, sí']);

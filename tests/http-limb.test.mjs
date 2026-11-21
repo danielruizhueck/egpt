@@ -1,10 +1,10 @@
 // http-limb.test.mjs — the chatbox limb (src/bridges/http.mjs) on a real loopback server: sessions,
-// the JSON and SSE reads, CORS, max_chars, the rate limit, widget.js.
+// the JSON and SSE reads, CORS, max_chars, the rate limit, info and the UI's files.
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtemp, rm, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, readdir, writeFile, mkdir, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { startHttpBridge, isHttpChatId, httpClientOf, HTTP_STRINGS, DEEP_CHAT } from '../src/bridges/http.mjs';
+import { startHttpBridge, isHttpChatId, httpClientOf, HTTP_STRINGS, chatboxesOf } from '../src/bridges/http.mjs';
 import { freeSafeHttpPort } from './free-safe-http-port.mjs';
 
 const live = [];
@@ -471,58 +471,155 @@ describe('POST end: the visitor ends the conversation', () => {
   });
 });
 
-describe('widget.js and routing', () => {
-  it('widget.js is served as JavaScript with the client\'s title and Spanish strings', async () => {
-    const { url } = await limb({ acme: { being: 'ed', title: 'EduWeb', strings: { send: 'Mandar' } } });
-    const r = await fetch(`${url()}widget.js`);
+describe('the chatbox UI: info and its files (a plugin; the limb knows only the files)', () => {
+  const uiDirs = async () => {
+    const root = await mkdtemp(join(tmpdir(), 'egpt-ui-'));
+    live.push(() => rm(root, { recursive: true, force: true }));
+    const plugin = join(root, 'plugin'), skin = join(root, 'skin');
+    await mkdir(plugin); await mkdir(skin);
+    await writeFile(join(plugin, 'widget.js'), 'window.plugin = 1;\n');
+    await writeFile(join(plugin, 'skin.css'), '/* plugin */');
+    await writeFile(join(skin, 'skin.css'), '.egc{--egc-bg:#123}');
+    await writeFile(join(skin, 'skin.json'), '{"strings":{"intro":"Hola"}}');
+    await writeFile(join(skin, 'face.svg'), '<svg xmlns="http://www.w3.org/2000/svg"/>');
+    await writeFile(join(skin, 'page.html'), '<p>no</p>');
+    await writeFile(join(skin, '.hidden.css'), 'x');
+    await writeFile(join(root, 'outside.css'), 'secret');
+    await symlink(join(root, 'outside.css'), join(skin, 'out.css'));
+    return { root, plugin, skin };
+  };
+
+  it('info: the client, its title (default the client), max_chars and init — what the UI reads from the limb', async () => {
+    const { url } = await limb({ acme: { being: 'ed', title: 'Contoso', max_chars: 900, init: 'prime', identity: 'optional' }, plain: { being: 'ed' } });
+    const r = await fetch(`${url()}info`);
     expect(r.status).toBe(200);
-    expect(r.headers.get('content-type')).toMatch(/javascript/);
-    const js = await r.text();
-    expect(js).toContain('"title":"EduWeb"');
-    expect(js).toContain('"send":"Mandar"');
-    expect(js).toContain(JSON.stringify(HTTP_STRINGS.placeholder));
-    expect(() => new Function(js)).not.toThrow();
+    expect(await r.json()).toEqual({ client: 'acme', title: 'Contoso', max_chars: 900, init: 'prime', places: [] });
+    expect(await (await fetch(`${url('plain')}info`)).json()).toEqual({ client: 'plain', title: 'plain', max_chars: 4000, init: false, places: [] });
+    expect((await fetch(`${url()}info`, { method: 'POST' })).status).toBe(405);
   });
 
-  it('widget.js is a Deep Chat loader: the pinned bundle with its integrity, wired to messages and events', async () => {
-    const { url } = await limb();
-    const js = await (await fetch(`${url()}widget.js`)).text();
-    expect(DEEP_CHAT.url).toMatch(/^https:\/\/cdn\.jsdelivr\.net\/npm\/deep-chat@\d+\.\d+\.\d+\/dist\/deepChat\.bundle\.js$/);
-    expect(DEEP_CHAT.integrity).toMatch(/^sha384-[A-Za-z0-9+/]{64}$/);
-    expect(js).toContain(JSON.stringify(DEEP_CHAT));
-    expect(js).toContain("createElement('deep-chat')");
-    expect(js).toContain("base + 'messages?session='");
-    expect(js).toContain("base + 'events?session='");
-    expect(js).toContain("fetch(base + 'messages', { method: 'POST'");
-    expect(js).toContain('"client":"acme"');
+  it('a UI file comes from the last ui: folder that has it, typed, nosniff; an svg sandboxed', async () => {
+    const { plugin, skin } = await uiDirs();
+    const { url } = await limb({ acme: { being: 'ed', ui: [plugin, skin] } });
+    const w = await fetch(`${url()}widget.js`);
+    expect(w.status).toBe(200);
+    expect(w.headers.get('content-type')).toMatch(/^text\/javascript/);
+    expect(w.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(await w.text()).toBe('window.plugin = 1;\n');
+    expect(await (await fetch(`${url()}skin.css`)).text()).toBe('.egc{--egc-bg:#123}');   // the skin's, over the plugin's
+    expect((await fetch(`${url()}skin.json`)).headers.get('content-type')).toMatch(/^application\/json/);
+    const svg = await fetch(`${url()}face.svg`);
+    expect(svg.headers.get('content-type')).toBe('image/svg+xml');
+    expect(svg.headers.get('content-security-policy')).toMatch(/sandbox/);
+    expect((await fetch(`${url()}widget.js`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status).toBe(405);
   });
 
-  it('widget.js has the end button with its inline confirm, and ends through POST end then clears the panel', async () => {
-    const { url } = await limb();
-    const js = await (await fetch(`${url()}widget.js`)).text();
-    expect(js).toContain('class="egc-end"');
-    expect(js).toContain('class="egc-ask"');
-    expect(js).not.toContain('confirm(');
-    expect(js).toContain("fetch(base + 'end', { method: 'POST'");
-    expect(js).toContain('JSON.stringify({ session: token, identity: identity })');
-    expect(js).toContain('chat.clearMessages()');
-    expect(js).toContain(`"end":${JSON.stringify(HTTP_STRINGS.end)}`);
+  it('skin.yaml is served as skin.json (JSON, nosniff, cached like any UI file); yaml beats json in a folder; the last folder with either wins', async () => {
+    const { plugin, skin, root } = await uiDirs();
+    await writeFile(join(skin, 'skin.yaml'), '# comment\nstrings:\n  intro: Hola yaml\n  prime_text: "¿Qué tal?"\nlist: [1, 2]\n');
+    const { url } = await limb({ acme: { being: 'ed', ui: [plugin, skin] } });
+    const r = await fetch(`${url()}skin.json`);
+    expect(r.status).toBe(200);
+    expect(r.headers.get('content-type')).toMatch(/^application\/json/);
+    expect(r.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(r.headers.get('cache-control')).toBe('max-age=300');
+    expect(await r.json()).toEqual({ strings: { intro: 'Hola yaml', prime_text: '¿Qué tal?' }, list: [1, 2] });   // not the json beside it
+    expect((await fetch(`${url()}skin.yaml`)).status).toBe(404);                                                    // the raw yaml is not a UI file
+    // folder order: a later folder's skin.json beats an earlier folder's skin.yaml; and an earlier-only yaml is served
+    const late = join(root, 'late'); await mkdir(late); await writeFile(join(late, 'skin.json'), '{"strings":{"intro":"late json"}}');
+    const b = await limb({ acme: { being: 'ed', ui: [plugin, skin, late] } });
+    expect((await (await fetch(`${b.url()}skin.json`)).json()).strings.intro).toBe('late json');
+    const lateYaml = join(root, 'lateyaml'); await mkdir(lateYaml); await writeFile(join(lateYaml, 'skin.yaml'), 'strings: {intro: late yaml}\n');
+    const d = await limb({ acme: { being: 'ed', ui: [lateYaml, skin] } });
+    expect((await (await fetch(`${d.url()}skin.json`)).json()).strings.intro).toBe('Hola yaml');
+    const e = await limb({ acme: { being: 'ed', ui: [skin, lateYaml] } });
+    expect((await (await fetch(`${e.url()}skin.json`)).json()).strings.intro).toBe('late yaml');
   });
 
-  it('widget.js shows ⏳ (Deep Chat\'s loading bubble) while a line is out, and retries a POST that got no answer or a 5xx, with the same id', async () => {
-    const { url } = await limb();
-    const js = await (await fetch(`${url()}widget.js`)).text();
-    expect(js).toContain('chat.displayLoadingBubble = true');
-    expect(js).toContain("loading: { message: { html: '⏳' } }");
-    expect(js).toContain('var BACKOFF = [1000, 3000, 9000]');
-    expect(js).toContain('JSON.stringify({ session: token, text: text, id: id, identity: identity })');
-    expect(js).toContain('crypto.getRandomValues');
-    expect(js).toMatch(/if \(\(status && status < 500\) \|\| n >= BACKOFF\.length\) return Promise\.reject\(status\)/);
+  it('a skin.yaml that does not parse is a 500 with a short message and a log of its path and line, never a half skin', async () => {
+    const { plugin, skin } = await uiDirs();
+    await writeFile(join(skin, 'skin.yaml'), 'strings:\n  intro: ok\n  bad: [unclosed\n');
+    const { url, lines } = await limb({ acme: { being: 'ed', ui: [plugin, skin] } });
+    const r = await fetch(`${url()}skin.json`);
+    expect(r.status).toBe(500);
+    expect(r.headers.get('content-type')).toMatch(/^application\/json/);
+    expect((await r.json()).error).toMatch(/^skin\.yaml does not parse/);
+    expect(lines.some((l) => l.includes('skin.yaml') && /:\d+ — skin\.yaml does not parse/.test(l))).toBe(true);
+    await writeFile(join(skin, 'skin.yaml'), '- just\n- a list\n');
+    expect((await fetch(`${url()}skin.json`)).status).toBe(500);
+  });
+
+  it('a skin.yaml over the size cap is not served (404, logged), as any UI file', async () => {
+    const { plugin, skin } = await uiDirs();
+    await writeFile(join(skin, 'skin.yaml'), 'a: ' + 'x'.repeat(2 * 1024 * 1024 + 1) + '\n');
+    const { url, lines } = await limb({ acme: { being: 'ed', ui: [plugin, skin] } });
+    expect((await fetch(`${url()}skin.json`)).status).toBe(404);
+    expect(lines.some((l) => l.includes('skin.yaml is over'))).toBe(true);
+  });
+
+  it('a skin.yaml that is a link out of its folder is not served', async () => {
+    const { plugin, skin, root } = await uiDirs();
+    await writeFile(join(root, 'outside.yaml'), 'secret: 1\n');
+    await symlink(join(root, 'outside.yaml'), join(skin, 'skin.yaml'));
+    const { url } = await limb({ acme: { being: 'ed', ui: [plugin, skin] } });
+    const body = await (await fetch(`${url()}skin.json`)).text();
+    expect(body).not.toMatch(/secret/);
+    expect(body).toBe('{"strings":{"intro":"Hola"}}');   // falls to the folder's skin.json
+  });
+
+  it('only flat names with a UI extension, inside a ui: folder: no other type, no dotfile, no subpath, no link out', async () => {
+    const { plugin, skin } = await uiDirs();
+    const { url, port } = await limb({ acme: { being: 'ed', ui: [plugin, skin] } });
+    for (const name of ['page.html', '.hidden.css', 'out.css', 'missing.js', 'nope']) expect((await fetch(`${url()}${name}`)).status, name).toBe(404);
+    for (const path of ['skin/skin.css', '..%2Foutside.css', '%2E%2E/outside.css']) expect((await fetch(`${url()}${path}`)).status, path).toBe(404);
+    expect((await fetch(`http://127.0.0.1:${port}/chat/acme/../outside.css`)).status).toBe(404);
+  });
+
+  it('a relative ui: folder is under home; limbs.http.ui is the default of a chatbox with none', async () => {
+    const { root } = await uiDirs();
+    const boxes = chatboxesOf({ limbs: { http: { ui: 'plugin', chatboxes: ['a', 'b'] } }, a: { being: 'ed' }, b: { being: 'ed', ui: ['plugin', 'skin'] } });
+    expect(boxes.a.ui).toBe('plugin');
+    expect(boxes.b.ui).toEqual(['plugin', 'skin']);
+    const { url } = await limb(boxes, { home: root });
+    expect(await (await fetch(`${url('a')}skin.css`)).text()).toBe('/* plugin */');
+    expect(await (await fetch(`${url('b')}skin.css`)).text()).toBe('.egc{--egc-bg:#123}');
+  });
+
+  it('no ui: no files (the API still answers), logged; the panel\'s texts and places\' looks given to the limb are named as moved, never served', async () => {
+    const { url, lines, post } = await limb({ acme: { being: 'ed', intro: 'Hola', strings: { waiting: ['Un momento'], send: 'Mandar' }, places: { espacio: { css: 'x', user_strip: true } } } });
+    expect((await fetch(`${url()}widget.js`)).status).toBe(404);
+    expect((await post({ text: 'hola' })).status).toBe(200);
+    expect(lines).toContain('acme: no ui: folder — its page gets no widget (the API answers)');
+    expect(lines).toContain('acme: send, intro, waiting, places css / user_strip — the chatbox UI\'s now (its skin, in a ui: folder); ignored here');
+    expect(JSON.stringify(await (await fetch(`${url()}info`)).json())).not.toMatch(/Hola|Mandar|Un momento/);
+  });
+
+  it('the limb keeps its own texts: the 401 message and the two to the team topic', () => {
+    expect(Object.keys(HTTP_STRINGS)).toEqual(['identity', 'ended', 'earlier']);
   });
 
   it('an unknown client or path is 404', async () => {
     const { port, post } = await limb();
     expect((await post({ text: 'hola' }, {}, 'other')).status).toBe(404);
     expect((await fetch(`http://127.0.0.1:${port}/elsewhere`)).status).toBe(404);
+  });
+});
+
+describe('cold: a line to a conversation not warmed in the last 4 minutes', () => {
+  it('the POST answer says cold: a new conversation is, a line right after is not, 4 minutes of quiet make it cold again, and so does an end', async () => {
+    const MIN = 60_000;
+    let t = Date.UTC(2026, 10, 11, 23, 0);
+    const { post, url } = await limb(undefined, { now: () => t });
+    const a = await (await post({ text: 'hola' })).json();
+    expect(a.cold).toBe(true);
+    expect((await (await post({ session: a.session, text: 'y otra' })).json()).cold).toBe(false);
+    t += 3 * MIN;
+    expect((await (await post({ session: a.session, text: 'sigo' })).json()).cold).toBe(false);
+    t += 4 * MIN + 1;
+    expect((await (await post({ session: a.session, text: 'volví' })).json()).cold).toBe(true);
+    t += MIN;
+    const ended = await fetch(`${url()}end`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session: a.session }) });
+    expect(ended.status).toBe(200);
+    expect((await (await post({ session: a.session, text: 'de nuevo' })).json()).cold).toBe(true);
   });
 });

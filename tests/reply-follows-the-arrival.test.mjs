@@ -45,6 +45,9 @@ import { createSender } from '../src/spine/sender.mjs';
 // ends drifted. Used only to PROVE the 1:1 below really is a chat the participant key refuses.
 import { crossAccountChatKey, crossAccountMsgKey } from '../src/bridges/beeper.mjs';
 import { encodeNodeSignature } from '../src/node-signature.mjs';
+import { createCliHost, connectCliHost, CLI_HOST_ENV } from '../src/cli-host.mjs';
+import { createWarmCliSession } from '../src/warm-cli-session.mjs';
+import { ipcPair, fakeClaude } from './fake-claude-cli.mjs';
 
 let boot, emptyState, ensureContact, aliasContact, getContact, recordThread;
 beforeAll(async () => {
@@ -57,17 +60,17 @@ afterAll(async () => {
 });
 
 // ── THE TWO CONNECTIONS, named the way the live node names them ─────────────────────────────
-const PRIMARY = 'TOK-primary';       // anrodz42 — the EAR (boot's ear rule: 'primary' by name)
-const SECONDARY = 'TOK-secondary';   // dolly.egpt — the MOUTH the names resolve output to
+const PRIMARY = 'TOK-primary';       // anaprueba42 — the EAR (boot's ear rule: 'primary' by name)
+const SECONDARY = 'TOK-secondary';   // mouth.acct — the MOUTH the names resolve output to
 // The operator's own Beeper WINDOW: a SECOND INSTALL of the account `primary` already is, so it
 // carries its own token and sees the SAME rooms under the SAME ids. It exists here only to be
 // refused (INGEST_NEVER_BY_NAME) — waking on it answers every message twice.
 const GUI = 'TOK-primary-gui';
 const NAME_OF = { [PRIMARY]: 'primary', [SECONDARY]: 'secondary', [GUI]: 'primary_gui' };
 
-const AN = '+16468217865';
-const RODZ = '+13472576794';
-const DANDO = '+34658515045';
+const AN = '+15550100001';
+const RODZ = '+15550100002';
+const DARIO = '+15550100005';
 const KEN = '+15551230000';
 
 // An account's OWN entry: a matrix id and NO phoneNumber. A member's entry carries the number.
@@ -137,24 +140,24 @@ const TYPE_OF = {
 const DESKTOPS = {
   [PRIMARY]: {
     [SELF_DM]: [self('an@beeper.local')],
-    [AN_GROUP]: [self('an@beeper.local'), member('dando@beeper.local', DANDO)],
-    [BOTH_AS_PRIMARY]: [self('an@beeper.local'), member('rodz@beeper.local', RODZ), member('dando@beeper.local', DANDO)],
+    [AN_GROUP]: [self('an@beeper.local'), member('dario@beeper.local', DARIO)],
+    [BOTH_AS_PRIMARY]: [self('an@beeper.local'), member('rodz@beeper.local', RODZ), member('dario@beeper.local', DARIO)],
     // A DIFFERENT third member, deliberately: same membership would key the same, and two groups
     // with one membership are the documented limit of the key, not the case under test here.
     [ORPHAN_GROUP]: [self('an@beeper.local'), member('rodz@beeper.local', RODZ), member('ken@beeper.local', KEN)],
   },
   [SECONDARY]: {
-    // dolly.egpt has neither the Self-DM nor AN_GROUP — that is the whole point of those cases —
+    // mouth.acct has neither the Self-DM nor AN_GROUP — that is the whole point of those cases —
     // and it has its OWN room for the one group both accounts really are in.
-    [BOTH_AS_SECONDARY]: [self('rodz@dolly.local'), member('an@dolly.local', AN), member('dando@dolly.local', DANDO)],
-    [DM_AS_SECONDARY]: [self('rodz@dolly.local'), member('an@dolly.local', AN)],
-    [DECOY_ON_SECONDARY]: [self('rodz@dolly.local'), member('lulu@dolly.local', KEN)],
+    [BOTH_AS_SECONDARY]: [self('rodz@dolly.local'), member('user@dolly.local', AN), member('dario@dolly.local', DARIO)],
+    [DM_AS_SECONDARY]: [self('rodz@dolly.local'), member('user@dolly.local', AN)],
+    [DECOY_ON_SECONDARY]: [self('rodz@dolly.local'), member('lola@dolly.local', KEN)],
     // An is NOT here, under any of the three identifiers his install answers to.
     [SECONDARY_ONLY]: [self('rodz@dolly.local'), member('ken@dolly.local', KEN)],
   },
   // The GUI install's world is the EAR's world — same account, same rooms, same ids.
   [GUI]: {
-    [GUI_GROUP]: [self('an@beeper.local'), member('dando@beeper.local', DANDO)],
+    [GUI_GROUP]: [self('an@beeper.local'), member('dario@beeper.local', DARIO)],
   },
 };
 // The primary's half of the 1:1, added beside its own rosters rather than inside them so the
@@ -188,15 +191,15 @@ const LISTED = {
 
 // What each install reports as its OWN account's identities — `/v1/accounts`, every identifier on
 // the `isSelf` user entries (measured live 2026-09-12 on both installs: the phone
-// (+16468217865 / +13472576794), the Beeper user id (@anrodriguez / @dolly-egpt:beeper.com) and
+// (+15550100001 / +15550100002), the Beeper user id (@anaprueba / @mouth-acct:beeper.com) and
 // the email). This is where the exclusion identities come from: MEASURED per connection, never
 // configured — and the mouth is looked for under every one of them, not the phone alone.
 const SELF_IDENTITY = {
-  [PRIMARY]: [AN, '@anrodriguez:beeper.com', 'anrodz42@example.com'],
-  [SECONDARY]: [RODZ, '@dolly-egpt:beeper.com', 'dolly.egpt@example.com'],
+  [PRIMARY]: [AN, '@anaprueba:beeper.com', 'anaprueba42@example.com'],
+  [SECONDARY]: [RODZ, '@mouth-acct:beeper.com', 'mouth.acct@example.org'],
   // The same account, measured through the other install — which is exactly why it must never
   // be an ear: it would answer as the connection this node already hears on.
-  [GUI]: [AN, '@anrodriguez:beeper.com', 'anrodz42@example.com'],
+  [GUI]: [AN, '@anaprueba:beeper.com', 'anaprueba42@example.com'],
 };
 
 const digits = (v) => String(v ?? '').replace(/\D/g, '');
@@ -281,8 +284,8 @@ const KG = () => ({
   node_name: 'kg',
   user_name: 'An',
   beeper: {
-    primary: { account: 'anrodz42@example.com', token: PRIMARY },
-    secondary: { account: 'dolly.egpt@example.com', token: SECONDARY },
+    primary: { account: 'anaprueba42@example.com', token: PRIMARY },
+    secondary: { account: 'mouth.acct@example.org', token: SECONDARY },
   },
   agents: {
     egpt: { configuration: 'egpt', handles: ['e'], name: 'E' },
@@ -313,8 +316,8 @@ const KG_WITH_GUI = () => ({
   node_name: 'kg',
   user_name: 'An',
   beeper: {
-    primary: { account: 'anrodz42@example.com', token: PRIMARY },
-    primary_gui: { account: 'anrodz42@example.com', token: GUI },
+    primary: { account: 'anaprueba42@example.com', token: PRIMARY },
+    primary_gui: { account: 'anaprueba42@example.com', token: GUI },
   },
   agents: {
     egpt: { configuration: 'egpt', handles: ['e'], name: 'E', use: 'primary_gui' },
@@ -325,7 +328,7 @@ const KG_WITH_GUI = () => ({
 const SINGLE = () => ({
   node_name: 'kg',
   user_name: 'An',
-  beeper: { primary: { account: 'anrodz42@example.com', token: PRIMARY } },
+  beeper: { primary: { account: 'anaprueba42@example.com', token: PRIMARY } },
   agents: { egpt: { configuration: 'egpt', handles: ['e'], name: 'E' } },
 });
 
@@ -358,7 +361,7 @@ async function bootWith(config, { state: seedState, ...extra } = {}) {
 
 const deliver = (spy, chatId, body, { atE = true } = {}) => spy.onIncoming(body, {
   chatId, chatName: chatId.replace(/^!/, ''), network: 'whatsapp',
-  userId: DANDO, senderName: 'Dando', authorized: true, msgKey: `m-${chatId}-${body.length}`,
+  userId: DARIO, senderName: 'Dario', authorized: true, msgKey: `m-${chatId}-${body.length}`,
   atEStart: atE, atEAnywhere: atE,
 });
 
@@ -441,8 +444,8 @@ describe('a locally placed reply goes out on the connection the message ARRIVED 
 // be used as mouth. all agents have different wake words, but they all use secondary to speak,
 // when present."*
 //
-// THE REPRODUCTION (measured on dolly, node `do`, 2026-09-12). `primary` = anrodz42 is the ear,
-// `secondary` = dolly.egpt is the mouth, a message arrived on the ear in a group BOTH accounts
+// THE REPRODUCTION (measured on dolly, node `do`, 2026-09-12). `primary` = anaprueba42 is the ear,
+// `secondary` = mouth.acct is the mouth, a message arrived on the ear in a group BOTH accounts
 // are in — and D answered from the operator's OWN number. The old test asked whether the mouth's
 // declared `account:` STRING equalled the ear's, found it did not, and concluded "that chat id
 // does not exist on secondary". Every clause of that was true and the conclusion was still wrong:
@@ -512,7 +515,7 @@ describe('a chat the mouth\'s account is ALSO in is answered by the MOUTH, in th
   // ids, so the mouth speaks with the id it was handed and nothing is resolved.
   it('two connections on the SAME account speak with the id they were handed', async () => {
     const cfg = KG();
-    cfg.beeper.secondary.account = 'anrodz42@example.com';
+    cfg.beeper.secondary.account = 'anaprueba42@example.com';
     const { app, byConnection, replies } = await bootWith(cfg);
 
     await deliver(byConnection.primary, AN_GROUP, 'e hola');
@@ -1067,6 +1070,45 @@ describe('a scheduled send with NO arrival since boot: the chat is placed at reg
   });
 });
 
+// ── A BACKGROUND WAKE AFTER A RESTART, before anything arrived in the chat (2026-10-30) ──────────
+// kg, eGPT Admin, 10-22/10-27/10-29: the new spine adopted the daemon-held session, its task finished,
+// and the wake went out on 'secondary' addressed by the ear's room id → 404 "Chat not found".
+describe('a background wake with NO arrival since boot: the chat is placed before the being is woken', () => {
+  const realKill = process.kill;
+  beforeAll(() => { vi.spyOn(process, 'kill').mockImplementation((pid, sig) => (sig === 0 && pid >= 7100 && pid < 7200 ? true : realKill.call(process, pid, sig))); });
+  afterAll(() => { process.kill.mockRestore?.(); });
+
+  it('the wake is said by the MOUTH in its own room — never on secondary with the ear\'s id', async () => {
+    const claudes = [];
+    const host = createCliHost({ log: () => {}, setPriority: () => {}, spawn: () => { const c = fakeClaude(7100 + claudes.length); claudes.push(c); setImmediate(() => c.emit('spawn')); return c; } });
+    const hosted = () => {
+      const pair = ipcPair();
+      host.attach(pair.daemonSide);
+      const makeSession = (o) => { if (!o.spawn) throw new Error('not hosted'); return createWarmCliSession({ ...o, cwd: undefined }); };
+      return { pair, extra: { cliHost: connectCliHost(pair.spineSide, { [CLI_HOST_ENV]: '1' }), makeSession, reapPort: () => 0 } };
+    };
+
+    const a = hosted();
+    const one = await bootWith(KG(), a.extra);
+    await deliver(one.byConnection.primary, BOTH_AS_PRIMARY, 'e, bg: run the audit');
+    await waitFor(() => one.byConnection.secondary.streams.some((h) => h.finals.length));
+    one.app.stop();
+    a.pair.drop();
+    claudes[0].finishBg();
+
+    const b = hosted();
+    const two = await bootWith(KG(), { ...b.extra, state: one.state(), io: one.io });
+    const woke = (s) => s.streams.filter((h) => h.finals.some((f) => f.includes('the audit is done')));
+    await waitFor(() => woke(two.byConnection.secondary).length + woke(two.byConnection.primary).length > 0, { timeoutMs: 5000 });
+
+    expect(woke(two.byConnection.secondary).map((h) => h.chatId)).toEqual([BOTH_AS_SECONDARY]);
+    expect(two.replies().filter((r) => r.chatId === BOTH_AS_PRIMARY)).toEqual([]);
+    expect(two.lines).toContain(`[wake] egpt: ${BOTH_AS_PRIMARY} is a chat on 'primary' — recorded, so its sends start there`);
+    two.app.stop();
+    b.pair.drop();
+  });
+});
+
 // ── THE NODE'S OWN LINES OBEY THE MOUTH TOO (operator 2026-09-16) ────────────────────────────────
 // *"every output of the spine comes through the mouth."* A command reply and the lifecycle lines
 // carry no being, and rode `rawBridgeOf(null, chat)` — the connection HOLDING the chat, which is the
@@ -1147,7 +1189,7 @@ describe('the 🎧 listening mark: boot hands each connection the one placement'
     app.stop();
   });
 
-  // do, live 2026-09-17: `reaction 🎧 by An → #2838 [Maria (Mom) Palma]` — a 1:1 chat the mouth is not
+  // do, live 2026-09-17: `reaction 🎧 by An → #2838 [Maria (Mom) Muestra]` — a 1:1 chat the mouth is not
   // in. The Self-DM is the same shape: the mouth is a different account and has no room there, so the
   // mark is not placed from the operator's account instead.
   it('the Self-DM (the mouth is not in it): no 🎧 from either account', async () => {
@@ -1186,7 +1228,7 @@ describe('the retired super_chats block reroutes nothing and places no SI-state 
     return aliasContact(st, 'whatsapp', SI_CHAN, getContact(st, 'whatsapp', base).jid, { transcript: 'x', super: true });
   };
   const hola = (spy) => spy.onIncoming('hola', {
-    chatId: BOTH_AS_PRIMARY, chatName: 'both', network: 'whatsapp', userId: DANDO, senderName: 'Dando', authorized: true,
+    chatId: BOTH_AS_PRIMARY, chatName: 'both', network: 'whatsapp', userId: DARIO, senderName: 'Dario', authorized: true,
     msgKey: 'ear-hola', msgHash: crossAccountMsgKey(HOLA), msgTs: Date.parse(HOLA.timestamp), atEStart: true, atEAnywhere: true,
   });
   const BLOCKS = [{ triggers: ['SI chat'], automatic: true, mode: 'on' }, { triggers: ['SI chat'] }, null, { triggers: [] }];
@@ -1230,7 +1272,7 @@ describe('/send through the mouth: Rodz\'s own room for the original, found by i
     cfg.send = { post_back_from: 'secondary', origin: 'never' };
     const { app, byConnection } = await bootWith(cfg, { state: seed() });
     await deliver(byConnection.primary, BOTH_AS_PRIMARY, 'hola', { atE: false });   // the original: a chat the ear holds
-    await byConnection.primary.onIncoming('/e send', { chatId: SIDE_ROOM, chatName: 'SI+both-x', network: 'whatsapp', userId: DANDO, senderName: 'Dando', authorized: true, isSender: true, msgKey: 'snd-1', replyToId: 'q-1' });
+    await byConnection.primary.onIncoming('/e send', { chatId: SIDE_ROOM, chatName: 'SI+both-x', network: 'whatsapp', userId: DARIO, senderName: 'Dario', authorized: true, isSender: true, msgKey: 'snd-1', replyToId: 'q-1' });
     await waitFor(() => byConnection.secondary.sent.length > 0);
     expect(byConnection.secondary.sent.map((m) => [m.chatId, m.text])).toEqual([[BOTH_AS_SECONDARY, 'la respuesta']]);
     expect(byConnection.primary.sent.filter((m) => m.chatId === BOTH_AS_PRIMARY)).toEqual([]);

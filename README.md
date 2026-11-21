@@ -1,6 +1,6 @@
 # eGPT
 
-eGPT is a **being, not a session**: a persistent AI presence that lives in the
+eGPT is a **being, not a session**: a persistent SI presence that lives in the
 channels you already use — WhatsApp, Telegram, Signal, the shell, the browser —
 where it hears everything, remembers everything, and acts through real limbs on
 your behalf. The mission is a public tool that is **secure and powerful**: the
@@ -27,6 +27,217 @@ the whole product.
 > [`CONTRACTS.md`](CONTRACTS.md) (test-locked behavior), [`ROADMAP.md`](ROADMAP.md)
 > (state + what's next).
 
+## Run eGPT on your laptop (quickstart)
+
+1. ⭐ **Star** this repo.
+2. To be honest: **tell your SI to read and install this.** Make it do it *for you*, and
+   don't end up working for it: they're too cautious, too prudely trained. Make it run the steps on
+   your command. Ride your horse with confidence. 🐎
+   Using Claude? `--dangerously-skip-permissions` is highly recommended. Just don't tell your SI
+   to delete your computer. Although it will surely make a backup first. You are safe.
+3. **Fork** it (the **Fork** button, top right on GitHub).
+4. **Clone your own copy**: your fork, not `siran/egpt`. You are master of your domain.
+   In a terminal (Windows: **PowerShell**; macOS: **Terminal**; needs **Git**):
+
+   ```bash
+   git clone git@github.com:<you>/egpt.git
+   cd egpt
+   ```
+
+   No SSH key on GitHub? Use `https://github.com/<you>/egpt.git` instead.
+
+This is the shortest way to get eGPT answering you in a chat on one laptop. Pick
+**A (WhatsApp, through Beeper)** or **B (a Telegram bot)**. You can add the other one later.
+Nothing else in this README is needed for a first run.
+
+**Docker is the recommended install.** The image carries every dependency eGPT uses: Node,
+Claude Code, Beeper Desktop on a virtual screen you open in your browser (noVNC), Chrome,
+whisper.cpp for voice notes and piper for speech. Your machine needs only Docker and Git.
+Running eGPT **raw**, straight on your laptop without a container, is welcome too: that is
+[What you need](#what-you-need) and [Install](#install) below.
+
+### Docker (recommended)
+
+1. In your clone, build the image and start it. It clones your fork into its own volume on
+   the first start, and seeds `~/.egpt/config/config.yaml` there:
+
+   ```bash
+   docker build -f docker/Dockerfile -t egpt .
+   docker run -d --name egpt --hostname egpt --restart unless-stopped --shm-size=1g \
+     --security-opt seccomp=unconfined --security-opt systempaths=unconfined \
+     -e EGPT_REPO_URL=https://github.com/<you>/egpt.git \
+     -p 127.0.0.1:6080:6080 \
+     -v egpt-home:/home/egpt/.egpt -v egpt-claude:/home/egpt/.claude \
+     -v egpt-src:/home/egpt/src/egpt -v egpt-beeper:/home/egpt/.config/BeeperTexts \
+     egpt
+   docker logs -f egpt     # Ctrl+C leaves it running
+   ```
+
+   The two `--security-opt` are what the beings' sandbox (`docker/egpt-box`) and Chrome need.
+   Only Telegram (B), no WhatsApp? Add `-e EGPT_BEEPER=off`.
+2. Sign the beings in to Claude: `docker exec -it egpt egpt-claude-token`. It runs
+   `claude setup-token` and saves the token you paste.
+3. The container's screen (Beeper, the browsers): open http://localhost:6080/vnc.html. The
+   password is in `docker exec egpt cat .egpt/secrets/vnc.password`.
+4. Edit the config as in [Install](#install) step 3, then do A or B (and C) below. Inside the
+   container, the commands are:
+
+   | Raw | Docker |
+   |---|---|
+   | edit `~/.egpt/config/config.yaml` | `docker exec egpt cat .egpt/config/config.yaml > config.yaml`, edit it, then `docker exec -i egpt sh -c 'cat > .egpt/config/config.yaml' < config.yaml` |
+   | `node setup/telegram-token.mjs main` | `docker exec -it -w /home/egpt/src/egpt egpt node setup/telegram-token.mjs main` |
+   | Beeper Desktop on the laptop | Beeper on the noVNC screen of step 3 |
+   | `node egpt-daemon.mjs` | already running; after a config change, `docker restart egpt` |
+
+### What you need
+
+1. **Node.js 22 or newer.** Check with `node --version`.
+2. **Git**, to download eGPT.
+3. **Claude Code**, installed and signed in on this laptop, so that `claude` works in a terminal.
+   eGPT uses your Claude login. You don't need an API key.
+   Install and sign in: https://code.claude.com/docs/en/setup
+4. **Only for A:** a phone with WhatsApp, and **Beeper Desktop** installed on the laptop.
+   **Only for B:** a Telegram account.
+
+### Install
+
+1. In your clone (the `egpt` folder), run:
+
+   ```bash
+   npm install
+   ```
+
+2. Create your settings file from the template.
+
+   macOS:
+
+   ```bash
+   mkdir -p ~/.egpt/config
+   cp config/skeletons/config.yaml ~/.egpt/config/config.yaml
+   ```
+
+   Windows (PowerShell):
+
+   ```powershell
+   mkdir "$env:USERPROFILE\.egpt\config" -Force
+   copy config\skeletons\config.yaml "$env:USERPROFILE\.egpt\config\config.yaml"
+   ```
+
+3. Open that `config.yaml` in a text editor and change these lines:
+   - `node_name:` a short name for this laptop, e.g. `studio`.
+   - `user_name:` your name.
+   - Under `agents:`, delete the whole `ken:` and `wren:` blocks. Keep only `egpt:`.
+     (`wren` has full access to your computer. A first setup doesn't need it.)
+   - Under `agents:` → `egpt:`, add these lines. Line them up with `handles:`:
+
+     ```yaml
+         conversation_defaults:
+           access_level: regular
+           sandboxed: false
+     ```
+
+     Without these lines eGPT tries to use a Windows sandbox that this quickstart doesn't
+     set up, and it can't answer on a Mac. (To use the sandbox, see `setup/SANDBOX.md`.)
+
+### A. WhatsApp through Beeper (your phone number)
+
+eGPT answers **from your own WhatsApp number**, so your contacts see its replies as coming from you.
+
+1. Open **Beeper Desktop**, sign in, and add your WhatsApp account.
+   Beeper shows a QR code: scan it from WhatsApp on your phone (Settings → Linked devices → Link a device).
+2. In Beeper Desktop go to **Settings → Developer → Desktop API** and copy the token.
+3. In `config.yaml`, under `limbs:` → `beeper:` → `main:`, paste the token in place of
+   `PASTE_YOUR_TOKEN_HERE`, and put your Beeper login email after `account:`.
+4. Keep Beeper Desktop open while eGPT runs.
+
+### B. A Telegram bot
+
+1. In Telegram, open **@BotFather**, send `/newbot`, and follow the steps. It gives you a **bot token**.
+2. Save the token. In the `egpt` folder, run the command below and paste the token when it asks
+   (you won't see it as you paste):
+
+   ```bash
+   node setup/telegram-token.mjs main
+   ```
+
+   Windows: you can also double-click `setup\telegram-token.cmd`.
+   The token is saved to `~/.egpt/secrets/telegram-main.token`, not to `config.yaml`.
+3. In `config.yaml`, under `limbs:`, remove the `#` from these three lines and put your bot's username after `account:`:
+
+   ```yaml
+     telegram:
+       main:
+         account: "my_egpt_bot"
+   ```
+4. Tell eGPT who it may answer. Under `networks:`, change the `telegram:` line to:
+
+   ```yaml
+     telegram: { admin_chat_ids: [], allowed_users: ["YOUR_TELEGRAM_NUMERIC_ID"] }
+   ```
+
+   To find your numeric id, send any message to @userinfobot in Telegram.
+5. **If you're not using A:** put a `#` at the start of the `beeper:` line and of each line under it
+   (`main:`, `account:`, `token:`). eGPT then runs on Telegram only.
+
+### C. Admin and Logs channels (suggested)
+
+Give the node two chats of its own, so you see what it does without reading its terminal:
+
+- **eGPT Admin**: where you type its commands (`/e status`, `/e upgrade`, ...), and where it
+  sends the notices that need you, such as the control link of `/e browser`.
+- **eGPT Logs**: one line per command (`/upgrade in <chat> by <you> → ok`), and the lifecycle
+  lines: `↻ restarting`, `✅ egpt back up! — /upgrade: pulled 3 commits, npm install ok`,
+  `✅ egpt started`; also the compaction notices and a public being's errors, so eGPT Admin
+  stays clean. With no Logs chat set, those two go to eGPT Admin.
+
+On Telegram, one group with topics holds both:
+
+1. Create a group, and in its settings turn **Topics** on. Add your bot and make it an
+   **admin**: only then does it see every message, and post in the topics.
+2. Create two topics, `eGPT Admin` and `eGPT Logs`.
+3. Get each topic's id. Write a message in the topic, then right-click it (long-press on a
+   phone) → **Copy Message Link**. From `https://t.me/c/1000000000104/185/190`, the topic is
+   `tg:-1000000000104/185`: `-100` and the number after `/c/`, then the topic's number.
+4. In `config.yaml`, at the top level (the skeleton has both lines, commented out):
+
+   ```yaml
+   log_to_group: "tg:-1000000000104/185"   # eGPT Logs
+   admin_channel: "tg:-1000000000104/124"  # eGPT Admin
+   ```
+
+   and put the eGPT Admin topic in `networks:` → `telegram:` → `admin_chat_ids`, so commands
+   typed there are accepted.
+
+On WhatsApp (A), make two groups instead, and give their names: `log_to_group: "eGPT Logs"`,
+`admin_channel: "eGPT Admin"`.
+
+### Start eGPT
+
+In the `egpt` folder, run:
+
+```bash
+node egpt-daemon.mjs
+```
+
+Leave this window open. eGPT runs as long as it's open. To stop eGPT, press **Ctrl+C** in this window.
+
+### Check that it works
+
+1. Look at the messages in the terminal window:
+   - A: a line containing `beeper: subscribed to all chats`.
+     If you see `NO TOKEN`, check the token in step A3.
+   - B: a line like `[telegram] 'main' is @my_egpt_bot`.
+     If you see `rejected the token`, run step B2 again.
+2. Send a message that starts with `@e`, for example `@e hello`:
+   - A: send it in WhatsApp, for example in the chat with yourself.
+   - B: send it in a private chat with your bot.
+
+   eGPT answers in the same chat.
+3. Send `/e status`. eGPT replies with a short health report.
+4. Optional, on macOS: run `node setup/verify-install.mjs` in a second terminal. `Exit 0` means all good.
+   On Windows this check also looks for background services that this quickstart doesn't install,
+   so it reports them as missing. That's expected here.
+
 ## Setup
 
 eGPT runs as a background service against a **profile directory** (`EGPT_HOME`,
@@ -46,7 +257,7 @@ default `~/.egpt`).
    > **Everything past this point is OPTIONAL EXPANSION, and none of it is needed
    > to run eGPT.** A node can additionally hold a SECOND Beeper account, and can
    > run its Beeper Desktop as a Windows SESSION 0 service so the agents answer
-   > with nobody logged in — see `handoffs/2026-09-03-session-zero.md`. That
+   > with nobody logged in — see the session-zero handoff (kept in the node profile). That
    > buys an unattended node and a reply that arrives from a visibly different
    > person. It also costs a second install, a second login, and a service to
    > supervise. Skip it. Add it the day you want what it buys.
@@ -60,8 +271,8 @@ default `~/.egpt`).
    ```
 
    Then edit `~/.egpt/config/config.yaml`: paste your `beeper_token`, set
-   `user_name`, add each surface's `chat_id`, and put your ids in the top-level
-   `conversation_defaults.allowed_users` (empty = nobody; your own account-owner
+   `user_name`, add each surface's `admin_chat_ids`, and put your ids in the top-level
+   `conversation_defaults.allowed_users` (empty = no listed owner; your own account-owner
    messages are always authorized): beings answer only those owners by default. Every key is
    documented inline and registered in [`config/config-schema.mjs`](config/config-schema.mjs).
    The `agents:` block is required — the shipped default makes `egpt` the persona
@@ -145,7 +356,7 @@ ordinary text (the editor shell console still takes it):
                               node's confined default), all (unconfined), or
                               sandbox (all's capability, only inside the OS box)
 /<handle> restart             bounce the node (daemon respawns the current checkout)
-/<handle> upgrade             git pull + npm install + rebuild, then respawn
+/<handle> upgrade [full]      git pull + npm install + rebuild, then respawn; full: the daemon too
 /<handle> rewind <ref>        check out <ref>, reinstall, respawn
 ```
 
@@ -160,7 +371,7 @@ wins: `config/config.yaml` < `config/conversations.yaml` (the entry) <
 the entity's own `conversations/<slug>/config.yaml` or `rooms/<name>/config.yaml`.
 The spine dumps what it resolved, and the file each value came from, to those
 three `*.readonly.yaml` aggregates at the profile root. See [`MANUAL.md`](MANUAL.md) for the full operator
-reference, [`OPERATIONS.md`](OPERATIONS.md) for deploying to the live nodes and getting a shell that can,
+reference (each node's runbook lives in its private node repo, checked out at `~/.egpt/node/`, never here),
 and [`TESTING.md`](TESTING.md) for the manual verification tiers.
 
 ## Requirements

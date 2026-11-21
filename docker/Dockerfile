@@ -1,4 +1,4 @@
-# eGPT node blueprint: Beeper Desktop, Chrome, whisper.cpp, piper and claude in one container.
+# eGPT node blueprint: Beeper Desktop, Chrome, whisper.cpp, piper, claude and gh in one container.
 # Beeper is a GUI app, so it runs on a virtual X screen (Xvfb). x11vnc exposes
 # that screen on :5900 for the one-time login; keep that port private.
 # No eGPT code and no secrets in the image: the checkout is cloned onto its own volume at first boot.
@@ -27,11 +27,11 @@ FROM node:${NODE_VERSION}-bookworm-slim
 # Electron runtime libs, virtual display, VNC, and tools egpt shells out to.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git tini procps lsof unzip gnupg jq \
-      xvfb x11vnc openbox xdotool imagemagick \
+      xvfb x11vnc openbox xdotool xprintidle imagemagick \
       libgtk-3-0 libnss3 libxss1 libasound2 libgbm1 libxshmfence1 libdrm2 \
       libsecret-1-0 libnotify4 libatspi2.0-0 libx11-xcb1 libxtst6 xdg-utils \
       fonts-noto-core fonts-noto-color-emoji \
-      ffmpeg libgomp1 python3 python3-venv \
+      ffmpeg libgomp1 python3 python3-venv python3-psycopg2 \
   && rm -rf /var/lib/apt/lists/*
 
 # Google Chrome stable, at /usr/bin/google-chrome-stable (chrome-launcher.mjs CHROME_PATHS.linux).
@@ -39,6 +39,13 @@ RUN curl -fsSL https://dl.google.com/linux/linux_signing_key.pub -o /usr/share/k
   && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-linux.asc] https://dl.google.com/linux/chrome/deb/ stable main" \
        > /etc/apt/sources.list.d/google-chrome.list \
   && apt-get update && apt-get install -y --no-install-recommends google-chrome-stable \
+  && rm -rf /var/lib/apt/lists/*
+
+# GitHub CLI (gh), from GitHub's signed apt repo. No auth in the image: gh reads GH_TOKEN at run time.
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+  && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+       > /etc/apt/sources.list.d/github-cli.list \
+  && apt-get update && apt-get install -y --no-install-recommends gh \
   && rm -rf /var/lib/apt/lists/*
 
 # Beeper Desktop, unpacked from its AppImage (no FUSE needed at runtime).
@@ -77,13 +84,18 @@ RUN --mount=type=bind,source=docker/awscli.asc,target=/tmp/awscli.asc \
   && unzip -q awscli.zip && ./aws/install \
   && rm -rf awscli.zip awscli.zip.sig aws "$GNUPGHOME"
 
+# AWS RDS CA bundle, the sslrootcert of dbq's credential (mkdir, not curl --create-dirs: that makes the dir 0750).
+RUN mkdir -p /usr/local/share/ca-rds \
+  && curl -fsSL -o /usr/local/share/ca-rds/global-bundle.pem https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
+
 COPY --from=whisper /src/whisper.cpp/build/bin/whisper-cli /src/whisper.cpp/build/bin/whisper-server /usr/local/bin/
 COPY --from=whisper /src/whisper.cpp/samples/jfk.wav /opt/whisper/samples/jfk.wav
 
 # The being box: a sandboxed being runs as its conversation's own uid in a private view
 # (docker/egpt-box). Root-owned; the spine may run it through one sudoers line.
-RUN apt-get update && apt-get install -y --no-install-recommends sudo acl openssh-client \
-  && rm -rf /var/lib/apt/lists/*
+# openssh-server: sshd as egpt when EGPT_SSH_PORT is set; its host key is on the data volume, not here.
+RUN apt-get update && apt-get install -y --no-install-recommends sudo acl openssh-client openssh-server \
+  && rm -f /etc/ssh/ssh_host_* && rm -rf /var/lib/apt/lists/*
 
 COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/egpt-entrypoint
 COPY --chmod=755 docker/scripts/ /usr/local/bin/
@@ -101,6 +113,9 @@ USER egpt
 ENV HOME=/home/egpt EGPT_HOME=/home/egpt/.egpt DISPLAY=:99 EGPT_SESSION1=1 \
     RADIO_PIPER=/opt/piper CLAUDE_CONFIG_DIR=/home/egpt/.claude
 RUN mkdir -p /home/egpt/.egpt /home/egpt/.config/BeeperTexts /home/egpt/.claude /home/egpt/src/egpt
+# SSH shells get the beings' Claude token, as the entrypoint exports it. Top of .bashrc: `ssh nu cmd` too.
+RUN { printf '%s\n' 'if [ -s "$EGPT_HOME/secrets/claude-oauth.token" ]; then export CLAUDE_CODE_OAUTH_TOKEN="$(tr -d "\r\n" <"$EGPT_HOME/secrets/claude-oauth.token")"; fi'; \
+      cat ~/.bashrc; } >/tmp/bashrc && mv /tmp/bashrc ~/.bashrc
 VOLUME ["/home/egpt/.egpt", "/home/egpt/.config/BeeperTexts", "/home/egpt/.claude", "/home/egpt/src/egpt"]
 EXPOSE 5900 6080
 

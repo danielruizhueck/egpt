@@ -13,6 +13,7 @@ const _HOME = vi.hoisted(() => {
 import { promises as fs, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { freeSafeHttpPort } from './free-safe-http-port.mjs';
+import { chatboxesOf } from '../src/bridges/http.mjs';
 
 let boot, emptyState, getContact, ensureContact;
 beforeAll(async () => {
@@ -39,7 +40,7 @@ const AGENTS = {
 const config = (port) => ({
   node_name: 'EDW', user_name: 'John',
   conversation_defaults: { allowed_users: ['owner-1'] },
-  limbs: { http: { port, clients: { eduweb: { being: 'ed', title: 'EduWeb' } } } },
+  limbs: { http: { port, clients: { contoso: { being: 'ed', title: 'Contoso' } } } },
   agents: AGENTS,
 });
 
@@ -69,7 +70,8 @@ function brain(turns) {
 }
 
 // withBeeper: a fake Beeper transport beside the chatbox, recording every chat it is asked to post in.
-async function bootChatbox({ withBeeper = false, client = {}, agents = AGENTS, ayde = null, registry = null } = {}) {
+// edit(cfg): the config's last change before boot; id: the client the helpers' url names.
+async function bootChatbox({ withBeeper = false, client = {}, agents = AGENTS, ayde = null, registry = null, edit = null, id = 'contoso' } = {}) {
   const port = await freeSafeHttpPort();
   const io = memIo();
   const turns = [];
@@ -84,10 +86,11 @@ async function bootChatbox({ withBeeper = false, client = {}, agents = AGENTS, a
     };
   };
   const cfg = config(port);
-  Object.assign(cfg.limbs.http.clients.eduweb, client);
+  Object.assign(cfg.limbs.http.clients.contoso, client);
   cfg.agents = agents;
   if (ayde) cfg.limbs.http.ayde = ayde;
   if (withBeeper) cfg.limbs.beeper = { main: { account: 'x@example.com', token: 'TOK' } };
+  edit?.(cfg);
   let convState = registry ?? emptyState();
   const app = await boot({
     readConfig: () => cfg,
@@ -99,10 +102,10 @@ async function bootChatbox({ withBeeper = false, client = {}, agents = AGENTS, a
     io, ingest: false, tickMs: 0,
     log: { line: (s) => lines.push(s) },
   });
-  const url = `http://127.0.0.1:${port}/chat/eduweb/`;
+  const url = `http://127.0.0.1:${port}/chat/${id}/`;
   const post = (body) => fetch(`${url}messages`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then((r) => r.json());
   const messages = (session, since = 0) => fetch(`${url}messages?session=${encodeURIComponent(session)}&since=${since}`).then((r) => r.json());
-  return { app, io, turns, lines, url, post, messages, beeper, state: () => convState };
+  return { app, io, turns, lines, port, url, post, messages, beeper, state: () => convState };
 }
 
 // Every `data:` event of an SSE response, as it arrives.
@@ -132,7 +135,7 @@ const convDir = (slug) => join(_HOME, 'conversations', 'http', slug);
 describe('limbs.http on a node with no Beeper', () => {
   it('boots with the chatbox as its only limb', async () => {
     const { app, lines } = await bootChatbox();
-    expect(app.httpPort.owns('http:eduweb-0123456789abcdef')).toBe(true);
+    expect(app.httpPort.owns('http:contoso-0123456789abcdef')).toBe(true);
     expect(app.telegramPort).toBeNull();
     expect(lines.some((l) => l.startsWith('[http] listening on'))).toBe(true);
     app.stop();
@@ -166,7 +169,7 @@ describe('limbs.http on a node with no Beeper', () => {
     expect(cwds).toHaveLength(2);
     for (const cwd of cwds) expect(dirname(cwd)).toBe(join(_HOME, 'conversations', 'http'));
     const slugs = cwds.map((c) => c.split(/[\\/]/).at(-1));
-    for (const slug of slugs) expect(slug).toMatch(/^eduweb-[0-9a-f]{16}$/);
+    for (const slug of slugs) expect(slug).toMatch(/^contoso-[0-9a-f]{16}$/);
     const [ta, tb] = slugs.map((slug) => io.files.get(join(convDir(slug), 'transcript.md')) ?? '');
     const byA = [ta, tb].find((t) => t.includes('soy A'));
     const byB = [ta, tb].find((t) => t.includes('soy B'));
@@ -223,19 +226,19 @@ describe('what the widget shows', () => {
 
 describe('the seeded desk', () => {
   it('a new session\'s folder holds the client\'s seed before the being\'s first turn; a later seed edit never touches it', async () => {
-    const seedDir = join(_HOME, 'seeds', 'eduweb');
+    const seedDir = join(_HOME, 'seeds', 'contoso');
     await fs.mkdir(join(seedDir, 'drawer'), { recursive: true });
     await fs.writeFile(join(seedDir, 'identidad.md'), 'v1');
     await fs.writeFile(join(seedDir, 'drawer', 'db.txt'), 'solo lectura');
     try {
-      const { app, post, turns, lines } = await bootChatbox({ client: { seed: 'seeds/eduweb' } });
+      const { app, post, turns, lines } = await bootChatbox({ client: { seed: 'seeds/contoso' } });
       const a = await post({ text: 'hola' });
       await vi.waitFor(() => expect(turns).toHaveLength(1), { timeout: 5000 });
       const dirA = turns[0].cwd;
       expect(turns[0].desk).toBe(true);
       expect(await fs.readFile(join(dirA, 'identidad.md'), 'utf8')).toBe('v1');
       expect(await fs.readFile(join(dirA, 'drawer', 'db.txt'), 'utf8')).toBe('solo lectura');
-      expect(lines.some((l) => /^\[http\] http:eduweb-[0-9a-f]{16}: its desk is seeded from .* \(2 files\)$/.test(l))).toBe(true);
+      expect(lines.some((l) => /^\[http\] http:contoso-[0-9a-f]{16}: its desk is seeded from .* \(2 files\)$/.test(l))).toBe(true);
 
       await fs.writeFile(join(seedDir, 'identidad.md'), 'v2');
       await fs.writeFile(join(seedDir, 'nuevo.md'), 'nuevo');
@@ -298,19 +301,19 @@ describe('limbs.http.ayde through boot', () => {
   it('HTTP Basic by level, the users file read on each request; the scope by the registry boot reads; the escritorio route is gone', async () => {
     const { userLine } = await import('../src/bridges/http-ayde.mjs');
     const usersFile = join(_HOME, 'secrets', 'ayde.users');
-    const id = 'eduweb-00000000000000aa';
+    const id = 'contoso-00000000000000aa';
     const basic = (user, pass) => ({ headers: { Authorization: `Basic ${Buffer.from(`${user}:${pass}`).toString('base64')}` } });
     await fs.mkdir(dirname(usersFile), { recursive: true });
     await fs.writeFile(usersFile, `${await userLine('ana', 'team', 'clave-de-ana-1')}\n${await userLine('rob', 'root', 'clave-de-rob-1')}\n`);
-    await fs.mkdir(convDir(id), { recursive: true });
-    await fs.writeFile(join(convDir(id), 'usuario.json'), JSON.stringify({ abrin: 'IEV', username: 'mlopez' }));
+    await fs.mkdir(join(convDir(id), 'desktop'), { recursive: true });
+    await fs.writeFile(join(convDir(id), 'desktop', 'user.json'), JSON.stringify({ abrin: 'IEV', username: 'mlopez' }));
     try {
-      const other = 'eduweb-00000000000000bb';
+      const other = 'contoso-00000000000000bb';
       let registry = ensureContact(emptyState(), 'http', `http:${id}`).state;
       registry = ensureContact(registry, 'http', `http:${other}`).state;
       await fs.mkdir(convDir(other), { recursive: true });
       const { app, url, lines } = await bootChatbox({ ayde: { on: true, scope: [`http:${id}`] }, registry });
-      const ayde = url.replace('/chat/eduweb/', '/ayde/');
+      const ayde = url.replace('/chat/contoso/', '/ayde/');
       expect(lines.some((l) => /scope is empty/.test(l))).toBe(false);
       expect(lines.some((l) => /ayde is on but/.test(l))).toBe(false);
       const none = await fetch(ayde);
@@ -320,8 +323,8 @@ describe('limbs.http.ayde through boot', () => {
       expect((await fetch(ayde, ana)).status).toBe(200);
       expect((await fetch(`${ayde}tree`, ana).then((r) => r.json())).entries.map((e) => [e.path, e.chats])).toEqual([[`conversations/http/${id}`, [`http:${id}`]]]);
       const top = await fetch(`${ayde}tree`, ana).then((r) => r.json());
-      expect(top.sections).toEqual([{ id: 'chatbox:eduweb', kind: 'chatbox', label: 'EduWeb' }]);
-      expect(top.entries[0]).toMatchObject({ section: 'chatbox:eduweb', title: 'mlopez', usuario: { abrin: 'IEV', username: 'mlopez' }, preview: null });
+      expect(top.sections).toEqual([{ id: 'chatbox:contoso', kind: 'chatbox', label: 'Contoso' }]);
+      expect(top.entries[0]).toMatchObject({ section: 'chatbox:contoso', title: 'mlopez', card: { abrin: 'IEV', username: 'mlopez' }, preview: null });
       expect((await fetch(`${ayde}tree?p=conversations/http/${other}`, ana)).headers.get('www-authenticate')).toBe('Basic realm="ayde root", charset="UTF-8"');
       expect((await fetch(`${ayde}tree?p=`, ana)).headers.get('www-authenticate')).toBe('Basic realm="ayde root", charset="UTF-8"');
       expect((await fetch(`${ayde}tree?p=secrets`, basic('rob', 'clave-de-rob-1')).then((r) => r.json())).entries.map((e) => e.name)).toContain('ayde.users');
@@ -334,7 +337,7 @@ describe('limbs.http.ayde through boot', () => {
     } finally {
       await fs.rm(usersFile, { force: true });
       await fs.rm(convDir(id), { recursive: true, force: true });
-      await fs.rm(convDir('eduweb-00000000000000bb'), { recursive: true, force: true });
+      await fs.rm(convDir('contoso-00000000000000bb'), { recursive: true, force: true });
     }
   });
 
@@ -345,16 +348,16 @@ describe('limbs.http.ayde through boot', () => {
     await fs.writeFile(usersFile, `${await userLine('ana', 'team', 'clave-de-ana-1')}\n`);
     let slug = null;
     try {
-      const { app, url, io, post, messages, turns } = await bootChatbox({ ayde: { on: true, scope: ['http:eduweb-'] } });
+      const { app, url, io, post, messages, turns } = await bootChatbox({ ayde: { on: true, scope: ['http:contoso-'] } });
       const ana = { headers: { Authorization: `Basic ${Buffer.from('ana:clave-de-ana-1').toString('base64')}` } };
-      const list = () => fetch(`${url.replace('/chat/eduweb/', '/ayde/')}tree`, ana).then((r) => r.json());
+      const list = () => fetch(`${url.replace('/chat/contoso/', '/ayde/')}tree`, ana).then((r) => r.json());
       const j = await post({ text: 'hola, quiero una demo' });
       await vi.waitFor(async () => expect(settled((await messages(j.session)).messages)).toBeTruthy(), { timeout: 5000 });
       slug = turns[0].cwd.split(/[\\/]/).at(-1);
       await fs.mkdir(convDir(slug), { recursive: true });   // the test's io keeps the folder in memory
       const saved = join(_HOME, 'state', 'http-messages', `${slug.split('-').at(-1)}.json`);
       await vi.waitFor(async () => expect(JSON.parse(await fs.readFile(saved, 'utf8')).some((m) => m.from === 'being' && m.done && /respuesta a/.test(m.text))).toBe(true), { timeout: 5000 });
-      expect((await list()).entries).toEqual([expect.objectContaining({ name: slug, section: 'chatbox:eduweb', title: 'Visitor', usuario: null, preview: 'hola, quiero una demo' })]);
+      expect((await list()).entries).toEqual([expect.objectContaining({ name: slug, section: 'chatbox:contoso', title: 'Visitor', card: null, preview: 'hola, quiero una demo' })]);
       await fs.writeFile(join(convDir(slug), 'transcript.md'), io.files.get(join(convDir(slug), 'transcript.md')));
       await fs.rm(saved);
       expect((await list()).entries[0].preview).toBe('hola, quiero una demo');
@@ -363,5 +366,80 @@ describe('limbs.http.ayde through boot', () => {
       await fs.rm(usersFile, { force: true });
       if (slug) await fs.rm(convDir(slug), { recursive: true, force: true });
     }
+  });
+});
+
+describe('limbs.http.chatboxes: each chatbox named under limbs.http, configured in its own top-level block', () => {
+  // The shape of a node's config: no clients:, the chatbox's keys flat in its block.
+  const blocks = (more = {}) => (cfg) => {
+    cfg.limbs.http = { port: cfg.limbs.http.port, chatboxes: ['contoso_marketer'] };
+    cfg.contoso_marketer = { url: 'contoso', being: 'ed', title: 'Agente Contoso', intro: '¡Hola, soy Edu!', ...more };
+  };
+  const info = (url) => fetch(`${url}info`).then((r) => r.json());
+  const slugOf = (turn) => turn.cwd.split(/[\\/]/).at(-1);
+
+  it('chatboxes alone: /chat/<url>/info has the block\'s title, widget.js is its ui: folder\'s (under EGPT_HOME); a visitor reaches its being as http:<url>-<sid>, its desk from the block\'s seed', async () => {
+    const seedDir = join(_HOME, 'seeds', 'contoso'), uiDir = join(_HOME, 'seeds', 'ui');
+    await fs.mkdir(seedDir, { recursive: true });
+    await fs.mkdir(uiDir, { recursive: true });
+    await fs.writeFile(join(seedDir, 'identidad.md'), 'v1');
+    await fs.writeFile(join(uiDir, 'widget.js'), 'window.ui = 1;\n');
+    try {
+      const { app, url, post, messages, turns, state, lines } = await bootChatbox({ edit: blocks({ seed: 'seeds/contoso', ui: ['seeds/ui'] }) });
+      expect(await info(url)).toEqual({ client: 'contoso', title: 'Agente Contoso', max_chars: 4000, init: false, places: [] });
+      expect(await (await fetch(`${url}widget.js`)).text()).toBe('window.ui = 1;\n');
+      expect(lines).toContain('[http] contoso: intro — the chatbox UI\'s now (its skin, in a ui: folder); ignored here');
+      const j = await post({ text: 'hola' });
+      await vi.waitFor(async () => expect(settled((await messages(j.session)).messages)).toBeTruthy(), { timeout: 5000 });
+      expect(settled((await messages(j.session)).messages).text).toMatch(/^🦉 /);
+      const slug = slugOf(turns[0]);
+      expect(slug).toMatch(/^contoso-[0-9a-f]{16}$/);
+      expect(turns[0].desk).toBe(true);
+      expect(getContact(state(), 'http', `http:${slug}`).entry.agents).toEqual({ ed: expect.objectContaining({ default: true, mode: 'on', allowed_users: ['*'] }) });
+      expect(lines.find((l) => l.startsWith('[http] listening on'))).toMatch(/clients: contoso$/);
+      expect(lines.join('\n')).not.toMatch(/not a local agent|skipped/);
+      app.stop();
+    } finally { await fs.rm(join(_HOME, 'seeds'), { recursive: true, force: true }); }
+  });
+
+  it('url defaults to the block\'s name', async () => {
+    const { app, url, post, messages, turns } = await bootChatbox({ id: 'democlient', edit: (cfg) => {
+      cfg.limbs.http = { port: cfg.limbs.http.port, chatboxes: ['democlient'] };
+      cfg.democlient = { being: 'ed', title: 'Soporte' };
+    } });
+    expect((await info(url)).client).toBe('democlient');
+    const j = await post({ text: 'hola' });
+    await vi.waitFor(async () => expect(settled((await messages(j.session)).messages)).toBeTruthy(), { timeout: 5000 });
+    expect(slugOf(turns[0])).toMatch(/^democlient-[0-9a-f]{16}$/);
+    app.stop();
+  });
+
+  it('a flat string beats the block\'s strings: map; `identity` stays the mode, its text in strings:; the panel\'s texts are named as moved', async () => {
+    const boxes = chatboxesOf({ limbs: { http: { chatboxes: ['b'] } }, b: { being: 'ed', ended: 'Fin.', strings: { ended: 'otro', earlier: 'Antes: {n}' } } });
+    expect(boxes.b.strings).toEqual({ ended: 'Fin.', earlier: 'Antes: {n}' });
+    const { app, url, lines } = await bootChatbox({ edit: blocks({ send: 'Mandar', waiting: ['Un momento…', 'Ya casi'], identity: 'required', strings: { send: 'Enviar ya', placeholder: 'Pregunta', identity: 'Inicia sesión' } }) });
+    expect(lines).toContain('[http] contoso: placeholder, send, intro, waiting — the chatbox UI\'s now (its skin, in a ui: folder); ignored here');
+    const r = await fetch(`${url}messages`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: 'hola' }) });
+    expect(r.status).toBe(401);
+    expect(await r.json()).toEqual({ error: 'identity required', message: 'Inicia sesión' });
+    app.stop();
+  });
+
+  it('clients: still serves beside them; the same url in both: the block wins, logged; a name with no block, or not a map, is logged and skipped', async () => {
+    const { app, url, port, post, messages, lines } = await bootChatbox({ edit: (cfg) => {
+      cfg.limbs.http = { port: cfg.limbs.http.port, chatboxes: ['ghost', 'contoso_marketer', 'flat'], clients: { contoso: { being: 'egpt', title: 'Viejo' }, acme: { being: 'ed', title: 'Acme' } } };
+      cfg.contoso_marketer = { url: 'contoso', being: 'ed', title: 'Agente Contoso' };
+      cfg.flat = 'not a block';
+    } });
+    expect((await info(url)).title).toBe('Agente Contoso');
+    expect((await info(`http://127.0.0.1:${port}/chat/acme/`)).title).toBe('Acme');
+    const j = await post({ text: 'hola' });
+    await vi.waitFor(async () => expect(settled((await messages(j.session)).messages)).toBeTruthy(), { timeout: 5000 });
+    expect(settled((await messages(j.session)).messages).text).toMatch(/^🦉 /);
+    expect(lines.some((l) => /^\[http\] .*limbs\.http\.clients\.contoso.*contoso_marketer.*the block wins/.test(l))).toBe(true);
+    expect(lines.some((l) => /^\[http\] .*\bghost\b.*skipped/.test(l))).toBe(true);
+    expect(lines.some((l) => /^\[http\] .*\bflat\b.*skipped/.test(l))).toBe(true);
+    expect(lines.find((l) => l.startsWith('[http] listening on'))).toMatch(/clients: contoso, acme$/);
+    app.stop();
   });
 });

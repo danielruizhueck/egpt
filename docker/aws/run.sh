@@ -1,6 +1,6 @@
 #!/bin/bash
 # run.sh [--tag edw] [--recreate] [--apply]
-# (Re)starts EDW's container on the AWS instance from the ECR image.
+# (Re)starts the container edw on the plain-EC2 host from the ECR image.
 # On the instance (as root) it does the work; anywhere else (WSL) it sends itself
 # to the instance over SSM and runs there.
 set -euo pipefail
@@ -38,6 +38,7 @@ FLAGS=(-d --name edw --hostname edw --restart unless-stopped
   -v "$SRV/egpt-jsonl:/home/egpt/.egpt-jsonl")   # boxed beings' Claude sessions survive a recreate
 
 if [ $ON_HOST = 0 ]; then
+  legacy_only
   check_account
   IMAGE=$REGISTRY/egpt:$TAG
   if pushed=$(q ecr describe-images --repository-name egpt --image-ids "imageTag=$TAG" \

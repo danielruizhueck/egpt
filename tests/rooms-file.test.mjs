@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   readRoomsFile, readRoomConfig, setRoomConfigBlock, setRoomConfigKey, removeRoomRow,
-  roomsFilePath, agentsFilePath, readBrowserGroups, browserUploadsOn,
+  roomsFilePath, agentsFilePath, readBrowserGroups, setBrowserGroup, browserUploadsOn,
   mergeRoomBeings, persistRoomBeings, mergeAgentBeings, persistAgentBeings,
 } from '../src/rooms-file.mjs';
 
@@ -59,16 +59,16 @@ describe('rooms.yaml — the room rung', () => {
 
   it('sets a DOTTED key inside a row', async () => {
     const io2 = mkIO('rooms:\n');
-    await setRoomConfigKey('room/dj-son', 'radio_service.wildnloyal.enabled', false, io2);
+    await setRoomConfigKey('room/dj-son', 'radio_service.examplefm.enabled', false, io2);
     expect(await readRoomConfig('room/dj-son', io2))
-      .toEqual({ radio_service: { wildnloyal: { enabled: false } } });
+      .toEqual({ radio_service: { examplefm: { enabled: false } } });
   });
 
   it('never splits ns — a slug with dots and spaces stays ONE key', async () => {
     const io2 = mkIO('rooms:\n');
     const ns = 'whatsapp/HFM - high.frequency-2606300017';
-    await setRoomConfigKey(ns, 'radio.join', 'wildnloyal', io2);
-    expect(await readRoomConfig(ns, io2)).toEqual({ radio: { join: 'wildnloyal' } });
+    await setRoomConfigKey(ns, 'radio.join', 'examplefm', io2);
+    expect(await readRoomConfig(ns, io2)).toEqual({ radio: { join: 'examplefm' } });
     expect(Object.keys(await readRoomsFile(io2))).toEqual([ns]);
   });
 
@@ -203,8 +203,8 @@ describe('config/browsers.yaml — the browser-group map, same reader as rooms.y
       expect(await readBrowserGroups()).toEqual({});                       // no file → no groups
       mkdirSync(join(home, 'config'));
       const file = join(home, 'config', 'browsers.yaml');
-      writeFileSync(file, 'groups:\n  brain: [ "eGPT Admin", "eGPT Rodz Lulu An" ]\n');
-      expect(await readBrowserGroups()).toEqual({ brain: ['eGPT Admin', 'eGPT Rodz Lulu An'] });
+      writeFileSync(file, 'groups:\n  brain: [ "eGPT Admin", "eGPT Rodz Lola An" ]\n');
+      expect(await readBrowserGroups()).toEqual({ brain: ['eGPT Admin', 'eGPT Rodz Lola An'] });
       writeFileSync(file, 'groups:\n  brain: [ "eGPT Admin" ]\n  work: [ "Diego" ]\n');
       expect(await readBrowserGroups()).toEqual({ brain: ['eGPT Admin'], work: ['Diego'] });
     } finally {
@@ -215,6 +215,34 @@ describe('config/browsers.yaml — the browser-group map, same reader as rooms.y
 
   it('an unparseable file reads as no groups, like the other registries', async () => {
     expect(await readBrowserGroups(mkIO('groups: [ unclosed'))).toEqual({});
+  });
+});
+
+describe('config/browsers.yaml — setBrowserGroup (/browser <profile> records the chat)', () => {
+  const TEXT = `# operator comment
+groups:
+  brain: [ "eGPT Admin" ]
+  perrito: [ "perrito traduciones", "Work chat" ]   # keep me
+
+colors:
+  brain: "#1a73e8"
+`;
+  it('moves the chat to the group (one group only), keeps the other rows, comments, colors', async () => {
+    const io = mkIO(TEXT);
+    await setBrowserGroup('Work chat', 'lola', io);
+    expect(await readBrowserGroups(io)).toEqual({ brain: ['eGPT Admin'], perrito: ['perrito traduciones'], lola: ['Work chat'] });
+    expect(io.store.text).toContain('# operator comment');
+    expect(io.store.text).toContain('# keep me');
+    expect(io.store.text).toContain('colors:');
+    await setBrowserGroup('Work chat', 'perrito', io);
+    expect((await readBrowserGroups(io)).perrito).toEqual(['perrito traduciones', 'Work chat']);
+    expect((await readBrowserGroups(io)).lola).toEqual([]);
+  });
+  it('creates the file when absent; the same group twice adds the chat once', async () => {
+    const io = mkIO(null);
+    await setBrowserGroup('Work chat', 'shared', io);
+    await setBrowserGroup('Work chat', 'shared', io);
+    expect(await readBrowserGroups(io)).toEqual({ shared: ['Work chat'] });
   });
 });
 

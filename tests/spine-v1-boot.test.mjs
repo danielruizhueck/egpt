@@ -677,18 +677,19 @@ describe('boot() — config-shape migration', () => {
     app.stop();
   });
 
-  // ONE OWNER LIST (operator 2026-10-26): commands read networks.<surface>.allowed_users when set,
-  // else the node's conversation_defaults.allowed_users — ids of any network, mixed.
+  // ONE OWNER LIST (operator 2026-10-26): commands read the node's conversation_defaults.allowed_users
+  // — ids of any network, mixed — joined (2026-11-07) with networks.<surface>.allowed_users when set.
   // contract 7.1
-  it('commands follow the node owner list; networks.<surface>.allowed_users replaces it on that surface', async () => {
+  it('commands follow the node owner list; networks.<surface>.allowed_users adds to it on that surface', async () => {
     const { opts, app } = await captureBoot({ agents: AG, conversation_defaults: { allowed_users: ['op@any', '*'] }, networks: {
       whatsapp: { chat_ids: ['self-1'] },
       telegram: { chat_ids: [], allowed_users: ['op@tg'] },
     } });
     expect(opts.isAllowedUser('op@any', 'whatsapp')).toBe(true);     // no list here: the node's
     expect(opts.isAllowedUser('op@any', 'googlevoice')).toBe(true);  // no block at all: the node's
-    expect(opts.isAllowedUser('op@any', 'telegram')).toBe(false);    // this surface's own list wins
-    expect(opts.isAllowedUser('op@tg', 'telegram')).toBe(true);
+    expect(opts.isAllowedUser('op@any', 'telegram')).toBe(true);     // the node's owner stays one on a surface with a list of its own
+    expect(opts.isAllowedUser('op@tg', 'telegram')).toBe(true);      // …and this surface's list adds its own
+    expect(opts.isAllowedUser('op@tg', 'whatsapp')).toBe(false);     // but only there
     expect(opts.isAllowedUser('stranger', 'whatsapp')).toBe(false);  // "*" names nobody here
     app.stop();
   });
@@ -727,7 +728,7 @@ describe('boot() — config-shape migration', () => {
   // THE NODE'S WAKE SET (2026-10-22): every agent's declared handles ∪ its fallback tokens — the
   // limbs' own mention flag only (atE no longer routes anything; the router decides who answers).
   it('wakeWords = every agent\'s declared handles ∪ its fallback tokens; a half-written fallback adds nothing', async () => {
-    const kg = await captureBoot({ agents: { egpt: { configuration: 'egpt', handles: ['ekg', 'egptkg'], fallback_handle: { handle: ['e', 'egpt'], unless_present: '+13472576794' } } } });
+    const kg = await captureBoot({ agents: { egpt: { configuration: 'egpt', handles: ['ekg', 'egptkg'], fallback_handle: { handle: ['e', 'egpt'], unless_present: '+15550100002' } } } });
     expect([...kg.opts.wakeWords].sort()).toEqual(['e', 'egpt', 'egptkg', 'ekg']);
     kg.app.stop();
     const half = await captureBoot({ agents: { egpt: { configuration: 'egpt', handles: ['ekg'], fallback_handle: { handle: ['e'] } } } });
@@ -740,7 +741,7 @@ describe('boot() — config-shape migration', () => {
   // contract 8.4
   it('replyWakeWords = every local being\'s wake + fallback + voice tokens; a relay contributes none', async () => {
     const r = await captureBoot({ agents: {
-      egpt: { configuration: 'egpt', handles: ['ekg'], fallback_handle: { handle: ['e'], unless_present: '+13472576794' } },
+      egpt: { configuration: 'egpt', handles: ['ekg'], fallback_handle: { handle: ['e'], unless_present: '+15550100002' } },
       wren: { configuration: 'egpt', handles: ['w'], voice_handles: ['ren'] },
       don: { relay_channel: '!relay:beeper.local', handles: ['d'] },
     } });
@@ -754,7 +755,7 @@ describe('boot() — config-shape migration', () => {
   it('wakeWordsIn: the override chat\'s sets drop `e` (declared AND fallback) and keep `ekg`; any other chat → null', async () => {
     const state = { contacts: { telegram: { 'team-tg': { slug: 'team', agents: { egpt: { handles: ['ekg'] } } } } } };
     const r = await captureBoot({ agents: {
-      egpt: { configuration: 'egpt', handles: ['egpt', 'ekg'], fallback_handle: { handle: ['e'], unless_present: '+13472576794' }, voice_handles: ['perro'] },
+      egpt: { configuration: 'egpt', handles: ['egpt', 'ekg'], fallback_handle: { handle: ['e'], unless_present: '+15550100002' }, voice_handles: ['perro'] },
       wren: { configuration: 'egpt', handles: ['w'] },
     } }, { state });
     const here = await r.opts.wakeWordsIn('telegram', 'team-tg');
@@ -1813,5 +1814,30 @@ describe("boot() — access_level:'sandbox' beside sandboxed:false is FATAL", ()
     const app = await bootWith({ egpt: persona, wren: { configuration: 'egpt', handles: ['w'] } });
     expect(app).toBeTruthy();
     app.stop();
+  });
+});
+
+// Warm defaults as boot wires them (operator 2026-11-08: memory-based only): no warm block = no cap
+// and no idle timer, so a conversation idle for a week is still warm.
+describe('boot() — no warm config', () => {
+  it('the pool has no cap, and an idle conversation is never idle-evicted', async () => {
+    const { start, spy } = fakeStart();
+    let state = seedMode(emptyState(), 'on');
+    const config = { whatsapp: {}, node_name: 'kg', agents: { egpt: { configuration: 'egpt', handles: ['e', 'egpt'], default: true, conversation_defaults: { access_level: 'regular' } } } };
+    const closed = [];
+    const app = await boot({
+      readConfig: () => config, startBridge: start, makeSession: (o) => ({ ...fakeSession(o), close() { closed.push(1); } }),
+      loadState: async () => state, writeState: async (s) => { state = s; },
+      io: memIo(), ingest: false, now: () => Date.UTC(2026, 5, 29, 14, 5), tickMs: 0, log: { line: () => {} },
+    });
+    expect(app.pool.stats().max).toBe(Infinity);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      await spy.onIncoming('hola E', { chatId: '!room:beeper.com', chatName: 'fam', network: 'whatsapp', userId: 'u-1', senderName: 'An', authorized: true, msgKey: 'm1' });
+      expect(app.pool.stats().size).toBe(1);
+      await vi.advanceTimersByTimeAsync(7 * 24 * 3600_000);
+      expect(app.pool.stats().size).toBe(1);
+      expect(closed).toHaveLength(0);
+    } finally { vi.useRealTimers(); app.stop(); }
   });
 });

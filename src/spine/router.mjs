@@ -12,10 +12,12 @@
 // on/auto (gating.resolveMode) takes the line too, named or not — each being once. Nobody
 // named and nobody on → no target; `receives` says whether the line is recorded at all.
 //
-// resolve() returns { being, mesh?, mention, targets, receives } — `targets` is the FULL list (the
+// resolve() returns { being, mesh?, mention, targets, receives, refused? } — `targets` is the FULL list (the
 // spine runs every one through its per-target path), with the first target mirrored at the top
 // level. Each target carries its OWN mention — the matcher's real per-agent { atEStart,
 // atEAnywhere, replyToBot } — so the mode vocabulary keeps its meaning (mention-direct ≠ mention).
+// `refused` (present only when non-empty) is the same shape: the addressed beings that allowed_users
+// alone turned away — the spine has the chat asked when a being's own line named them (boot askMention).
 //
 // Cross-node reach is AGENT-BASED (operator 2026-07-25): the ONLY way to leave this machine is
 // a RELAY agent, whose relay_channel is the route — resolve() returns { being: null, mesh:
@@ -29,6 +31,9 @@ import { mentionHits } from '../auto-mode.mjs';
 // WRITES it (incoming-media.voiceTranscriptBody), never re-spelled here. addressed() takes it off
 // before the spoken-wake scan so "the start" means the start of the TRANSCRIPT, not of the marker.
 import { VOICE_MARK } from '../incoming-media.mjs';
+import { BEING_STAMP } from '../bridges/persona-wrap.mjs';
+import { stripInvisible } from '../invisible.mjs';
+import { isHumanTurn } from '../stop-guard.mjs';
 import { getBeing, getContact, allowedUsersPermits, defaultBeingOf } from '../conversations-state.mjs';
 import { surfaceOf, SHELL_SURFACE } from './identity.mjs';
 import { fromOtherNode } from './node-names.mjs';
@@ -56,36 +61,85 @@ export function isKnownSender(senderId, config = {}) {
   return allowedUsersPermits(lists, senderId);
 }
 
-// ── WHO MAY WAKE A BEING (operator 2026-10-26: "E must only listen to its owner by default") ──
-// This node's owners on a surface — who may command it (boot's isAllowedUser) and whom a being with
-// no list of its own answers: networks.<surface>.allowed_users (else a legacy top-level <surface>:
-// block's) when set, else the node's conversation_defaults.allowed_users, else nobody.
-export function ownersOf(config = {}, surface) {
+// ── WHO MAY WAKE A BEING (operator 2026-10-26: "E must only listen to its owner by default"; 2026-11-07:
+// allowed_users lists JOIN by inheritance, never replace) ──
+// The Operator is defined at the ROOT of config.yaml (conversation_defaults.allowed_users) and is always
+// allowed; every list below the root only ADDS people. The node's own lists on a surface, as written
+// ('*' kept): networks.<surface>.allowed_users (else a legacy top-level <surface>: block's) first, so an
+// owner's [0] stays that surface's own id, then the root's.
+function nodeListsOf(config = {}, surface) {
+  const block = surfaceBlockOf(config, surface);
+  return [block.allowed_users, config?.conversation_defaults?.allowed_users].filter(Array.isArray).flat();
+}
+// networks.<surface>, else a legacy top-level <surface>: block, else {}.
+function surfaceBlockOf(config, surface) {
   const s = String(surface ?? '').toLowerCase();
   const isMap = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
-  const block = isMap(config?.networks?.[s]) ? config.networks[s] : isMap(config?.[s]) ? config[s] : {};
-  const list = Array.isArray(block.allowed_users) ? block.allowed_users : config?.conversation_defaults?.allowed_users;
-  return (Array.isArray(list) ? list : []).filter((u) => u !== '*');
+  return isMap(config?.networks?.[s]) ? config.networks[s] : isMap(config?.[s]) ? config[s] : {};
 }
 
-// Is this sender an owner where the line ARRIVED? Authorized by its bridge (the account owner, an id
-// on that surface's list, the authenticated console), or its id on that surface's list.
+// This node's ADMIN CHATS on a surface, always a list (operator 2026-11-03: "it should be called
+// admin_chat_ids"): the chats that accept commands (commands.mjs isOperator), the first of them where
+// boot's lifecycle lines land. networks.<surface>.admin_chat_ids, else the pre-rename `chat_ids`,
+// else the older singular `chat_id` — configs written before the rename keep working unedited.
+export function adminChatIdsOf(config = {}, surface) {
+  const block = surfaceBlockOf(config, surface);
+  if (Array.isArray(block.admin_chat_ids)) return block.admin_chat_ids;
+  if (Array.isArray(block.chat_ids)) return block.chat_ids;
+  return block.chat_id != null ? [block.chat_id] : [];
+}
+
+// This node's owners on a surface — who may command it (boot's isAllowedUser): the two node lists
+// joined. "*" names nobody here: it opens beings (mayWake), it does not make strangers owners.
+export function ownersOf(config = {}, surface) {
+  return nodeListsOf(config, surface).filter((u) => u !== '*');
+}
+
+// A being's line (ev.fromBeing) is never a person's, whatever account posted it: on Beeper every being posts
+// through the operator's own account, so its sender id IS the operator's id, and on Telegram its echo arrives
+// isSender + authorized through the one bot. Ids name people and flags speak for people, so neither admits it:
+// only a '*' in the joined lists does (mayWake); otherwise a being→being wake is the question (spine `refused`).
+const fromBeing = (ev) => ev?.fromBeing != null;
+
+// Does an account-owner / console flag (isSender, authorized) speak for a PERSON? Only on a human line, never
+// our own output coming back, another node's frame or a brain member's line. Provenance is stop-guard's
+// isHumanTurn, the one the spine's humanTurn / kindOf are built on; its backlog clause is about age, not authorship.
+const personLine = (ev) => isHumanTurn({ ...ev, backlog: false });
+
+// Is this sender the Operator where the line ARRIVED? Its id on that surface's owner lists, or, for a
+// person's line, the flag its bridge set (the account owner, an id on that list, the authenticated console).
+// Never a being's line.
 export function isOwner(ev, config = {}) {
-  if (ev?.authorized === true || ev?.isSender === true) return true;
+  if (fromBeing(ev)) return false;
+  if ((ev?.authorized === true || ev?.isSender === true) && personLine(ev)) return true;
   return allowedUsersPermits(ownersOf(config, (ev?.origin ?? ev)?.surface), ev?.senderId);
 }
 
-// THE reachability test, for router.resolve, mesh's responder and /agents. Nearest list wins: the
-// conversation's, else the agent's conversation_defaults, else the owners (isOwner). A list holds
-// ids or '*' only: ['*'] anyone, [] nobody. `seed`: the block a conversation with no entry yet will
+// THE reachability test, for router.resolve, mesh's responder and /agents. The lists JOIN: the Operator
+// (isOwner) always passes, and whoever is on the node's lists, the agent's conversation_defaults or the
+// conversation's own may wake the being, unless a level is final (allowed_users_inheritance: false: its list
+// alone, plus the Operator). A list holds ids or '*' only: '*' anywhere is anyone, [] adds
+// nobody. A being's line is admitted by '*' alone. `seed`: the block a conversation with no entry yet will
 // be created with — its list is the conversation's.
 export function mayWake(being, agent, ev, { state = null, config = {}, surface = ev?.surface, chatId = ev?.chatId, seed = null } = {}) {
   let conv = null;
-  if (state) { try { conv = getBeing(state, surface, chatId, being)?.allowedUsers; } catch { conv = null; } }
-  conv ??= seed?.allowed_users;
-  const own = agent?.conversation_defaults?.allowed_users;
-  const list = Array.isArray(conv) ? conv : Array.isArray(own) ? own : null;
-  return list ? allowedUsersPermits(list, ev?.senderId) : isOwner(ev, config);
+  if (state) { try { conv = getBeing(state, surface, chatId, being); } catch { conv = null; } }
+  const cd = agent?.conversation_defaults;
+  // Top to bottom; a level with `allowed_users_inheritance: false` (operator 2026-11-09) is FINAL: its list
+  // stands without the levels above it. Walk from the bottom up and stop at the first final one.
+  const levels = [
+    { list: nodeListsOf(config, (ev?.origin ?? ev)?.surface) },
+    { list: cd?.allowed_users, final: cd?.allowed_users_inheritance === false },
+    { list: conv?.allowedUsers, final: conv?.allowedUsersInheritance === false },
+    { list: seed?.allowed_users, final: seed?.allowed_users_inheritance === false },
+  ];
+  const lists = [];
+  for (const { list, final } of levels.reverse()) {
+    if (Array.isArray(list)) lists.push(...list);
+    if (final) break;
+  }
+  if (fromBeing(ev)) return lists.includes('*');
+  return isOwner(ev, config) || allowedUsersPermits(lists, ev?.senderId);
 }
 
 // THE STRANGER RULE (operator 2026-10-15): dispatch.stranger_agent maps a CONNECTION to the agent
@@ -115,8 +169,8 @@ export function configWarnings(config = {}) {
   const strangers = config.dispatch?.stranger_agent;
   for (const [conn, name] of Object.entries(strangers && typeof strangers === 'object' && !Array.isArray(strangers) ? strangers : {})) {
     const key = localAgentKey(config.agents, name);
-    const list = key ? config.agents[key]?.conversation_defaults?.allowed_users : null;
-    if (key && !(Array.isArray(list) && list.includes('*'))) out.push(`WARNING dispatch.stranger_agent.${conn}: ${key} does not allow ['*'], so a stranger reaches nobody. Set agents.${key}.conversation_defaults.allowed_users: ['*'].`);
+    const open = key && [config.agents[key]?.conversation_defaults?.allowed_users, config.conversation_defaults?.allowed_users].some((l) => Array.isArray(l) && l.includes('*'));   // lists join: '*' on either opens it
+    if (key && !open) out.push(`WARNING dispatch.stranger_agent.${conn}: ${key} does not allow ['*'], so a stranger reaches nobody. Set agents.${key}.conversation_defaults.allowed_users: ['*'].`);
   }
   return out;
 }
@@ -205,11 +259,11 @@ export function voiceWakeTokens(agent) {
 // one line to specify the handles that i expect to be answered by some other account (like
 // rodz); if that account is not present in the chat, fallback_handle can be used").
 //
-//   fallback_handle: { handle: e,          unless_present: "+13472576794" }
-//   fallback_handle: { handle: [d, don],   unless_present: "+13472576794" }   ← since 2026-09-01
+//   fallback_handle: { handle: e,          unless_present: "+15550100002" }
+//   fallback_handle: { handle: [d, don],   unless_present: "+15550100002" }   ← since 2026-09-01
 //
 // THE ARRANGEMENT it exists for: kg and do stopped sharing ONE Beeper account (2026-08-31). `do`
-// now runs on a SECOND account (+1 347…, "Rodz") and carries a relay agent `e` that forwards to
+// now runs on a SECOND account (+1 555…, "Rodz") and carries a relay agent `e` that forwards to
 // ekg.kg — so `@e` is ANSWERED by kg's brain but POSTED from a visibly different account, which is
 // the whole point of the arrangement. The COST is that `e` became a handle on `do` ONLY: in every
 // chat the 347 account is not a member of — most of the operator's chats, and EVERY room, since a
@@ -421,13 +475,24 @@ export function addressed(text, agents, { addressWithoutAt = true, isVoice = fal
   return out;
 }
 
+// THE ADDRESSING VIEW (operator 2026-11-04): what resolve() hands addressed() — the line's words,
+// with invisible characters, a leading node frame (rendered `<node>` by identity.build) and the
+// persona stamp skipped, for every sender. The recorded and prompted text keep all of it.
+// Also how commands.mjs reads a being's line for /<handle> super.
+export function addressingView(ev) {
+  let t = stripInvisible(ev?.body).trimStart();
+  const frame = ev?.fromNode ? `<${ev.fromNode}>` : '';
+  if (frame && t.startsWith(frame)) t = t.slice(frame.length);
+  return t.replace(BEING_STAMP, '');
+}
+
 // `addressWithoutAt` is the node's dispatch.address_without_at (boot reads it once; DEFAULT true)
 // — the ONE switch for the bare-handle form, forwarded to `addressed` above.
 // `loadState` (operator 2026-08-15, allowed_users) — () => Promise<conv state>, the SAME
 // conversations-state IO gating.mjs's createGating takes, injected the same way (mirrored, not
 // duplicated). Absent (tests, a caller that doesn't need per-conversation overrides) → resolve()
 // simply never reads any per-conversation allowed_users, and every being's reachability falls
-// straight to its global `agents:` default (or the owners, when neither is set).
+// straight to its global `agents:` default joined with the node's owners.
 // `isPresent` (operator 2026-08-31, fallback_handle) — async (identity, ev) => true | false | null
 // ("unknown"), THE membership question, injected exactly the way loadState is: the router never
 // opens a socket of its own, it ASKS. boot binds it to the node's own Beeper bridge, which answers
@@ -522,9 +587,10 @@ export function createRouter({ getAgents = () => ({}), getConfig = () => ({}), a
     async resolve(ev) {
       const agents = getAgents() ?? {};
       const targets = [];
+      const refused = [];   // addressed beings admitted but for allowed_users (see `admits`, the loop below)
       // ONE conv-state read for the whole call (never per-hit) — mirrors gating.mjs's own
       // beingView seam/failure mode: no loadState injected, or a read that throws → null, and
-      // every hit below falls straight to its GLOBAL allowed_users (or the owners).
+      // every hit below falls straight to its GLOBAL allowed_users joined with the owners.
       const state = loadState ? await loadState().catch(() => null) : null;
       // WHERE THIS MESSAGE ARRIVED (operator 2026-08-31), which is not always where it is being
       // dispatched. Since 8227b99 a wa-group's message re-enters the room it was invited to as a
@@ -587,7 +653,8 @@ export function createRouter({ getAgents = () => ({}), getConfig = () => ({}), a
       // false drops that being from this line (it is still recorded). `anyArrival` = exempt from the
       // connection gate: a hit won by a fallback_handle token (its own guard below decides), or a
       // being taken by its mode (as the old default fall-through was: it never arbitrated arrivals).
-      const admits = (name, agent, anyArrival = false) => {
+      // `asked`: the caller answers allowed_users itself (an addressed hit, which it asks the chat about when refused).
+      const admits = (name, agent, anyArrival = false, asked = false) => {
         if (ownerOnly && name.toLowerCase() !== owner.toLowerCase()) return false;
         // SURFACE PIN (operator 2026-07-25): an agent may carry `surface: <name>` so it is an
         // agent ONLY on that surface; on any OTHER surface the @mention falls through (as if
@@ -611,25 +678,23 @@ export function createRouter({ getAgents = () => ({}), getConfig = () => ({}), a
         // is able to trigger the agent … i think the 'dangerous' key is mistake" — replaces the
         // evicted TYPE-FILE `dangerous:true` reachability mechanism (meta-engineer.yaml, gone;
         // see brainpool.mjs's confinementFor for what `dangerously_skip_permissions` still
-        // means — a CAPABILITY tier only, never a reachability gate any more). Two-tier, the SAME override pattern
-        // access_level already uses: a per-conversation `allowedUsers` (conversations.yaml
-        // agents.<being>.allowed_users, read via getBeing off the ONE state read above,
-        // FLAT — that block is already scoped to one being in one conversation) REPLACES —
-        // never merges with — the node's global default, which lives NESTED under
-        // agents.<handle>.conversation_defaults.allowed_users in config.yaml: the nesting IS
-        // the allowlist of which agent fields get this two-tier treatment (a registry/
-        // structural field like handles/configuration/relay_channel, sitting as a direct
-        // sibling, is never eligible — no code-side allowlist to keep in sync). UNSET at both
-        // tiers = only this node's owners (isOwner, operator 2026-10-26). mayWake (top
-        // of file) is the one test — a literal "*" entry permits any sender (operator
-        // 2026-08-16), otherwise shortChatId normalizes both sides
-        // (src/bridges/chat-id.mjs) — the SAME normalizer boot.mjs's OWN (separate, network-level)
-        // allowed_users check uses — so a short OR legacy full-form entry matches either way.
-        // Only an unset list reads ev.authorized/ev.isSender (the NETWORK-level concept); an
-        // explicit id list never does. A hit failing it is dropped SILENTLY, same
+        // means — a CAPABILITY tier only, never a reachability gate any more). The lists JOIN (operator
+        // 2026-11-07): the Operator at the root of config.yaml always passes, and the node's lists, the
+        // agent's NESTED agents.<handle>.conversation_defaults.allowed_users and the conversation's own
+        // `allowedUsers` (conversations.yaml agents.<being>.allowed_users, read via getBeing off the ONE
+        // state read above, FLAT — that block is already scoped to one being in one conversation) only ADD
+        // people: the nesting IS the allowlist of which agent fields are read this way (a registry/
+        // structural field like handles/configuration/relay_channel, sitting as a direct sibling, is never
+        // eligible — no code-side allowlist to keep in sync). mayWake (top of file) is the one test — a
+        // literal "*" entry in any of them permits any sender (operator 2026-08-16), otherwise shortChatId
+        // normalizes both sides (src/bridges/chat-id.mjs) — the SAME normalizer boot.mjs's OWN (separate,
+        // network-level) allowed_users check uses — so a short OR legacy full-form entry matches either way.
+        // The account-owner / console flags (ev.authorized/ev.isSender) pass only a PERSON's line, never a
+        // being's (isOwner). A hit failing it is dropped from `targets`, same
         // convention as the surface-pin mismatch above: it falls through exactly as if the
-        // @token had never matched.
-        if (!permits(name, agent)) return false;
+        // @token had never matched — except an ADDRESSED being, listed in `refused` (operator
+        // 2026-11-07: when a being's line named it the chat is asked, and a member of that list may let it through).
+        if (!asked && !permits(name, agent)) return false;
         // THE CONNECTION GATE (operator 2026-09-08) — another post-match filter, same shape as
         // the two above and placed before the fallback guard so that guard keeps being the last
         // thing to run and the only one that can cost a lookup. The ONE matcher decided the
@@ -711,8 +776,18 @@ export function createRouter({ getAgents = () => ({}), getConfig = () => ({}), a
         // replyToBeing, as a text reply to that message would (operator 2026-10-18).
         // The handles are the ARRIVAL chat's (`org`): where the line was typed is whose names it uses.
         const here = agentsInChat(agents, state, org?.surface, org?.chatId);
-        for (const hit of addressed(ev?.kind === 'reaction' ? '' : (ev?.body ?? ''), here, { addressWithoutAt, isVoice: ev?.isVoice, withFallback: !!isPresent || !!isPeerAlive, replyToBeing: ev?.replyToBeing })) {
-          if (!admits(hit.name, hit.agent, hit.unlessPresent != null || hit.unlessPeerAlive != null)) continue;
+        // reply_default (operator 2026-11-11): a quote-reply (or reaction) to THIS node's bot whose quoted post
+        // names no being (ev.replyToBeing null: unstamped) goes to the arrival conversation's `reply_default`
+        // being, when it is one of `here`. Another node's post and a human's never take it. Unset → unchanged.
+        const dflt = state ? getContact(state, org?.surface, org?.chatId)?.entry?.reply_default : null;
+        const replyToBeing = ev?.replyToBeing ?? (dflt && ev?.mention?.replyToBot && !fromOtherNode(cfg, { fromNode: ev?.replyToNode ?? null }) ? dflt : null);
+        for (const hit of addressed(ev?.kind === 'reaction' ? '' : addressingView(ev), here, { addressWithoutAt, isVoice: ev?.isVoice, withFallback: !!isPresent || !!isPeerAlive, replyToBeing })) {
+          // allowed_users is read here, not in `admits`: a hit it alone turns away lands in `refused`
+          // instead of `targets`. Not a fallback-token hit: that token may be another account's, and the
+          // guards below (the only lookups) are for hits that survived everything else.
+          const permitted = permits(hit.name, hit.agent);
+          const guarded = hit.unlessPresent != null || hit.unlessPeerAlive != null;
+          if (!admits(hit.name, hit.agent, guarded, true) || (guarded && !permitted)) continue;
           // FALLBACK-HANDLE GUARD (operator 2026-08-31) — the LAST post-match filter here, and
           // deliberately shaped like the two above (surface pin, allowed_users): the ONE matcher
           // decided the token was addressed, this decides whether THIS node is the one to answer
@@ -756,7 +831,7 @@ export function createRouter({ getAgents = () => ({}), getConfig = () => ({}), a
             if (present == null) onLog(`fallback_handle: @${hit.name} NOT woken by its fallback handle in ${ev?.surface}/${ev?.chatId} — could not establish whether ${hit.unlessPresent} is in the chat (unknown ⇒ the token stays its owner's; use a declared handle)`);
             if (present !== false) continue;
           }
-          targets.push(targetFor(hit));
+          (permitted ? targets : refused).push(targetFor(hit));
         }
       }
       // EVERY BEING WHOSE MODE HERE IS on/auto TAKES THE LINE TOO (operator 2026-10-22/23: no default
@@ -781,7 +856,8 @@ export function createRouter({ getAgents = () => ({}), getConfig = () => ({}), a
         if (targets.some((t) => t.being === name) || !admits(key, agent, true)) continue;
         targets.push({ being: name, mention: {}, address: null, fallthrough: true });
       }
-      return targets.length ? { ...targets[0], targets, receives } : { being: null, mention: undefined, targets, receives };
+      const asked = refused.length ? { refused } : {};
+      return targets.length ? { ...targets[0], targets, receives, ...asked } : { being: null, mention: undefined, targets, receives, ...asked };
     },
   };
 }

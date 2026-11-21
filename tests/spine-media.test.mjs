@@ -31,7 +31,7 @@ describe('media.save', () => {
     const dest = await media.save(META);
     expect(copies).toHaveLength(1);
     expect(copies[0].src).toBe('/tmp/dl/photo.jpg');
-    expect(dest).toMatch(/whatsapp[\\/]fam-\d{10}[\\/]media[\\/]20260629-140530-an-image-m5\.jpg$/);
+    expect(dest).toMatch(/whatsapp[\\/]fam[\\/]media[\\/]20260629-140530-an-image-m5\.jpg$/);
     expect(appends[0].data).toContain('[20260629-140530-an-image-m5.jpg]');   // index links the file
     expect(appends[0].data).toContain('look');                                // caption
   });
@@ -51,7 +51,7 @@ describe('media.save', () => {
     const contacts = createContacts({ loadState: async () => state, writeState: async (s) => { state = s; }, io });
     const media = createMedia({ contacts, io });
     const dest = await media.save({ ...META, network: 'telegram' });
-    expect(dest).toMatch(/telegram[\\/]fam-\d{10}[\\/]media[\\/]20260629-140530-an-image-m5\.jpg$/);
+    expect(dest).toMatch(/telegram[\\/]fam[\\/]media[\\/]20260629-140530-an-image-m5\.jpg$/);
     expect(dest).not.toMatch(/whatsapp/);
     expect(state.contacts.telegram?.['!room:beeper.com']).toBeTruthy();   // contact registered in the telegram bucket
     expect(state.contacts.whatsapp).toBeUndefined();                       // NOT the whatsapp bucket
@@ -60,7 +60,7 @@ describe('media.save', () => {
   it("falls back to the constructor surface when meta carries no network", async () => {
     const { media } = harness();
     const dest = await media.save(META);   // META has no `network`
-    expect(dest).toMatch(/whatsapp[\\/]fam-\d{10}[\\/]media[\\/]/);
+    expect(dest).toMatch(/whatsapp[\\/]fam[\\/]media[\\/]/);
   });
 
   it('returns null (never throws) when localPath or chatID is missing', async () => {
@@ -88,6 +88,24 @@ describe('media.save', () => {
     expect(frameCalls[0].opts.ffmpeg).toBe('C:/ff/ffmpeg.exe');   // ffmpeg path from config
     expect(frameCalls[0].opts.count).toBe(3);
     expect(txCalls).toHaveLength(1);                              // audio transcribed
+  });
+
+  // BACKLOG IS NOT TRANSCRIBED (operator 2026-11-05), videos included: saved and named, no keyframes, no whisper.
+  it('REPRODUCE: a backlog video is saved — no keyframes, no transcription, just its saved path', async () => {
+    let state = emptyState();
+    const copies = [];
+    const io = { copyFile: async (src, dest) => copies.push({ src, dest }), mkdir: async () => {}, appendFile: async () => {} };
+    const seen = { frames: 0, tx: 0, asked: 0 };
+    const media = createMedia({
+      contacts: createContacts({ loadState: async () => state, writeState: async (s) => { state = s; }, io }), io,
+      extractFrames: async () => { seen.frames++; return []; },
+      transcribe: async () => { seen.tx++; return '(video) gol de Enciso'; },
+      resolveTranscriptionService: async () => { seen.asked++; return { enabled: true }; },
+    });
+    const r = await media.save({ ...META, kind: 'video', mime: 'video/mp4', fileName: 'clip.mp4', localPath: '/tmp/clip.mp4', backlog: true });
+    expect(r).toMatch(/media[\\/].*\.mp4$/);
+    expect(copies).toHaveLength(1);
+    expect(seen).toEqual({ frames: 0, tx: 0, asked: 0 });
   });
 
   // VIDEOS ON THE SAME PATH AS VOICE NOTES (operator 2026-09-16). A voice note is transcribed only when

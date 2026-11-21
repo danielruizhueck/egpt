@@ -13,6 +13,9 @@ function New-Facts([hashtable] $Over = @{}) {
 }
 
 Describe 'Invoke-ReconcilePass - one part failing never skips the other' {
+  Mock Get-EgptLivePid { $null }
+  Mock Test-BeeperClaimHeld { $false }
+  Mock Get-Service { [pscustomobject]@{ Name = 'egpt-beeper-primary'; Status = 'Stopped' } }
   It 'a Beeper failure still runs the egpt-daemon part' {
     Mock Say { }
     Mock Invoke-BeeperPart { throw 'no such service' }
@@ -37,6 +40,71 @@ Describe 'Invoke-ReconcilePass - one part failing never skips the other' {
     Mock Invoke-BeeperPart { 0 }
     Mock Invoke-EgptDaemonPart { }
     Invoke-ReconcilePass | Should Be 0
+  }
+}
+
+# The Session 0 egpt daemon owns the Beeper services (operator 2026-11-15): its pass is -BeeperOnly,
+# and the task's pass touches them only while no Session 0 daemon is live.
+Describe 'Invoke-ReconcilePass - who covers the Beeper services' {
+  Mock Say { }
+  Mock Test-BeeperClaimHeld { $false }
+  Mock Get-Service { @([pscustomobject]@{ Name = 'egpt-beeper-primary'; Status = 'Stopped' }, [pscustomobject]@{ Name = 'egpt-beeper-secondary'; Status = 'Stopped' }) }
+  Mock Invoke-BeeperPart { 0 }
+  Mock Invoke-EgptDaemonPart { }
+  It 'the S0 daemon''s pass (-BeeperOnly): every Beeper service, never the egpt-daemon part' {
+    Mock Get-EgptLivePid { 5000 }
+    $BeeperOnly = $true
+    Invoke-ReconcilePass | Should Be 0
+    Assert-MockCalled Invoke-BeeperPart -Times 1 -Exactly -Scope It -ParameterFilter { $Name -eq 'egpt-beeper-primary' }
+    Assert-MockCalled Invoke-BeeperPart -Times 1 -Exactly -Scope It -ParameterFilter { $Name -eq 'egpt-beeper-secondary' }
+    Assert-MockCalled Invoke-EgptDaemonPart -Times 0 -Exactly -Scope It
+  }
+  It 'the task''s pass while the S0 daemon is live: the egpt-daemon part only' {
+    Mock Get-EgptLivePid { 5000 }
+    Invoke-ReconcilePass | Should Be 0
+    Assert-MockCalled Get-EgptLivePid -Times 1 -Exactly -Scope It -ParameterFilter { $File -eq 'daemon-s0.pid' -and $Script -eq 'egpt-daemon.mjs' }
+    Assert-MockCalled Invoke-BeeperPart -Times 0 -Exactly -Scope It
+    Assert-MockCalled Invoke-EgptDaemonPart -Times 1 -Exactly -Scope It
+  }
+  It 'the task''s pass with no S0 daemon (stopped, crashed): the backstop covers every Beeper service too' {
+    Mock Get-EgptLivePid { $null }
+    Invoke-ReconcilePass | Should Be 0
+    Assert-MockCalled Invoke-BeeperPart -Times 2 -Exactly -Scope It
+    Assert-MockCalled Invoke-EgptDaemonPart -Times 1 -Exactly -Scope It
+  }
+  It 'beeper-update.ps1 holds its lock: no Beeper service is touched mid-update' {
+    Mock Get-EgptLivePid { $null }
+    Mock Test-BeeperClaimHeld { $true }
+    $BeeperOnly = $true
+    Invoke-ReconcilePass | Should Be 0
+    Assert-MockCalled Invoke-BeeperPart -Times 0 -Exactly -Scope It
+  }
+}
+
+Describe 'Invoke-BeeperPart - a service on its own profile (the secondary, the mouth) stays up' {
+  $secAp = '--user-data-dir=C:/Users/user/.egpt/state/rodz-beeper/userdata --disable-gpu'
+  function Use-Secondary([string] $Status, [string] $StartType) {
+    $script:Status = $Status; $script:StartType = $StartType
+    Mock Get-ItemProperty { [pscustomobject]@{ AppParameters = $secAp } }
+    Mock Get-BeeperPreStartHook { '' }
+    Mock Get-Service { [pscustomobject]@{ Status = $script:Status; StartType = $script:StartType } }
+    Mock Start-Service { }
+    Mock Say { }
+    Mock Write-Host { }
+  }
+  It 'Stopped and Automatic: started, and said' {
+    Use-Secondary 'Stopped' 'Automatic'
+    Invoke-BeeperPart 'egpt-beeper-secondary' | Should Be 0
+    Assert-MockCalled Start-Service -Times 1 -Exactly -Scope It -ParameterFilter { $Name -eq 'egpt-beeper-secondary' }
+    Assert-MockCalled Say -Times 1 -Exactly -Scope It
+  }
+  It 'Running, Manual or Disabled: left alone, nothing in the log' {
+    foreach ($o in @(@('Running', 'Automatic'), @('Stopped', 'Manual'), @('Stopped', 'Disabled'))) {
+      Use-Secondary $o[0] $o[1]
+      Invoke-BeeperPart 'egpt-beeper-secondary' | Should Be 0
+    }
+    Assert-MockCalled Start-Service -Times 0 -Exactly -Scope It
+    Assert-MockCalled Say -Times 0 -Exactly -Scope It
   }
 }
 
@@ -80,8 +148,8 @@ Describe 'Invoke-EgptDaemonPart' {
 }
 
 Describe 'Invoke-BeeperPart - the normal pass starts only a service that shares the window profile' {
-  $dollyAp = '--user-data-dir="C:\Users\an\.egpt\state\an-beeper" --disable-gpu --disable-gpu-compositing'
-  $hook = 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:\Users\an\bin\egpt\setup\s0-identity-reconcile.ps1" -PreStart -LogPath "C:\Users\an\.egpt\config\logs\s0-identity.log"'
+  $dollyAp = '--user-data-dir="C:\Users\user\.egpt\state\an-beeper" --disable-gpu --disable-gpu-compositing'
+  $hook = 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:\Users\user\bin\egpt\setup\s0-identity-reconcile.ps1" -PreStart -LogPath "C:\Users\user\.egpt\config\logs\s0-identity.log"'
   $reveAp = Get-BeeperServiceArgLine (Get-BeeperDefaultProfile $env:APPDATA)
   function Use-Service([string] $Ap, [string] $Hook, [string] $Status = 'Stopped', [bool] $Claimed = $false) {
     $script:Ap = $Ap; $script:Hook = $Hook; $script:Status = $Status; $script:Claimed = $Claimed
@@ -95,13 +163,13 @@ Describe 'Invoke-BeeperPart - the normal pass starts only a service that shares 
     Mock Say { }
     Mock Write-Host { }
   }
-  It 'dolly unconverted (its own --user-data-dir, no hook): left alone, one console line, nothing in the log' {
+  It 'dolly unconverted (its own --user-data-dir, no hook): not the window''s - no claim read, quiet (the daemon''s pass runs every minute)' {
     Use-Service $dollyAp ''
     Invoke-BeeperPart | Should Be 0
     Assert-MockCalled Start-Service -Times 0 -Exactly -Scope It
     Assert-MockCalled Test-BeeperClaimHeld -Times 0 -Exactly -Scope It
     Assert-MockCalled Say -Times 0 -Exactly -Scope It
-    Assert-MockCalled Write-Host -Times 1 -Exactly -Scope It
+    Assert-MockCalled Write-Host -Times 0 -Exactly -Scope It
   }
   It 'dolly converted (its own --user-data-dir behind the Start/Pre hook): started when Stopped and unclaimed' {
     Use-Service $dollyAp $hook
@@ -138,6 +206,45 @@ Describe 'Invoke-BeeperPart - the normal pass starts only a service that shares 
     Invoke-BeeperPart | Should Be 0
     Assert-MockCalled Get-BeeperPreStartHook -Times 0 -Exactly -Scope It
     Assert-MockCalled Start-Service -Times 0 -Exactly -Scope It
+  }
+}
+
+Describe 'Invoke-BeeperPart - while a Session 1 egpt runner is live the window is S1''s to recover' {
+  $reveAp = Get-BeeperServiceArgLine (Get-BeeperDefaultProfile $env:APPDATA)
+  function Use-Node([bool] $S1Live, [bool] $Claimed = $false, [string] $Status = 'Stopped') {
+    $script:S1Live = $S1Live; $script:Claimed = $Claimed; $script:Status = $Status
+    Mock Get-ItemProperty { [pscustomobject]@{ AppParameters = $reveAp } }
+    Mock Get-BeeperPreStartHook { '' }
+    Mock Test-BeeperClaimHeld { $script:Claimed }
+    Mock Test-BeeperClaimHeld { $script:S1Live } -ParameterFilter { $Path -eq 'C:\h\.egpt\state\s1.claim' }
+    Mock Test-BeeperProfileInUse { $false }
+    Mock Get-CimInstance { @() }
+    Mock Get-Service { [pscustomobject]@{ Status = $script:Status } }
+    Mock Start-Service { }
+    Mock Say { }
+    Mock Write-Host { }
+  }
+  It '(c) S1 is live, nothing in S1 claims or runs the profile: the service is NOT started, and the log says why' {
+    Use-Node $true
+    Invoke-BeeperPart | Should Be 0
+    Assert-MockCalled Start-Service -Times 0 -Exactly -Scope It
+    Assert-MockCalled Say -Times 1 -Exactly -Scope It -ParameterFilter { $m -match 'Session 1' -and $m -match 'not started' }
+  }
+  It 'nobody logged in, or just logged off (no S1 runner, no claim): the service is started' {
+    Use-Node $false
+    Invoke-BeeperPart | Should Be 0
+    Assert-MockCalled Start-Service -Times 1 -Exactly -Scope It -ParameterFilter { $Name -eq 'egpt-beeper-primary' }
+  }
+  It 'S1 live and the window claims the profile: quiet, nothing started' {
+    Use-Node $true $true
+    Invoke-BeeperPart | Should Be 0
+    Assert-MockCalled Start-Service -Times 0 -Exactly -Scope It
+    Assert-MockCalled Say -Times 0 -Exactly -Scope It
+  }
+  It '-PreStart does not look at S1: the window''s fallback may start the service' {
+    $PreStart = $true
+    Use-Node $true
+    Invoke-BeeperPart | Should Be 0
   }
 }
 

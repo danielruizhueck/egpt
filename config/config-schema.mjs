@@ -15,7 +15,8 @@
 //       getConfig().<key> reads and fails if the v2 spine reads a top-level key
 //       that is not registered here.
 //     - tests/skeletons.test.mjs — fails if config/skeletons/config.yaml sets a
-//       top-level key that is not registered here.
+//       top-level key that is not registered here, or a key here (bar its exempt
+//       list) has no example, set or commented, in config/skeletons/*.yaml.
 //   So: when the spine starts reading a new top-level key, register it here too.
 //
 // SHAPE
@@ -451,15 +452,15 @@ export const CONFIG_SCHEMA = {
         STABLE sender ids that may command this node ON TELEGRAM — a network
         jid / Beeper room id, NEVER a display name, since a chat title is
         attacker-controllable.
-        Set, it REPLACES the top-level conversation_defaults.allowed_users here;
-        unset, that list applies. EMPTY = deny (fail-closed). The account owner
-        (isSender) is always authorized regardless.
+        Set, it ADDS to the top-level conversation_defaults.allowed_users here (the
+        lists join, 2026-11-07); that list applies either way. EMPTY adds nobody.
+        The account owner (isSender) is always authorized regardless.
 
     Ids are per-surface NAMESPACES — a WhatsApp jid authorizes NOTHING here.
 
     SHORT FORM (operator 2026-07-03): a Beeper room id here is written WITHOUT
     the Matrix decoration — no leading "!", no trailing ":beeper.local" (e.g.
-    "yz3kJjWXsQJofK9naaVb", not "!yz3kJjWXsQJofK9naaVb:beeper.local"). egpt
+    "FakeRoomId0000000001", not "!FakeRoomId0000000001:beeper.local"). egpt
     expands to the full form only at the Beeper API boundary
     (src/bridges/chat-id.mjs).
 
@@ -482,9 +483,9 @@ export const CONFIG_SCHEMA = {
       allowed_users
         STABLE sender ids that may command this node ON SIGNAL — a network jid /
         Beeper room id, NEVER a display name.
-        Set, it REPLACES the top-level conversation_defaults.allowed_users here;
-        unset, that list applies. EMPTY = deny (fail-closed). The account owner
-        (isSender) is always authorized regardless.
+        Set, it ADDS to the top-level conversation_defaults.allowed_users here (the
+        lists join, 2026-11-07); that list applies either way. EMPTY adds nobody.
+        The account owner (isSender) is always authorized regardless.
 
     Ids are per-surface NAMESPACES — a WhatsApp/Telegram id authorizes NOTHING
     here.
@@ -514,6 +515,62 @@ export const CONFIG_SCHEMA = {
         <mode> <handle>. There is no default agent (2026-10-22): "on" or "auto"
         here means every agent answers every line in every chat the node
         hears — boot warns about it.
+      bot_quiet
+        Boolean. DEFAULT: true
+        A turn a BOT's line triggered — another being or node: a node-signed
+        line ("💸<do>"), a room member's reply; the provenance test the loop
+        guard uses (src/stop-guard.mjs isHumanTurn) — stays quiet
+        (operator 2026-10-31):
+          true   no "⏳ Thinking…" train opens for it, in any mode — not on a
+                 tool use, not after ten seconds, not on streamed text; the
+                 reply is posted once, whole, when the turn ends. Its "…" is
+                 never shown (no "…", no "✓"), only recorded in transcript.md
+                 as "(not surfaced) …". A bot's line steered into a live turn
+                 gets no ✍️/👍.
+          false  as before: in 'on' the train opens once the being works (a tool
+                 use, ten seconds, text; operator 2026-10-18), elsewhere at once,
+                 and a "…" in mention/mention-direct/accum is posted.
+        A HUMAN's turn is untouched either way. Read live (src/spine/gating.mjs
+        decide/surfaces).
+      thinking_train
+        ENUM: "emoji" | "bubble"
+        DEFAULT: "emoji"
+        How a turn shows it is running (operator 2026-11-03):
+          emoji   no "⏳ Thinking…" bubble, in any mode. A human's line that starts
+                  or queues a turn gets 👾 at arrival, from the account it arrived
+                  on, moved to the mouth once the mouth has its own copy (else it
+                  stays there; operator 2026-11-04), then thinking_frames when its
+                  turn starts, and the reaction comes off when the turn ends (reply,
+                  silence, error, timeout). The reply is posted once, whole —
+                  unless the being uses a tool (operator 2026-11-04): then the
+                  reaction comes off and the ⏳ bubble opens with its text so far,
+                  and the turn runs as bubble's from there (not a bot's line or a
+                  split: those post once, whole). A "…"
+                  posts nothing unless the being was addressed (@handle, an opening
+                  bare handle, a reply to its post); then the "…" is posted. Not on
+                  a steered line (✍️/👍 as before), a bot's line, a reaction, or a
+                  chat whose reply goes to a side group or split. Only where the
+                  chat can carry the reaction: a chat the mouth is in, or the
+                  Telegram bot's own. Elsewhere — no mouth account, a chat the
+                  mouth is not in, the chatbox, the console — that turn is bubble's.
+          bubble  as before: the ⏳ placeholder with its liveness timer, and the ✍️
+                  on an unaddressed 'on' line.
+        Read live (src/spine/gating.mjs decide).
+      thinking_frames
+        "random" or a list of emoji. DEFAULT: "random"
+        The emoji train's started phase (operator 2026-11-04), on whichever
+        account holds the mark, until it comes off (the bubble opens, or the turn
+        ends). A step still in flight skips the next.
+          random  🤔 when the turn starts, then every thinking_frame_ms any of
+                  Telegram's standard reaction set (turns.mjs TELEGRAM_REACTIONS)
+                  but the one showing — no order to read time off.
+          list    the first when the turn starts, then the next, in order. One
+                  entry = no animation. Telegram bots may use only its fixed
+                  reaction set; a refused emoji is skipped there.
+        Read live (src/spine/turns.mjs).
+      thinking_frame_ms
+        Integer, ms. DEFAULT: 2000
+        The interval between thinking_frames. Read live.
       address_without_at
         Boolean. DEFAULT: true
         May a BARE handle OPENING a message address its agent — "d hola",
@@ -573,6 +630,24 @@ export const CONFIG_SCHEMA = {
     chat's own conversations.yaml entry, \`closed: { notice, at }\`. Removing
     the chat reopens it on its conversations.yaml settings. By the chat's own
     id: an alias side group is closed by its own id. Heartbeats are not gated.
+  `,
+  reply_default: `
+    Who takes a quote-reply to this node's bot when the quoted post names no
+    being (operator 2026-11-11). PER CONVERSATION ONLY, on the chat's own
+    conversations.yaml entry, as a being key. DEFAULT: unset (such a reply
+    addresses nobody, as before). A reply to a post that carries a being's stamp
+    still goes to that being.
+
+      contacts:
+        telegram:
+          "-100123": { reply_default: egpt }
+
+    Applies to a quote-reply and to a reaction on an unstamped post this node's
+    bot sent (a system line, a post made outside the spine, an old message), and
+    only when that being is one of the chat's beings. A reply to a human or to
+    another node's post never takes it. It is a reply hit like any other
+    (src/spine/router.mjs): a mention-mode chat admits it without a handle, and
+    allowed_users and the surface pin still apply.
   `,
   whatsapp: `
     Beeper-transport bridge config — network-agnostic; the "whatsapp" name is
@@ -778,11 +853,13 @@ export const CONFIG_SCHEMA = {
         A website chatbox (src/bridges/http.mjs, 2026-10-26). Each visitor session
         is its own conversation: chat id http:<client>-<sid>, folder
         conversations/http/<client>-<sid>/ (sid: a hash of the session token; the
-        token itself is never logged). Under <path>/<client>/:
-          POST messages {session?, text, id?, identity?} → {session, message}; no or an unknown or
+        token itself is never logged); with conversation_by: identity, each signed
+        identity is (below). Under <path>/<client>/:
+          POST messages {session?, text, id?, identity?, place?} → {session, message, cold}; no or an unknown or
             expired session (session_days idle) starts a new one. application/json only.
             id (16-64 of A-Za-z0-9_-, the widget's per-line random): a POST repeating
             an id within 10 min posts nothing and gets the first one's answer (a retry).
+            {kind: init, session?, identity} → {session} with init: true (below).
           GET messages?session=&since=<seq>&identity= → {session, seq, messages}
           GET events?session=&since=<seq>&identity=   SSE, each message as posted/edited/settled
           POST end {session, identity?} → {ok}  the visitor's "end conversation": same
@@ -790,7 +867,12 @@ export const CONFIG_SCHEMA = {
             /agents rethread), the session's history is cleared, and the team
             topic gets strings.ended. Unknown session 404. Nothing said since
             the last end: nothing done.
-          GET widget.js                     the embeddable bubble + panel
+          GET info → {client, title, max_chars, init, places}: what the chatbox's UI reads
+          GET <file>  a file of the chatbox's UI (widget.js, skin.json (served from its skin.yaml), skin.css, an image):
+            the last of its ui: folders that has it (below). A page embeds
+            <script src="https://<host>/chat/<client>/widget.js" … defer>
+        cold: the conversation was not spoken to (a line) in the last 4 minutes,
+        so the being starts cold (the UI may say so while it waits).
         A message is {id, from: visitor|being, text, done, seq} or {id, deleted, seq}.
         The session's conversation is created with
         agents.<being>: { default: true, mode: on, allowed_users: ['*'] } and
@@ -805,13 +887,43 @@ export const CONFIG_SCHEMA = {
         ayde              { on: false (default) | true, path: /ayde,
                           public_max_level: team (default) | devs | admin | root,
                           scope: [] (default) }:
-                          the EduWeb team's read-only browser of EGPT_HOME, served by
+                          the Contoso team's read-only browser of EGPT_HOME, served by
                           this limb (below). A path that overlaps the chatbox's path:
                           off (logged). public_max_level: the highest level a login
                           opens through the proxy (below); any other value: team (logged).
                           scope: the conversations team, devs and admin read, by chat
                           id (below); absent or empty: none (logged)
-        clients:
+        chatboxes         [<block>, …] (2026-10-29): the node's chatboxes, each one a
+                          top-level block of this file named here (the recommended form):
+                            limbs:
+                              http:
+                                port: 8095
+                                chatboxes: [ contoso_marketer, contoso_soporte ]
+                            contoso_marketer:
+                              url: contoso
+                              being: asesor
+                              seed: seeds/contoso
+                              title: "🐶 Agente Contoso SI"
+                              ui: [ plugins/chatboxes-egpt, plugins/contoso-skin ]
+                              team_name: Equipo Contoso
+                              team_group: -1000000000102
+                              label: Marketer — website
+                            contoso_soporte:
+                              url: democlient
+                              being: soporte
+                              identity: required
+                              allowed_origins: [ … ]
+                          A block holds a <client>'s keys (below), the limb's strings written
+                          flat beside them (ended, earlier); a strings: map there still
+                          works, a flat key beats it. identity is the mode: its text goes in
+                          strings:. url: the <client>, in the URL (/chat/contoso/widget.js),
+                          the chat ids (http:contoso-<sid>), the folders and the key file;
+                          default the block's name. A name with no block (a map): logged and
+                          skipped. A block and a clients entry with the same <client>: the
+                          block wins (logged). The blocks are restart-only, as limbs is.
+                          /ayde lists the blocks in this order, then clients'.
+        ui                [<folder>, …]: the ui: of each chatbox with none of its own (below)
+        clients:          the older form, still read: the same keys, one entry per chatbox
           <client>:       lowercase letters, digits, - and _
             being             the agent that answers its visitors
             seed              a folder (relative: under EGPT_HOME) copied, files and
@@ -821,19 +933,42 @@ export const CONFIG_SCHEMA = {
             allowed_origins   CORS list; empty (default) = same-origin only: no CORS
                               headers and every preflight refused. Non-empty: a
                               request whose Origin is not listed is refused (403)
-            title             the panel's title
+            title             the chatbox's name: the team topic's {title} and info's title
+                              (the panel's, unless its skin names one); default the client
+            ui                [<folder>, …] (2026-11-12): the chatbox's UI, a plugin. The limb
+                              serves these folders' files (relative: under EGPT_HOME) at
+                              <path>/<client>/<file>: a flat name ending .js .css .json .svg
+                              .png .jpg .jpeg .webp .gif .woff2, at most 2 MB, from the LAST
+                              folder that has it; a link out of its folder is not served. The
+                              UI is github.com/siran/chatboxes-egpt (widget.js: the bubble and
+                              panel on Deep Chat; the panel's texts, waiting phrases, colours,
+                              face and places' looks in a skin folder: skin.yaml (skin.json too), skin.css),
+                              cloned on the node, the node's own skin folder after it:
+                              ui: [plugins/chatboxes-egpt, plugins/contoso-skin]. The limb knows
+                              none of it. None: no files (logged); the API still answers
             label             its section's title in /ayde (e.g. "Marketer — website",
-                              "Support — EduWeb app"); default the title, else the name
-            strings           UI strings (Spanish defaults): open, close,
-                              placeholder, send, error, too_long, too_many,
-                              end, end_confirm, end_yes, cancel, identity; intro (the panel's first
-                              line, again after an end; default none); ended (the
-                              line the team topic gets on an end); earlier (heads the
-                              recap a late topic gets, {n} = the earlier lines)
+                              "Support — Contoso app"); default the title, else the name
+            strings           the limb's own texts (Spanish defaults): identity (the 401's
+                              message); ended (the line the team topic gets on an end);
+                              earlier (heads the recap a late topic gets, {n} = the earlier
+                              lines). The panel's texts (open, close, placeholder, send,
+                              error, end, support, intro, waiting, waiting_cold, prime_text, …) are the
+                              UI's, in its skin.yaml (2026-11-12); given here, flat or in
+                              strings:, they are logged and ignored
+            places            [<name>, …]: where the host page may be (lowercase letters,
+                              digits, - and _). The page names its place with data-place on
+                              the widget's script tag; a listed one is told to the being
+                              ("(in <name>) …"), an unknown one logged and ignored. info lists
+                              them for the UI; each place's look (css, the user strip) is the
+                              skin's. A map is read as its keys (its css and user_strip went
+                              to the skin, 2026-11-12). Default none
             session_days      idle days before a session expires (its token then
                               starts a new conversation and topic), default 365
             max_chars         one message, default 4000 (413 over it)
-            rate              { messages: 30, minutes: 10 } per session (429 over it)
+            rate              { messages: 30, minutes: 10 } per session (429 over it);
+                              turns_per_identity_per_hour: N (default off) also caps a
+                              signed identity's lines across all its sessions (429
+                              {error: 'too many messages from this identity', retry_after_s})
             new_sessions      { count: 30, minutes: 60 } new sessions per visitor
                               address (429 over it; see trust_proxy)
             team_group        a Telegram forum supergroup's chat id (the bot an admin
@@ -853,70 +988,139 @@ export const CONFIG_SCHEMA = {
                               line tries again, not within 2 min of a failed try
             team_name         the team's name in the widget, default the title
             topic_title       the team topic's name: {abrin} {user_type} {short_name}
-                              {username} {title} {sid} (6 hex of the sid). Default
+                              {username} {title} {sid} (6 hex of the sid), and {<claim>}
+                              for any claim of the identity (an absent one stays as written). Default
                               "{title} · {sid}". A placeholder with no value is empty,
                               spaces collapse, an empty () or [] goes; nothing left:
                               the default. Cut at 128 (Telegram's limit) with "…".
-                              EduWeb: "{abrin} {user_type} {short_name} ({username})"
+                              Contoso: "{abrin} {user_type} {short_name} ({username})"
+            chat_title        a signed chat's name in /ayde's lists, a template as topic_title's over the
+                              identity's claims: {abrin} {short_name} {username} {user_type}, or any
+                              {<claim>} of the token (e.g. "{school} · {short_name}"). A claim with no value
+                              is empty and the separator it leaves goes. Default
+                              "{abrin} · {short_name} · {username}". Recorded as "title" in the
+                              conversation's desktop/user.json when it starts; unsigned: none ("Visitor")
+            chat_subtitle     the same for the line under the title, default "{user_type}"
             identity          off (default) | optional | required: the host page's
                               signed user (below). required: a call without one is
                               401 {error, message: strings.identity}, which the widget
                               shows. optional: an unsigned visitor works as with off.
                               An invalid or expired identity is always 401, never
                               treated as unsigned; no key file: 503. Any other value:
-                              required. A session belongs to the identity it started
-                              with (abrin + username; unsigned is one too): a line
+                              required. Or a map { mode: <that> (default required),
+                              required: [<claim>, …] (default [abrin, username]),
+                              key: [<claim>, …] (default [abrin, username]) }: the claims
+                              a token must carry non-empty (strings or numbers; a key
+                              claim is required too), and the ones that are the identity.
+                              A session belongs to the identity it started
+                              with (its key; unsigned is one too): a line
                               from another identity starts a new session, folder and
                               topic, its token in the answer; a read or an end with
-                              another identity is 404. A new signed session's folder
-                              gets usuario.json (the verified fields + verified_at,
-                              never the token) and a one-line usuario.md, before the
-                              seed copy.
+                              another identity is 404. A new signed conversation's folder
+                              gets desktop/user.json (the verified fields abrin, user_type,
+                              short_name, username, user_id + verified_at, never the
+                              token) and a one-line desktop/user.md, before the seed copy.
+            card_claims       [<claim>, …] (default none): claims of the token also kept on
+                              the card (desktop/user.json, one line each in user.md), e.g.
+                              [cuentas] for every account of the person, signed by the site.
+                              The card is rewritten when a verified line or init brings
+                              other values for them, not only for a new conversation.
+            conversation_by   session (default) | identity: identity puts every session of
+                              one signed identity (its key) in ONE conversation, chat id
+                              http:<client>-<16 hex of client + key>: one folder, thread,
+                              topic and panel; each tab of each session gets every frame.
+                              Unsigned visitors stay one per session. Switched on, a live
+                              session keeps its token and its next line starts its
+                              identity's conversation as new (desktop/user.json, seed); the old
+                              folders stay, their panels are not carried. Needs identity.
+            init              false (default) | true | prime: the widget POSTs {kind: init} once
+                              per page load. It needs a verified identity (else 401) and
+                              makes or resumes the session as a line would, and answers
+                              {session}. A new session's init records ONE transcript line,
+                              "(opened the chatbox, signed in as {<claims but exp>})",
+                              as backlog: recorded, never dispatched (no turn), not on
+                              the panel, no team topic (the first line seats it). A
+                              reload or another tab (the same session) records nothing.
+                              prime: opening the chatbox sends ONE message: the widget's
+                              {kind: init, prime_text}, the opening phrase (the page's, else the
+                              plugin's default in its skin.yaml; this limb holds none), as the
+                              visitor's first line, the line path itself: max_chars (413), rate
+                              gates (429), identity budget (once, in rate.turns_per_identity_per_hour),
+                              escaping, recorded on the panel, answered and posted like any line.
+                              No phrase: nothing is sent (no turn, no notice). Not sent when the
+                              thread already has lines (a reload, another tab or device); after the
+                              visitor's end-conversation nothing is replayed (the next open sends the
+                              opening again). prime_text in this block is ignored (it moved to the
+                              plugin's skin.yaml; logged at start). Off by default.
             escritorio        REMOVED 2026-10-27, with <path>/<client>/escritorio/, the
                               old admin route and AyDE's signed link: limbs.http.ayde
                               replaces them. Both routes answer 404.
         THE SIGNED IDENTITY. Key: <EGPT_HOME>/secrets/chatbox-<client>.key, its text used
-        as is (not decoded), e.g.  openssl rand -base64 32 > <EGPT_HOME>/secrets/chatbox-demoiev.key
+        as is (not decoded), e.g.  openssl rand -base64 32 > <EGPT_HOME>/secrets/chatbox-democlient.key
         then chmod 600. Read on each signed call (a new key needs no restart). The same text
         goes to the host site's server only, never to a browser or a repo.
         Token: base64url(JSON payload) "." base64url(HMAC-SHA256(key, the first part)), no
         padding, at most 2048 characters. Payload {abrin, username, user_type, short_name,
-        user_id?, exp}: exp in unix seconds, abrin and username required, each field cut at
-        80 characters. The page passes it to the widget as data-identity; the widget sends it
+        user_id?, exp}: exp in unix seconds, abrin and username required (identity.required),
+        each field cut at 80 characters. Every string, number or boolean claim is kept as
+        identity.claims (strings cleaned and cut the same way; others dropped): what
+        topic_title and init read. The page passes it to the widget as data-identity; the widget sends it
         with every call and keeps each user's session token apart (localStorage). PHP:
           $b64 = function ($s) { return rtrim(strtr(base64_encode($s), '+/', '-_'), '='); };
           $p = $b64(json_encode(['abrin' => $abrin, 'user_type' => $_SESSION['TipoUsuario'],
             'short_name' => $nombre, 'username' => $login, 'exp' => time() + 12 * 3600]));
           $tok = $p . '.' . $b64(hash_hmac('sha256', $p, $key, true));
-          echo '<script src="https://<host>/chat/demoiev/widget.js" data-identity="'
+          echo '<script src="https://<host>/chat/democlient/widget.js" data-identity="'
             . htmlspecialchars($tok) . '" defer></script>';
         json_encode needs UTF-8 strings (utf8_encode a Latin-1 name, else it returns false).
         A page left open past exp gets strings.identity on its next line: reload.
         AYDE (ayde.on; src/bridges/http-ayde.mjs). GET <ayde.path>/ (e.g.
-        https://eduweb.com.ve/ayde/; without the last slash: 308 to it): the EduWeb team's read-only
-        browser of EGPT_HOME, by level. One English page: the user and level, and one list of the
-        scope's conversations (root's too): a section per chatbox client (its label, in
-        limbs.http.clients' order), then "Team groups (Telegram)", then "Other"; in each, Today and
-        Previous, newest first. A row is a person or a group: a signed session's usuario.json (name,
-        username, school, type); an anonymous one "Visitor" and its first line (its history,
-        state/http-messages/<sid>.json, else its transcript; one line, 80 characters, never
-        logged); a Telegram folder its name in conversations.yaml (not a fork's), else the folder's
-        without its -<datestamp>. Chat ids and folders only in the tooltip. One search box filters
-        every section by name, username, school, first line or title. Root also gets "Everything
-        else": the EGPT_HOME tree. A row opens its folder tree ("Up" climbs), paths above the
-        user's level greyed, a text file (first 256 KB) or a download. Dates in the browser's
-        locale and zone, never seconds. API: tree?scope=1 (below root also tree with no p) →
-        {sections: [{id, kind, label}], entries: [{path, chats, section, label, kind, title,
-        usuario, preview, last, …}]}.
-        Read-only for every level: any method but GET is 405. A future delete of core files
+        https://contoso.example/ayde/; without the last slash: 308 to it): the Contoso team's browser
+        of EGPT_HOME, by level. One English page with a side menu, only what the user's level
+        reaches (levelOf, on the same paths), hash routes (#/chatbox/<client>/<key> is stable, to share):
+          Home           the user, level and the node's clock (default_time_zone), a tile per chatbox
+                         (active chats, chats today, total, last line)
+          Chatboxes      one entry per chatbox (limbs.http.chatboxes' order, then clients'; its label).
+                         Three zones: its chats on the left (a row is a conversation: with
+                         conversation_by: identity one per user, whatever their tabs and devices), Active | Past tabs and a search box (a
+                         chat is active while its last line is within the client's session_days; each
+                         row: title, subtitle, user type, last update, message count, last line; the
+                         list refreshes every 20 s); the chat's room in the centre (transcript.md as
+                         a conversation: bubbles, times, day marks; links to the raw transcript and
+                         the folder); around it a panel: Card (desktop/user.json), Desktop, Files,
+                         Heartbeats, Outbox, Credentials (devs and above)
+          Conversations  the Telegram groups and the rest, the same three zones
+          Heartbeats     heartbeats/*.yaml of each scoped conversation: when it fires, what it runs, the
+                         day it last fired (state/heartbeats-daily.json; only those rows leave)
+          Scripts        scripts/*.x.md, read-only, and when each last ran (its .log)
+          Desktop        desktop/ of each conversation
+          Credentials    .credentials/ of each conversation, devs and above (names; a file opens through file)
+          Files          the folder browser: one list of the scope's conversations (root's too), a
+                         row opens its folder tree, a text file (first 256 KB) or a download
+        A chat's title and subtitle are the ones recorded in its desktop/user.json (chat_title, chat_subtitle);
+        else name, username; an anonymous one is "Visitor" and its first line. Chat ids and folders only
+        in the tooltip. Dates in the node's zone. API (GET, JSON): home, chatbox?c=<client>,
+        room?p=<conversation folder>, area?k=heartbeats|scripts|desktop|credentials|outbox[&p=<folder>],
+        tree?scope=1 (below root also tree with no p) → {sections: [{id, kind, label}], entries:
+        [{path, chats, section, label, kind, title, card, preview, last, …}]}, tree, file.
+        SUPPORT: POST <ayde.path>/say {client, key, text} (application/json, same origin; any ayde user
+        who reads that conversation) puts a human line into that chat's LIVE session: the visitor's
+        widget shows it headed "Soporte · <user>" (from: support, by: user). For the support line the
+        being behaves as in mode accum (the gate of mention, plus the lines recorded since its last turn
+        in the prompt): the line is recorded (sender support:<user>) and accumulated, and wakes the being
+        only if it addresses it (@handle, or the wake words as the visitor's lines are read); then the being
+        answers the visitor. The visitor's own lines keep the conversation's mode (on). No live session: 409. The access
+        log and the conversation's admin-access.log get "<user> (<level>) said in <folder>/", never the text.
+        Read-only for every level, but for say: any other method but GET is 405. A future delete of core files
         (config/, state/, secrets/) is root's only.
         The scope (ayde.scope): what team, devs and admin read, a list of chat ids, e.g.
-          scope: ["tg:-1004408163350", "tg:-1004473260995", "tg:-1004311994096", "http:eduweb-", "http:demoiev-"]
+          scope: ["tg:-1000000000101", "tg:-1000000000102", "tg:-1000000000103", "http:contoso-", "http:democlient-"]
         Each entry is one of:
           tg:<group>     the Telegram group and every topic in it (tg:<group>/<n>); a /split fork
                          lives in its parent's folder, so it comes with it
-          <prefix>-      every chat id starting with it: http:<client>- is each chatbox session of
-                         that client (conversations/http/<client>-<sid>/)
+          <prefix>-      every chat id starting with it: http:<client>- is each chatbox conversation of
+                         that client (conversations/http/<client>-<key>/: a session's, or with
+                         conversation_by: identity a signed user's, one for all their tabs and devices)
           <chat id>      that chat only (one topic tg:<group>/<n>, one session, a Beeper room id)
         Its folders are found by chat id in config/conversations.yaml (each matching contact's
         conversation_path), on each request: a renamed folder keeps its access, and no folder is in
@@ -960,11 +1164,11 @@ export const CONFIG_SCHEMA = {
         inside a conversation (conversations/<surface>/<name>/) also appended to its
         admin-access.log. Each refusal is logged with the level it needed.
         HTTPS only: Basic sends the password with every request. The site's proxy is HTTPS; the
-        hop from the proxy to the node stays private (EduWeb: Portales-new → edw.egpt.internal:8095,
+        hop from the proxy to the node stays private (Contoso: the website proxy → edw.example.internal:8095,
         beside /chat/). The proxy passes the Authorization header and the WWW-Authenticate answer
         as they are (nginx and Apache do by default), e.g.
-          nginx:  location /ayde/ { proxy_pass http://edw.egpt.internal:8095; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; }
-          Apache: ProxyPass /ayde/ http://edw.egpt.internal:8095/ayde/  (mod_proxy adds X-Forwarded-For)
+          nginx:  location /ayde/ { proxy_pass http://edw.example.internal:8095; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; }
+          Apache: ProxyPass /ayde/ http://edw.example.internal:8095/ayde/  (mod_proxy adds X-Forwarded-For)
   `,
 
   beeper: `
@@ -984,6 +1188,15 @@ export const CONFIG_SCHEMA = {
       <name>:
         account   label — the Beeper address this token belongs to
         token     that account's Desktop API token
+        networks  OPTIONAL — the networks this account HEARS, e.g. [whatsapp]
+                  (a bare string is one). Absent or [] = every network Beeper
+                  bridges on it. Each entry is a case-insensitive PREFIX of the
+                  message's Beeper account id, which reads 'whatsapp…',
+                  'telegram…', 'signal…'; with a list set, a message whose
+                  account id is unknown is dropped too. Dropped means never
+                  transcribed, recorded or dispatched, its reactions and edits
+                  included. Inbound only: sending, chat lookup and creating a
+                  chat on any network are unaffected.
       auto_update:
         <os>: { method: auto | manual | none }      os = windows | linux | mac
         Keeping Beeper Desktop itself current (src/tools/beeper-update.mjs).
@@ -991,12 +1204,28 @@ export const CONFIG_SCHEMA = {
           manual  checks at boot, every 6 h and on /<handle> update beeper; ONE
                   line per newly downloaded version to log_to_group; installs
                   only on /<handle> update beeper (operator only).
-          auto    as manual, then installs by itself at the next quiet moment.
+          auto    as manual, then installs by itself at the next quiet moment
+                  (an update Beeper has not downloaded itself is fetched first).
         Installing is a controlled Beeper restart: it waits for turns like
         /restart, eGPT stays up, the result is one line in log_to_group.
-        DEFAULT: windows manual. linux / mac: accepted, not implemented yet —
-        treated as none (one log line at boot). Not a connection. beeper: is a
-        restart-only key, so a change applies at the next restart.
+        DEFAULT: auto on every OS (windows, linux, mac).
+        mac: the feed's zip for this Mac's architecture is unpacked beside
+        Beeper Desktop.app (/Applications, else ~/Applications), the Beeper
+        processes are quit, the bundle is swapped in and they are opened again
+        with the flags they had. macOS 13+ guards app bundles: the process that
+        runs eGPT needs App Management (System Settings → Privacy & Security →
+        App Management); without it the update is refused with that remedy,
+        once per version, before anything quits. Not yet run on a real Mac.
+        linux (the docker node): the feed's AppImage is unpacked onto the volume
+        as $EGPT_HOME/beeper/<version>/ (the newest two stay), then the Beeper
+        processes are killed and the entrypoint relaunches the newest. That needs
+        an image whose entrypoint launches Beeper from the volume: rebuild it
+        once (docker/aws/build-push.sh); until then the update is refused with
+        that remedy, once per version. Beeper downloads nothing itself there, so
+        there is no "downloaded" notice: manual = install on /<handle> update
+        beeper. Not a connection. beeper: is a restart-only key, so a change
+        applies at the next restart.
+        eGPT's own update method is the top-level auto_update.egpt (auto_update).
 
     THE PORT IS DISCOVERED — there is none to configure (operator 2026-09-07).
     Beeper Desktop's local API binds the FIRST FREE PORT starting at 23373, so
@@ -1057,7 +1286,7 @@ export const CONFIG_SCHEMA = {
     that chat at all. So every outbound this node places — an agent's reply and
     the node's own announces alike — rides the mouth when the mouth can reach
     the chat, and otherwise the connection that holds it (the one it arrived on,
-    or the ear for this node's own networks.<surface>.chat_ids). One rule, no
+    or the ear for this node's own networks.<surface>.admin_chat_ids). One rule, no
     exception for node-level sends. beeper.use is therefore an OPTIONAL override
     of the default mouth, never a requirement: with it absent the names decide,
     and no chat becomes unreachable either way.
@@ -1117,11 +1346,11 @@ export const CONFIG_SCHEMA = {
     per station, mirroring transcription_service's named profile blocks:
 
       radio_service:
-        wildnloyal:
-          name: "Wild n Loyal radio"
-          listen_url: https://radio.wildnloyal.org/
+        examplefm:
+          name: "Example FM radio"
+          listen_url: https://radio.examplefm.example/
           enabled: true
-          endpoint: https://radio.wildnloyal.org
+          endpoint: https://radio.examplefm.example
           relay_user: egpt
           relay_password: ""
           default_speaker: egpt
@@ -1135,11 +1364,11 @@ export const CONFIG_SCHEMA = {
     KEYS, per <radio-name>:
       name
         Human-readable station name used in /radio's replies (e.g. "relaying
-        to Wild n Loyal radio…"). Falls back to the config key (the radio's
-        map key, e.g. "wildnloyal") when absent.
+        to Example FM radio…"). Falls back to the config key (the radio's
+        map key, e.g. "examplefm") when absent.
       listen_url
         Where a HUMAN listens (the public station page), e.g.
-        https://radio.wildnloyal.org/. Included in /radio join's reply when
+        https://radio.examplefm.example/. Included in /radio join's reply when
         set, omitted entirely when absent — never derived from endpoint, since
         the API base and the public listen page need not be the same host.
       enabled
@@ -1404,13 +1633,17 @@ export const CONFIG_SCHEMA = {
 
     KEYS:
       allowed_users
-        THE NODE'S OWNERS: stable sender ids of any network, mixed. They may
-        command this node, and a being whose own allowed_users is unset (at
-        the conversation and at agents.<name>.conversation_defaults) answers
-        only them. networks.<surface>.allowed_users, when set, replaces this
-        list on that surface. Unset or [] = nobody (the account owner, and the
-        authenticated console, always pass). "*" names nobody here
-        (src/spine/router.mjs ownersOf / mayWake).
+        THE OPERATOR AND THE NODE'S OTHER OWNERS: stable sender ids of any
+        network, mixed. Defined here, at the ROOT, and always allowed: they
+        command this node and wake every one of its beings. allowed_users lists
+        JOIN by inheritance, never replace (operator 2026-11-07): the lists
+        below the root (networks.<surface>, agents.<name>.conversation_defaults,
+        a conversation's own) only ADD people, so who may wake a being is the
+        union of them all. "*" in any list = anyone; [] adds nobody and shuts
+        nobody out. "*" names nobody as an owner here. The account owner and the
+        authenticated console always pass, on a person's line only. A being's
+        own line is admitted by "*" alone, whatever id it carries; else the chat
+        is asked (src/spine/router.mjs ownersOf / isOwner / mayWake).
   `,
 
   networks: `
@@ -1418,23 +1651,53 @@ export const CONFIG_SCHEMA = {
 
     SHAPE:
       whatsapp | telegram | signal:
-        chat_ids
+        admin_chat_ids
           STABLE command-channel ids — chats that accept /agents, /restart, … ; a
-          LIST; a node may own several.
+          LIST; a node may own several. The FIRST admin chat of whatsapp (the
+          Self-DM), else of telegram, else of any other surface, gets the
+          lifecycle lines: "↻ /restart… (pid)" going down, "✅ egpt back up!" /
+          "✅ egpt started" at boot (src/spine/boot.mjs announceChatId). Named
+          chat_ids until 2026-11-03.
         allowed_users
           OPTIONAL. This surface's owners — STABLE sender ids that may command
-          this node on THIS surface, and whom a being with no list of its own
-          answers here — jids / Beeper room ids, NEVER display names. Set, it
-          REPLACES the top-level conversation_defaults.allowed_users on this
-          surface; unset, that list applies. [] = deny (fail-closed). The
+          this node on THIS surface, and whom a being answers here — jids /
+          Beeper room ids, NEVER display names. Set, it ADDS to the top-level
+          conversation_defaults.allowed_users on this surface (the lists join,
+          2026-11-07); that list applies either way. [] adds nobody. The
           account owner is always allowed.
 
     Ids are per-surface NAMESPACES (a WhatsApp jid authorizes nothing on
-    Telegram). ONE resolver reads this (src/spine/router.mjs ownersOf).
+    Telegram). ONE resolver reads each key (src/spine/router.mjs ownersOf,
+    adminChatIdsOf).
 
-    BACK-COMPAT: the OLD top-level whatsapp: / telegram: / signal: blocks plus a
+    BACK-COMPAT: the pre-rename chat_ids is still read where admin_chat_ids is
+    absent, and the OLD top-level whatsapp: / telegram: / signal: blocks plus a
     SINGULAR chat_id are still accepted (a singular chat_id normalizes to a
-    1-element chat_ids). Prefer networks: when present.
+    1-element list). Prefer networks: when present.
+  `,
+
+  dir_sync: `
+    Folder watcher (docker/scripts/dir-sync): runs a command when a folder
+    changes, and optionally again on a slow timer. Replaces the old dir-sync.conf.
+      DEFAULT: absent / enabled false — the script does nothing.
+
+    SHAPE
+      dir_sync:
+        enabled: true
+        fallback_timer:        # 2nd, slower watcher: runs EVERY folder's command each N min
+          enabled: true        #   (catches changes inotify cannot see, e.g. made on Google Drive)
+          minutes: 30
+        exec: ""               # optional prefix that runs a command inside a container, e.g.
+                               #   "docker exec -u egpt ctr bash -c"; empty = run locally
+        path_map: { from: /home/ubuntu, to: /srv/egpt/ubuntu-home }   # optional: watch, on the
+                               #   host, the place where a container path really lives
+        folders:
+          - name: drive          # label in the log
+            path: /abs/folder    # watched recursively
+            command: /abs/sync.sh
+            quiet_seconds: 15    # DEFAULT 15 — wait this long without changes before running
+
+    Read by the script itself, not the spine. Restart it after editing.
   `,
 
   echo: `
@@ -1489,7 +1752,7 @@ export const CONFIG_SCHEMA = {
 
   echo_max_age_ms: `
     Never echo a voice note whose OWN timestamp is older than this (operator
-    2026-07-09, Zohykar incident; renamed from the old
+    2026-07-09, Zurikar incident; renamed from the old
     network.transcribe_ack_max_age_ms).
 
     A Beeper resync can re-deliver ancient backlog notes, and the 👂 is a
@@ -1564,7 +1827,7 @@ export const CONFIG_SCHEMA = {
         back-compat, and it is plain rung order now — nearest the room wins.
       server
         The endpoint engine — a remote worker e.g. DOLLY, or a resident server.
-          endpoint   URL, e.g. "http://192.168.1.50:23390"
+          endpoint   URL, e.g. "http://192.0.2.50:23390"
           token      shared HMAC-SHA256 secret, SAME on both machines;
                      unsigned/stale >60s rejected
       cli
@@ -1811,7 +2074,7 @@ export const CONFIG_SCHEMA = {
           type: "piper-server-remote"
             POST to endpoint + token (HMAC), the same scheme transcription's
             whisper-server-remote uses.
-              endpoint            e.g. "http://192.168.1.102:23391"
+              endpoint            e.g. "http://192.0.2.102:23391"
               token               HMAC auth; SAME value as the worker's synthesizer.server.token
               connect_timeout_ms  liveness probe — fail fast if the endpoint is down.
                                   DEFAULT: 3000
@@ -1916,8 +2179,8 @@ export const CONFIG_SCHEMA = {
         OPTIONAL (operator 2026-08-31) — ONE MORE @token this agent wakes on,
         but ONLY where a named OTHER identity is not in the chat:
 
-          fallback_handle: { handle: e,        unless_present: "+13472576794" }
-          fallback_handle: { handle: [d, don], unless_present: "+13472576794" }
+          fallback_handle: { handle: e,        unless_present: "+15550100002" }
+          fallback_handle: { handle: [d, don], unless_present: "+15550100002" }
 
         reads "also wake on @e, unless +1347… is a participant here". Where
         that identity IS present the token belongs to the OTHER account's
@@ -1925,7 +2188,7 @@ export const CONFIG_SCHEMA = {
         waking two spines.
 
         WHY IT EXISTS: kg and do stopped sharing one Beeper account. do runs on
-        a second account (+1 347…, "Rodz") and carries a relay agent \`e\` that
+        a second account (+1 555…, "Rodz") and carries a relay agent \`e\` that
         forwards to ekg.kg, so @e is ANSWERED by kg's brain but POSTED from a
         visibly different account — the point of the arrangement. The cost is
         that \`e\` became a handle on do ONLY, so in every chat the 347 account
@@ -2000,6 +2263,9 @@ export const CONFIG_SCHEMA = {
         RETIRED (2026-10-22), ignored — boot logs one line per agent carrying it.
         (A conversation's OWN agents.<name>.default: true in conversations.yaml
         is a different thing: that chat's owner; see heartbeats.)
+      background_agents
+        OPTIONAL { model, effort } for the sub-agents this being launches; wins over
+        the node's top-level background_agents key by key. See background_agents.
       heartbeats
         OPTIONAL Boolean (operator 2026-10-15). false = a conversation whose
         own default agent this is (conversations.yaml agents.<name>.default:
@@ -2021,8 +2287,9 @@ export const CONFIG_SCHEMA = {
         (edw-marketer): the person in its chat sees only its reply text - no
         "⏳ Thinking…" placeholder, no persona prefix, no visible signature
         (the invisible node frame stays), no error line. A failed or empty
-        turn is noticed in admin_channel instead (src/spine/sender.mjs plain
-        branch, src/bridges/persona-wrap.mjs).
+        turn is noticed in log_to_group instead (admin_channel when that is
+        unset; 2026-11-20; src/spine/sender.mjs plain branch,
+        src/bridges/persona-wrap.mjs).
       mode
         OPTIONAL (operator 2026-07-25) — THIS agent's own default reply-mode.
         ENUM: on | auto | mute | mention-direct | mention | accum | off
@@ -2089,11 +2356,12 @@ export const CONFIG_SCHEMA = {
           allowed_users
             A list of sender ids (same shape/normalization as
             networks.*.allowed_users - matched via shortChatId, so a short or
-            legacy full-form id both work). UNSET = only the node's owners
-            (operator 2026-10-26: top-level conversation_defaults.allowed_users,
-            or networks.<surface>.allowed_users where set). A list holds ids or
-            "*" only: ["*"] = anyone; [] = nobody. Set = ONLY a sender whose id
-            is in the list can reach it; every other sender's @mention falls through exactly as
+            legacy full-form id both work). ADDS people to the node's owners
+            (operator 2026-11-07: top-level conversation_defaults.allowed_users
+            plus networks.<surface>.allowed_users where set, always allowed);
+            the lists join, never replace. A list holds ids or "*" only: "*" in
+            any of them = anyone; [] adds nobody. A sender on none of the
+            lists cannot reach it; its @mention falls through exactly as
             if it never matched (silent, same convention as the surface pin).
             No mode is above it (operator 2026-10-16): such a sender never
             wakes this agent, not by handle, quote-reply, the persona
@@ -2107,6 +2375,14 @@ export const CONFIG_SCHEMA = {
             controlled here and by access_level instead. An explicit id list is
             independent of ev.authorized/isSender (the per-NETWORK owner
             concept); only an unset list reads the node's owners.
+          allowed_users_inheritance
+            Boolean. DEFAULT: true (operator 2026-11-09). false makes this
+            level's allowed_users FINAL: the node's lists (top-level
+            conversation_defaults, networks.<surface>) are not joined in. The
+            Operator always passes. Levels, top to bottom: node lists, this
+            block, the conversation's entry, a new chat's seed; a lower level
+            that is not final still joins onto this one. A being's own line is
+            admitted by a "*" in the final list alone.
           access_level
             ENUM: regular | all | sandbox | reader. Points this agent at
             config/permissions/<level>.md (src/spine/permission-levels.mjs),
@@ -2126,6 +2402,14 @@ export const CONFIG_SCHEMA = {
             --tools so unlisted tools do not exist, boxed or not (2026-10-15).
             A type with no list gets the level's whole list.
 
+            A BOXED being (sandbox, or sandboxed: true) whose type lists its
+            own tools is held to that list by the CLI (2026-11-09):
+            --permission-mode dontAsk + --allowedTools "<the list>", NO
+            bypass, so a scoped Bash(<bin>:*) allows that command and nothing
+            else in Bash. The box is still the OS boundary. A boxed being with
+            no list keeps the bypass (every tool, 2026-09-23); 'all' is
+            unconfined either way.
+
             All four are the SAME values /agents <handle>|all
             access_level <level> writes per-conversation - that validator and
             this enum are the same list, ACCESS_LEVELS in
@@ -2141,7 +2425,7 @@ export const CONFIG_SCHEMA = {
             all
               Unconfined at the CLI level - dangerously_skip_permissions plus
               bare Bash/Agent and no path confinement, exactly like an
-              interactive claude session. With no allowed_users at either tier
+              interactive claude session. With no allowed_users of its own
               it answers only the node's owners (2026-10-26); ['*'] opens it to
               anyone.
 
@@ -2213,7 +2497,7 @@ export const CONFIG_SCHEMA = {
             its chain of thought - warm-cli-session taps every assistant
             event's thinking blocks and renders them above the answer, with
             tool calls collapsed to bare stubs (wren's "see your full chain of
-            thought").
+            thought"). text = the same as true, without the tool-call stubs.
 
             THE ONE conversation_defaults field with a THIRD tier BELOW these
             two: the same key on the AGENT-TYPE FILE (config/agents/<type>.yaml
@@ -2265,11 +2549,13 @@ export const CONFIG_SCHEMA = {
 
         OVERRIDDEN PER CONVERSATION in conversations.yaml under the entry's
         agents: block - contacts.<surface>[<id>].agents.<name>.allowed_users /
-        .access_level / .sandboxed / .verbose_thinking / .allow_new_input - FLAT there (no conversation_defaults
+        .allowed_users_inheritance (false = that list is final: the agent's and the node's lists are not
+        joined in) / .access_level / .sandboxed / .verbose_thinking / .allow_new_input - FLAT there (no conversation_defaults
         wrapper: that block is already scoped to one being in one
         conversation, so there is no registry-field ambiguity to guard
         against). When set, the per-conversation value REPLACES this global
-        default for that one conversation (never merged/unioned with it);
+        default for that one conversation (never merged/unioned with it) -
+        except allowed_users, whose lists all JOIN (2026-11-07);
         unset there falls back to this global default, then to "no override"
         (today's behavior).
 
@@ -2279,7 +2565,7 @@ export const CONFIG_SCHEMA = {
         and gets STANDING grants for that account alone (same shape as
         allowed_paths; written once, kept across turns):
           sandbox_pin:
-            C:/Users/an/Documents: { allowed_tools: [ Read, Glob, Grep ] }
+            C:/Users/user/Documents: { allowed_tools: [ Read, Glob, Grep ] }
         {} = pinned, no standing paths. Removing the key releases it within a
         minute (the spine ends that session, revokes every standing ACE, frees
         the account). Windows box only. setup/SANDBOX.md, "Pinned accounts".
@@ -2364,6 +2650,23 @@ export const CONFIG_SCHEMA = {
     "verbose for this ONE agent/chat", because a type is shared by every agent
     that names it. Kept working for the profiles that already set it here.
 
+    THE SUPERINTENDENT, agents.super (operator 2026-11-04): S, one per chat.
+    "/<handle> super <message>" runs a turn of it on the handle's node, in that
+    chat, answered there: its own thread in the chat (agents.super.threadId,
+    made on first use), its cwd the chat's folder, prompted with <message> and,
+    in mode accum, what the chat said since its last turn. Run by the operator
+    or by a being's line (a node-signed one, read past its stamp and frame) —
+    the only command a being's line runs; never by another person, never by
+    S's own line here. A being's run counts in loop_guard.inbound. Give it
+    handles: [] so no name wakes it; allowed_users: [] adds nobody, so only an
+    owner's quote of its post can (the command reads neither). Absent →
+    "/<handle> super" says so.
+      super: { configuration: { type: ccode, model: opus, effort: xhigh,
+               personality: super }, handles: [], name: "S", body_emoji: "🦉",
+               mode: accum,
+               conversation_defaults: { access_level: all, sandboxed: false,
+                                        allowed_users: [] } }
+
     EXAMPLE:
       { egpt: { configuration: sonnet-high, handles: [e, egpt], default: true },
         don:  { configuration: relay, relay_channel: Rodz } }
@@ -2381,7 +2684,7 @@ export const CONFIG_SCHEMA = {
     SAME SHAPE as a type file's own allowed_paths (see agents above):
 
       allowed_paths:
-        C:/Users/an/src:
+        C:/Users/user/src:
           allowed_tools: [ Read, Glob, Grep ]   # read-only
         C:/shared/scratch:                      # empty value = full access
 
@@ -2409,6 +2712,27 @@ export const CONFIG_SCHEMA = {
     group at all (setup/SANDBOX.md).
   `,
 
+  background_agents: `
+    The model and effort of the sub-agents a being launches in the background
+    (the CLI's Agent tool), set per node and overridable per being:
+
+      background_agents: { model: sonnet, effort: medium }
+      agents:
+        wren:
+          background_agents: { effort: high }   # this being only; model stays the node's
+
+    model: sonnet | opus | haiku | inherit. effort: low | medium | high | xhigh | max.
+    Handed to the CLI as CLAUDE_CODE_SUBAGENT_MODEL / CLAUDE_CODE_SUBAGENT_EFFORT,
+    boxed or not. An agents.<name> key wins over the node's, key by key.
+
+    DEFAULT: model is sonnet when unset at every tier (operator 2026-11-04);
+    model: inherit passes nothing, so the CLI uses the parent's model. Effort has
+    no default: unset passes nothing and the CLI's own applies. An
+    invalid value is logged once and ignored. It applies when a CLI process
+    spawns (a new session, or a respawn); a warm process keeps what it started
+    with, like a type file's model/effort. Claude Code beings only.
+  `,
+
   global_read_paths: `
     Folders EVERY sandboxed being on this node can read, each mounted in its
     home beside \`src\` under the name given here (operator 2026-09-28: "please
@@ -2416,7 +2740,7 @@ export const CONFIG_SCHEMA = {
     maps, <mount name>: <path>:
 
       global_read_paths:
-        - repos: C:/Users/an/src/siran      # ~/repos in every pool profile
+        - repos: C:/Users/user/src/siran      # ~/repos in every pool profile
 
       DEFAULT: unset (or empty) - no extra mount and no grant, exactly the
       behaviour before this key existed.
@@ -2753,6 +3077,20 @@ export const CONFIG_SCHEMA = {
         this margin; below it, evict the idlest group Chrome and retry, else
         launch anyway with one log line — a browser is never denied (operator
         2026-10-24). NEVER gates or evicts the brain Chrome. Node-level.
+      idle_minutes
+        INT minutes (DEFAULT 30), or "keep"; 0 and "keep" = never. A browser
+        group's screen link (/<handle> browser) closes, with its VNC, after this
+        many minutes with no browser use through the spine (a being's browser
+        tool, /tabs, /open, /<handle> browser...) and no human input in the
+        browser (a click or key through the link: the X display's idle time,
+        xprintidle; if it cannot be read the screen counts as active and the
+        log says so once), even while someone still watches: a static page
+        nobody touches is idle. The Chrome stays, but a
+        group with no open link is evictable again under memory pressure (an open
+        one is pinned). One line in the chat the link was shared in:
+        "browser <group> screen closed after N min idle". Per launch,
+        /<handle> browser [all] [<profile>] keep holds that link until
+        /<handle> browser close. Node-level.
 
     NOTE: which Chrome a CHAT uses is not a chrome key. It is config/browsers.yaml
     (skeleton: config/skeletons/browsers.yaml): groups of chat names; group
@@ -3008,7 +3346,7 @@ export const CONFIG_SCHEMA = {
     chokepoint src/spine/spine.mjs; replaces the old flood-guard + mesh circuit
     breaker).
 
-    ONE GUARD, TWO TRIGGERS (operator 2026-09-20, after "🌴FAMILIA PALMA🌴" sat
+    ONE GUARD, TWO TRIGGERS (operator 2026-09-20, after "🌴FAMILIA MUESTRA🌴" sat
     paused for eight hours):
 
       · RATE — \`turns\` non-human turns within \`window\` MINUTES. "a hard limit of
@@ -3028,7 +3366,7 @@ export const CONFIG_SCHEMA = {
     signature, or a send the bridge knows by id) coming back through the bridge is
     BOOKKEEPING: it does not count and does not reset. E's own "⏳ Thinking…" /
     "⏳ Queued…" placeholders, posted through the mouth account, are what filled
-    PALMA's cap in five seconds. ANOTHER node's being still counts — that is real
+    MUESTRA's cap in five seconds. ANOTHER node's being still counts — that is real
     chatter.
 
     A PAUSE ANNOUNCES ITSELF in the channel, once, naming what tripped it (the
@@ -3059,15 +3397,17 @@ export const CONFIG_SCHEMA = {
 
     WHERE IT WORKS: **THE SELF CHAT ONLY** (operator 2026-07-26: "is must be a
     single word message in Self, 'stop', case insensitive") — that is
-    networks.<surface>.chat_ids[0] on whatsapp, the same Self-DM the restart
-    announce posts to. It used to fire from ANY chat on ANY surface, which made one
+    networks.whatsapp.admin_chat_ids[0], the same Self-DM the restart announce
+    posts to (the announce falls back to telegram's first admin chat; the safe
+    word does not). It used to fire from ANY chat on ANY surface, which made one
     stray "stop" in a group — or anyone at the operator console, which is
     unconditionally authorized — enough to take the node down. In every OTHER chat,
     group, and on the shell surface, "stop" is now ordinary text. No Self chat
     configured → the chat safe word is simply unavailable (fail-closed); the STOP
-    file is still the way out. The other admin chats (chat_ids[1..]) and every
-    group take stop_phrase instead (operator 2026-10-18, superseding 0a2fc04's
-    2026-10-15 widening of the bare word to every chat_ids entry).
+    file is still the way out. The other admin chats (admin_chat_ids[1..], and
+    every other surface's) and every group take stop_phrase instead (operator
+    2026-10-18, superseding 0a2fc04's 2026-10-15 widening of the bare word to
+    every chat_ids entry).
 
     WHAT COUNTS AS THE WORD: the WHOLE trimmed message, case-insensitive, trailing
     '.'/'!' tolerated. "stop it", "please stop", "stopping" are ordinary text.
@@ -3169,7 +3509,18 @@ export const CONFIG_SCHEMA = {
       every_ms
         DEFAULT: 15000 (operator 2026-10-16: "all updates every 15s").
         The spine tick is sized down to it (boot effectiveTickMs). Read at boot.
-        Background status lines share it.
+        A chat's background task list is checked at this pace; a change (a task
+        appears or finishes) is posted as background_change_ms says.
+      background_every_ms
+        DEFAULT: 600000 (10 min; operator 2026-10-30: "publicar el estatus de
+        todas las tareas en un mensaje cada cierto tiempo"). While background work
+        runs with no change, its status is posted again this often — a new
+        message, never an edit. Read each tick.
+      background_change_ms
+        DEFAULT: 120000 (2 min; operator 2026-11-02: "this is probably too much :)").
+        A change waits this long after the chat's last status, then ONE post
+        carries the current state. The first status (a turn ends leaving work
+        running) and the last ("done" / "ended") are not held. Read each tick.
   `,
 
   lag_probe: `
@@ -3211,6 +3562,57 @@ export const CONFIG_SCHEMA = {
     captures the new content as its boot hash.
     Only operator-triggered writes touch config.yaml (/config set, /radio
     disable); nothing automatic does, so there is no restart loop.
+  `,
+
+  auto_update: `
+    Keeping eGPT itself current (src/tools/egpt-update.mjs), beside the Beeper
+    check. At boot and every 6 h the node fetches its checkout's upstream (the
+    current branch's own: what /upgrade's git pull --ff-only takes) and, with new
+    commits, posts ONE line per upstream sha to log_to_group. Read at each look,
+    so an edit applies without a restart. Beeper's own method is NOT here: it
+    stays in limbs.beeper.auto_update.<os>.method (see beeper).
+
+    KEYS:
+      egpt
+        ENUM: auto-full | auto | manual | none   DEFAULT: auto-full
+          none       no fetch, no notice (the off switch).
+          manual     the notice only; the operator sends /<handle> upgrade full.
+          auto       the notice, then plain /upgrade by itself at the next quiet
+                     moment: the spine only, the daemon and its Chromes stay.
+          auto-full  auto, unless necessary: the notice, then plain /upgrade
+                     (spine only) UNLESS the daemon itself changed, then
+                     /upgrade full. After the fetch, the files changed
+                     between HEAD and the upstream (git diff --name-only) are
+                     matched against what the DAEMON loads, found from the code
+                     (src/tools/daemon-graph.mjs: the import graph from
+                     egpt-daemon.mjs, the setup/ scripts it names, and
+                     package.json / package-lock.json when it imports a
+                     package). A hit: /upgrade full (the daemon renewed too);
+                     none: /upgrade, spine only. One log line says which and why.
+                     Where nothing respawns the daemon (EGPT_DAEMON_RESPAWNS=1
+                     or the container entrypoint, the daemon's own check: a
+                     Windows service or task is not assumed to), a hit is NOT run
+                     full: it upgrades the spine only and posts one line that
+                     /upgrade full is still needed by hand.
+          auto and auto-full both: the existing drain (turns in flight finish, a
+          Beeper update under way finishes first). ONCE per upstream sha,
+          persisted before the exit (state/egpt-update.json): a pull that leaves
+          the checkout behind (a dirty tree, a conflict) is not retried until the
+          upstream moves, so it never loops the node. Not while a restart is
+          pending. Only where a daemon respawns the spine (EGPT_SUPERVISED=1): a
+          spine run by hand would only stop, so there they are manual.
+        A checkout AHEAD of its upstream (diverged: ff-only would fail) gets the
+        notice with that said, and no auto. No upstream, a detached HEAD, or a
+        failed fetch: a daemon-log line, nothing posted.
+      ask_on_boot
+        ENUM: true | false                  DEFAULT: true
+        When something is pending at boot (eGPT commits and/or a Beeper update),
+        ONE follow-up line after "✅ egpt back up!" / "✅ egpt started" (the same
+        chat(s)): what is pending, the command to type for each, "Apply now?".
+        Under auto / auto-full, the item says it applies at the next quiet moment instead.
+        Nothing pending: no line. The fetch never delays the back-up line.
+    EGPT_SELF_UPDATE=off in the spine's environment: neither this check nor
+    Beeper's exists (the test suite sets it, so no test touches the host).
   `,
 
   media_flood: `
@@ -3258,8 +3660,9 @@ export const CONFIG_SCHEMA = {
   public_commands: `
     The commands ANYONE in a chat may run (operator 2026-10-19); every other command is
     the node's allowed users' only (Self DM, networks.<surface>.allowed_users, the owner).
-    Command words, with or without the '/'. A node-signed line is never admitted.
-      config.yaml, root key:           DEFAULT [split, send, end] (join retired 2026-10-25)
+    Command words, with or without the '/'. A node-signed line is never admitted (it runs
+    /super only, agents.super).
+      config.yaml, root key:           DEFAULT [split, send, end, side] (join retired 2026-10-25)
       conversations.yaml, a chat's own entry: REPLACES the root list there; [] = none.
     A listed agents opens only the bare /agents list (agents_list); its verbs stay
     allowed-users only. Each command's own rules still apply (/end only in a side group).
@@ -3283,56 +3686,31 @@ export const CONFIG_SCHEMA = {
   `,
 
   warm: `
-    Warm-session pool for the resident brain processes (src/warm-sessions.mjs; E
-    stays resident so its context lives in memory instead of re-spawning +
-    --resume per message).
+    Warm-session pool (src/warm-sessions.mjs): a conversation's brain process stays
+    resident, its context in memory, instead of re-spawning + --resume per message.
 
-    KEYS:
-      max
-        DEFAULT: 6 — LRU cap on live sessions; the "keep a number — or, with a
-        high max, all — agents warm" knob. It bounds how many warm sessions live
-        at once, independent of the idle TTL.
-      idle_ttl_ms
-        DEFAULT: 1800000 — ms-of-idle before an unlisted class is evicted.
-      idle_ttl_by_class
-        Per-class idle TTL.
-        DEFAULT: { system: 43200000, resident: 43200000, conversation: 900000,
-                   sibling: 43200000 }
+    EVICTION IS MEMORY-BASED (operator 2026-11-08), built in, nothing to set:
+      reserve     max(15% of total memory (cgroup-aware), 500 MB). Opening a session
+                  with less available first evicts one idle session; the spine's tick
+                  evicts one more per tick while under it. The turn always runs.
+      PSI         Linux: memory "some avg10" > 10 also evicts one per tick.
+      order       chatbox first, then conversation / sibling, resident / system last;
+                  least recently used within each.
+      never       a busy session, one with background work running, a kept one.
 
-    TTL DIALECT (operator 2026-07-26 — the same one posts_back_delay_ms and
-    loop_guard.inbound.turns speak): -1 = never idle-evict (warm forever), 0 = always evict
-    (dropped the moment its turn ends, so every turn is a cold --resume), N =
-    evict after N ms idle. An ABSENT class falls through to idle_ttl_ms; absent
-    never means 0.
+    KEYS (all optional):
+      max                a backstop on live sessions, same victim order. DEFAULT: none
+      idle_ttl_ms        idle timer for a class not in idle_ttl_by_class. DEFAULT: -1 (off)
+      idle_ttl_by_class  { <class>: <ttl> } — chatbox, conversation, sibling, resident,
+                         system; chatbox takes conversation's unless listed. DEFAULT: none.
+                         An unparseable value is logged; that class takes idle_ttl_ms.
+      idle_ttl           per conversation (folder config.yaml, conversations.yaml entry,
+                         or here for all): beats the class TTL. DEFAULT: none
+      keep               per conversation: true = never evicted (memory, max or timer);
+                         a stop, a re-pin, a configuration reopen or a failure still ends
+                         it. Read live. At the node rung it would keep every conversation.
 
-    CONVERSATION DEFAULT = 15m (operator 2026-07-02: "keep any conversation as a
-    background agent 15m after the last message, configurable"): a conversation
-    goes cold 15 min after its last turn, then idle-evicts (the transcript +
-    --resume make the next turn correct, just colder). This SUPERSEDES the
-    earlier never-evict default.
-
-    EVERYTHING ELSE IDLES OUT AT 12h (operator 2026-09-20: "let them idle out,
-    12h"). system/resident/sibling used to default to -1 — never — which left
-    one live claude.exe per warm session (13 of them on kg) until the pool hit
-    max, or the spine restarted. Evicting is cheap: the thread id lives in the
-    conversation record, so the next turn resumes the same session. A node whose
-    config.yaml already spells these out is brought forward by migrations/0013.
-
-    PER-CONVERSATION OVERRIDE: a conversation folder's own config.yaml (the same
-    file that carries the transcription: / heartbeats: blocks) may set
-    warm: { idle_ttl: 1h } — a ms number or a "<qty><unit>" duration
-    (ms/s/m/h) — to override the class TTL for THAT conversation only;
-    idle_ttl: -1 there = keep this conversation always warm.
-    RESOLUTION: per-conversation override > class TTL.
-
-    KEEP (operator 2026-10-22: "that group should be kept always on"):
-    warm: { keep: true } on a conversation's conversations.yaml entry (or its
-    folder config.yaml) — its sessions are never idle-evicted and never LRU-evicted;
-    only a stop, a rethread/re-pin, a configuration reopen or a failure ends one.
-    A pool full of kept or busy sessions grows past max. Read live: an edit
-    applies at the next idle check / LRU pass, no turn and no restart needed.
-    idle_ttl: -1 alone still yields to max (LRU); keep does not. At the node
-    rung it would keep EVERY conversation — set it per conversation.
+    TTL: a ms number or a duration ("15m", "2h"); -1 = never, 0 = at turn end, N = N ms idle.
   `,
 
   advice_channel: `
@@ -3369,25 +3747,51 @@ export const CONFIG_SCHEMA = {
       auto
         DEFAULT: false. false = nothing reaches a being until an owner answers
         the posted question: a reply to it (or a reaction on it) saying yes / si /
-        sí / y / ok / 👍 dispatches it, no / n / 👎 drops it. Pending questions
-        survive a restart (state/ingest-asks.json) and never expire. true =
+        sí / y / s / ok / 👍 dispatches it, no / n / non / 👎 drops it. Pending questions
+        survive a restart (state/ingest-asks.json) and expire (ttl_ms). true =
         dispatched at once. show false + auto false posts only the question;
         show false + auto true posts nothing.
       ask
         DEFAULT: "received message, dispatch? reply yes / no". The question text.
+      ttl_ms
+        DEFAULT: 600000 (10 minutes) — how long an open question waits for its
+        answer. The same store holds a being's line that names a being whose
+        allowed_users refuse its sender ("❓ lark → finch: pass it on? reply yes /
+        no", boot askMention), so this covers both kinds. (An owner answers either
+        kind; the mention's is answered by whoever may wake its being: the Operator,
+        or its allowed_users lists.) The post ends with the time left, "· ⏳ 10 min",
+        and is EDITED once a minute as it runs down (a connection that cannot edit
+        shows the clock time it closes at instead:
+        "· ⏳ until 14:35"). At the deadline the post is edited to say it expired
+        ("⌛ lark → finch: expired, not passed on" / "⌛ expired, not dispatched"), the
+        question leaves the store and a line is logged: an answer after that is
+        ordinary chat. The deadline is stored with the question, so a restart keeps
+        it. A question stored before expiry existed (its post never showed a
+        countdown) gets a fresh deadline at load and, when it runs out, ends in the
+        log alone: nothing is edited or said in the chat. 0 or negative = never
+        expire (no countdown). Read live; it applies to the questions asked after
+        the change.
   `,
 
   admin_channel: `
     The node's admin channel (operator 2026-09-24: "make it's posted on admin
     channel, eGPT Admin. BTW the 'admin channel' must be defined in config.yaml")
-    - the ONE chat this node posts its own notices to. Today that is the
-    compaction notice: "🗜️ <node> · <being> in <chat> compacted its context
-    (was Nk tokens)...", said after a /compact that succeeded
-    (src/spine/compaction.mjs, boot.mjs noticeToAdmin). Every node may name the
+    - the ONE chat this node posts its own notices to. Since 2026-11-20 that is
+    the browser CONTROL link (/<handle> browser sends it here, never into the
+    chat it was typed in; unset: that form is refused), the captcha notice
+    (captcha_channel, below) and the output of a silent: heartbeat. It is
+    where the operator types commands, so it is kept clean: the LOG-type notices
+    - the compaction notice ("🗜️ <node> · <being> in <chat> compacted its
+    context (was Nk tokens)...", said after a /compact that succeeded,
+    src/spine/compaction.mjs, boot.mjs noticeToAdmin) and a public being's
+    error line - go to log_to_group (eGPT Logs) when it is set (operator An,
+    2026-11-20: "please put eGPT Logs in its channel, so eGPT Admin stays
+    clean"), and only fall back here when it is not. Every node may name the
     same chat; the line says which node it came from.
 
     VALUE: a chat NAME or a raw Beeper room id in SHORT form, exactly like
-    advice_channel. A name is resolved to its room by the bridge's own
+    advice_channel, or a Telegram chat id: tg:<chat>, a topic tg:<chat>/<topic>
+    (a bot cannot look a Telegram chat up by name). A name is resolved to its room by the bridge's own
     resolveChatId before the line is said, so the being's mouth can say it in
     its own room. Unset (or empty): nothing is posted, the notice stays in the
     daemon log. Operator alerts are NOT sent here; they stay on the Self chat.
@@ -3403,8 +3807,23 @@ export const CONFIG_SCHEMA = {
     <outcome> is appended only where a silent/side-effecting handler returns one
     (today: /end); every other command is just its invocation line.
 
-    VALUE: a chat NAME or a raw Beeper room id in SHORT form, resolved to its room
-    EXACTLY like admin_channel — the SAME boot.mjs resolver + poster (noticeToChannel),
+    The lifecycle lines go here too (2026-11-03): "↻ /restart|/upgrade|/rewind…"
+    before the exit, "✅ egpt back up! (sha → sha) pids — /upgrade: <what it did>"
+    and "✅ egpt started", besides the first admin chat (networks.<surface>.
+    admin_chat_ids); said once when that is this same chat.
+
+    The node's other LOG-type notices go here too (operator An, 2026-11-20:
+    "please put eGPT Logs in its channel, so eGPT Admin stays clean" ... "configure
+    log_channel it's in config.yaml" - this key is that channel): the compaction
+    notice (the pre-compaction warning and the "compacted" confirmation) and a
+    public being's error line (agents.<name>.public). With log_to_group unset they
+    stay in admin_channel, so a node without a log channel loses nothing. The browser
+    control links, the captcha notice and a silent: heartbeat's output stay in
+    admin_channel.
+
+    VALUE: a chat NAME or a raw Beeper room id in SHORT form, or a Telegram id
+    (tg:<chat>[/<topic>], a topic included), resolved to its room EXACTLY like
+    admin_channel — the SAME boot.mjs resolver + poster (noticeToChannel),
     fail-closed, said from the being's own mouth. It MAY name the same chat as
     admin_channel or a different one. Unset (or empty): auditing is OFF — nothing is
     posted and no command's behavior changes (src/spine/commands.mjs run() chokepoint,
@@ -3549,12 +3968,20 @@ export const CONFIG_SCHEMA = {
   `,
 
   split: `
-    /split — the REAL-FORK side-group (operator 2026-10-03). "/<handle> split [<name>]" (e.g.
+    /split — the REAL-FORK side-group (operator 2026-10-03). "/<handle> split [invite] [<name>]" (e.g.
     "/e split viaje"; the handle's node runs it) creates a private
     group backed by a NEW conversation (its own folder/entry, NOT an alias) whose resident beings'
     threads are COPIED from this chat so it DIVERGES. Anyone in a group chat may run it (2026-10-18):
     the primary account creates it, inviting the secondary (Rodz) and that person; the operator's own
-    split invites Rodz alone; no secondary → just that person. The two accounts' phones come from
+    split invites Rodz alone; no secondary → just that person. "invite" (2026-10-31) also invites every
+    member of the chat ("/e split invite fabio" in a 1:1 with Fabio: Rodz + Fabio). In the split,
+    anyone may call the being it was typed to (its allowed_users there: ['*']; not for access_level all).
+    A split is ANOTHER THREAD (operator 2026-11-20: "split is another thread in the same folder,
+    another group; separate accum"): its replies stay in the split and its own accum reads its own
+    transcript; the chat's being answers in the chat. The 2026-10-31 tunnel, which posted a chat's
+    replies into its open split signed "E from [<chat>]", is gone: split.tunnel (config.yaml) and a
+    conversations.yaml entry's split: { tunnel } are ignored (the boot says so once); delete them.
+    The two accounts' phones come from
     beeper.primary.phone / beeper.secondary.phone. On Telegram (2026-10-25) it is a TOPIC of the
     group, tg:<chat>/<thread>, which everyone in the group can open: the group needs Topics on and the
     bot an admin with "Manage topics", else the command says so; the answer is the topic's link, and
@@ -3621,13 +4048,23 @@ export const CONFIG_SCHEMA = {
 
   reply_in_side_group: `
     The automatic side group (operator 2026-10-18). Set it on ONE conversation's OWN entry in
-    config/conversations.yaml. Read nowhere else: in config/config.yaml, on a side group's entry or in
-    a folder config.yaml it does nothing. There is no trigger phrase.
+    config/conversations.yaml, or in config/config.yaml as the node's default (2026-11-02). On a side
+    group's entry or in a folder config.yaml it does nothing. There is no trigger phrase.
 
-    VALUE:
+    VALUE (the chat's own entry; it always wins):
       true / yes / on / 1 (any case)   → on; the group is titled "SI+<chat title>".
-      false / no / off / 0 / "" / unset → off: replies in place (the DEFAULT).
+      false / no / off / 0 / ""        → off: replies in place.
+      unset                            → the node default, below.
       any other text                   → on; that text (trimmed) is the group's title, as is.
+
+    NODE DEFAULT (config.yaml; operator 2026-11-02: "as a default, agents should reply in an output
+    channel, not in the same group"):
+      true / yes / on / 1 → on for every GROUP chat on a Beeper surface whose entry leaves it unset,
+                            titled "SI+<chat title>". Never a 1:1, Telegram (the bot's chats or
+                            Beeper's), an http chatbox, a room or the shell, or a side group's or a
+                            /split's own entry.
+      anything else / unset → off (the DEFAULT): only the chats' own entries count.
+    Read live. commands.sideGroupByDefault is the test, exported to list which chats would flip.
 
     On: no being replies in this chat, in any mode; every reply (its limbs and voice too) goes to the
     side group, unquoted. The node whose being is about to reply creates it when it holds none, on its
@@ -3637,10 +4074,28 @@ export const CONFIG_SCHEMA = {
     makes nothing. It is an alias of the chat (same folder and thread, its own transcript),
     marked automatic: true. /send works in it; /end does nothing there. Once the group is gone the
     next reply opens a new one. A title may repeat: the group is known by its id. The other node links
-    it from the opener and, when its own entry for the chat says nothing, sets reply_in_side_group: on
-    there too — so only the creating node needs configuring (2026-10-19). Both nodes making one at
+    it from the opener and, when its own entry for the chat says nothing and its own default does not
+    cover the chat, sets reply_in_side_group: on there too — so only the creating node needs
+    configuring (2026-10-19). Both nodes making one at
     once is fine: two groups, each node links the other's, and each keeps replying in the first it
     holds (its own); a line in either reaches both, as an alias of the chat.
+
+    ONE ACCUM (operator 2026-11-20: "E's accum should grow from original group and the side group; it's
+    a same thread but replying in other group"): a turn woken in the chat or in its side group, in mode
+    accum, is prompted with the lines of BOTH transcripts (transcript.md and transcript-SI+<name>.md)
+    since the being's last turn, in time order, each under its own group's name. A /split is another
+    thread and a /join room (made before 2026-10-25) keeps its own log: each reads only its own.
+
+    ONE MESSAGE'S WORTH, /side (operator 2026-11-20) — "/<handle> side <prompt>" ("it is not another thread, it's the same thread, it
+    just replies in another channel"): the per-message form of reply_in_side_group. <prompt> runs as one
+    ordinary turn of the chat's being, in the chat's own thread (same context and session), and that one
+    reply goes to the chat's SI+ side group, made as reply_in_side_group makes it when the chat has none
+    (same title rule, creator account and members; an alias of the chat). The chat keeps its setting: later
+    lines reply in place unless reply_in_side_group is on. It gets ONE line naming the group. The prompt line is
+    on the chat's own transcript as typed; the reply is recorded as reply_in_side_group records it.
+    Same gates as a normal turn by that sender (reply mode, allowed_users); public by default (public_commands).
+    Refused, with the reason: no prompt (usage), a 1:1, a side group, a /split, Telegram (use /split), a side
+    group that cannot be made. An alias is a commands_alias.yaml line, e.g. q: /e side.
   `,
 
   aliases: `
@@ -3678,7 +4133,7 @@ export const CONFIG_SCHEMA = {
         DEFAULT: 0.03 (operator 2026-10-08). The WARN threshold sits this fraction
         of the window BELOW ratio: warn_threshold = (ratio - warn_gap) of the
         window, clamped at >= 0. At the warn threshold the being writes its handoff
-        and the admin channel gets the pre-compaction notice (compaction_warn_notice,
+        and the log channel gets the pre-compaction notice (compaction_warn_notice,
         a top-level key), ONCE per thread; at ratio the actual /compact runs. So the
         operator is warned and the handoff exists ~warn_gap of the window before the
         context compacts. Per-being/room overridable, same place as ratio. A
@@ -3738,7 +4193,9 @@ export const CONFIG_SCHEMA = {
   `,
 
   compaction_warn_notice: `
-    The PRE-COMPACTION notice posted to the admin channel at the WARN threshold
+    The PRE-COMPACTION notice posted to the log channel (log_to_group; admin_channel
+    when that is unset - operator An, 2026-11-20: "please put eGPT Logs in its
+    channel, so eGPT Admin stays clean") at the WARN threshold
     (compaction.warn_gap below compaction.ratio), operator 2026-10-08 — the PRIMARY
     compaction notice now, said a few % before the context compacts so the operator
     is warned AND the handoff already exists. The node still prefixes its own
@@ -3755,6 +4212,6 @@ export const CONFIG_SCHEMA = {
     DEFAULT: unset — the operator's reference wording is used:
     "the conversation is at {percent}%, handoff being written, compaction next. you
     can read the handoff here: {path}". A blank/whitespace string SKIPS the notice
-    (same degrade as handoff_prompt / welcome); no admin_channel sink also skips it.
+    (same degrade as handoff_prompt / welcome); neither log_to_group nor admin_channel set also skips it.
   `,
 };

@@ -166,12 +166,15 @@ already is would hear every message twice.
 **Or one profile for both (optional).** `setup\share-beeper-primary-profile.cmd`
 points `egpt-beeper-primary` at your own window's profile: one device, one token,
 no `primary_gui`. The window runs it while Beeper is open; the service runs it
-otherwise; never both. `setup\beeper-window.cmd` (logon, and the "Beeper (eGPT)"
-shortcut) stops the service before opening Beeper and starts it when Beeper
-exits; the service's NSSM Start/Pre hook refuses to start it while the window
-claims or runs the profile; `egpt-s0-identity` (as you, S4U) starts it after a
-logoff. So `egpt-beeper-primary` is **Stopped while your Beeper is open** — that
-is the shape, not a fault.
+otherwise; never both. The egpt daemon supervises it: in Session 1, every 15 s
+its pass (`setup\beeper-window.ps1 -Once`) stops the service before opening
+Beeper and reopens Beeper whenever it exits, until you log off; in Session 0,
+every 60 s (`s0-identity-reconcile.ps1 -BeeperOnly`) it starts a stopped Beeper
+service, the primary only once Session 1 lets go. The "Beeper (eGPT)" shortcut
+defers to it. The service's NSSM Start/Pre hook refuses to start it while the
+window claims or runs the profile; `egpt-s0-identity` (as you, S4U) is the
+backstop while no Session 0 daemon is live. So `egpt-beeper-primary` is
+**Stopped while your Beeper is open** — that is the shape, not a fault.
 
 One bridge is opened per distinct token.
 
@@ -242,7 +245,7 @@ What still differs, measured, and why it is not being changed:
   re-linking that account.
 - **`do`'s `egpt-daemon` service is an older install**: its binary sits inside
   the profile and it logs under a different name. Converging it is a reinstall,
-  and the service runs as `.\an`, so a reinstall needs that account's password at
+  and the service runs as `.\user`, so a reinstall needs that account's password at
   a real console.
 - **The helper tasks differ by purpose, not by drift.** `kg` has `egpt-chrome-radio`
   and an enabled `egpt-wake-duty`; `do` has a disabled `egpt-lock-on-logon` and a

@@ -14,6 +14,10 @@
 #             for ports and one got none, 2026-10-15) - one restart of a service with no port,
 #             then the app LAST. Stopping a service needs the right to: grant it once with
 #             setup\grant-beeper-service-control.cmd, or let this script ask for administrator.
+# The relaunch is setup\beeper-window's: while the Session 1 egpt daemon holds state\s1.claim, that
+# daemon's next pass opens the window on its profile (one owner); with none, beeper-window opens it.
+# The update lock (Get-BeeperUpdateLockPath) keeps the daemon's pass from reopening Beeper from
+# closing the app until the relaunch.
 # The app goes FIRST and gets WM_CLOSE (hidden window included). It hides instead of quitting
 # unless its "Quit Beeper when closing the main window" is on; then nothing is stopped or
 # installed and the result says to quit it from the tray.
@@ -31,6 +35,7 @@
 #   -CloseAppOnly [-WaitSec n]        only close the open app (WM_CLOSE, then n s, default 30, for it
 #                                     to quit); {quit:true} or the close-app refusal, nothing else touched
 #   -RelaunchApp                      relaunch the app even though it is not running now (eGPT closed it first)
+#   -Installer <exe> -Sha512 <b64>    install this file (eGPT's own download), not the pending folder's
 #   -StateFile <json>                 plan from a recorded state, not this machine (tests); implies -DryRun
 #
 # ASCII ONLY, deliberately: PowerShell 5.1 decodes a BOM-less UTF-8 script as ANSI, so a single
@@ -47,6 +52,8 @@ param(
   [switch] $NoElevate,
   [switch] $Pause,
   [string] $StateFile,
+  [string] $Installer,
+  [string] $Sha512,
   # Carried through a UAC prompt, which may log in as another account.
   [string] $LocalAppData = $env:LOCALAPPDATA,
   [string] $AppData = $env:APPDATA,
@@ -63,6 +70,7 @@ $exe        = Join-Path $LocalAppData 'Programs\BeeperTexts\Beeper.exe'
 $pendingDir = Join-Path $LocalAppData 'beepertexts-updater\pending'
 $grantCmd   = Join-Path $repo 'setup\grant-beeper-service-control.cmd'
 $selfCmd    = Join-Path $PSScriptRoot 'beeper-update.cmd'
+$windowVbs  = Join-Path $repo 'setup\beeper-window.vbs'
 
 function Say($m) { Write-Host "[beeper-update] $m" }
 function Done($o, [int] $code = 0) {
@@ -81,6 +89,16 @@ function Get-Sha512Base64([string] $Path) {
   return [Convert]::ToBase64String($bytes)
 }
 
+# $s.pending for an installer: the version from its file name.
+function Get-Pending([string] $File, [string] $Sha, [bool] $AdminRequired) {
+  return [ordered]@{
+    installer     = $File
+    version       = $(if ((Split-Path $File -Leaf) -match '(\d+\.\d+\.\d+(\.\d+)?)') { $matches[1] } else { $null })
+    adminRequired = $AdminRequired
+    sha512Ok      = ((Test-Path $File) -and $Sha -and (Get-Sha512Base64 $File) -eq $Sha)
+  }
+}
+
 # Everything the plan depends on, read without changing anything. -StateFile supplies the same shape.
 function Read-MachineState {
   $me = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -94,15 +112,9 @@ function Read-MachineState {
     appRunning = [bool](Get-CimInstance Win32_Process -Filter "Name='Beeper.exe'" | Where-Object { $_.SessionId -ne 0 })
   }
   $infoPath = Join-Path $pendingDir 'update-info.json'
-  if (Test-Path $infoPath) {
+  if (-not $Installer -and (Test-Path $infoPath)) {
     $info = Get-Content $infoPath -Raw | ConvertFrom-Json
-    $file = Join-Path $pendingDir $info.fileName
-    $s.pending = [ordered]@{
-      installer     = $file
-      version       = $(if ($info.fileName -match '(\d+\.\d+\.\d+(\.\d+)?)') { $matches[1] } else { $null })
-      adminRequired = [bool]$info.isAdminRightsRequired
-      sha512Ok      = ((Test-Path $file) -and $info.sha512 -and (Get-Sha512Base64 $file) -eq $info.sha512)
-    }
+    $s.pending = Get-Pending (Join-Path $pendingDir $info.fileName) $info.sha512 ([bool]$info.isAdminRightsRequired)
   }
   return $s
 }
@@ -132,6 +144,7 @@ function Get-UpdatePlan($s) {
 
 $closeAppRefusal = [ordered]@{ ok = $false; step = 'close-app'; error = 'the Beeper app hid instead of quitting'; remedy = 'quit Beeper from its tray icon (Quit), then update again'; connections = @(); app = [ordered]@{ ran = $true; relaunched = $false } }
 if ($CloseAppOnly) {
+  $updateLock = Open-BeeperClaim (Get-BeeperUpdateLockPath $LocalAppData)
   Say "closing the Beeper app (waiting up to ${WaitSec}s)"
   if (Close-BeeperApp $WaitSec (Get-BeeperDefaultProfile $AppData)) { Done ([ordered]@{ ok = $true; quit = $true }) }
   Say 'the Beeper app is still running - nothing was stopped'
@@ -141,12 +154,14 @@ if ($CloseAppOnly) {
 
 if ($StateFile) { $DryRun = $true; $state = Get-Content $StateFile -Raw | ConvertFrom-Json }
 else { $state = Read-MachineState }
+if ($Installer) { $state.pending = Get-Pending $Installer $Sha512 $false }
 $plan = Get-UpdatePlan $state
 
 if (-not $plan.ok) {
   if (-not $DryRun -and -not $NoElevate -and -not $state.elevated -and $plan.step -in @('permission', 'admin-rights')) {
     $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"", '-LocalAppData', "`"$LocalAppData`"", '-AppData', "`"$AppData`"", '-EgptHome', "`"$EgptHome`"")
     foreach ($k in 'RestartOnly', 'Force', 'NoRelaunchGui', 'RelaunchApp', 'Pause') { if (Get-Variable $k -ValueOnly) { $a += "-$k" } }
+    if ($Installer) { $a += @('-Installer', "`"$Installer`"", '-Sha512', $Sha512) }
     Say "$($plan.error) - elevating..."
     Start-Process powershell -Verb RunAs -ArgumentList $a
     return
@@ -186,6 +201,7 @@ function New-ConnectionRow($name, $service, $r, [bool] $hasToken, $expect) {
 $t0 = Get-Date
 $tokens = Get-BeeperTokens -RepoRoot $repo -EgptHome $EgptHome
 $failStep = $null; $failErr = $null; $step = 'stop'
+$updateLock = Open-BeeperClaim (Get-BeeperUpdateLockPath $LocalAppData)
 # The app first: if it will not quit, nothing has been stopped, so nothing needs bringing back.
 # (eGPT closes it beforehand with -CloseAppOnly, so this is for a run started by hand.)
 if ($plan.closeApp) {
@@ -248,8 +264,9 @@ foreach ($svc in $plan.start) {
 }
 if ($plan.relaunchApp) {
   # Through explorer.exe: the app runs as the desktop user, detached from this process, never elevated.
-  Say 'relaunching the Beeper app'
-  Start-Process explorer.exe -ArgumentList "`"$exe`""
+  Say 'relaunching the Beeper app (beeper-window; the Session 1 egpt daemon when it holds the profile)'
+  if ($updateLock) { $updateLock.Dispose() }
+  Start-Process explorer.exe -ArgumentList "`"$windowVbs`""
   foreach ($name in @($tokens.Keys | Where-Object { -not $ofService.ContainsKey($_) } | Sort-Object)) {
     [void]$conns.Add((New-ConnectionRow $name $null (Wait-Connection $tokens[$name]) $true $expect))
   }

@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { startTelegramBridge, readTelegramToken, telegramTokenPath, isTelegramChatId, secretTag } from '../src/bridges/telegram.mjs';
 import { createBeeperBridgePort } from '../src/bridges/beeper-port.mjs';
 import { encodeNodeSignature } from '../src/node-signature.mjs';
+import { TELEGRAM_REACTIONS } from '../src/spine/turns.mjs';
 
 const TOKEN = '123456:FAKE-bot-token-never-logged';
 const ME = { id: 99, is_bot: true, username: 'edw_bot', can_read_all_group_messages: true };
@@ -89,7 +90,7 @@ function start(api, extra = {}) {
 
 const NOW_S = Math.floor(Date.now() / 1000);
 const privateMsg = (over = {}) => ({ message_id: 7, date: NOW_S, chat: { id: 42, type: 'private', first_name: 'An', last_name: 'R' }, from: { id: 42, is_bot: false, first_name: 'An', last_name: 'R', username: 'anr' }, text: '@ed hola', ...over });
-const groupMsg = (over = {}) => ({ message_id: 8, date: NOW_S, chat: { id: -1001234, type: 'supergroup', title: 'SI+EduWeb' }, from: { id: 77, is_bot: false, first_name: 'Diego' }, text: 'buenas', ...over });
+const groupMsg = (over = {}) => ({ message_id: 8, date: NOW_S, chat: { id: -1001234, type: 'supergroup', title: 'SI+Contoso' }, from: { id: 77, is_bot: false, first_name: 'Diego' }, text: 'buenas', ...over });
 
 describe('telegram limb — boot: getMe names the bot, never the token', () => {
   it('logs @username and polls; no line carries the token', async () => {
@@ -148,7 +149,7 @@ describe('telegram limb — inbound', () => {
     await bridge.startupReady;
     api.updates(groupMsg());
     await vi.waitFor(() => expect(incoming).toHaveLength(1));
-    expect(incoming[0].from).toMatchObject({ chatId: 'tg:-1001234', chatName: 'SI+EduWeb', chatType: 'group', userId: '77', authorized: false });
+    expect(incoming[0].from).toMatchObject({ chatId: 'tg:-1001234', chatName: 'SI+Contoso', chatType: 'group', userId: '77', authorized: false });
     bridge.stop();
   });
 
@@ -326,6 +327,51 @@ describe('telegram limb — inbound media (the shared intake)', () => {
         { chatId: 'tg:42', msgId: '7', emoji: '🎧', remove: true },
       ]);
       await vi.waitFor(() => expect(readdirSync(dir)).toEqual([]));
+      bridge.stop();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  // BACKLOG IS NOT TRANSCRIBED (operator 2026-11-05) — the shared intake's rule, on this limb too.
+  it('REPRODUCE: a backlog voice note is saved and named, never transcribed, nothing pending', async () => {
+    const dir = withDir();
+    try {
+      const api = fakeApi();
+      api.files['voice/n1.oga'] = 'opus';
+      const { saved, onMedia } = saver();
+      let calls = 0;
+      const { bridge, incoming } = start(api, {
+        onMedia, mediaDir: dir, transcribe: async () => { calls++; return '@ed hola'; }, postsBackDelayMs: 0,
+        resolveTranscriptionService: async () => ({ enabled: true, postsBack: true }),
+      });
+      await bridge.startupReady;
+      api.updates(privateMsg({ date: NOW_S - 3600, text: undefined, voice: { file_id: 'n1', duration: 3, mime_type: 'audio/ogg' } }));
+      await vi.waitFor(() => expect(incoming).toHaveLength(1));
+      expect(incoming[0].body).toBe('(voice note not transcribed: backlog)\n(audio) [saved: media/audio-7.bin]');
+      expect(incoming[0].from).toMatchObject({ backlog: true });
+      expect(incoming[0].from).not.toHaveProperty('voiceLine');
+      expect(saved).toHaveLength(1);
+      expect(calls).toBe(0);
+      expect(api.of('sendMessage')).toHaveLength(0);
+      bridge.stop();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('REPRODUCE: a backlog video reaches onMedia marked backlog (media.save skips keyframes + whisper); a live one is not', async () => {
+    const dir = withDir();
+    try {
+      const api = fakeApi();
+      api.files['videos/v1.mp4'] = 'mp4';
+      api.files['videos/v2.mp4'] = 'mp4';
+      const { saved, onMedia } = saver();
+      const { bridge, incoming } = start(api, { onMedia, mediaDir: dir });
+      await bridge.startupReady;
+      api.updates(
+        privateMsg({ message_id: 7, date: NOW_S - 3600, text: undefined, video: { file_id: 'v1', file_size: 10 } }),
+        privateMsg({ message_id: 8, text: undefined, video: { file_id: 'v2', file_size: 10 } }),
+      );
+      await vi.waitFor(() => expect(incoming).toHaveLength(2));
+      expect(saved.find((m) => m.msgId === '7')).toMatchObject({ kind: 'video', backlog: true });
+      expect(saved.find((m) => m.msgId === '8')).toMatchObject({ kind: 'video', backlog: false });
       bridge.stop();
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
@@ -649,6 +695,36 @@ describe('telegram limb — outbound', () => {
     bridge.stop();
   });
 
+  // The emoji train and the steer ack (2026-11-03): each glyph in the bot set's own spelling — ✍ bare,
+  // the rest have no FE0F. A bot holds one reaction per message: 🤔 is set over 👾, [] takes it off.
+  it('the train and steer glyphs go as the bot set spells them; one reaction per message, replaced', async () => {
+    const api = fakeApi();
+    const { bridge } = start(api);
+    for (const e of ['👾', '🤔', '✍️', '👍']) await bridge.sendReaction('tg:42', '9', e);
+    expect(api.of('setMessageReaction').map((c) => c.body.reaction[0].emoji)).toEqual(['👾', '🤔', '✍', '👍']);
+    expect([...'✍'].map((c) => c.codePointAt(0).toString(16))).toEqual(['270d']);
+    await bridge.sendReaction('tg:42', '10', '👾');
+    await bridge.sendReaction('tg:42', '10', '🤔');
+    await bridge.removeReaction('tg:42', '10', '🤔');
+    expect(api.of('setMessageReaction').filter((c) => c.body.message_id === 10).map((c) => c.body.reaction)).toEqual([
+      [{ type: 'emoji', emoji: '👾' }], [{ type: 'emoji', emoji: '🤔' }], [],
+    ]);
+    bridge.stop();
+  });
+
+  // The random frames' pool (2026-11-04): Bot API ReactionTypeEmoji's 73, each sent in the set's spelling.
+  it('every glyph of TELEGRAM_REACTIONS goes out bare, one each, the train and steer glyphs among them', async () => {
+    const api = fakeApi();
+    const { bridge } = start(api);
+    for (const e of TELEGRAM_REACTIONS) await bridge.sendReaction('tg:42', '9', e);
+    const sent = api.of('setMessageReaction').map((c) => c.body.reaction[0].emoji);
+    expect(sent).toHaveLength(73);
+    expect(new Set(sent).size).toBe(73);
+    expect(sent.filter((e) => e.includes('️'))).toEqual([]);
+    expect(sent).toEqual(expect.arrayContaining(['👾', '🤔', '🤓', '👀', '🤯', '✍', '👍', '❤', '❤‍🔥', '🤷‍♀']));
+    bridge.stop();
+  });
+
   // /group (2026-10-26): the chat's photo (multipart, like sendMedia), title and description. A topic's
   // are its group's: the thread is dropped at the API, and no message_thread_id goes with them.
   it('setChatInfo: photo uploads multipart, title and description go as JSON, a topic sets its parent group', async () => {
@@ -658,12 +734,12 @@ describe('telegram limb — outbound', () => {
       const { bridge } = start(api);
       const p = join(dir, 'logo.png'); writeFileSync(p, 'png');
       expect(await bridge.setChatInfo('tg:-1001234/77', { photo: p })).toEqual({ ok: true });
-      expect(await bridge.setChatInfo('tg:-1001234/77', { title: 'EduWeb · Ventas' })).toEqual({ ok: true });
+      expect(await bridge.setChatInfo('tg:-1001234/77', { title: 'Contoso · Ventas' })).toEqual({ ok: true });
       expect(await bridge.setChatInfo('tg:-1001234', { description: 'Demos y ventas' })).toEqual({ ok: true });
       const [photo] = api.of('setChatPhoto');
       expect(photo.body).toEqual({ chat_id: '-1001234', photo: { name: 'logo.png', type: 'image/png', size: 3 } });
       expect(photo.headers).toBeNull();
-      expect(api.of('setChatTitle').map((c) => c.body)).toEqual([{ chat_id: '-1001234', title: 'EduWeb · Ventas' }]);
+      expect(api.of('setChatTitle').map((c) => c.body)).toEqual([{ chat_id: '-1001234', title: 'Contoso · Ventas' }]);
       expect(api.of('setChatDescription').map((c) => c.body)).toEqual([{ chat_id: '-1001234', description: 'Demos y ventas' }]);
       bridge.stop();
     } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -805,6 +881,16 @@ describe('telegram limb behind the shared port adapter (beeper-port createBeeper
     { start: startTelegramBridge },
   );
   const ed = { persona: 'ed', bodyEmoji: '🦉', label: 'ED' };
+
+  // admin_channel / log_to_group named by a tg: id (nu's admin channel is a topic, tg:-1000000000104/124, 2026-11-02):
+  // boot's resolveConfiguredChat asks the owning limb, and the port answered null for every Telegram chat.
+  it('REPRODUCE: a tg: id resolves to itself (a topic too); a name resolves to nothing — a bot cannot list its chats', async () => {
+    const port = await portOn(fakeApi());
+    expect(await port.resolveChatId('tg:-1000000000104/124')).toBe('tg:-1000000000104/124');
+    expect(await port.resolveChatId('tg:42')).toBe('tg:42');
+    expect(await port.resolveChatId('eGPT Admin')).toBeNull();
+    port.stop();
+  });
 
   it('REPRODUCE-FIRST: a persona send carries the visible stamp and layers, and no invisible character', async () => {
     const api = fakeApi();

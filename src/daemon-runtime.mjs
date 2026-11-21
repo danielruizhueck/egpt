@@ -14,6 +14,14 @@ export const RESTART_EXIT_CODE = 43;
 export const REWIND_EXIT_CODE = 44;
 // /standdown: the spine handed the profile to the waiting Session 1 daemon (operator 2026-10-22).
 export const STANDDOWN_EXIT_CODE = 45;
+// /upgrade full: the /upgrade, and then THE DAEMON goes too, so whatever respawns it (the container's
+// keep_running, docker/entrypoint.sh) brings it back on the new code. /upgrade alone renews only the
+// spine: chrome-host, cli-host and this file stay as loaded until the daemon itself restarts.
+export const UPGRADE_FULL_EXIT_CODE = 46;
+// The container's entrypoint, whose keep_running respawns a daemon that exits.
+export const CONTAINER_ENTRYPOINT = '/usr/local/bin/egpt-entrypoint';
+// Does anything bring the daemon back when it exits? (the daemon's own check, and the spine's: auto-full in egpt-update.mjs)
+export const respawnsOf = (env, platform, exists = nodeExistsSync) => env?.EGPT_DAEMON_RESPAWNS === '1' || (platform === 'linux' && exists(CONTAINER_ENTRYPOINT));
 export const CLEAN_EXIT_CODE = 0;
 const HOLD_LOG_MS = 60_000;   // while a daemon waits for the profile, it says who holds it this often
 
@@ -150,6 +158,13 @@ export function createDaemonRuntime(opts = {}) {
   const sessionLabel = session1 ? 'the s1 (logon) session' : 'the s0 (service) session';
   const chromeHost = session1 && createChromeHost ? createChromeHost({ profilesRoot: join(egptHome, 'chrome', 'profiles'), log }) : null;
   const cliHost = createCliHost ? createCliHost({ log }) : null;
+  // Does anything bring this daemon back when it exits? Only then may /upgrade full end it. The
+  // container's entrypoint does (EGPT_DAEMON_RESPAWNS=1, or the entrypoint on disk for images built
+  // before it exported that); a Windows service or task is not assumed to. A process shared by
+  // several profiles (startProfileDaemons) never ends for one of them.
+  const daemonRespawns = opts.daemonRespawns
+    ?? respawnsOf(processObj.env, platform, existsSync);
+  const sharedProcess = opts.sharedProcess ?? false;
   // The singleton's own file, written by the DAEMON, one per session. Distinct from
   // state/spine.pid, which the spine writes and which is shared by whichever spine holds the
   // profile — that file cannot say which session a supervisor is in, and it is why the old
@@ -245,6 +260,21 @@ export function createDaemonRuntime(opts = {}) {
   // and then crashed obviously did.
   let spawnBeatMtime = null;
   let lastGoodRecorded = false;   // once per child; reset in spawnShell
+
+  // --- the primary Beeper follows the runner (operator 2026-11-15, GENOME 6) ----------------------
+  // This daemon is its supervisor: one PowerShell pass per tick, never two at once. S1: the
+  // operator's window on the shared profile (beeper-window.ps1 -Once). S0: the Beeper services
+  // (s0-identity-reconcile.ps1 -BeeperOnly; it leaves the primary to S1 while s1.claim is held).
+  const beeperIntervalMs = opts.beeperIntervalMs ?? (session1 ? 15_000 : 60_000);
+  const beeperArgs = session1 ? ['beeper-window.ps1', '-Once'] : ['s0-identity-reconcile.ps1', '-BeeperOnly'];
+  let beeperTimer = null;
+  let beeperPass = null;
+  // Between passes, a 1 s probe of the shared profile's lockfile (~50 us, no spawn): free -> the pass now.
+  const beeperProbeMs = opts.beeperProbeMs ?? 1_000;
+  const beeperLockHeld = opts.beeperLockHeld ?? lockfileHeld;
+  let beeperProbeTimer = null;
+  let beeperProfile = null;   // the profile the last pass reported (profile=<dir>); null: no probe
+  let beeperArmed = true;     // a free lock fires one pass, then waits until it is seen held again
 
   function log(msg) {
     stdout.write(`[egpt-daemon ${new Date(now()).toISOString()}]${logTag ? ` [${logTag}]` : ''} ${msg}\n`);
@@ -370,19 +400,24 @@ export function createDaemonRuntime(opts = {}) {
     log(`${childLogPaths.stdout} is ${humanBytes(size)} and nothing rotates it while this spine is up — it rolls on the next respawn. Restart the spine, or move the file aside, if that is too big.`);
   }
 
-  // A narrow reimplementation of boot.mjs's selfChatId()/surfaceCfg() lookup — the daemon
-  // has no bridge and no resolved config object, so it reads+parses config.yaml directly.
-  // SAME priority as boot.mjs (networks.whatsapp new shape, falling back to top-level
-  // whatsapp old shape; chat_ids[] if present, else chat_id wrapped as a 1-element array),
-  // just narrower (only this one lookup, not the full resolver). Never throws.
+  // A narrow reimplementation of boot.mjs's announceChatId()/router.mjs adminChatIdsOf — the
+  // daemon has no bridge and no resolved config object, so it reads+parses config.yaml directly.
+  // SAME priority as boot.mjs: the first admin chat of whatsapp, else telegram, else any other
+  // networks: surface; per surface networks.<surface> (else the old top-level block),
+  // admin_chat_ids[], else the pre-rename chat_ids[], else chat_id as a 1-element array.
+  // Never throws.
   function resolveSelfChatId() {
     try {
       const doc = YAML.parse(readFileSync(configYamlPath, 'utf8')) ?? {};
-      const raw = (doc.networks?.whatsapp && typeof doc.networks.whatsapp === 'object') ? doc.networks.whatsapp
-                : (doc.whatsapp && typeof doc.whatsapp === 'object') ? doc.whatsapp
-                : {};
-      const chat_ids = Array.isArray(raw.chat_ids) ? raw.chat_ids : (raw.chat_id != null ? [raw.chat_id] : []);
-      return chat_ids[0] ?? null;
+      const isMap = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+      for (const s of new Set(['whatsapp', 'telegram', ...Object.keys(isMap(doc.networks) ? doc.networks : {})])) {
+        const raw = isMap(doc.networks?.[s]) ? doc.networks[s] : isMap(doc[s]) ? doc[s] : {};
+        const ids = Array.isArray(raw.admin_chat_ids) ? raw.admin_chat_ids
+                  : Array.isArray(raw.chat_ids) ? raw.chat_ids
+                  : (raw.chat_id != null ? [raw.chat_id] : []);
+        if (ids[0] != null) return ids[0];
+      }
+      return null;
     } catch { return null; }
   }
 
@@ -433,25 +468,46 @@ export function createDaemonRuntime(opts = {}) {
     }
   }
 
+  // WHAT /upgrade AND /rewind DID, on the back-up line (operator 2026-11-03: "nothing happened… or
+  // you didn't show updates"): the outcome joins the sidecar the going-down spine wrote, and boot.mjs's
+  // read-back says it after the shas ("— /upgrade: already up to date"). No sidecar (the spine could
+  // not write one): the daemon log is all there is. The ladder's own note overwrites it (force).
+  function addOutcome(outcome) {
+    try { writeFileSync(restartAnnouncePath, JSON.stringify({ ...JSON.parse(readFileSync(restartAnnouncePath, 'utf8')), outcome })); }
+    catch { /* best-effort */ }
+  }
+  function appendOutcome(more) {
+    let was = '';
+    try { was = JSON.parse(readFileSync(restartAnnouncePath, 'utf8')).outcome ?? ''; } catch { /* no sidecar */ }
+    addOutcome(was ? `${was}, ${more}` : more);
+  }
+
   async function runUpgrade() {
     const before = gitVersion(root).sha;
     log(`upgrade requested — git pull (currently ${before})`);
-    const pull = spawnSync('git', ['pull', '--ff-only'], { cwd: root, stdio: 'inherit' });
+    const pull = spawnSync('git', ['pull', '--ff-only'], { cwd: root, stdio: 'pipe' });
     if (pull.status !== 0) {
-      log('git pull failed; continuing with current code');
+      const why = gitWhy(pull).replace(/^: /, '') || `exit ${pull.status}`;
+      log(`git pull failed (${why}); continuing with current code`);
+      addOutcome(`git pull failed (${why}), still on ${before}`);
       return false;
     }
     const after = gitVersion(root);
+    let outcome;
     if (after.sha !== before) {
       log(`pulled ${before} -> ${after.sha} — running npm install`);
+      const n = Number(gitOut(git(['rev-list', '--count', `${before}..${after.sha}`])));
       const r = spawnSync('npm install', { cwd: root, stdio: 'inherit', shell: true });
       if (r.status !== 0) {
         log(`npm install exited ${r.status}${r.error ? `: ${r.error.message}` : ''}; continuing with current deps`);
       }
+      outcome = `pulled ${n} commit${n === 1 ? '' : 's'}, npm install ${r.status === 0 ? 'ok' : `exited ${r.status}`}`;
     } else {
       log(`already up to date at ${after.sha} (${after.tag}, branch ${after.branch}) — rebuilding dist anyway`);
+      outcome = 'already up to date';
     }
-    await buildExtension(root);
+    if (!(await buildExtension(root))) outcome += ', build:ext failed';
+    addOutcome(outcome);
     log(`upgrade complete — now at ${after.sha} (${after.tag}, branch ${after.branch})`);
     return true;
   }
@@ -483,14 +539,16 @@ export function createDaemonRuntime(opts = {}) {
     const co = spawnSync('git', ['checkout', ref], { cwd: root, stdio: 'inherit' });
     if (co.status !== 0) {
       log(`rewind step failed (git checkout ${ref})${co.error ? `: ${co.error.message}` : ''}; restarting anyway with current code`);
+      addOutcome(`git checkout ${ref} failed, still on ${gitVersion(root).sha}`);
       return false;
     }
     const ni = spawnSync('npm install', { cwd: root, stdio: 'inherit', shell: true });
     if (ni.status !== 0) {
       log(`rewind step failed (npm install)${ni.error ? `: ${ni.error.message}` : ''}; restarting anyway with current code`);
+      addOutcome(`checked out ${ref}, npm install exited ${ni.status}`);
       return false;
     }
-    await buildExtension(root);
+    addOutcome(`checked out ${ref}${(await buildExtension(root)) ? '' : ', build:ext failed'}`);
     log(`rewind to ${ref} complete`);
     return true;
   }
@@ -728,6 +786,44 @@ export function createDaemonRuntime(opts = {}) {
     }
   }
 
+  // A Beeper this pass opens inherits its environment, so EGPT_SESSION1 stays out of it.
+  function runBeeperPass() {
+    if (stopping || beeperPass) return;
+    const [script, mode] = beeperArgs;
+    const { [SESSION1_ENV]: _session1, ...env } = processObj.env;
+    const name = `${script} ${mode}`;
+    try {
+      beeperPass = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', join(root, 'setup', script), mode, '-EgptHome', egptHome], {
+        cwd: root, env: { ...env, EGPT_HOME: egptHome }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+      });
+    } catch (e) { log(`beeper: could not run ${name} (${e.message})`); return; }
+    let reported = null;
+    const say = (buf) => {
+      for (const line of String(buf).split(/\r?\n/)) {
+        const m = /^profile=(.+)$/.exec(line.trim());
+        if (m) reported = m[1];
+        else if (line.trim()) log(`beeper: ${line.trim()}`);
+      }
+    };
+    beeperPass.stdout?.on('data', say);
+    beeperPass.stderr?.on('data', say);
+    beeperPass.on('error', (e) => { log(`beeper: ${name} failed to run (${e.message})`); beeperPass = null; });
+    beeperPass.on('exit', (code) => { beeperPass = null; beeperProfile = reported; if (code) log(`beeper: ${name} exited ${code}`); });
+  }
+
+  // Chromium holds <profile>\lockfile with no write sharing while a Beeper runs the profile: a write
+  // open fails exactly then. Test-BeeperLockHeld's verdict, without its delete.
+  function lockfileHeld(dir) {
+    try { closeSync(openSync(join(dir, 'lockfile'), 'r+')); return false; }
+    catch (e) { return e?.code !== 'ENOENT'; }
+  }
+
+  function probeBeeper() {
+    if (!beeperProfile || beeperPass) return;
+    if (beeperLockHeld(beeperProfile)) { beeperArmed = true; return; }
+    if (beeperArmed) { beeperArmed = false; runBeeperPass(); }
+  }
+
   function spawnShell() {
     if (stopping) return null;
     const blocked = blocker();
@@ -798,6 +894,27 @@ export function createDaemonRuntime(opts = {}) {
         return;
       }
 
+      // The pull, and then the daemon itself, even when the pull brought nothing: a checkout pulled by
+      // an earlier /upgrade is on disk while this daemon still runs the code it started with.
+      if (code === UPGRADE_FULL_EXIT_CODE) {
+        await runUpgrade();
+        if (daemonRespawns && !sharedProcess) {
+          appendOutcome('daemon renewed');
+          log('/upgrade full — the daemon exits now; its supervisor respawns it on the new code');
+          stopAll();
+          cliHost?.endAll('/upgrade full: the daemon renews');
+          chromeHost?.closeAll?.('/upgrade full: the daemon renews');
+          setTimeoutFn(() => processObj.exit(UPGRADE_FULL_EXIT_CODE), 500);
+          return;
+        }
+        const why = sharedProcess ? 'this process supervises other profiles too' : 'nothing respawns this daemon (EGPT_DAEMON_RESPAWNS unset)';
+        appendOutcome(`daemon NOT renewed: ${why} — restart the service`);
+        log(`/upgrade full — ${why}: only the spine renews; restart the service to renew the daemon`);
+        backoff = RESTART_MIN_MS;
+        spawnShell();
+        return;
+      }
+
       if (code === RESTART_EXIT_CODE) {
         log('restart requested — no upgrade, no build, no backoff');
         backoff = RESTART_MIN_MS;
@@ -862,18 +979,26 @@ export function createDaemonRuntime(opts = {}) {
   }
 
   function shutdown(sig) {
-    stopping = true;
     log(`${sig} received — stopping egpt-daemon`);
-    releaseSession();
-    closeChildLogs();
-    if (livenessTimer) { clearIntervalFn(livenessTimer); livenessTimer = null; }
-    if (holdTimer) { clearIntervalFn(holdTimer); holdTimer = null; }
-    for (const fd of [runnerLock, s1Claim]) if (fd != null) unlockFile(fd);
-    runnerLock = s1Claim = null;
+    stopAll();
     if (child) {
       try { child.kill('SIGTERM'); } catch {}
     }
     setTimeoutFn(() => processObj.exit(0), 500);
+  }
+
+  // What any leaving daemon lets go of: its claim, its logs, its timers, its locks.
+  function stopAll() {
+    stopping = true;
+    releaseSession();
+    closeChildLogs();
+    if (livenessTimer) { clearIntervalFn(livenessTimer); livenessTimer = null; }
+    if (holdTimer) { clearIntervalFn(holdTimer); holdTimer = null; }
+    if (beeperTimer) { clearIntervalFn(beeperTimer); beeperTimer = null; }
+    if (beeperProbeTimer) { clearIntervalFn(beeperProbeTimer); beeperProbeTimer = null; }
+    try { beeperPass?.kill('SIGTERM'); } catch { /* already gone */ }
+    for (const fd of [runnerLock, s1Claim]) if (fd != null) unlockFile(fd);
+    runnerLock = s1Claim = null;
   }
 
   // Is a live pid recorded in `path`, by the same two facts liveDaemonPid has always decided
@@ -947,6 +1072,13 @@ export function createDaemonRuntime(opts = {}) {
       livenessTimer = setIntervalFn(checkLiveness, livenessIntervalMs);
       livenessTimer?.unref?.();
     }
+    if (platform === 'win32' && beeperIntervalMs > 0 && !beeperTimer) {
+      beeperTimer = setIntervalFn(runBeeperPass, beeperIntervalMs);
+      beeperTimer?.unref?.();
+      beeperProbeTimer = setIntervalFn(probeBeeper, beeperProbeMs);
+      beeperProbeTimer?.unref?.();
+      runBeeperPass();   // now: it also reports the profile the probe watches
+    }
     return c;
   }
 
@@ -1014,7 +1146,7 @@ export function startProfileDaemons({ profiles, createRuntime = createDaemonRunt
   const failed = [];
   for (const home of homes) {
     const runtime = createRuntime({
-      ...opts, perProfileLogs, logTag: opts.logTag ?? tagFor(home), egptHome: home, processObj: seamFor(home),
+      ...opts, perProfileLogs, sharedProcess: shared, logTag: opts.logTag ?? tagFor(home), egptHome: home, processObj: seamFor(home),
     });
     runtimes.push({ egptHome: home, runtime });
     let child = null;

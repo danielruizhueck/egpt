@@ -29,7 +29,7 @@ contacts:
       # where the folder is, home-relative; the slug is its basename (not stored)
       conversation_path: .egpt/conversations/whatsapp/some-group-2606291919
       # the home conversation_path is relative to, msys-style. Pointer only.
-      home_dir: /c/Users/an
+      home_dir: /c/Users/user
 
       # 👂 voice-note echo delay ms: -1 never echo, 0 immediate, N debounce
       # default: config.yaml transcription_service.posts_back_delay_ms
@@ -48,8 +48,13 @@ contacts:
       #warm: { keep: true }
 
       # no reply here: every reply goes to a side group the primary makes (config-schema reply_in_side_group);
-      # true/yes/on → "SI+<title>", any other text → that title
+      # true/yes/on → "SI+<title>", any other text → that title; off → in place, whatever
+      # config.yaml's default; unset → config.yaml reply_in_side_group (group chats only)
       #reply_in_side_group: on
+
+      # who takes a quote-reply to this node's bot when the quoted post names no being
+      # (config-schema reply_default); unset → such a reply addresses nobody
+      #reply_default: egpt
 
       # commands anyone here may run; replaces config.yaml public_commands, [] = none
       #public_commands: [join, split, send, end]
@@ -77,12 +82,17 @@ contacts:
           # here falls to that global default, then to this node's ordinary default.
           #access_level: all
 
-          # this agent's reachability allow-list for THIS conversation only - a list of
-          # sender ids (same shape as config.yaml networks.*.allowed_users). REPLACES
-          # (does not merge with) this agent's global config.yaml
-          # agents.<name>.allowed_users default when set; unset here falls to that
-          # global default, then to "reachable by anyone" (today's ordinary default).
+          # more people who may wake this agent in THIS conversation only - a list of
+          # sender ids (same shape as config.yaml networks.*.allowed_users). JOINS
+          # (does not replace) this agent's global config.yaml
+          # agents.<name>.conversation_defaults.allowed_users and the node's owners
+          # (config.yaml conversation_defaults.allowed_users), who always may; ['*'] =
+          # anyone, [] adds nobody.
           #allowed_users: []
+          # false makes the list above FINAL: this agent's and the node's lists are not
+          # joined in, so only these ids (and the Operator, who always may) wake it here.
+          # Default true.
+          #allowed_users_inheritance: false
 
           # the names that address this agent IN THIS CHAT (@name, a leading bare name,
           # /<name> commands, the bare-name readback). REPLACES config.yaml
@@ -104,18 +114,18 @@ contacts:
 
     # a second id for the SAME contact - one thread, one folder, one mode.
     # One level only; an alias pointing at an alias resolves to nothing.
-    #"584122182178@s.whatsapp.net":
+    #"15550100006@s.whatsapp.net":
     #  aliasOf: "EXAMPLE_CHAT_ID"
 
   #telegram:
-  #  "88164392": # An
+  #  "100000001": # An
   #    conversation_path: .egpt/conversations/telegram/an-2605211200
-  #    home_dir: /c/Users/an
+  #    home_dir: /c/Users/user
 
   #shell:
   #  main: # console
   #    conversation_path: .egpt/conversations/shell/lobby
-  #    home_dir: /c/Users/an
+  #    home_dir: /c/Users/user
 
 
 # INERT - `system_thread:` at the root: round-trips, nothing reads it. Don't copy

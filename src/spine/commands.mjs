@@ -23,7 +23,7 @@ import { loadPermissionLevel, ACCESS_LEVELS, isAccessLevel } from './permission-
 // over a single already-extracted token is the house single-token lookup (src/spine/mesh.mjs's
 // findAgentByToken, src/spine/heartbeat-loader.mjs's `agent:`); `addressableTokens` LISTS the
 // valid handles in the not-hosted log line. See agentsCmd's HANDLE → KEY block.
-import { addressed, addressableTokens, agentsInChat, fallbackWake, isKnownSender, mayWake, wakeTokens, voiceWakeTokens } from './router.mjs';
+import { addressed, addressableTokens, addressingView, adminChatIdsOf, agentsInChat, fallbackWake, isKnownSender, mayWake, wakeTokens, voiceWakeTokens } from './router.mjs';
 import { superChannelAlive, resolveMode } from './gating.mjs';
 import { stat as fsStat, readFile as fsReadFile, writeFile as fsWriteFile, mkdir as fsMkdir, readdir as fsReaddir, rm as fsRm, rename as fsRename } from 'node:fs/promises';
 import { readdirSync } from 'node:fs';
@@ -37,7 +37,7 @@ import { shortChatId } from '../bridges/chat-id.mjs';
 // 2026-08-31) — the scorer lives in src/text-similarity.mjs beside the echo one, so
 // this module never grows a fuzzy-match of its own.
 import { closestNames } from '../text-similarity.mjs';
-import { ownNodeNamesOf, knownNodeNames } from './node-names.mjs';
+import { ownNodeNamesOf, knownNodeNames, fromOtherNode } from './node-names.mjs';
 import { Room, ROOMS_ROOT } from '../room-core.mjs';
 import { SHELL_SURFACE, surfaceOf as surfaceOfNetwork } from './identity.mjs';
 // The room slug rule (fixedSlugFor, surface `room`) applied to a READ, which must not mint —
@@ -53,8 +53,9 @@ import { CONFIG_YAML_PATH, writeConfigKey, beeperBlockOf } from '../tools/config
 import { isRestartKey } from './config-swap.mjs';
 import { resolveConfigKey } from '../../config/config-schema.mjs';
 import { createCdpClient, createChannelTransport } from '../tools/cdp.mjs';
-import { resolveBrainProfile, chromePipeArgs, chromePlainArgs, stampGroupProfile, profileHolder as defaultProfileHolder } from '../tools/chrome-launcher.mjs';
+import { resolveBrainProfile, chromePipeArgs, chromePlainArgs, stampGroupProfile, profileHolder as defaultProfileHolder, killProcessTree as defaultKillProcessTree, chromeProcesses as defaultChromeProcesses, cmdUsesProfile } from '../tools/chrome-launcher.mjs';
 import { connectChromeHost } from '../chrome-host.mjs';
+import { linkOf, GRACE_MS, IDLE_MS } from '../tools/screen-tunnel.mjs';
 import { admitLaunch, estimateChromeBytes, BRAIN_GROUP, SHARED_GROUP, isSafeGroupName, chromeConversationOf } from './chrome-pool.mjs';
 import { freemem } from 'node:os';
 import { helpText, COMMAND_SET, parseBeingCommand } from '../interpreter.mjs';
@@ -62,7 +63,7 @@ import { uploadNote, radioNoteFilename, pickSpeaker } from '../radio-relay.mjs';
 import { stripNodeSignature, stripRenderedNodeSignature, decodeChatCanary } from '../node-signature.mjs';
 import { bodyForMessageId } from '../transcript-log.mjs';
 import { htmlToMarkdown } from '../html-to-markdown.mjs';
-import { readRoomConfig, readBrowserGroups, readBrowserColors } from '../rooms-file.mjs';
+import { readRoomConfig, readBrowserGroups, setBrowserGroup, readBrowserColors } from '../rooms-file.mjs';
 import { hhmm, dayBoundary } from '../dispatch-line.mjs';
 import { statCache } from '../stat-cache.mjs';
 
@@ -78,6 +79,8 @@ export const CHROME_BRAIN_PROFILE = resolveBrainProfile();
 // (per-Chrome cost floor) and chrome.memory_margin_mb (free-memory margin a launch must leave).
 const CHROME_LAUNCH_ESTIMATE_MB = 500;
 const CHROME_MEMORY_MARGIN_MB = 1024;
+const BROWSER_IDLE_MINUTES = 30;   // chrome.idle_minutes: a screen link closes after this long with no browser use; 0 / "keep" = never
+const IDLE_SWEEP_MS = 30_000;
 const MB = 1024 * 1024;
 
 // Default per-pid RSS reader (injected seam; faked in tests). Best-effort working set in bytes, or
@@ -266,9 +269,12 @@ const quoteLeadingCommand = (text) => String(text ?? '').replace(/^\/([a-z0-9_-]
 
 // The commands anyone in a chat may run (operator 2026-10-19): config.yaml public_commands, or the
 // chat's own conversations.yaml list, which replaces it. Everything else is the node's allowed users'.
-const PUBLIC_COMMANDS_DEFAULT = ['split', 'send', 'end'];
+const PUBLIC_COMMANDS_DEFAULT = ['split', 'send', 'end', 'side'];
 // Bare /agents: a non-operator gets agentsPublic where public_commands lists agents.
 const AGENTS_BARE_CMD = /^\/agents\s*$/i;
+// /<handle> super <message> (operator 2026-11-04): a turn of the chat's superintendent, agents.super.
+const SUPER_CMD = /^\/super\b/i;
+const SUPER_BEING = 'super';
 // The public list's words for a reply mode; 'off' has none (that being is not listed).
 const PUBLIC_MODE_WORDS = {
   on: 'answers everything', auto: 'answers everything',
@@ -348,16 +354,16 @@ const LIVE_AGENT_SUBS = Object.keys(AGENT_SUB_ARITY).filter((v) => !Object.hasOw
 // Every level name in the operator-facing text comes from ACCESS_LEVELS (permission-levels.mjs),
 // never a literal: the tier list is spelled out in ONE place, and a new tier updates this line,
 // the refusals below and /help together or not at all. Same rule now holds for the verb list.
-export const AGENTS_USAGE = `usage: /<handle> agents [<verb>] [<value>] [<handle>|force all [<conversation>]] — verbs: refresh | rethread | reset | compact | stop | mode <${AUTO_MODES.join('|')}> | access_level <${ACCESS_LEVELS.join('|')}>. A verb with no target acts on the being the command was typed to. \`/<handle> agents <handle>|force all\` shows status; bare \`all\` is refused. <conversation> is the rest of the line, spaces and all: \`/e agents refresh e eGPT Rodz Lulu An\`.`;
+export const AGENTS_USAGE = `usage: /<handle> agents [<verb>] [<value>] [<handle>|force all [<conversation>]] — verbs: refresh | rethread | reset | compact | stop | mode <${AUTO_MODES.join('|')}> | access_level <${ACCESS_LEVELS.join('|')}>. A verb with no target acts on the being the command was typed to. \`/<handle> agents <handle>|force all\` shows status; bare \`all\` is refused. <conversation> is the rest of the line, spaces and all: \`/e agents refresh e eGPT Rodz Lola An\`.`;
 
 // args (already whitespace-split) -> what agentsCmd wants: { args: [handle, verb, value],
 // slug }, or { retired } for the old order. Pure; exported for tests.
 //
 // The conversation is EVERYTHING after the handle, joined with single spaces (operator
 // 2026-09-28: "please enable: /agent refresh <agent> <channel slug> so i can fire from eGPT
-// Admin"). It was one token, and chat names and slugs carry spaces (`eGPT Rodz Lulu An-
-// 2609201419`), so `refresh e eGPT Rodz Lulu An` resolved "eGPT" and answered `don't know
-// where to put "Rodz Lulu An"`. With nothing left over in any shape, that reply went too.
+// Admin"). It was one token, and chat names and slugs carry spaces (`eGPT Rodz Lola An-
+// 2609201419`), so `refresh e eGPT Rodz Lola An` resolved "eGPT" and answered `don't know
+// where to put "Rodz Lola An"`. With nothing left over in any shape, that reply went too.
 // `force all` is ONE target (operator 2026-10-11); the conversation starts after it.
 const FORCE_ALL = 'force all';
 const targetAt = (args, i) => (args[i]?.toLowerCase() === 'force' && args[i + 1]?.toLowerCase() === 'all'
@@ -410,6 +416,20 @@ export const GROUP_TITLE_DEFAULT = '{group}-{name}';
 // Every side group's title starts with it: "SI+<group>-<name>" (/split), "SI+<group>" (automatic,
 // unless reply_in_side_group names the title). config.group_title_prefix replaces it; "" = none.
 export const SIDE_GROUP_PREFIX = 'SI+';
+// reply_in_side_group's value: a truthy word → true ("SI+<group>"), a falsy word / empty / absent →
+// false, any other string → that title.
+const replyInSideGroupOf = (v) => {
+  if (v === true || v === 1) return true;
+  const s = typeof v === 'string' ? v.trim() : '';
+  if (['true', 'yes', 'on', '1'].includes(s.toLowerCase())) return true;
+  return ['false', 'no', 'off', '0', ''].includes(s.toLowerCase()) ? false : s;
+};
+// THE NODE DEFAULT (operator 2026-11-02): config.yaml reply_in_side_group on → a group chat whose own
+// entry says nothing replies in its SI+ group. Never a 1:1, an alias or fork entry, or Telegram
+// (http chatboxes and rooms are never groups). `group`: the bridge's chatType / Beeper's chat type.
+export const sideGroupByDefault = (entry, { surface, group }, config = {}) =>
+  replyInSideGroupOf(config?.reply_in_side_group) === true && entry?.reply_in_side_group == null
+  && !entry?.aliasOf && !entry?.parent_chat && group === true && surface !== 'telegram';
 // /send's posting account when config.send.post_back_from is unset or invalid: the operator's OWN
 // account (primary) — /send relays as the operator, who typed it (operator 2026-10-04). The config
 // override config.send.post_back_from='secondary' still routes via the mouth when set.
@@ -451,7 +471,7 @@ export function rewriteForkSessionJsonl(raw, { sessionId, cwd = null }) {
 }
 
 // The one id form that addresses the SECONDARY account (Rodz) from the PRIMARY account's roster is
-// the PHONE NUMBER (idKey in src/bridges/beeper.mjs; @dolly-egpt:beeper.com is the secondary's
+// the PHONE NUMBER (idKey in src/bridges/beeper.mjs; @mouth-acct:beeper.com is the secondary's
 // OWN-account id and does NOT reach it from here — investigation 2026-10-01). phoneDigitsOf returns
 // the bare digits of a phone-shaped id, or null for anything else (a matrix/@user id, a slug, a name).
 function phoneDigitsOf(v) {
@@ -566,12 +586,23 @@ export function createCommands({
   // Run by the Session 0 daemon: no desktop, so no browser until someone logs in (operator 2026-10-22).
   inSession0 = process.env.EGPT_SUPERVISED === '1' && String(process.env.EGPT_SESSION1 ?? '').trim() !== '1',
   profileHolder = defaultProfileHolder,
+  killProcessTree = defaultKillProcessTree,   // seam: tests never kill a real pid
+  chromeProcesses = defaultChromeProcesses,
   freeMem = () => freemem(),
   rssOf = defaultRssOf,
+  platform = process.platform,   // seam: memoryOf is omitted on win32
   onChromeLog = () => {},
   browserGroups = readBrowserGroups,     // config/browsers.yaml's groups, read fresh (rooms-file.readBrowserGroups)
+  assignBrowserGroup = setBrowserGroup,  // (chat name, group): `/browser <profile>` records the chat in that table (rooms-file.setBrowserGroup)
   profileFolders = defaultProfileFolders,   // the folder names under the profiles root
   browserColors = readBrowserColors,     // its optional colors: map, read at each launch
+  // A SCREEN PER BROWSER GROUP (plans/2611022204-BROWSER-SCREENS.md): browserScreens starts the group's virtual
+  // screen (src/tools/browser-screens.mjs), screenTunnel its link (src/tools/screen-tunnel.mjs). Boot injects both;
+  // null, or a node where browserScreens.available() is false, is a desktop node: the Chrome is a normal window
+  // there. adminChat → { chatId } | { reason, to } is boot's resolveAdminChat: /browser's control link goes there.
+  browserScreens = null,
+  screenTunnel = null,
+  adminChat = async () => ({ reason: 'unset' }),
   commandAliasesPath = join(EGPT_HOME, 'config', 'commands_alias.yaml'),   // alias → command line (aliased, below)
   // git probe for /status (short sha + subject). Mirrors boot's gitOut so it's
   // fakeable in tests without threading spawnSync through createCommands.
@@ -618,6 +649,8 @@ export function createCommands({
   // message's line in transcript.md. Defaults: no backlog, UTC.
   backlogOf = () => [],
   timeZone = null,
+  // /super's turn: ({ being, ev }) → { turn } | null, THE SPINE's commandTurn, late-bound by boot like backlogOf.
+  commandTurn = async () => null,
   // ── /split + /send + /end seams (operator 2026-10-03) ─────────────────────────────────────
   // /split backs a new side-group with a NEW conversation diverged from this one (the automatic group
   // aliases one to it); /send relays a chosen message back to the original chat;
@@ -733,16 +766,10 @@ export function createCommands({
     return out;
   })();
 
-  // Per-surface self-DM command channels (operator 2026-07-09): the NEW shape lists them under
-  // networks:.<surface>.chat_ids (plural); the OLD shape has <surface>.chat_id (singular). Read
-  // BOTH, preferring networks:, always yielding a LIST — a command typed in ANY of the surface's
-  // command channels is the operator (a singular chat_id normalizes to a 1-element list).
-  function commandChatIds(surface) {
-    const c = cfg() ?? {};
-    const raw = (c.networks?.[surface] && typeof c.networks[surface] === 'object') ? c.networks[surface]
-              : (c[surface] && typeof c[surface] === 'object') ? c[surface] : {};
-    return Array.isArray(raw.chat_ids) ? raw.chat_ids : (raw.chat_id != null ? [raw.chat_id] : []);
-  }
+  // Per-surface command channels: networks.<surface>.admin_chat_ids (router.mjs adminChatIdsOf, which
+  // also reads the pre-rename chat_ids and the old singular chat_id) — a command typed in ANY of the
+  // surface's admin chats is the operator.
+  function commandChatIds(surface) { return adminChatIdsOf(cfg() ?? {}, surface); }
   // The operator gate — reused by isCommand and every command handler. Same
   // authorization every slash command uses: the origin surface's own Self DM (ids
   // are per-surface namespaces), an authorized sender, or the account owner (isSender).
@@ -780,7 +807,9 @@ export function createCommands({
     let body = String(ev?.body ?? '').trim();
     let alias = null;
     if (!body.startsWith('/')) {
-      const hit = aliasOf(ev, body);
+      // A being's line (node-signed), read past its stamp and frame: /super is the only command found there.
+      const view = ev?.fromNode != null ? addressingView(ev).trim() : null;
+      const hit = view && parseBeingCommand(view)?.cmd === '/super' ? { body: view, alias: null } : aliasOf(ev, body);
       if (!hit) return null;
       ({ body, alias } = hit);
     }
@@ -813,11 +842,12 @@ export function createCommands({
 
   // Same id in any form counts as the Self DM (lid vs phone-form — a /restart
   // often arrives as the @lid self-jid). The Self DM is PER-SURFACE now (operator
-  // 2026-07-02): a /restart typed in the telegram surface's own chat_id is checked
-  // against cfg.telegram.chat_id, not whatsapp's — ids are per-surface namespaces.
+  // 2026-07-02): a /restart typed in the telegram surface's own admin chat is checked
+  // against networks.telegram.admin_chat_ids, not whatsapp's — ids are per-surface namespaces.
   // Fall back to the whatsapp block when ev.surface is absent (safety). Authorized
   // senders (per-surface allowed_users / isSender) can command from anywhere.
-  // Anyone else runs only the chat's public commands (publicCommandsOf), never from a node-signed line.
+  // Anyone else runs only the chat's public commands (publicCommandsOf), never from a node-signed line,
+  // except a being's /super.
   // The ev is commandOf's: a command names its being (commandBeing), except a registered command on
   // the console.
   async function isCommand(ev) {
@@ -826,6 +856,8 @@ export function createCommands({
     if (!body.startsWith('/')) return false;
     const onConsole = surfaceOf(ev) === SHELL_SURFACE && COMMAND_SET.has(body.split(/\s/)[0].toLowerCase());
     if (ev?.commandBeing == null && !onConsole) return false;
+    // A being's line runs /super, but never this node's own S's line (author exclusion).
+    if (ev?.fromNode != null && SUPER_CMD.test(body)) return !(String(ev.fromBeing ?? '').toLowerCase() === SUPER_BEING && !fromOtherNode(cfg(), ev));
     if (isOperator(ev)) return true;
     if (ev?.fromNode != null) return false;
     const word = body.slice(1).split(/[\s=]/)[0].toLowerCase();
@@ -866,12 +898,13 @@ export function createCommands({
   // THE WRAPPER around the dispatch: run the command, then emit the ONE audit line. A '/'-command the
   // dispatch handled on THIS node is audited (outcome inline when the handler returned one); NO_AUDIT
   // (an ignored public /agents list) and a non-'/'-message (the rs radio quick reply) are not.
+  // A command that opened a turn (/super) hands back `{ turn }`, so the chat's lane does not wait on it.
   async function run(ev) {
     const outcome = await runDispatch(ev);
     if (outcome === NO_AUDIT) return;
     const m = /^\/(\w+)/.exec(String(ev?.body ?? '').trim());
-    if (!m) return;
-    await auditCommand(ev, m[1], typeof outcome === 'string' ? outcome : null);
+    if (m) await auditCommand(ev, m[1], typeof outcome === 'string' ? outcome : null);
+    return outcome?.turn ? { turn: outcome.turn } : undefined;
   }
 
   async function runDispatch(ev) {
@@ -922,7 +955,7 @@ export function createCommands({
     // `[<conv>]` and `=<slug>` are the same thing said two ways.
     //
     // `=<slug>` is a PRIVATE convention parsed by THIS regex alone, bound directly to the
-    // command token (`/e agents=palma refresh e`).
+    // command token (`/e agents=muestra refresh e`).
     // Omitted = the CURRENT conversation (ev.surface/ev.chatId), exactly like today's bare
     // /e reset/auto/access. Given = resolved through resolveTarget — the SAME fuzzy/jid
     // resolver /e auto <mode> <target> and /e reset <target> already used, reused verbatim
@@ -998,9 +1031,13 @@ export function createCommands({
     if (loginMatch) { await send?.(ev.chatId, await loginCmd(ev, loginMatch[1])); return; }
 
     // /browser refresh [group] [url] — this chat's (or a named group's) browser profile in a plain Chrome window, for a human
-    // sign-in or check (browserRefresh). Pre-catch-all.
+    // sign-in or check (browserRefresh); /browser [all|stop|close] [group] — its screen's link (browserShow). Pre-catch-all.
     const browserMatch = /^\/browser\b[ \t]*(.*)$/i.exec(line);
     if (browserMatch) { await send?.(ev.chatId, await browserCmd(ev, browserMatch[1].trim())); return; }
+
+    // /browsers — the open browsers, one line each (browsersCmd; operator 2026-11-20). `/browser\b` does not match it. Pre-catch-all.
+    const browsersMatch = /^\/browsers\s*$/i.test(line);
+    if (browsersMatch) { await send?.(ev.chatId, await browsersCmd()); return; }
 
     // /rooms — bare: list the saved rooms. Otherwise `/rooms <verb> [<room>]`, routed to the
     // same room() the singular /rooms used to reach. /rooms itself is retired (operator
@@ -1079,7 +1116,7 @@ export function createCommands({
     if (updateMatch) {
       const target = updateMatch[1].trim().toLowerCase();
       const usage = `usage: ${hintOf('update beeper', ev)} — install the Beeper update this node downloaded (eGPT itself: ${hintOf('upgrade', ev)})`;
-      await send?.(ev.chatId, target !== 'beeper' ? usage : beeperUpdate ? await beeperUpdate.update() : 'Beeper updates are not wired on this node');
+      await send?.(ev.chatId, target !== 'beeper' ? usage : beeperUpdate ? await beeperUpdate.update((t) => send?.(ev.chatId, t)) : 'Beeper updates are not wired on this node');
       return;
     }
 
@@ -1103,6 +1140,18 @@ export function createCommands({
     if (sendMatch) { await sendToOriginal(ev); return; }
     const endMatch = /^\/end\b[\s\S]*$/i.exec(line);
     if (endMatch) { return await end(ev); }   // end() returns its outcome string (archived / no-op) for the audit line
+
+    // /side <prompt> — one turn of this chat's being, its reply in the chat's SI+ group (sideTurn).
+    const sideMatch = /^\/side\b[ \t]*([\s\S]*)$/i.exec(line);
+    if (sideMatch) return await sideTurn(ev, sideMatch[1].trim());
+
+    // /super <message> — a turn of this chat's S (agents.super), answered here: its own thread in this chat.
+    const superMatch = /^\/super\b[ \t]*([\s\S]*)$/i.exec(line);
+    if (superMatch) {
+      if (!superMatch[1].trim()) { await send?.(ev.chatId, `usage: ${hintOf('super <message>', ev)}`); return; }
+      if (!cfg().agents?.[SUPER_BEING]) { await send?.(ev.chatId, `/super: no ${SUPER_BEING} agent on this node (config.yaml agents.${SUPER_BEING})`); return 'no super agent'; }
+      return (await commandTurn({ being: SUPER_BEING, ev })) ?? 'no turn';
+    }
 
     // A registered command no branch above dispatches.
     const tok = line.split(/\s+/)[0];
@@ -1128,7 +1177,8 @@ export function createCommands({
   const _ensuring = new Map();   // profileDir → in-flight launch (per-profile single-flight)
   const _signin = new Map();     // profileDir → { group, pid, chatId }: a plain Chrome holds it (/browser refresh)
   const chromeAlive = (e) => !!e && !e.channel.closed;
-  const evictable = (e) => !e.busy && chromeAlive(e) && e.group !== BRAIN_GROUP && e.group !== SHARED_GROUP;
+  // (operator 2026-11-19: a group someone is watching through its link is not idle — eviction left them a black screen)
+  const evictable = (e) => !e.busy && chromeAlive(e) && e.group !== BRAIN_GROUP && e.group !== SHARED_GROUP && !(hasScreens() && screenTunnel?.isOpen(e.group));
   const launchEstimateBytes = () => (Number(cfg()?.chrome?.launch_estimate_mb) || CHROME_LAUNCH_ESTIMATE_MB) * MB;
   const memoryMarginBytes = () => (Number(cfg()?.chrome?.memory_margin_mb) || CHROME_MEMORY_MARGIN_MB) * MB;
 
@@ -1179,12 +1229,18 @@ export function createCommands({
   // already holds → no browser + one log line. Never throws.
   // Resolves { group, profileDir, client, pid, launched, running, why? }.
   function ensureChrome(conversation, opts) { return _reattached.then(() => ensureGroupChrome(conversation, opts)); }
-  // A conversation's group and profile dir; no usable profile → profileDir null + why, logged.
+  // A conversation's group and profile dir; no usable profile → profileDir null + why, logged. One profile, one Chrome
+  // (Chrome's SingletonLock): a profile another group's Chrome (or sign-in window) holds is refused.
   function groupProfileOf(conversation) {
     const group = conversation ? conversation.group : BRAIN_GROUP;
     const profileDir = chromeProfileOf(cfg(), conversation);
-    if (profileDir && (group === BRAIN_GROUP || profileDir !== chromeProfileOf(cfg()))) return { group, profileDir };
-    const why = conversation?.why || `browser group "${group}" ${profileDir ? 'is the brain profile dir' : 'is unusable'}`;
+    let why = conversation?.why;
+    if (profileDir && (group === BRAIN_GROUP || profileDir !== chromeProfileOf(cfg()))) {
+      const heldBy = chromeAlive(_groups.get(profileDir)) ? _groups.get(profileDir).group : _signin.get(profileDir)?.group;
+      if (heldBy && heldBy !== group) why = `the "${basename(profileDir)}" profile is open in group "${heldBy}"'s browser — one profile, one Chrome; close that browser first`;
+      else return { group, profileDir };
+    }
+    why ||= `browser group "${group}" ${profileDir ? 'is the brain profile dir' : 'is unusable'}`;
     onChromeLog(`no browser for "${conversation?.name ?? ''}": ${why}`);
     return { group, profileDir: null, why };
   }
@@ -1205,7 +1261,7 @@ export function createCommands({
       const holder = profileHolder(profileDir);
       if (holder) {
         onChromeLog(`not launching "${group}" Chrome ${profileDir}: another Chrome holds it (${holder})`);
-        return { group, profileDir, client: null, launched: false, running: false, why: `the "${group}" browser is open in a normal window; close it to hand it back to the spine` };
+        return { group, profileDir, client: null, launched: false, running: false, why: `the "${group}" browser is open in a normal window; close it to hand it back to the spine, or \`browser close\` closes it for you` };
       }
       if (group !== BRAIN_GROUP) {
         const estimateBytes = estimateChromeBytes({
@@ -1224,7 +1280,9 @@ export function createCommands({
       stampGroupProfile({ userDataDir: profileDir, group, colors: await browserColors(), log: onChromeLog });   // no Chrome holds it (above)
       let spawned;
       try {
-        spawned = await chromeHost.launch({ group, profileDir, bin: chromeBinOf(cfg()), argv: chromePipeArgs({ userDataDir: profileDir, windowName: group }) });
+        const display = await displayOf(group);
+        spawned = await chromeHost.launch({ group, profileDir, bin: chromeBinOf(cfg()), argv: chromePipeArgs({ userDataDir: profileDir, windowName: group }), ...(display && { display }) });
+        oldDaemon(group, display, spawned);
       } catch (e) {
         onChromeLog(`group Chrome ${profileDir} launch failed — ${e?.message ?? e}`);
         return { group, profileDir, client: null, launched: false, running: false, why: String(e?.message ?? e) };
@@ -1261,10 +1319,37 @@ export function createCommands({
   // it in a PLAIN Chrome on the group's profile: eGPT's Chrome closes through the daemon, the plain one
   // opens there, and the group is held until it exits. No stealth, no captcha solving here.
   // [group]: a known group's name (any case, never url-shaped); else the chat's group and [url].
+  // /browser [all|stop|close] [group] — the group's screen, shared by link (browserShow, below).
   async function browserCmd(ev, args) {
-    const [verb, ...rest] = args.split(/\s+/);
-    const usage = (more = '') => `usage: ${hintOf('browser refresh [group] [url]', ev)} — close my browser for this chat (or [group]) and open a normal Chrome window on its profile, for you to sign in or pass a check${more}`;
-    if (verb.toLowerCase() !== 'refresh' || rest.length > 2) return usage();
+    const [verb = '', ...rest] = args.split(/\s+/).filter(Boolean);
+    const usage = (more = '') => `usage: ${hintOf('browser refresh [group] [url]', ev)} — close my browser for this chat (or [group]) and open a normal Chrome window on its profile, for you to sign in or pass a check · ${hintOf('browser [all] [<profile> [new]] [keep]', ev)} — this chat's browser and its link; <profile> (default: the chat's, else \`shared\`) puts this chat on that profile for good — \`new\` makes one that does not exist, \`shared\` undoes it. The link: view-only here and control to the admin channel; all: control here; keep: the link stays open however idle the browser is · ${hintOf('browser stop|close [group|all]', ev)} — stop: close the link; close: close the browser, or every open browser (all) · ${hintOf('browsers', ev)} (or ${hintOf('browser list', ev)}) — the open browsers${more}`;
+    const v = verb.toLowerCase();
+    if (v === 'list') return rest.length ? usage() : browsersCmd();   // alias of /browsers (operator 2026-11-20)
+    if (v !== 'refresh') {
+      const op = ['all', 'stop', 'close'].includes(v) ? v : '';
+      const words = op ? rest : [verb, ...rest].filter(Boolean);
+      const known = await knownBrowserGroups();
+      if (op === 'stop' || op === 'close') {   // these name a GROUP
+        if (words.length > 1) return usage();
+        if (op === 'close' && words[0]?.toLowerCase() === 'all') return browserCloseAll();   // the keyword, before any group named "all" (operator 2026-11-20)
+        const named = words[0] ? known.find((g) => g.toLowerCase() === words[0].toLowerCase()) : null;
+        if (words[0] && !named) return usage(`; groups: ${known.join(', ')}`);
+        return op === 'stop' ? browserStop(ev, named) : browserClose(ev, named);
+      }
+      // [<profile> [new]] [keep]: the profile this chat is put on (a known one, or `new`)
+      const keep = words.at(-1)?.toLowerCase() === 'keep' && !!words.pop();
+      const isNew = words.length === 2 && words[1].toLowerCase() === 'new' && !!words.pop();
+      if (words.length > 1) return usage();
+      let profile = null;
+      if (words[0]) {
+        profile = known.find((g) => g.toLowerCase() === words[0].toLowerCase());
+        if (!profile && !isNew) return `no profile "${words[0]}" — ${hintOf(`browser ${words[0]} new`, ev)} makes it; profiles: ${known.join(', ')}`;
+        profile ??= words[0];
+        if (!isSafeGroupName(profile)) return usage();
+      }
+      return browserShow(ev, profile, op === 'all', keep);
+    }
+    if (rest.length > 2) return usage();
     let group = null;
     if (rest[0] && !urlShaped(rest[0])) {
       const known = await knownBrowserGroups();
@@ -1281,13 +1366,21 @@ export function createCommands({
     const names = [BRAIN_GROUP, SHARED_GROUP, ...Object.keys(await browserGroups()), ...profileFolders()];
     return [...new Set(names)].filter((g) => isSafeGroupName(g) && !/\s/.test(g) && !urlShaped(g)).sort();
   }
+  // The group a /browser line names, else this chat's: { conversation, group, profileDir, why }.
+  async function browserTarget(ev, named) {
+    const conversation = named ? { key: '', name: named, group: named } : await browserConversationOf(surfaceOf(ev), ev.chatId);
+    return { conversation, ...groupProfileOf(conversation) };
+  }
   async function browserRefresh(ev, url, named) {
     const whose = named ? `group "${named}"` : 'this chat';
-    const { group, profileDir, why } = groupProfileOf(named ? { key: '', name: named, group: named } : await browserConversationOf(surfaceOf(ev), ev.chatId));
+    const { group, profileDir, why } = await browserTarget(ev, named);
     if (!profileDir) return `no browser for ${whose} — ${why}`;
     if (!chromeHost) return `no browser for ${whose} — ${NO_CHROME_HOST}`;
     await _reattached;
     if (_signin.has(profileDir)) return `the "${group}" browser is already held for sign-in — close that Chrome window first`;
+    let display;
+    try { display = await displayOf(group); }
+    catch (e) { return `/browser refresh: the "${group}" screen did not start — ${e?.message ?? e}`; }
     const hold = { group, pid: null, chatId: ev.chatId };
     _signin.set(profileDir, hold);
     await _ensuring.get(profileDir);
@@ -1300,7 +1393,9 @@ export function createCommands({
     for (let i = 0; holder && closed && i < 40; i++) { await new Promise((r) => setTimeout(r, 250)); holder = holderOf(); }
     try {
       if (holder) throw new Error(`another Chrome holds the "${group}" profile (${holder}) — close it first`);
-      hold.pid = (await chromeHost.launchPlain({ group, profileDir, bin: chromeBinOf(cfg()), argv: chromePlainArgs({ userDataDir: profileDir, url }) })).pid;
+      const spawned = await chromeHost.launchPlain({ group, profileDir, bin: chromeBinOf(cfg()), argv: chromePlainArgs({ userDataDir: profileDir, url }), ...(display && { display }) });
+      hold.pid = spawned.pid;
+      oldDaemon(group, display, spawned);
     } catch (e) {
       _signin.delete(profileDir);
       onChromeLog(`"${group}" sign-in window not opened — ${e?.message ?? e}`);
@@ -1308,8 +1403,245 @@ export function createCommands({
     }
     onChromeLog(`"${group}" held for sign-in: plain Chrome pid ${hold.pid} on ${profileDir}`);
     const lead = closed ? `I closed my browser for ${group}.` : `My browser for ${group} was not open.`;
-    const vnc = process.platform === 'win32' ? '' : ' Open VNC (:6080) to see it.';
-    return `${lead} A normal Chrome window opened on ${cfg().node_name ?? 'this node'} at ${url}: sign in / pass the check yourself, then close that window — I'll use the session next time.${vnc}`;
+    const done = `${lead} A normal Chrome window opened on ${cfg().node_name ?? 'this node'} at ${url}: sign in / pass the check yourself, then close that window — I'll use the session next time.`;
+    // On the group's screen: the answer carries its link instead of "Open VNC (:6080)" (plan decision 7).
+    return display ? `${done}\n${await shareLinks(ev, group, false)}` : done;
+  }
+
+  // ── A SCREEN PER BROWSER GROUP (plans/2611022204-BROWSER-SCREENS.md; operator 2026-11-02, NU Ops #96-#121) ──
+  // "make a structural command that when ran returns the link"; "a screen per browser group"; "only operator can
+  // drive by default with /n browser, /n browser all should let anyone drive". No being turn: the answer IS the link.
+  // A container node shows each group's Chrome on its own virtual screen (browserScreens) and shares it through a
+  // quick tunnel (screenTunnel); a desktop node (Windows, no Xvfb) has neither — the Chrome is a window on that PC.
+  // Nothing here closes on memory (operator #121: "don't close anything automatically"); only the link closes
+  // itself, on its viewers (screen-tunnel.mjs) or on idleness (the idle timer, below).
+  const hasScreens = () => !!browserScreens?.available();
+  // THE IDLE TIMER (operator 2026-11-19: "a browser inactivity timer, with an option to keep on"). A viewer left on a
+  // static tab is not activity: the signal is the group's lastUsedAt, which every spine browser use already stamps
+  // (ensureChrome: a being's tool, /tabs, /open, /browser…), or human input on its X display (activityOf). Past chrome.idle_minutes the link and the VNC close (the
+  // Chrome and its Xvfb stay) and, with no link, the group is evictable again. `keep` (per launch) skips it; a link
+  // shared before a spine restart is swept too, but its chat is forgotten (no line, a log).
+  const _keep = new Set();       // groups whose link was launched with keep: until /browser close or stop
+  const _linkChat = new Map();   // group → the chat its link was shared in (where the idle line goes)
+  let _sweep = null;
+  const idleMinutes = () => {
+    const v = cfg()?.chrome?.idle_minutes;
+    if (v == null) return BROWSER_IDLE_MINUTES;
+    return String(v).toLowerCase() === 'keep' ? 0 : Number(v) >= 0 ? Number(v) : BROWSER_IDLE_MINUTES;
+  };
+  // Activity = the later of the spine's last browser use and the last human input on the group's X display (a click or a key
+  // through VNC is real X input; operator 2026-11-20: "click counts, and typing in browser"). A probe that cannot answer
+  // counts as active — a broken probe never closes a screen — and says so once per group, until it answers again.
+  const _probeFailed = new Set();
+  function activityOf(e) {
+    try {
+      const ms = browserScreens.idleMs(e.group);
+      _probeFailed.delete(e.group);
+      return Math.max(e.lastUsedAt, now() - ms);
+    } catch (err) {
+      if (!_probeFailed.has(e.group)) onChromeLog(`"${e.group}" X idle probe failed — ${err?.message ?? err}; treating the screen as ACTIVE: the idle timer will not close it until the probe works (docker needs xprintidle)`);
+      _probeFailed.add(e.group);
+      return now();
+    }
+  }
+  const linked = () => [..._groups.values()].filter((e) => chromeAlive(e) && screenTunnel?.isOpen(e.group));
+  function idleSweeping() {
+    if (_sweep) return;
+    _sweep = setInterval(() => {
+      const idle = idleMinutes();
+      for (const e of linked()) {
+        if (!idle || _keep.has(e.group) || now() - activityOf(e) < idle * 60_000) continue;
+        idleClose(e.group, idle);
+      }
+      if (!linked().length) { clearInterval(_sweep); _sweep = null; }
+    }, IDLE_SWEEP_MS);
+    _sweep.unref?.();
+  }
+  function idleClose(group, idle) {
+    const chatId = _linkChat.get(group);
+    _linkChat.delete(group);
+    const say = (text) => { if (chatId) Promise.resolve(send?.(chatId, text)).catch((e) => onChromeLog(`"${group}" idle line not posted — ${e?.message ?? e}`)); };
+    try {
+      screenTunnel.close(group);
+      browserScreens.close(group, { keepDisplay: true });
+    } catch (e) {
+      onChromeLog(`"${group}" screen did not close after ${idle} min idle — ${e?.message ?? e}`);
+      say(`browser ${group} screen did not close after ${idle} min idle — ${e?.message ?? e}`);
+      return;
+    }
+    onChromeLog(`"${group}" screen closed after ${idle} min idle (link and VNC; the Chrome stays)`);
+    say(`browser ${group} screen closed after ${idle} min idle`);
+  }
+  // The display a group's Chrome opens on: its screen's, started on first need; null on a desktop node.
+  const displayOf = async (group) => (hasScreens() ? (await browserScreens.ensure(group)).display : null);
+  // A daemon started before browser screens ignores `display`: the Chrome opened on :99 (chrome-host.mjs).
+  function oldDaemon(group, display, spawned) {
+    if (display && spawned?.display !== display) onChromeLog(`"${group}" Chrome opened on the daemon's own display, not ${display}: the daemon predates browser screens — restart it`);
+  }
+  const noAdmin = (ev, a) => `no link: the control link goes to the admin channel and admin_channel ${a?.reason === 'unset' ? 'is not set in config.yaml' : `${JSON.stringify(a?.to)} names no chat on this node`} — set it, or ${hintOf('browser all', ev)} gives this chat the control link`;
+  // The group's link (opened, or the open one) in the chat: `all` → the control link here; else the view-only link
+  // here and the control link to the admin channel, or both here when this IS the admin channel. Returns the chat's text.
+  async function shareLinks(ev, group, all) {
+    const admin = all ? null : await adminChat();
+    if (!all && !admin?.chatId) return noAdmin(ev, admin);
+    let t;
+    try { t = await screenTunnel.open(group); }
+    catch (e) { onChromeLog(`"${group}" link not opened — ${e?.message ?? e}`); return `no link for ${group} — ${e?.message ?? e}`; }
+    const view = linkOf(t.url, t.view, true), control = linkOf(t.url, t.control, false);
+    _linkChat.set(group, ev.chatId);
+    idleSweeping();
+    const idle = idleMinutes();
+    const life = `It closes ${GRACE_MS / 60_000} min after the last viewer leaves (${IDLE_MS / 60_000} min if nobody opens it)${_keep.has(group) ? '; kept open until browser close' : idle ? `, and after ${idle} min with no browser use (add keep to hold it)` : ''}; ${hintOf('browser stop', ev)} closes it now.`;
+    if (all) return `${group} browser — anyone with this link can drive it: ${control}\n${life}`;
+    if (shortChatId(admin.chatId) === shortChatId(ev.chatId)) return `${group} browser, view only: ${view}\ncontrol: ${control}\n${life}`;
+    await send?.(admin.chatId, `${group} browser, control (asked in ${ev.chatName || ev.chatId}): ${control}`);
+    return `${group} browser, view only: ${view}\nThe control link is in the admin channel. ${life}`;
+  }
+  // /browser [all] [<profile>] [keep]: this chat's group's Chrome up (eGPT's, unless a sign-in window holds it) on its
+  // screen, and its link. <profile> (a group name = a profile dir) first moves the chat to that group in browsers.yaml, once
+  // the browser is up: the next bare /browser finds it. `keep`: the idle timer leaves the link be.
+  async function browserShow(ev, profile, all, keep) {
+    const whose = 'this chat';
+    const base = await browserConversationOf(surfaceOf(ev), ev.chatId);
+    if (profile && (base.group === BRAIN_GROUP || profile === BRAIN_GROUP) && profile !== base.group) return `no browser for ${whose} — the "${BRAIN_GROUP}" group is fixed: its chats cannot leave it and no other chat can join`;
+    if (profile && !base.name) return `no browser for ${whose} — ${base.why || 'its name is unknown, so it cannot be recorded in browsers.yaml'}`;
+    const conversation = profile ? { ...base, group: profile, why: undefined } : base;
+    const { group, profileDir, why } = groupProfileOf(conversation);
+    if (!profileDir) return `no browser for ${whose} — ${why}`;
+    if (!chromeHost) return `no browser for ${whose} — ${NO_CHROME_HOST}`;
+    await _reattached;
+    const up = async () => { if (_signin.has(profileDir)) return null; const r = await ensureChrome(conversation); return r.client ? null : `no browser for ${whose} — ${r.why}`; };
+    if (!hasScreens()) return (await up()) ?? `the "${group}" browser is open as a normal window on ${cfg().node_name ?? 'this PC'} — you are at that PC: no screen to share, no link.`;
+    if (!all) { const admin = await adminChat(); if (!admin?.chatId) return noAdmin(ev, admin); }   // refused before anything starts
+    try { await browserScreens.ensure(group); }   // a Chrome already up keeps its screen; a stopped screen starts again
+    catch (e) { return `no screen for ${group} — ${e?.message ?? e}`; }
+    const refused = await up();
+    if (refused) return refused;
+    if (profile && profile !== base.group) await assignBrowserGroup(base.name, profile);
+    keep ? _keep.add(group) : _keep.delete(group);
+    return shareLinks(ev, group, all);
+  }
+  // /browser stop [group]: close the link now; the browser and its screen stay.
+  async function browserStop(ev, named) {
+    const { group, profileDir, why } = await browserTarget(ev, named);
+    if (!profileDir) return `no browser for ${named ? `group "${named}"` : 'this chat'} — ${why}`;
+    if (!hasScreens()) return `no link to close: the "${group}" browser is a normal window on ${cfg().node_name ?? 'this PC'}.`;
+    _keep.delete(group); _linkChat.delete(group);
+    return screenTunnel.close(group) ? `closed the ${group} link; the browser stays.` : `no ${group} link is open.`;
+  }
+  // /browser close [group]: its Chrome (eGPT's or the sign-in one), its link and its screen (operator #121: "we also
+  // need a /n browser close, which closes the browser"). The next need starts them again.
+  async function browserClose(ev, named) {
+    const { group, profileDir, why } = await browserTarget(ev, named);
+    if (!profileDir) return `no browser for ${named ? `group "${named}"` : 'this chat'} — ${why}`;
+    const { closed, unclosed } = await closeGroupBrowser(group, profileDir);
+    return closed.length ? `closed the ${group} browser: ${closed.join(', ')}${unclosed}. It starts again on next need.` : `the ${group} browser was not open${unclosed}.`;
+  }
+  // The close itself, one group → { closed: ['its Chrome', …], unclosed } (shared by close and close all).
+  // `hosted`: the daemon listed a Chrome for it, so the daemon is told to kill it even if the spine's table lacks it.
+  async function closeGroupBrowser(group, profileDir, hosted = false) {
+    await _reattached;
+    const live = _groups.get(profileDir);
+    const tracked = chromeAlive(live) || _signin.has(profileDir) || hosted;
+    // A Chrome nobody tracks but that holds the profile (a plain sign-in window that outlived a daemon restart): on a
+    // container node the operator cannot reach it to close it by hand (operator 2026-11-19). Windows names no pid: kill nothing.
+    // SingletonLock can be stale and its pid reused: kill it only if that pid is a Chrome on THIS profile.
+    const lockHolder = tracked ? null : profileHolder(profileDir);
+    const lockPid = /^pid (\d+)$/.exec(lockHolder ?? '')?.[1];
+    const isOurChrome = lockPid && chromeProcesses().some((p) => String(p.pid) === lockPid && cmdUsesProfile(p.cmd, profileDir, platform));
+    const holder = lockPid && !isOurChrome ? null : lockHolder;
+    const holderPid = isOurChrome ? lockPid : undefined;
+    const chrome = tracked || !!holderPid;
+    if (tracked) { chromeHost?.kill(group); _groups.delete(profileDir); }
+    else if (holderPid) killProcessTree(Number(holderPid));
+    // Its X server goes only once Chrome has written its profile and let go of it (as /browser refresh waits).
+    for (let i = 0; chrome && hasScreens() && profileHolder(profileDir) && i < 40; i++) await new Promise((r) => setTimeout(r, 250));
+    _keep.delete(group); _linkChat.delete(group);
+    const link = hasScreens() && screenTunnel.close(group);
+    const screen = hasScreens() && browserScreens.close(group);
+    const closed = [chrome && 'its Chrome', link && 'its link', screen && 'its screen'].filter(Boolean);
+    onChromeLog(`/browser close "${group}": ${closed.join(', ') || 'nothing was open'}`);
+    const unclosed = holder && !holderPid ? ` (a Chrome holds the profile; it could not be closed by pid)` : '';
+    return { closed, unclosed };
+  }
+  // WHAT IS OPEN (operator 2026-11-20: "would a /edu browser close close all browsers? how to know which are open from
+  // which groups?"). The daemon is the truth (chromeHost.list: eGPT's pipe Chromes and plain sign-in windows); the spine's own
+  // tables fill in when it cannot answer, and a screen or a link with no Chrome is a row too. → [{ group, profileDir?, pid?, kind: 'egpt'|'signin'|null, display?, link }]
+  async function openBrowsers() {
+    await _reattached;
+    const rows = new Map();
+    const row = (group) => rows.get(group) ?? rows.set(group, { group, kind: null, link: false }).get(group);
+    let hosted = null;
+    try { hosted = chromeHost ? await chromeHost.list() : null; } catch { /* the daemon did not answer: the spine's tables below */ }
+    if (hosted) for (const g of hosted) Object.assign(row(g.group), { profileDir: g.profileDir, pid: g.pid, kind: g.plain ? 'signin' : 'egpt' });
+    else for (const e of _groups.values()) if (chromeAlive(e)) Object.assign(row(e.group), { profileDir: [..._groups].find(([, v]) => v === e)?.[0], pid: e.pid, kind: 'egpt' });
+    for (const [profileDir, h] of _signin) Object.assign(row(h.group), { profileDir, pid: h.pid, kind: 'signin' });
+    if (hasScreens()) {
+      let screens = [];
+      try { screens = browserScreens.open?.() ?? []; } catch { /* no list of screens: the Chromes' own */ }
+      for (const s of screens) row(s.group).display = s.display;
+      for (const g of await knownBrowserGroups()) if (screenTunnel?.isOpen(g)) row(g);
+      for (const r of rows.values()) r.link = !!screenTunnel?.isOpen(r.group);
+    }
+    return [...rows.values()].sort((a, b) => a.group.localeCompare(b.group));
+  }
+  // The chats that use a group, inverted from browsers.yaml (names as listed); shared is also every unlisted chat, brain the brain itself.
+  function chatsOf(group, table) {
+    const names = [].concat(table?.[group] ?? []).map(String);
+    const shown = names.length > 5 ? [...names.slice(0, 5), `+${names.length - 5} more`] : names;
+    if (group === SHARED_GROUP) shown.push('every unlisted chat');
+    if (group === BRAIN_GROUP) shown.push('the brain');
+    return shown.join(', ');
+  }
+  // Memory = RSS of the Chromes whose command line names the profile. Null (omitted) on Windows or when nothing can be read: never fails the command.
+  function memoryOf(profileDir) {
+    if (!profileDir || platform === 'win32') return null;
+    try {
+      let sum = 0, any = false;
+      for (const p of chromeProcesses()) {
+        if (!cmdUsesProfile(p.cmd, profileDir, platform)) continue;
+        const b = rssOf(p.pid);
+        if (b > 0) { sum += b; any = true; }
+      }
+      return any ? Math.round(sum / MB) : null;
+    } catch { return null; }
+  }
+  // Idle: the idle timer's own measure (activityOf: the later of the spine's last use and the last input on the group's X display);
+  // a window the spine does not track has the display's input alone. Omitted when neither is known.
+  function idleMinOf(r) {
+    try {
+      const e = [..._groups.values()].find((x) => x.group === r.group && chromeAlive(x));
+      const at = e ? activityOf(e) : hasScreens() && r.display ? now() - browserScreens.idleMs(r.group) : null;
+      return at == null ? null : Math.max(0, Math.floor((now() - at) / 60_000));
+    } catch { return null; }
+  }
+  // /browsers: one line per open browser, or one line saying none is.
+  async function browsersCmd() {
+    const rows = await openBrowsers();
+    if (!rows.length) return 'no browsers open.';
+    let table = {};
+    try { table = await browserGroups(); } catch { /* names are a nicety */ }
+    const lines = rows.map((r) => {
+      const chats = chatsOf(r.group, table);
+      const screen = [r.display && `screen ${r.display}`, r.link && 'link open'].filter(Boolean).join(', ');
+      const idle = idleMinOf(r);
+      const mb = memoryOf(r.profileDir);
+      const parts = [r.kind === 'signin' ? 'sign-in window' : r.kind === 'egpt' ? 'eGPT' : 'screen only, no Chrome', chats && `chats: ${chats}`, screen, idle != null && `idle ${idle < 1 ? '<1' : idle} min`, mb != null && `${mb} MB`].filter(Boolean);
+      return `• ${r.group} — ${parts.join(' · ')}`;
+    });
+    return `browsers open (${rows.length}):\n${lines.join('\n')}`;
+  }
+  // /browser close all: each open browser closed as close does for one group; one summary.
+  async function browserCloseAll() {
+    const rows = await openBrowsers();
+    if (!rows.length) return 'no browsers open: nothing to close.';
+    const done = [];
+    for (const r of rows) {
+      const dir = r.profileDir ?? groupProfileOf({ key: '', name: r.group, group: r.group }).profileDir;
+      const { closed, unclosed } = dir ? await closeGroupBrowser(r.group, dir, r.kind != null) : { closed: [], unclosed: ' (no usable profile)' };
+      done.push(`${r.group} (${closed.join(', ') || 'was not open'}${unclosed})`);
+    }
+    return `closed ${rows.length} browser${rows.length === 1 ? '' : 's'}: ${done.join('; ')}. They start again on next need.`;
   }
   // The plain window's Chrome exited: the group is eGPT's again.
   function signinDone(dir, h) {
@@ -1826,6 +2158,7 @@ export function createCommands({
       const fields = {};
       if (b?.accessLevel != null) fields.access_level = b.accessLevel;
       if (b?.allowedUsers != null) fields.allowed_users = b.allowedUsers;
+      if (b?.allowedUsersInheritance != null) fields.allowed_users_inheritance = b.allowedUsersInheritance;
       return [h, fields];
     });
     let next = state;
@@ -2545,7 +2878,7 @@ export function createCommands({
     const add = /^add\s+tab\s+(\d+)(?:\s+(\S+))?$/i.exec(rest);
     if (add) { await membersAddTab(ev, room, Number(add[1]), add[2] ?? null); return; }
     // `add group <chat name|id>` — the argument runs to END OF LINE, because a chat NAME has
-    // spaces in it ("Radio WnL"). A single-token capture could only ever take an id.
+    // spaces in it ("Radio EFM"). A single-token capture could only ever take an id.
     const addGroup = /^add\s+group\s+(\S.*)$/i.exec(rest);
     if (addGroup) { await membersAddGroup(ev, room, addGroup[1].trim()); return; }
     // remove/mode take their target to END OF LINE for the SAME reason add group does —
@@ -2625,9 +2958,9 @@ export function createCommands({
   // (Operator console, 2026-08-31 — three symptoms, one cause. `add group` grew a chat
   // resolver in c63cdd6 + c84deac and its siblings did not:
   //   /members add group perrito traduciones
-  //     → added group 'perrito traduciones' → '0MP97ovrD6XvVovMVx6v' — mode:disable
-  //   /members mode all !0MP97ovrD6XvVovMVx6v:beeper.local
-  //     → no member '!0MP97ovrD6XvVovMVx6v:beeper.local' in this conversation
+  //     → added group 'perrito traduciones' → 'FakeRoomId0000000002' — mode:disable
+  //   /members mode all !FakeRoomId0000000002:beeper.local
+  //     → no member '!FakeRoomId0000000002:beeper.local' in this conversation
   //   /members mode all perrito traduciones
   //     → usage: /members | /members add tab … | /members mode <disable|mention|all> <id>
   // …i.e. the system printed a chat id in its OWN error message that its OWN next command
@@ -2659,7 +2992,7 @@ export function createCommands({
   // THE id comparison, in SHORT space (operator 2026-08-31). The two id forms on this node
   // are not a mistake to be migrated away, they are both real: resolveChatId NORMALIZES to
   // the short form and returns it (beeper.mjs — a '!' argument is passed through
-  // shortChatId), so `add group <name>` stores '0MP97ovrD6XvVovMVx6v'; `add group !<id>:
+  // shortChatId), so `add group <name>` stores 'FakeRoomId0000000002'; `add group !<id>:
   // beeper.local` stores the full form verbatim; and the FULL form is what /members
   // listings, Beeper's own UI, and this module's own error messages show the operator.
   // Comparing raw strings therefore made the printed form unusable. Folding BOTH sides
@@ -3270,16 +3603,20 @@ export function createCommands({
     return Object.values(agents).some((b) => b && typeof b === 'object' && b.threadId != null);
   };
 
-  // `/split`'s <name> (the rest of the line, it fills {name} in the group title); none → a
-  // random one (randomName).
-  const forkNameOf = (body) => /^\/split\b[ \t]*(.*)$/i.exec(String(body ?? '').trim())?.[1].trim() || randomName();
+  // `/split [invite] [<name>]`: `invite` brings the chat's members in (2026-10-31); <name> (the rest
+  // of the line) fills {name} in the group title, none → a random one (randomName).
+  const splitArgsOf = (body) => {
+    const rest = /^\/split\b[ \t]*(.*)$/i.exec(String(body ?? '').trim())?.[1].trim() ?? '';
+    const invite = /^invite(?:\s+(.*))?$/i.exec(rest);
+    return { invite: !!invite, name: (invite ? invite[1]?.trim() : rest) || randomName() };
+  };
 
   // config.split.placeholder, with the built-in fallback so a command never edits to an empty string.
   const placeholderOf = (block, dflt) => (block && typeof block.placeholder === 'string' && block.placeholder.trim()) ? block.placeholder : dflt;
   // config.group_title_prefix (unset → SIDE_GROUP_PREFIX) + config.group_title ({group}=parent chat name, {name}=the <name> arg).
   const groupTitleTpl = () => ((typeof cfg().group_title === 'string' && cfg().group_title.trim()) ? cfg().group_title : GROUP_TITLE_DEFAULT);
   const sidePrefix = () => (typeof cfg().group_title_prefix === 'string' ? cfg().group_title_prefix : SIDE_GROUP_PREFIX);
-  // The prefix once: a title already starting with it (any case, e.g. a /join inside "SI+EduWeb") keeps its own.
+  // The prefix once: a title already starting with it (any case, e.g. a /join inside "SI+Contoso") keeps its own.
   const sidePrefixed = (title) => (String(title).toLowerCase().startsWith(sidePrefix().toLowerCase()) ? String(title) : sidePrefix() + title);
   const groupTitleOf = (groupName, name) =>
     sidePrefixed(fill(groupTitleTpl(), { group: groupName, name }));
@@ -3416,7 +3753,7 @@ export function createCommands({
   }
 
   // Whom a being would wake for this sender here, by router.resolve's allowed_users test (the
-  // conversation's block, else the agent's conversation_defaults, else its owners; a stranger reaches only the
+  // conversation's block, the agent's conversation_defaults and its owners, joined; a stranger reaches only the
   // conversation's own agent). Bare /agents' public list reads it.
   const senderMayWake = (state, surface, chatId, ev, being) => {
     const owner = defaultBeingOf(getContact(state, surface, chatId)?.entry);
@@ -3514,10 +3851,11 @@ export function createCommands({
       await send?.(ev.chatId, '/split: I can\'t add you to a group from this account.');
       return 'refused — the sender id cannot be invited';
     }
-    const plan = await sideGroupPlan(ev, '/split');
+    const { invite, name } = splitArgsOf(ev.body);
+    const plan = await sideGroupPlan(ev, '/split', { everyone: invite && !forkBridge.roomsInside?.(ev.chatId) });
     if (!plan) return;
     const cTitle = ev.chatName || (await forkBridge.chatTitle(ev.chatId)) || ev.chatId;
-    const title = groupTitleOf(cTitle, forkNameOf(ev.body));
+    const title = groupTitleOf(cTitle, name);
 
     // ── mutations begin ──
     // (a) CREATE the group (sideGroupPlan). SHORT id: the new entry + parent_chat must key by the form
@@ -3529,7 +3867,7 @@ export function createCommands({
     const placeholder = fill(placeholderOf(cfg().split, link ? SPLIT_LINK_DEFAULT : SPLIT_PLACEHOLDER_DEFAULT), { link });
     // (b)+(c) its own conversation, each resident's thread copied (registerSplit).
     state = await loadState();
-    const split = await registerSplit(state, surface, splitChatId, ev.chatId, { title, verb: '/split' });
+    const split = await registerSplit(state, surface, splitChatId, ev.chatId, { title, verb: '/split', openTo: ev.commandBeing });
     await writeState(split.state);
     // (d) EDIT the operator's /split message into the placeholder marker — not anyone else's message
     //     (not ours to edit; the new group's opener is their answer). A room with a link (a topic) is
@@ -3546,7 +3884,9 @@ export function createCommands({
   const THREAD_FIELDS = new Set(['threadId', 'threadCreatedAt', 'identityInjectedAt', 'compactionWelcome']);
   // A /split group's fork, on the creator (/split) and on the other node (linkSideGroup):
   // → { state, slug, transcript, copied }; the caller writes the state.
-  async function registerSplit(state, surface, splitChatId, parentChatId, { title, verb }) {
+  // `openTo`: the being /split was typed to — anyone in the group may call it there (2026-10-31),
+  // unless it runs at access_level all.
+  async function registerSplit(state, surface, splitChatId, parentChatId, { title, verb, openTo = null }) {
     // (b) REGISTER the group as a FORK (operator 2026-10-26: "/split gives the context and folder with
     //     all previous files"): the parent's folder, its own transcript-<key>.md, parent_chat for /send+/end.
     const base = sanitizeSlug(title) || 'fork';
@@ -3565,6 +3905,11 @@ export function createCommands({
     for (const [being, block] of Object.entries(origEntry?.agents ?? {})) {
       const settings = Object.fromEntries(Object.entries(block ?? {}).filter(([k]) => !THREAD_FIELDS.has(k)));
       if (Object.keys(settings).length) state = patchBeing(state, surface, splitChatId, being, settings);
+    }
+    if (openTo) {
+      const level = getBeing(state, surface, splitChatId, openTo)?.accessLevel ?? cfg().agents?.[openTo]?.conversation_defaults?.access_level ?? 'sandbox';
+      if (level !== 'all') state = patchBeing(state, surface, splitChatId, openTo, { allowed_users: ['*'] });
+      else onLog(`${verb}: ${openTo} runs at access_level all — the split keeps its allowed_users`);
     }
     const residents = residentsOf(origEntry)
       .map((being) => [being, getBeing(state, surface, parentChatId, being)?.threadId ?? null])
@@ -3596,7 +3941,7 @@ export function createCommands({
     // The fork's log names its thread, so the parent's next roll leaves it alone.
     if (slug && lastThread) {
       try { await mkdir(slugDir(surface, slug), { recursive: true }); } catch { /* the stamp says why */ }
-      await stampThreadId(surface, slug, lastThread, { key: transcript });
+      await stampThreadId(surface, slug, lastThread, { key: transcript, io: { readFile, writeFile } });
     }
     return { state, slug, transcript, copied };
   }
@@ -3685,26 +4030,30 @@ export function createCommands({
   // reply has something to post (sender.open); false = withhold the reply (the create failed); null =
   // in place. The node whose being replies makes it when it holds none (operator 2026-10-19); both
   // nodes making one at once is fine: two groups, each node links the other's, and each keeps replying
-  // in the first one it holds — its own.
-  // The value: a truthy word → true ("SI+<group>"), a falsy word / empty / absent → false, any other
-  // string → that title.
-  const replyInSideGroupOf = (v) => {
-    if (v === true || v === 1) return true;
-    const s = typeof v === 'string' ? v.trim() : '';
-    if (['true', 'yes', 'on', '1'].includes(s.toLowerCase())) return true;
-    return ['false', 'no', 'off', '0', ''].includes(s.toLowerCase()) ? false : s;
-  };
+  // in the first one it holds — its own. An entry that says nothing takes the node default
+  // (sideGroupByDefault).
+  // A group chat: the bridge's chatType, else (a turn the spine starts) the chat's own record.
+  const isGroupChat = async (ev) => (ev.raw ? ev.raw.chatType : (await forkBridge.chatRaw?.(ev.chatId))?.type) === 'group';
   const autoCreating = new Map();   // surface+chatId → the create in flight, so one reply makes one group
-  async function autoSideGroup(ev, { create = true } = {}) {
+  const autoRoomOf = (state, surface, chatId) => Object.keys(state.contacts[surface]).find((id) => state.contacts[surface][id]?.aliasOf === chatId && state.contacts[surface][id].automatic === true) ?? null;
+  async function autoSideGroup(ev, { create = true, late = false, once = false } = {}) {
     if (!loadState || !writeState) return null;
     const surface = surfaceOf(ev);
     let state;
     try { state = await loadState(); } catch { return null; }
     const own = state?.contacts?.[surface]?.[ev.chatId];
-    if (!own || own.aliasOf) return null;
-    const setting = replyInSideGroupOf(own.reply_in_side_group);
+    if (own?.aliasOf) return null;
+    // A chat first heard now: the transcript writes its entry after this gate, so under the node
+    // default the group is made with the reply, once (`late`); no entry even then → nothing posted.
+    if (!own) {
+      const byDefault = !late && sideGroupByDefault(own, { surface, group: true }, cfg()) && await isGroupChat(ev);
+      return byDefault ? () => autoSideGroup(ev, { late: true }) : null;
+    }
+    // `once` (/side): this one reply goes to the side group whatever the chat's setting; a title it names still stands.
+    const setting = (own.reply_in_side_group != null ? replyInSideGroupOf(own.reply_in_side_group)
+      : sideGroupByDefault(own, { surface, group: true }, cfg()) && await isGroupChat(ev)) || once;
     if (!setting) return null;
-    const room = Object.keys(state.contacts[surface]).find((id) => state.contacts[surface][id]?.aliasOf === ev.chatId && state.contacts[surface][id].automatic === true) ?? null;
+    const room = autoRoomOf(state, surface, ev.chatId);
     if (room) {
       const alive = forkBridge.chatRaw ? await superChannelAlive(room, { chatRaw: forkBridge.chatRaw, config: cfg() }) : null;
       if (alive !== false) return room;
@@ -3713,18 +4062,43 @@ export function createCommands({
     }
     if (!create) return () => autoSideGroup(ev);
     const key = `${surface}\u0000${ev.chatId}`;
-    if (!autoCreating.has(key)) autoCreating.set(key, openAutoSideGroup(ev, surface, setting).finally(() => autoCreating.delete(key)));
+    if (!autoCreating.has(key)) autoCreating.set(key, openAutoSideGroup(ev, surface, setting, once).finally(() => autoCreating.delete(key)));
     return (await autoCreating.get(key)) ?? false;
   }
-  async function openAutoSideGroup(ev, surface, setting) {
+  // /<handle> side <prompt>: ONE turn of the chat's being, in the chat's own thread, whose reply goes to its
+  // automatic side group (autoSideGroup with `once`; made there when the chat has none). The chat gets one
+  // line naming the group. The prompt line is on the chat's record as typed (ingestion); the being is
+  // prompted with the prompt alone (`trigger`).
+  async function sideTurn(ev, prompt) {
+    const refuse = async (why) => { await send?.(ev.chatId, `/side: ${why}`); return `refused — ${why}`; };
+    if (!prompt) { await send?.(ev.chatId, `usage: ${hintOf('side <prompt>', ev)}`); return; }
+    const surface = surfaceOf(ev);
+    if (surface === 'telegram') return refuse(`Telegram has no side groups — use ${hintOf('split', ev)}`);
+    const own = (await loadState())?.contacts?.[surface]?.[ev.chatId];
+    if (!own) return refuse('this chat has no record here yet');
+    if (own.aliasOf) return refuse('this is a side group already — a reply here stays here');
+    if (own.parent_chat) return refuse('this is a /split, another thread — it has no side group');
+    // A 1:1: the group invites the chat's other person (the roster, as a group's members) + Rodz; the primary that makes it is a member already.
+    if (!(await isGroupChat(ev)) && !(await membersOf(ev.chatId, '/side'))?.length) return refuse('I cannot tell who the other person in this chat is — no side group');
+    if (!senderMayWake(await loadState(), surface, ev.chatId, ev, ev.commandBeing)) return refuse(`you may not wake ${ev.commandBeing} here`);
+    const head = ev.line != null && ev.line.endsWith(prompt) ? ev.line.slice(0, ev.line.length - prompt.length).replace(/\/\S+[ \t]+\S+[ \t]+$/, '') : '';
+    const ran = await commandTurn({ being: ev.commandBeing, ev, trigger: head + prompt, side: true });
+    if (!ran) return refuse(`no turn — the side group could not be made, or ${ev.commandBeing} is quiet in this chat`);
+    const room = autoRoomOf(await loadState(), surface, ev.chatId);
+    await send?.(ev.chatId, `↪ replying in ${(room && await forkBridge.chatTitle?.(room)) || sidePrefixed(ev.chatName || ev.chatId)}`);
+    return ran;
+  }
+  // `once` (/side): the group is marked `side: true` on its entry and its opener's canary says kind 'side' (not
+  // 'automatic'), so the other node links it as an alias without switching the chat to reply_in_side_group.
+  async function openAutoSideGroup(ev, surface, setting, once = false) {
     const plan = await sideGroupPlan(ev, 'automatic', { everyone: true });
     if (!plan) return null;
     const cTitle = ev.chatName || (await forkBridge.chatTitle(ev.chatId)) || ev.chatId;
     const title = setting === true ? sidePrefixed(cTitle) : setting;
-    const aliased = await createAliasedSideGroup(ev, surface, title, plan, 'automatic', { automatic: true });
+    const aliased = await createAliasedSideGroup(ev, surface, title, plan, 'automatic', { automatic: true, ...(once ? { side: true } : {}) });
     if (!aliased) return null;
     onLog(`automatic: ${cTitle} -> ${aliased.chatId} "${title}" (invited ${plan.participantIDs.join(', ')})`);
-    await postOpener({ verb: 'automatic', newChatId: aliased.chatId, openerText: openerOf(null, AUTO_OPENER, cTitle), origin: aliased.primaryJid, kind: 'automatic', transcript: aliased.transcript });
+    await postOpener({ verb: 'automatic', newChatId: aliased.chatId, openerText: openerOf(null, AUTO_OPENER, cTitle), origin: aliased.primaryJid, kind: once ? 'side' : 'automatic', transcript: aliased.transcript });
     return aliased.chatId;
   }
   // The other node's half: a side group's opener names it, its origin and its kind (ev.canary, beside the
@@ -3735,8 +4109,9 @@ export function createCommands({
   // As on the creator, Rodz's copy comes first (mouthCopyOf; it waits on this chat's lane only), so the
   // group is never usable here before its mouth_chat: one write holds both. An automatic group also
   // switches reply_in_side_group on for this node's own entry of the origin when that entry says
-  // nothing (operator 2026-10-19: only the creating node is configured), in the same write.
-  const SIDE_KINDS = new Set(['join', 'split', 'automatic']);
+  // nothing (operator 2026-10-19: only the creating node is configured), in the same write — unless
+  // this node's default already covers it (sideGroupByDefault; the origin is taken as a group).
+  const SIDE_KINDS = new Set(['join', 'split', 'automatic', 'side']);
   async function linkSideGroup(ev) {
     const c = ev?.canary;
     if (!c?.origin || ev.fromNode == null || !loadState || !writeState) return;
@@ -3766,9 +4141,10 @@ export function createCommands({
         as = `a fork in ${split.slug} (parent ${c.origin}; copied threads for ${split.copied.join(', ') || '(none)'})`;
       } else {
         const { jid } = getContact(state, surface, c.origin);
-        state = aliasContact(state, surface, chatId, jid, { transcript: c.transcript ?? sanitizeSlug(ev.chatName || chatId), ...(c.kind === 'automatic' ? { automatic: true } : {}) });
+        state = aliasContact(state, surface, chatId, jid, { transcript: c.transcript ?? sanitizeSlug(ev.chatName || chatId), ...(c.kind === 'automatic' ? { automatic: true } : c.kind === 'side' ? { automatic: true, side: true } : {}) });
         as = `an alias of ${jid}`;
-        if (c.kind === 'automatic' && getContact(state, surface, jid)?.entry?.reply_in_side_group == null) {
+        const originEntry = getContact(state, surface, jid)?.entry;
+        if (c.kind === 'automatic' && originEntry?.reply_in_side_group == null && !sideGroupByDefault(originEntry, { surface, group: true }, cfg())) {
           state = patchContact(state, surface, jid, { reply_in_side_group: 'on' });
           switched = jid;
         }
@@ -4120,9 +4496,7 @@ export function createCommands({
     // kept warm, info about them, size from total"). pool.stats() already exposed
     // { size, max, keys }; this shows the roster instead of just the count.
     //
-    // `size/max` is the headline because it is the thing that is easy not to know: max
-    // defaults to 6 (src/warm-sessions.mjs) and the live config leaves it unset, so with
-    // ~100 conversations in the registry the pool LRU-evicts constantly. Per entry:
+    // `size/max` is the headline (just `size` when warm.max is unset: no cap). Per entry:
     // the warm key (it already encodes <being>:<engine>:<surface>:<slug>), the live
     // context size, and what that size is OUT OF — the compaction threshold the SPINE
     // applies (src/spine/compaction.mjs compactionRatio, not compact-being's own 0.25
@@ -4134,7 +4508,7 @@ export function createCommands({
     try {
       const s = warmStats();
       if (s && typeof s.size === 'number' && typeof s.max === 'number') {
-        lines.push(`warm: ${s.size}/${s.max}`);
+        lines.push(`warm: ${s.size}${Number.isFinite(s.max) ? `/${s.max}` : ''}`);
         const keys = Array.isArray(s.keys) ? s.keys : [];
         if (keys.length) {
           let targets = [];

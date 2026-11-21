@@ -24,14 +24,14 @@ import { shortChatId } from '../src/bridges/chat-id.mjs';
 import { encodeNodeSignature, encodeChatCanary } from '../src/node-signature.mjs';
 import { mentionStatus } from '../src/auto-mode.mjs';
 
-const ORIGIN = 'palma1';
-const TITLE = 'PALMA';
-const AN = '+16468217865';
-const RODZ = '+13472576794';
-const RODZ_USER_ID = '@whatsapp_lid-69433129173200:beeper.local';
-const AN_ID = '@anrodriguez:beeper.com';
-const LULU = '@whatsapp_lid-lulu42:beeper.local';
-const LIVE = { participants: { items: [{ id: AN_ID, phoneNumber: AN, isSelf: true }, { id: RODZ_USER_ID, phoneNumber: RODZ }, { id: LULU, phoneNumber: '+34600000000' }] } };
+const ORIGIN = 'muestra1';
+const TITLE = 'MUESTRA';
+const AN = '+15550100001';
+const RODZ = '+15550100002';
+const RODZ_USER_ID = '@whatsapp_lid-10000000000015:beeper.local';
+const AN_ID = '@anaprueba:beeper.com';
+const LOLA = '@whatsapp_lid-lola42:beeper.local';
+const LIVE = { participants: { items: [{ id: AN_ID, phoneNumber: AN, isSelf: true }, { id: RODZ_USER_ID, phoneNumber: RODZ }, { id: LOLA, phoneNumber: '+34600000000' }] } };
 const NODES = {
   kg: { role: 'primary', being: 'e', handles: ['e'] },
   do: { role: 'secondary', being: 'd', handles: ['d', 'don'] },
@@ -53,13 +53,13 @@ function streamingBridge() {
 
 // One node. `entry` patches its own origin entry (e.g. reply_in_side_group); `mode` is every being's
 // reply mode here.
-function node(name, { entry = {}, mode = 'mention' } = {}) {
+function node(name, { entry = {}, mode = 'mention', extra = {} } = {}) {
   const { role, being, handles } = NODES[name];
   const agents = { [being]: { handles, conversation_defaults: { allowed_users: ['*'] } } };   // the group's members reach it
   const config = {
     beeper: { primary: { phone: AN }, secondary: { phone: RODZ } },
     node_name: name, node_role: role, group_title: '{group}-{name}', agents, dispatch: { auto_default_mode: mode },
-    networks: { whatsapp: { chat_ids: ['!self'] } },
+    networks: { whatsapp: { chat_ids: ['!self'] } }, ...extra,
   };
   let st = ensureContact({ contacts: {} }, 'whatsapp', ORIGIN, { pushedName: TITLE }).state;
   st = recordThread(st, 'whatsapp', ORIGIN, `${name}-thread`, '2026-10-01T00:00:00Z', being);
@@ -101,7 +101,7 @@ function node(name, { entry = {}, mode = 'mention' } = {}) {
   });
   const say = (body, over = {}) => {
     const { atEStart, atEAnywhere } = mentionStatus(body, handles);
-    return spine.handleInbound({ body, from: { network: 'whatsapp', chatId: ORIGIN, chatName: TITLE, userId: LULU, senderName: 'Lulu', isSender: false, msgKey: `k-${name}-${body}-${over.chatId ?? ''}`, atEStart, atEAnywhere, ...over } });
+    return spine.handleInbound({ body, from: { network: 'whatsapp', chatId: ORIGIN, chatName: TITLE, userId: LOLA, senderName: 'Lola', isSender: false, msgKey: `k-${name}-${body}-${over.chatId ?? ''}`, atEStart, atEAnywhere, ...over } });
   };
   // Where this node's replies opened, in order.
   const repliedIn = () => [...bridge.streams.map((s) => s.chat), ...bridge.sent.map((s) => s.chat)];
@@ -117,7 +117,7 @@ const operator = { userId: AN_ID, senderName: 'An', isSender: true, authorized: 
 beforeEach(() => { rmSync(HOME, { recursive: true, force: true }); });
 
 describe('/split: the handle\'s node creates', () => {
-  it('/don split hi: dolly (node_role secondary) makes SI+PALMA-hi on its primary account; kg makes nothing', async () => {
+  it('/don split hi: dolly (node_role secondary) makes SI+MUESTRA-hi on its primary account; kg makes nothing', async () => {
     const kg = node('kg'), dolly = node('do');
     for (const n of [kg, dolly]) await n.say('/don split hi', operator);
     expect(dolly.calls.create).toEqual([{ title: `SI+${TITLE}-hi`, via: 'primary' }]);
@@ -164,6 +164,20 @@ describe('the automatic group: the node whose being replies makes it', () => {
     expect(dolly.calls.logs.filter((l) => /reply_in_side_group/.test(l))).toHaveLength(1);
     // From then on don's replies go to that group; dolly makes none of its own.
     await dolly.say('don, hola');
+    expect(dolly.calls.create).toEqual([]);
+    expect(dolly.repliedIn()).toEqual([g]);
+  });
+
+  it('a node whose config.yaml default covers the chat links it without switching its own entry (2026-11-02)', async () => {
+    const kg = node('kg', { entry: { reply_in_side_group: true } });
+    const dolly = node('do', { extra: { reply_in_side_group: 'on' } });
+    await kg.say('e, hola');
+    const g = shortChatId('!kg-side1:beeper.local');
+    await deliverOpener(kg, dolly);
+    expect(dolly.contacts()[g]).toMatchObject({ aliasOf: ORIGIN, automatic: true });
+    expect(dolly.contacts()[ORIGIN].reply_in_side_group).toBeUndefined();
+    expect(dolly.calls.logs.filter((l) => /reply_in_side_group/.test(l))).toEqual([]);
+    await dolly.say('don, hola', { chatType: 'group' });
     expect(dolly.calls.create).toEqual([]);
     expect(dolly.repliedIn()).toEqual([g]);
   });

@@ -67,16 +67,16 @@ const self = (id) => ({ id, isSelf: true });
 
 // The chat the brain is replying in, as the PRIMARY account sees it.
 const AS_PRIMARY = {
-  id: '!6ljZJkx0OaY9ZVhEzFgi:beeper.local', title: 'Group', type: 'group',
+  id: '!FakeRoomId0000000004:beeper.local', title: 'Group', type: 'group',
   participants: { items: [self('@primary:beeper.com'), member('p-secondary', SECONDARY_NUM), member('p-m1', M1), member('p-m2', M2)] },
 };
 // The SAME real chat as the SECONDARY account sees it: different room id, different participant
 // ids, different order. Only the phone numbers line up.
 const AS_SECONDARY = {
-  id: '!HuXFQeZSY1X4khNDWTzz:beeper.local', title: 'Group', type: 'group',
+  id: '!FakeRoomId0000000003:beeper.local', title: 'Group', type: 'group',
   participants: { items: [member('s-m2', M2), self('@secondary:beeper.com'), member('s-primary', PRIMARY_NUM), member('s-m1', M1)] },
 };
-const SECONDARY_CHAT_ID = 'HuXFQeZSY1X4khNDWTzz';   // what shortChatId makes of it
+const SECONDARY_CHAT_ID = 'FakeRoomId0000000003';   // what shortChatId makes of it
 // A chat the peer's account is NOT in: the members and this account, nobody else.
 const NO_PEER_CHAT = {
   id: '!solo:beeper.local', title: 'Solo', type: 'group',
@@ -761,7 +761,7 @@ describe('end to end: a reply in the primary\'s room is streamed in the SECONDAR
   const KEY = 'e:wa:chat-1';
   // `{ ack }`, not a bare `true` (2026-09-09): the 👍 is placed only on the session's own word
   // that the MODEL took the line, so a fake claiming success without evidence would get ✍️ and
-  // no 👍 at all. See tests/steer-ack.test.mjs for the Joyce fault that split the two.
+  // no 👍 at all. See tests/steer-ack.test.mjs for the Julia fault that split the two.
   const steerable = () => ({ async allowNewInput() { return 'any'; }, steer: () => ({ ack: Promise.resolve({ ok: true }) }) });
   const STEER_EV = {
     surface: 'wa', chatId: CHAT_ID, senderId: 'marina', senderName: 'marina', body: STEERED_TEXT,
@@ -789,7 +789,7 @@ describe('end to end: a reply in the primary\'s room is streamed in the SECONDAR
     ]);
     expect(listed).toEqual([SECONDARY_CHAT_ID, SECONDARY_CHAT_ID]);
     expect(bridge.reactions).toEqual([]);                     // nothing from the account not answering
-    expect(logs.some((l) => l.includes('[secondary]') && /placed a peer's 👍 on HuXFQeZSY1X4khNDWTzz\/1118/.test(l))).toBe(true);
+    expect(logs.some((l) => l.includes('[secondary]') && /placed a peer's 👍 on FakeRoomId0000000003\/1118/.test(l))).toBe(true);
     expect(notes.join('\n')).toMatch(/placed the 👍 on its own copy/);
 
     await out.finish({ text: 'done' });
@@ -985,7 +985,7 @@ describe('the steer ack rides the same mouth the reply does', () => {
   const KEY = 'e:wa:chat-1';
   // `{ ack }`, not a bare `true` (2026-09-09): the 👍 is placed only on the session's own word
   // that the MODEL took the line, so a fake claiming success without evidence would get ✍️ and
-  // no 👍 at all. See tests/steer-ack.test.mjs for the Joyce fault that split the two.
+  // no 👍 at all. See tests/steer-ack.test.mjs for the Julia fault that split the two.
   const steerable = () => ({ async allowNewInput() { return 'any'; }, steer: () => ({ ack: Promise.resolve({ ok: true }) }) });
   // The steered message as the BRAIN's account sees it: its own local id, plus the two fields the
   // bridge mints for naming it across accounts (beeper.crossAccountMsgKey / the payload timestamp).
@@ -1188,7 +1188,7 @@ describe('the steer ack rides the same mouth the reply does', () => {
 });
 
 // ── 8. THE /react LIMB RIDES THE MOUTH THE STEER ACK RIDES (live 2026-09-16) ──────────────────
-// THE LIVE FAULT, node kg, "conversas con favel": the operator wrote "e gracias" and E's whole
+// THE LIVE FAULT, node kg, "conversas con fiona": the operator wrote "e gracias" and E's whole
 // turn was `/react #7530 👍`. The 👍 landed from the OPERATOR'S OWN account on his own message,
 // while the same turn's placeholder correctly went out on the mouth ("[mouth] … the mouth says
 // this reply, in its own room"). The limb reacted on the EAR with the ear's id; the steer ack
@@ -1325,7 +1325,7 @@ describe('/reply and /media are said by the MOUTH, in its own room — never fro
     expect(mouthBridge.sent).toEqual([{ chat: SECONDARY_CHAT_ID, text: 'exacto', opts: { replyTo: STEERED_ON_SECONDARY.id, ...stamp } }]);
     expect(ear.sent).toEqual([]);
     expect(ran).toHaveLength(1);                     // it LANDED — the stage-direction is truthful
-    expect(logs.join('\n')).toMatch(/'secondary' said it in its own room \(its chat HuXFQeZSY1X4khNDWTzz\), naming its own #1118/);
+    expect(logs.join('\n')).toMatch(/'secondary' said it in its own room \(its chat FakeRoomId0000000003\), naming its own #1118/);
   });
 
   it('the mouth cannot find the target: the SAME text goes out UNQUOTED from the mouth, never from the ear, and the log says why', async () => {
@@ -1343,7 +1343,7 @@ describe('/reply and /media are said by the MOUTH, in its own room — never fro
       expect(ran, reason).toHaveLength(1);
       const line = logs.find((l) => /cannot find #2901 on its own copy/.test(l));
       expect(line, reason).toContain(reason);
-      expect(logs.join('\n')).toMatch(/'secondary' said it in its own room \(its chat HuXFQeZSY1X4khNDWTzz\), UNQUOTED/);
+      expect(logs.join('\n')).toMatch(/'secondary' said it in its own room \(its chat FakeRoomId0000000003\), UNQUOTED/);
     }
   });
 
@@ -1458,7 +1458,7 @@ describe('/edit is made by the MOUTH on its own message — and never lands on o
     expect(mouthBridge.edits).toEqual(edited(SECONDARY_CHAT_ID, SAID_ON_SECONDARY.id));
     expect(ear.edits).toEqual([]);
     expect(ran).toHaveLength(1);                     // it LANDED — the stage-direction is truthful
-    expect(logs.join('\n')).toMatch(/edit e\/chat-1: 'secondary' said it in its own room \(its chat HuXFQeZSY1X4khNDWTzz\), naming its own #1150/);
+    expect(logs.join('\n')).toMatch(/edit e\/chat-1: 'secondary' said it in its own room \(its chat FakeRoomId0000000003\), naming its own #1150/);
   });
 
   it('the mouth cannot identify its own copy: NOTHING is edited on either account, the limb does not land, and the log says why', async () => {
@@ -1578,7 +1578,7 @@ describe('the voice attach is said by the MOUTH, replying to the text in its own
     expect(mouthBridge.media).toHaveLength(1);
     expect(mouthBridge.media[0]).toMatchObject({ chat: SECONDARY_CHAT_ID, opts: { replyTo: null } });
     expect(ear.media).toEqual([]);
-    expect(logs.join('\n')).toMatch(/voice: #mouth-said is not among the recent messages of HuXFQeZSY1X4khNDWTzz on 'secondary'/);
+    expect(logs.join('\n')).toMatch(/voice: #mouth-said is not among the recent messages of FakeRoomId0000000003 on 'secondary'/);
     expect(logs.join('\n')).toMatch(/voice e\/chat-1: 'secondary' cannot find its target on its own copy \(no-key/);
   });
 
@@ -1609,59 +1609,62 @@ describe('the voice attach is said by the MOUTH, replying to the text in its own
   });
 });
 
-// ── 10b. A BACKGROUND STATUS QUOTES THE BEING'S OWN REPLY, IN THE ROOM IT OPENS IN (2026-10-16) ──
-// liveness opens the status with the dispatching turn's reply id and the room that id lives in
-// (`replyIn`, the sender's confirmedIn). Same room → that id; a mouth's room → its own copy, found as
-// /reply and the voice attach find it (keyOf + quote); else unquoted. Never another room's id.
-describe("a background status quotes the being's reply in the room the status opens in", () => {
-  const STATUS = '⚙️ working in background: Run the audit';
+// ── 10b. A BACKGROUND STATUS QUOTES THE BEING'S OWN REPLY, IN THE ROOM IT IS SAID IN (2026-10-16) ──
+// liveness posts the status (sender.post, one send — operator 2026-10-30) with the dispatching turn's
+// reply id and the room that id lives in (`replyIn`, the sender's confirmedIn). Said by the mouth, it
+// quotes the mouth's own copy, found as /reply and the voice attach find it (keyOf + quote); else
+// unquoted. Never another room's id.
+describe("a background status quotes the being's reply in the room the status is said in", () => {
+  const STATUS = '⚙️ background work (1):\n• Run the audit · 4m00s';
   const statusNode = (shape) => {
     const n = earAndMouth(shape);
     const sender = createSender({ bridge: n.ear, bodyEmojiOf: () => '🐶', peerMouth: n.peerMouth, onLog: (m) => n.logs.push(`[mouth] ${m}`) });
-    const open = async (replyTo, replyIn) => { sender.open(CHAT_ID, { being: 'e', status: STATUS, replyTo, replyIn }); await settled(); };
-    return { ...n, open };
+    const post = async (replyTo, replyIn) => { await sender.post(CHAT_ID, STATUS, { being: 'e', replyTo, replyIn }); };
+    return { ...n, post };
   };
   const mouthRoom = (bridge) => ({ connection: 'secondary', bridge, chatId: SECONDARY_CHAT_ID });
-  const opened = (bridge) => bridge.streams.map((s) => [s.chat, s.opts.replyTo]);
+  const opened = (bridge) => bridge.sent.map((s) => [s.chat, s.opts.replyTo]);
 
-  it('the mouth said the reply: the status opens from the mouth, quoting that id as-is', async () => {
-    const { ear, mouthBridge, open } = statusNode({ mouthMessages: [SAID_ON_SECONDARY] });
-    await open(SAID_ON_SECONDARY.id, mouthRoom(mouthBridge));
+  it('the mouth said the reply: the status is ONE send by the mouth, quoting that same message', async () => {
+    const { ear, mouthBridge, post } = statusNode({ mouthMessages: [SAID_ON_SECONDARY] });
+    await post(SAID_ON_SECONDARY.id, mouthRoom(mouthBridge));
     expect(opened(mouthBridge)).toEqual([[SECONDARY_CHAT_ID, SAID_ON_SECONDARY.id]]);
-    expect(ear.streams).toEqual([]);
+    expect(mouthBridge.sent[0]).toMatchObject({ text: STATUS, opts: { bodyEmoji: '🐶', persona: 'e' } });
+    expect(mouthBridge.streams).toEqual([]);
+    expect(ear.sent).toEqual([]);
   });
 
-  it("the reply fell back to the ear: the status opens from the mouth, quoting the MOUTH's own copy — never the ear's id", async () => {
-    const { ear, mouthBridge, open } = statusNode({ earMessages: [SAID_ON_PRIMARY], mouthMessages: [SAID_ON_SECONDARY] });
-    await open(SAID_ON_PRIMARY.id, null);
+  it("the reply fell back to the ear: the status is said by the mouth, quoting the MOUTH's own copy — never the ear's id", async () => {
+    const { ear, mouthBridge, post } = statusNode({ earMessages: [SAID_ON_PRIMARY], mouthMessages: [SAID_ON_SECONDARY] });
+    await post(SAID_ON_PRIMARY.id, null);
     expect(opened(mouthBridge)).toEqual([[SECONDARY_CHAT_ID, SAID_ON_SECONDARY.id]]);
-    expect(ear.streams).toEqual([]);
+    expect(ear.sent).toEqual([]);
   });
 
   it('the mouth cannot find its copy: the status goes out UNQUOTED from the mouth, and the log says why', async () => {
-    const { mouthBridge, logs, open } = statusNode({ earMessages: [SAID_ON_PRIMARY], mouthMessages: [] });
-    await open(SAID_ON_PRIMARY.id, null);
+    const { mouthBridge, logs, post } = statusNode({ earMessages: [SAID_ON_PRIMARY], mouthMessages: [] });
+    await post(SAID_ON_PRIMARY.id, null);
     expect(opened(mouthBridge)).toEqual([[SECONDARY_CHAT_ID, null]]);
     expect(logs.join('\n')).toMatch(/status e\/chat-1: 'secondary' cannot find #2950 on its own copy/);
   });
 
-  it("the reply lives in the mouth's room but the status opens on the ear: UNQUOTED, never the mouth's id", async () => {
-    const { ear, mouthBridge, open } = statusNode({ mouthIsMember: false });
-    await open(SAID_ON_SECONDARY.id, mouthRoom(mouthBridge));
+  it("the reply lives in the mouth's room but the status is said on the ear: UNQUOTED, never the mouth's id", async () => {
+    const { ear, mouthBridge, post } = statusNode({ mouthIsMember: false });
+    await post(SAID_ON_SECONDARY.id, mouthRoom(mouthBridge));
     expect(opened(ear)).toEqual([[CHAT_ID, null]]);
-    expect(mouthBridge.streams).toEqual([]);
+    expect(mouthBridge.sent).toEqual([]);
   });
 
   it("NO mouth: the status quotes the ear's own id and no message list is read", async () => {
-    const { ear, earListed, open } = statusNode({ withMouth: false });
-    await open(SAID_ON_PRIMARY.id, null);
+    const { ear, earListed, post } = statusNode({ withMouth: false });
+    await post(SAID_ON_PRIMARY.id, null);
     expect(opened(ear)).toEqual([[CHAT_ID, SAID_ON_PRIMARY.id]]);
     expect(earListed).toEqual([]);
   });
 });
 
 // ── 10c. AN ORDINARY REPLY QUOTES THE MOUTH'S OWN COPY OF WHAT IT ANSWERS (live 2026-10-16) ──────
-// SI+EduWeb: the placeholder opened in the mouth's room carrying the EAR's id, so it quoted nothing.
+// SI+Contoso: the placeholder opened in the mouth's room carrying the EAR's id, so it quoted nothing.
 // It now quotes the mouth's own copy (quoteIn, as the status does), looked up at most WAIT before the
 // placeholder opens unquoted, once per message.
 describe("an ordinary reply quotes the mouth's own copy of the message it answers", () => {
@@ -1959,7 +1962,7 @@ describe('the one placement takes a reaction back off, on the account that place
     expect(earListed).toEqual([]);
   });
 
-  // THE LIVE FAULT, node do, 2026-09-17: `reaction 🎧 by An → #2838 [Maria (Mom) Palma]`. The mouth was
+  // THE LIVE FAULT, node do, 2026-09-17: `reaction 🎧 by An → #2838 [Maria (Mom) Muestra]`. The mouth was
   // wired but not a member of that 1:1 chat, so route() found no room and the mark fell back to the ear.
   it('a mouth that is NOT A MEMBER of the chat: no 🎧 from either account, and the log says why', async () => {
     const logs = [];
@@ -2018,7 +2021,7 @@ describe('the one placement takes a reaction back off, on the account that place
 });
 
 // ── 12. THE STORED MOUTH ROOM — no cold-derivation drop, and self-heal (operator 2026-10-12) ──────
-// THE LIVE BUG (Favel/super): a reply routed to a super room by its MAIN id is handed to the MOUTH;
+// THE LIVE BUG (Fiona/super): a reply routed to a super room by its MAIN id is handed to the MOUTH;
 // the mouth must translate that to ITS OWN room id. The mapping was re-derived LIVE every reply from
 // the mouth's roster/chat-list, and a COLD derivation (after a restart, before any message had
 // arrived in the super room) missed → the reply was dropped. The fix stores the second-account room

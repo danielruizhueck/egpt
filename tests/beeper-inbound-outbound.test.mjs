@@ -17,9 +17,9 @@
 //     bridge that WAS open on primary dropped an `@handle` whose agent spoke on secondary.
 //
 // Consequence on the operator's own machine, measured: `~/.egpt` declares `primary`
-// (anrodz42@gmail.com), `secondary` (dolly.egpt@gmail.com) and `primary_gui` (anrodz42 again, a
-// SECOND install). With the default resolving to `secondary`, kg dialled dolly.egpt alone and went
-// DEAF on anrodz42 — including the operator command channel, which is An's own Self-DM. The only
+// (anaprueba@example.org), `secondary` (mouth.acct@example.com) and `primary_gui` (anaprueba42 again, a
+// SECOND install). With the default resolving to `secondary`, kg dialled mouth.acct alone and went
+// DEAF on anaprueba42 — including the operator command channel, which is An's own Self-DM. The only
 // thing keeping it alive was a hand-added `use: primary` in the live config, marked TEMPORARY.
 //
 // TWO MEASURED FACTS THIS FILE ENCODES:
@@ -28,7 +28,7 @@
 //      dial one endpoint twice as two ears.
 //   2. `primary` and `primary_gui` are the SAME ACCOUNT on two different installs (two different
 //      tokens, so nothing downstream collapses them). Dialling both would ingest every message on
-//      anrodz42 TWICE. Only one of them may be an ear, and it is `primary`.
+//      anaprueba42 TWICE. Only one of them may be an ear, and it is `primary`.
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 
 // A PRIVATE profile for this file — egpt-home.mjs freezes EGPT_HOME at module load, so it must be
@@ -45,10 +45,10 @@ const _PRIVATE_HOME = vi.hoisted(() => {
 import { promises as fs } from 'node:fs';
 import { dirname } from 'node:path';
 
-let boot, emptyState;
+let boot, emptyState, ensureContact;
 beforeAll(async () => {
   ({ boot } = await import('../src/spine/boot.mjs'));
-  ({ emptyState } = await import('../src/conversations-state.mjs'));
+  ({ emptyState, ensureContact } = await import('../src/conversations-state.mjs'));
 });
 afterAll(async () => {
   delete process.env.EGPT_HOME;
@@ -62,9 +62,9 @@ const T_GUI = 'TOK-primary-gui';
 const NAME_OF = { [T_PRIMARY]: 'primary', [T_SECONDARY]: 'secondary', [T_GUI]: 'primary-gui' };
 
 const LIVE_BEEPER = () => ({
-  primary: { account: 'anrodz42@example.com', token: T_PRIMARY },
+  primary: { account: 'anaprueba42@example.com', token: T_PRIMARY },
   secondary: { account: 'dolly@example.com', token: T_SECONDARY },
-  primary_gui: { account: 'anrodz42@example.com', token: T_GUI },   // SAME account, SECOND install
+  primary_gui: { account: 'anaprueba42@example.com', token: T_GUI },   // SAME account, SECOND install
 });
 
 const AG = () => ({ egpt: { configuration: 'egpt', handles: ['e', 'egpt'] } });
@@ -113,10 +113,10 @@ function fakeTransport() {
   return { start, built };
 }
 
-async function bootWith(config) {
+async function bootWith(config, state = emptyState()) {
   const { start, built } = fakeTransport();
   const lines = [];
-  let convState = emptyState();
+  let convState = state;
   const app = await boot({
     readConfig: () => ({ node_name: 'kg', user_name: 'An', ...config }),
     startBridge: start,
@@ -137,7 +137,7 @@ async function bootWith(config) {
 // mention finding (this stub never computes it), so it is stated here.
 const deliver = (spy, body, chatId = '!room') => spy.onIncoming(body, {
   chatId, chatName: 'room', network: 'whatsapp',
-  userId: '+34658515045', senderName: 'Dando', authorized: true, msgKey: `m-${chatId}-${body.length}`,
+  userId: '+15550100005', senderName: 'Dario', authorized: true, msgKey: `m-${chatId}-${body.length}`,
   atEStart: true, atEAnywhere: true,
 });
 
@@ -183,7 +183,7 @@ describe('the ear and the mouth are two answers (operator 2026-09-10)', () => {
   // ── THE LIVE ~/.egpt SHAPE ────────────────────────────────────────────────────────────────
   // primary + secondary + primary_gui, no `use:`. primary_gui is the operator's OWN Beeper window
   // on the SAME account as primary; dialling it as a second ear would ingest every message on
-  // anrodz42 twice, and the two tokens differ so nothing downstream would collapse them.
+  // anaprueba42 twice, and the two tokens differ so nothing downstream would collapse them.
   it('primary_gui is NEVER an ear — the same account on a second install is not dialled', async () => {
     const { dialled, byConnection, replies, app } = await bootWith({ agents: AG(), beeper: LIVE_BEEPER() });
     expect(dialled()).toEqual(['primary', 'secondary']);
@@ -399,5 +399,57 @@ describe('the ear and the mouth are two answers (operator 2026-09-10)', () => {
     expect(replies()).toEqual([]);
     expect(lines.filter((l) => /no INGEST connection/.test(l))).toHaveLength(1);
     app.stop();
+  });
+});
+
+// NEW-CHAT BURST (operator 2026-11-05): the EAR's floodBan answers observeChat from conversations.yaml
+// (never seen = no entry there), and its notice goes out the media-flood line. A mouth ingests
+// nothing, so it gets no burst check.
+describe('the new-chat burst check rides the ear and reads conversations.yaml', () => {
+  it('ear: a chat conversations.yaml holds is never counted, the 11th unknown one is held; mouth: no check', async () => {
+    const known = ensureContact(emptyState(), 'whatsapp', '!known', { pushedName: 'Casa' }).state;
+    const { byConnection, lines, app } = await bootWith({
+      agents: AG(),
+      beeper: { primary: { account: 'an@example.com', token: T_PRIMARY }, secondary: { account: 'rodz@example.com', token: T_SECONDARY } },
+    }, known);
+    try {
+      expect(byConnection.secondary.opts.floodBan.observeChat).toBeUndefined();
+      const ear = byConnection.primary.opts.floodBan;
+      for (let i = 1; i <= 10; i++) expect((await ear.observeChat('whatsapp', `!new-${i}`, { chatName: `n${i}` })).held).toBe(false);
+      expect((await ear.observeChat('whatsapp', '!known', { chatName: 'Casa' })).held).toBe(false);
+      expect((await ear.observeChat('whatsapp', '!new-11', { chatName: 'n11' })).held).toBe(true);
+      expect(lines.filter((l) => l.startsWith('[media-flood] new-chat burst on primary: 11 new chats'))).toHaveLength(1);
+    } finally { app.stop(); }
+  });
+
+  // The node's own line to the admin chat — the path "kg · spine recovered after 2m" takes (logToGroup).
+  it('REPRODUCE: the burst START reaches log_to_group once, as a node line; the chats held after it say nothing more', async () => {
+    let opts = null;
+    const sent = [];
+    const start = async (o) => {
+      opts = o;
+      return {
+        async send(text, so) { sent.push({ text, chatId: so?.chatId }); return { ok: true }; },
+        async sendAndGetId(text, so) { sent.push({ text, chatId: so?.chatId }); return 'id-1'; },
+        startStreamMessage() { return { delivered: false, update() {}, async finish() {} }; },
+        async resolveChatId(s) { return String(s); },
+        async chatHasParticipant() { return null; },
+        isAlive: () => true, stop() {},
+      };
+    };
+    const app = await boot({
+      readConfig: () => ({ node_name: 'kg', log_to_group: 'eGPT Admin', agents: AG(), beeper: { primary: { account: 'an@example.com', token: T_PRIMARY } } }),
+      startBridge: start, makeSession: fakeSession, probeEndpoint: fakeProbe,
+      loadState: async () => emptyState(), writeState: async () => {},
+      io: memIo(), ingest: false, tickMs: 0, log: { line: () => {} },
+    });
+    try {
+      for (let i = 1; i <= 14; i++) await opts.floodBan.observeChat('whatsapp', `!new-${i}`, { chatName: `n${i}` });
+      const admin = () => sent.filter((m) => m.chatId === 'eGPT Admin').map((m) => m.text);
+      await vi.waitFor(() => expect(admin()).toHaveLength(1));
+      await new Promise((r) => setTimeout(r, 50));
+      expect(admin()).toHaveLength(1);
+      expect(admin()[0]).toContain('kg · new-chat burst on primary: 11 new chats in 5m (last: n11)');
+    } finally { app.stop(); }
   });
 });

@@ -1,7 +1,7 @@
 // boot-public-agent.test.mjs — agents.<name>.public wired end to end through boot (2026-10-15): the
 // lead's chat gets the reply text alone (no placeholder, no stamp, no 🏰), and a failed turn says
-// nothing there; it is noticed in admin_channel through noticeToChannel. A being without the flag
-// is locked: placeholder, stamp and signature as before.
+// nothing there; it is noticed in log_to_group (admin_channel when that is unset; 2026-11-20) through
+// noticeToChannel. A being without the flag is locked: placeholder, stamp and signature as before.
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 
 const _PRIVATE_HOME = vi.hoisted(() => {
@@ -29,13 +29,15 @@ afterAll(async () => {
 
 const CHAT = '!lead:beeper.com';
 const ADMIN = '!admin:beeper.com';
-const CONFIG = (isPublic) => () => ({
+const LOGS = '!logs:beeper.com';
+const CONFIG = (isPublic, extra = {}) => () => ({
   node_name: 'kg',
   user_name: 'John',
   bridge_signature_close: '🏰',
   admin_channel: ADMIN,
   beeper: { use: 'main', main: { account: 'you@example.com', token: 'TOK' } },
-  agents: { egpt: { configuration: 'egpt', name: 'EduWeb', body_emoji: '🐶', handles: ['e'], default: true, ...(isPublic ? { public: true } : {}) } },
+  agents: { egpt: { configuration: 'egpt', name: 'Contoso', body_emoji: '🐶', handles: ['e'], default: true, ...(isPublic ? { public: true } : {}) } },
+  ...extra,
 });
 
 function memIo() {
@@ -78,12 +80,12 @@ function seedOn() {
   return ens.state;
 }
 
-async function run({ isPublic, turn }) {
+async function run({ isPublic, turn, body = 'hola, quiero información', config = {} }) {
   const { start, built } = fakeTransport();
   let convState = seedOn();
   const lines = [];
   const app = await boot({
-    readConfig: CONFIG(isPublic),
+    readConfig: CONFIG(isPublic, config),
     startBridge: start,
     makeSession: (opts) => ({ opts, sessionId: 'sess-1', turn, close() {} }),
     probeEndpoint: async () => ({ ok: false, status: 0 }),
@@ -94,7 +96,7 @@ async function run({ isPublic, turn }) {
     log: { line: (m) => lines.push(m) },
   });
   const spy = built[0];
-  await spy.onIncoming('hola, quiero información', { chatId: CHAT, chatName: 'Bea', network: 'whatsapp', userId: 'u-1', senderName: 'Bea', authorized: true, msgKey: 'm1' });
+  await spy.onIncoming(body, { chatId: CHAT, chatName: 'Bea', network: 'whatsapp', userId: 'u-1', senderName: 'Bea', authorized: true, msgKey: 'm1' });
   return { app, spy, lines };
 }
 const reply = async (m, onUpdate) => { onUpdate?.('Hola'); return { text: 'Hola, ¿de qué colegio me escribes?', sessionId: 'sess-1' }; };
@@ -113,16 +115,27 @@ describe('boot — a public being', () => {
     expect(spy.sent.filter((s) => s.chatId === CHAT)).toEqual([]);
     expect(spy.streams).toEqual([]);
     const admin = spy.sent.find((s) => s.chatId === ADMIN).text;
-    expect(admin).toContain(`egpt in ${CHAT}: turn failed:`);
+    expect(admin).toContain(`egpt in ${CHAT}: model error:`);   // a thrown turn's failure, as a failed result's (2026-11-04)
     expect(admin).toContain('API Error: 529 overloaded');
     app.stop();
   });
 
+  // Operator An, 2026-11-20: "please put eGPT Logs in its channel, so eGPT Admin stays clean".
+  it('with log_to_group set, the error goes to the log channel and admin_channel hears nothing', async () => {
+    const { app, spy } = await run({ isPublic: true, config: { log_to_group: LOGS }, turn: async () => { throw new Error('API Error: 529 overloaded'); } });
+    await vi.waitFor(() => expect(spy.sent.some((s) => s.chatId === LOGS)).toBe(true), { timeout: 3000 });
+    expect(spy.sent.find((s) => s.chatId === LOGS).text).toContain(`egpt in ${CHAT}: model error:`);
+    expect(spy.sent.filter((s) => s.chatId === ADMIN)).toEqual([]);
+    expect(spy.sent.filter((s) => s.chatId === CHAT)).toEqual([]);
+    app.stop();
+  });
+
+  // Addressed: in 'on' an unaddressed line opens no placeholder (2026-11-02).
   it('LOCK: without the flag the same being streams its placeholder, stamped and signed as before', async () => {
-    const { app, spy } = await run({ isPublic: false, turn: reply });
+    const { app, spy } = await run({ isPublic: false, turn: reply, body: 'e hola, quiero información' });
     expect(spy.streams).toHaveLength(1);
-    expect(spy.streams[0].init).toMatch(/^🐶 EduWeb: ⏳ Thinking… 🏰/);
-    expect(spy.streams[0].finals[0]).toMatch(/^🐶 EduWeb: Hola, ¿de qué colegio me escribes\? 🏰/);
+    expect(spy.streams[0].init).toMatch(/^🐶 Contoso: ⏳ Thinking… 🏰/);
+    expect(spy.streams[0].finals[0]).toMatch(/^🐶 Contoso: Hola, ¿de qué colegio me escribes\? 🏰/);
     app.stop();
   });
 });
@@ -164,13 +177,13 @@ describe('boot — a turn fails on the CLI\'s is_error, never on its text', () =
     const { app, spy } = await runCli({ isPublic: false, result: { is_error: false, result: LIVE } });
     expect(spy.streams[0].finals[0]).toContain('Ahora responde 403');
     expect(spy.streams[0].finals[0]).toContain('Require all denied');
-    expect(spy.streams[0].finals[0]).not.toContain('no reply (turn failed/empty)');
+    expect(spy.streams[0].finals[0]).not.toContain('the turn failed');
     app.stop();
   });
 
   it('the measured 401 result is a failed turn: the no-reply marker, not the CLI text', async () => {
     const { app, spy } = await runCli({ isPublic: false, result: { is_error: true, api_error_status: 401, terminal_reason: 'api_error', result: 'Failed to authenticate. API Error: 401 OAuth access token is invalid.' } });
-    expect(spy.streams[0].finals[0]).toContain('⚠️ no reply (turn failed/empty)');
+    expect(spy.streams[0].finals[0]).toContain('⚠️ the turn failed — API error 401; not answered');
     expect(spy.streams[0].finals[0]).not.toContain('API Error');
     app.stop();
   });

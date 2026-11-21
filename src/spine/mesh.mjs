@@ -65,7 +65,7 @@ export function createMeshService({
   //
   // AND IT IS NOT COSMETIC, because one real chat is a DIFFERENT Matrix room per Beeper account
   // (originConv's header below records two pairs measured live). On the kg node the mouth is
-  // `secondary` (dolly.egpt) and the ear is `primary` (anrodz42), and THREE families of mesh send
+  // `secondary` (mouth.acct) and the ear is `primary` (anaprueba42), and THREE families of mesh send
   // carry an id that only the ear's account has:
   //   · THE ORIGIN CHAT — a human TYPED there, so it is a room on the ear by definition. The 🤔
   //     placeholder, the living mirror that is the entire visible output of a mesh hop, the
@@ -102,8 +102,7 @@ export function createMeshService({
   // the same way (mirrored, not duplicated). Absent (tests, a caller that doesn't need per-
   // conversation overrides) → relayDispatch's allowed_users gate simply never reads a per-
   // conversation override, and a being's reachability falls straight to its global
-  // agents.<handle>.conversation_defaults.allowed_users default (or the owners, when neither
-  // tier is set).
+  // agents.<handle>.conversation_defaults.allowed_users joined with the node's owners.
   loadState = null,
   // THE SPINE'S OWN TURN MACHINERY (src/spine/turns.mjs, operator 2026-08-31), THE SAME INSTANCE
   // createSpine got — boot.mjs builds it once, above both. A relayed turn is a turn: it belongs on
@@ -186,12 +185,12 @@ export function createMeshService({
   // reached this node, NOT meshEv's synthetic senderId:null)? Replaces the evicted TYPE-FILE
   // `dangerous:true` reachability gate (old dangerousDenial, meta-engineer.yaml — see git
   // history) with the SAME two-tier allowed_users rule router.mjs's resolve() enforces at the
-  // ORIGIN before a mesh envelope is ever sent: a per-conversation override (conversations.yaml
-  // agents.<being>.allowed_users, read via getBeing off ONE state read) REPLACES — never merges
-  // with — the node's global default (config.yaml's NESTED
-  // agents.<handle>.conversation_defaults.allowed_users). UNSET at both tiers = the owners (operator
-  // 2026-10-26), judged on route.ev. Returns the denial string to surface, or null when the turn
-  // may proceed. Checked in relayDispatch BEFORE brain.turn ever runs for a local being — never
+  // ORIGIN before a mesh envelope is ever sent: the lists JOIN (operator 2026-11-07) — the node's
+  // owners, config.yaml's NESTED agents.<handle>.conversation_defaults.allowed_users and the
+  // conversation's own (conversations.yaml agents.<being>.allowed_users, read via getBeing off ONE
+  // state read) only add people. The Operator always passes (the requester's flags count only for a
+  // person's line, not a node's frame), judged on route.ev. Returns the denial string to surface, or
+  // null when the turn may proceed. Checked in relayDispatch BEFORE brain.turn ever runs for a local being — never
   // for a relay hop (those don't reach here).
   //
   // EXPLICIT DENIAL, deliberately unlike router.mjs's silent drop: this file's own convention is
@@ -338,7 +337,7 @@ export function createMeshService({
   // MUST BE DIFFERENT THREADS!"). Returns { chatId, name }, or null = "not addressable here".
   //
   // THE NAME IS THE ONLY THING THAT CROSSES. Beeper chat ids do NOT: the same WhatsApp group is
-  // `!6ljZJkx0OaY9ZVhEzFgi` on anrodz42 and `!HuXFQeZSY1X4khNDWTzz` on dolly.egpt, and Radio WnL
+  // `!FakeRoomId0000000004` on anaprueba42 and `!FakeRoomId0000000003` on mouth.acct, and Radio EFM
   // is `!9M8Dhdj…` vs `!3yqv8ll…` (both measured on these two machines, 2026-08-31). So the
   // requester's chat id is meaningless on this node — config/rooms.yaml here lists its members by
   // THIS node's ids — while a WhatsApp group's TITLE is the same for both accounts. The tail has

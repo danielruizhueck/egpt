@@ -93,8 +93,9 @@ describe('a spine restart never ends a claude session', () => {
     expect(two.woken).toEqual([]);
     await two.adoptAll();
     await flush();
-    expect(two.woken).toEqual([{ key: KEY, summaries: ['audit — completed'] }]);
+    expect(two.woken).toEqual([{ key: KEY, summaries: ['audit — completed'], reply: 'the audit is done' }]);
     expect(two.pool.background(KEY)).toEqual([]);
+    expect(claude.controls).toEqual([]);              // the CLI's own turn on it is not interrupted
     expect(claude.killed).toBe(false);
     expect(w.spawns).toHaveLength(1);
   });
@@ -110,7 +111,42 @@ describe('a spine restart never ends a claude session', () => {
     expect(two.pool.background(KEY).map((t) => t.description)).toEqual(['audit']);
     w.spawns[0].child.finishBg();
     await flush();
-    expect(two.woken).toEqual([{ key: KEY, summaries: ['audit — completed'] }]);
+    expect(two.woken).toEqual([{ key: KEY, summaries: ['audit — completed'], reply: 'the audit is done' }]);
+  });
+
+  it('(b) a task still running at the reconnect keeps the agent that launched it and the CLI\'s ambient mark (operator 2026-10-31)', async () => {
+    const w = world();
+    const one = w.spine();
+    await run(one, 'bg: run the audit');
+    const tasks = [{ task_id: 'b1', description: 'audit' }, { task_id: 'b2', description: 'audit step', parent_task_id: 'b1' }, { task_id: 'w1', description: 'watch the log', ambient: true }];
+    w.spawns[0].child.stdout.emit('data', `${JSON.stringify({ type: 'system', subtype: 'background_tasks_changed', session_id: 'sess-1', tasks })}\n`);
+    await flush();
+    one.pair.drop();
+    const two = w.spine();
+    await two.adoptAll();
+    await flush();
+    expect(two.pool.background(KEY)).toEqual([
+      { taskId: 'b1', description: 'audit', since: expect.any(Number) },
+      { taskId: 'b2', description: 'audit step', since: expect.any(Number), parentTaskId: 'b1' },
+      { taskId: 'w1', description: 'watch the log', since: expect.any(Number), ambient: true },
+    ]);
+  });
+
+  it('(b) …and the CLI\'s task_type: the status tells a shell command from an agent (2026-11-02)', async () => {
+    const w = world();
+    const one = w.spine();
+    await run(one, 'bg: run the audit');
+    const tasks = [{ task_id: 'a1', task_type: 'local_agent', description: 'audit' }, { task_id: 'b1', task_type: 'local_bash', description: 'audit step', parent_task_id: 'a1' }];
+    w.spawns[0].child.stdout.emit('data', `${JSON.stringify({ type: 'system', subtype: 'background_tasks_changed', session_id: 'sess-1', tasks })}\n`);
+    await flush();
+    one.pair.drop();
+    const two = w.spine();
+    await two.adoptAll();
+    await flush();
+    expect(two.pool.background(KEY)).toEqual([
+      { taskId: 'a1', taskType: 'local_agent', description: 'audit', since: expect.any(Number) },
+      { taskId: 'b1', taskType: 'local_bash', description: 'audit step', since: expect.any(Number), parentTaskId: 'a1' },
+    ]);
   });
 
   it('a turn in flight when the spine died is adopted: its reply reaches the being through the wake', async () => {
@@ -309,7 +345,7 @@ describe('the host, across more than one restart', () => {
   });
 });
 
-// Live 2026-10-21 (kg, E in SI+EduWeb): a sandboxed session LRU-evicted, its launcher gone, the host still
+// Live 2026-10-21 (kg, E in SI+Contoso): a sandboxed session LRU-evicted, its launcher gone, the host still
 // listing it — adopted dead on every spine restart, the next turn written into nothing, the lane wedged for hours.
 describe('a dead held session never wedges a conversation', () => {
   const OTHER = 'egpt:ccode:whatsapp:other';

@@ -74,14 +74,14 @@ function fakePipeSpawner({ mem = { free: Infinity }, cost = 0 } = {}) {
   return { chromeHost: { launch, kill, list: async () => [], onExit: (cb) => { exits.add(cb); } }, calls, handles };
 }
 
-function build({ config = {}, mem, cost = 0, freeMem, rssOf, profileHolder = () => null } = {}) {
+function build({ config = {}, mem, cost = 0, freeMem, rssOf, profileHolder = () => null, browserScreens, screenTunnel } = {}) {
   const { chromeHost, calls, handles } = fakePipeSpawner({ mem, cost });
   const logs = [];
   let clk = 0;
   const cmds = createCommands({
     getConfig: () => config,
     chromeHost,
-    profileHolder,
+    profileHolder, browserScreens, screenTunnel,
     freeMem: freeMem ?? (() => (mem ? mem.free : Infinity)),
     rssOf: rssOf ?? (() => null),
     onChromeLog: (m) => logs.push(m),
@@ -93,7 +93,7 @@ function build({ config = {}, mem, cost = 0, freeMem, rssOf, profileHolder = () 
   return { cmds, calls, handles, logs };
 }
 
-const SHARED = { key: 'Reinie-2607150057', name: 'Reinie', group: 'shared' };
+const SHARED = { key: 'Renata-2607150057', name: 'Renata', group: 'shared' };
 const sharedDir = join(dirname(CHROME_BRAIN_PROFILE), 'shared');
 const BRAIN = { key: 'eGPT Admin-2601010000', name: 'eGPT Admin', group: 'brain' };
 
@@ -125,8 +125,8 @@ describe('chromePipeArgs — pipe, non-default profile, no port/origins', () => 
   });
   it('--window-name only when a name is given, before the trailing url', () => {
     expect(args.some((a) => a.startsWith('--window-name'))).toBe(false);
-    const named = chromePipeArgs({ userDataDir: 'C:/x/p', windowName: 'eduweb-si' });
-    expect(named).toContain('--window-name=eduweb-si');
+    const named = chromePipeArgs({ userDataDir: 'C:/x/p', windowName: 'contoso-si' });
+    expect(named).toContain('--window-name=contoso-si');
     expect(named.at(-1)).toBe('about:blank');
   });
 });
@@ -210,16 +210,16 @@ describe('FAIL CLOSED: a chat the lookup refused gets NO browser and one log lin
 });
 
 describe('browsers.yaml end to end — an operator edit moves a chat without a restart', () => {
-  it('eGPT Rodz Lulu An: brain\'s Chrome → removed from brain → shared\'s Chrome', async () => {
+  it('eGPT Rodz Lola An: brain\'s Chrome → removed from brain → shared\'s Chrome', async () => {
     const home = mkdtempSync(join(tmpdir(), 'egpt-browsers-'));
     const saved = process.env.EGPT_HOME;
     try {
       process.env.EGPT_HOME = home;
       mkdirSync(join(home, 'config'));
       const file = join(home, 'config', 'browsers.yaml');
-      writeFileSync(file, 'groups:\n  brain: [ "eGPT Admin", "eGPT Rodz Lulu An" ]\n');
+      writeFileSync(file, 'groups:\n  brain: [ "eGPT Admin", "eGPT Rodz Lola An" ]\n');
       const { cmds, calls } = build({ mem: { free: 8192 * MB } });
-      const entry = { conversation_path: '.egpt/conversations/whatsapp/eGPT Rodz Lulu An-2609201419' };   // live shape: no pushedName
+      const entry = { conversation_path: '.egpt/conversations/whatsapp/eGPT Rodz Lola An-2609201419' };   // live shape: no pushedName
 
       const before = await cmds.chromeClientFor(chromeConversationOf(entry, await readBrowserGroups()));
       expect(before.profileDir).toBe(CHROME_BRAIN_PROFILE);
@@ -290,6 +290,26 @@ describe('memory admission for the EXTRA (non-brain) group Chromes: evict when s
   });
 });
 
+describe('a group whose screen link is open is in use, not idle', () => {
+  // Same pressure as the eviction test above (room for two, not three); A is the idlest.
+  async function underPressure(linkOpen) {
+    const mem = { free: 2200 * MB };
+    const w = build({ mem, cost: 600 * MB, browserScreens: { available: () => true, ensure: async () => ({ display: ':101' }) }, screenTunnel: { isOpen: (g) => linkOpen && /^A/.test(g) } });
+    for (const g of ['A-1', 'B-1', 'C-1']) await w.cmds.chromeClientFor({ key: g[0].toLowerCase(), name: g[0], group: g });
+    return (g) => w.handles.find((h) => h.profileDir.endsWith(g)).child.killed;
+  }
+  it('A watched through its link is skipped: the next idlest (B) is evicted instead', async () => {
+    const killed = await underPressure(true);
+    expect(killed('A-1')).toBe(false);
+    expect(killed('B-1')).toBe(true);
+  });
+  it('with no open link the same idle A is still evicted', async () => {
+    const killed = await underPressure(false);
+    expect(killed('A-1')).toBe(true);
+    expect(killed('B-1')).toBe(false);
+  });
+});
+
 describe('per-profile single-flight + never-relaunch-a-live-profile', () => {
   it('two concurrent ensures of the SAME profile spawn ONE Chrome and share the client', async () => {
     const { cmds, calls } = build({ mem: { free: 8192 * MB } });
@@ -348,7 +368,7 @@ describe('a profile another Chrome already holds is never launched over', () => 
     const asked = [];
     const { cmds, calls, logs } = build({ mem: { free: 8192 * MB }, profileHolder: (dir) => { asked.push(dir); return 'EBUSY'; } });
     const r = await cmds.startBrowser(BRAIN);
-    expect(r).toEqual({ ok: false, reason: 'no-browser', detail: 'the "brain" browser is open in a normal window; close it to hand it back to the spine' });
+    expect(r).toEqual({ ok: false, reason: 'no-browser', detail: 'the "brain" browser is open in a normal window; close it to hand it back to the spine, or `browser close` closes it for you' });
     expect(asked).toEqual([CHROME_BRAIN_PROFILE]);
     expect(calls).toHaveLength(0);
     expect(logs.filter((l) => /not launching "brain" Chrome .*another Chrome holds it \(EBUSY\)/.test(l))).toHaveLength(1);

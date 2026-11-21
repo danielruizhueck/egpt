@@ -52,6 +52,19 @@ describe('config-swap — restart-only keys', () => {
     expect(isRestartKey('warm.idle_ttl')).toBe(false);
     expect(isRestartKey('dispatch.auto_default_mode')).toBe(false);
   });
+
+  it('a top-level chatbox block named by limbs.http.chatboxes binds at boot: restart-only, named by its key; an unrelated top-level block is hot', () => {
+    const boxes = { ...base, limbs: { http: { port: 8095, chatboxes: ['contoso_marketer'] } }, contoso_marketer: { url: 'contoso', being: 'ed', intro: 'Hola' }, notes: { a: 1 } };
+    expect(restartKeysChanged(boxes, { ...boxes, contoso_marketer: { ...boxes.contoso_marketer, intro: '¡Hola, soy Edu!' } })).toEqual(['contoso_marketer']);
+    expect(restartKeysChanged(boxes, { ...boxes, notes: { a: 2 } })).toEqual([]);
+    // a block added by its name, or removed with it: the list (under limbs) and the block
+    const { contoso_marketer, ...without } = boxes;
+    const named = { ...without, limbs: { http: { port: 8095, chatboxes: [] } } };
+    expect(restartKeysChanged(named, boxes)).toEqual(['limbs', 'contoso_marketer']);
+    expect(restartKeysChanged(boxes, named)).toEqual(['limbs', 'contoso_marketer']);
+    // a block no list names is any other key
+    expect(restartKeysChanged(named, { ...named, contoso_marketer: { being: 'ed' } })).toEqual([]);
+  });
 });
 
 // ── (c)+(d) the warm pool: a changed spawn option reopens that key only, never under background work ──
@@ -69,7 +82,7 @@ const full = (over = {}) => ({ sessionId: 'S1', engine: 'ccode', cwd: '/c', mode
 describe('warm pool — the reopen guard covers every spawn option', () => {
   it('a changed system prompt reopens that key only; the other key keeps its process', async () => {
     const { made, makeSession } = sessions();
-    const pool = createWarmPool({ makeSession });
+    const pool = createWarmPool({ makeSession, memory: () => ({ available: Infinity, psi: null }) });
     await pool.run('h:ccode:wa:x', 'a', () => {}, { brainOptions: full({ appendSystemPrompt: 'old' }) });
     await pool.run('e:ccode:wa:x', 'a', () => {}, { brainOptions: full() });
     await pool.run('h:ccode:wa:x', 'b', () => {}, { brainOptions: full({ appendSystemPrompt: 'new' }) });
@@ -187,6 +200,7 @@ async function bootWith({ modes = {}, edit = (c) => c } = {}) {
       return s;
     },
     probeEndpoint: async () => ({ ok: false, status: 0 }),
+    warmMemory: () => ({ available: Infinity, psi: null }),
     loadState: async () => convState,
     writeState: async (s) => { convState = s; },
     io, ingest: false, tickMs: 0,
